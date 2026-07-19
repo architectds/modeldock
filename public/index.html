@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ModelDock</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>ModelDock</h1>
+          <p>Local provider and model workbench for Codex config.</p>
+        </div>
+        <button id="refreshBtn" type="button">Refresh</button>
+      </header>
+
+      <section class="status-grid">
+        <div>
+          <span>Codex Home</span>
+          <strong id="codexHome">...</strong>
+        </div>
+        <div>
+          <span>Current Provider</span>
+          <strong id="currentProvider">...</strong>
+        </div>
+        <div>
+          <span>Current Model</span>
+          <strong id="currentModel">...</strong>
+        </div>
+        <div>
+          <span>Reasoning</span>
+          <strong id="currentReasoning">...</strong>
+        </div>
+      </section>
+
+      <section class="layout">
+        <form id="configForm" class="panel">
+          <div class="panel-title">
+            <h2>Preset Editor</h2>
+            <span id="restartNote">Restart Codex after applying changes.</span>
+          </div>
+
+          <label>
+            Preset
+            <select id="presetSelect"></select>
+          </label>
+
+          <div class="form-grid">
+            <label>
+              Provider ID
+              <input id="providerId" required placeholder="openrouter" />
+            </label>
+            <label>
+              Provider Name
+              <input id="providerName" placeholder="OpenRouter" />
+            </label>
+            <label>
+              Model
+              <input id="model" placeholder="openai/gpt-5.5" />
+            </label>
+            <label>
+              Reasoning Effort
+              <select id="reasoningEffort">
+                <option value="">default</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+              </select>
+            </label>
+            <label>
+              Verbosity
+              <select id="verbosity">
+                <option value="">default</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label>
+              Wire API
+              <select id="wireApi">
+                <option value="">default</option>
+                <option value="responses">responses</option>
+                <option value="chat">chat</option>
+              </select>
+            </label>
+            <label class="wide">
+              Base URL
+              <input id="baseUrl" placeholder="https://openrouter.ai/api/v1" />
+            </label>
+            <label>
+              API Key Env
+              <input id="envKey" placeholder="OPENROUTER_API_KEY" />
+            </label>
+            <label>
+              Profile Name
+              <input id="profileName" placeholder="openrouter-fast" />
+            </label>
+          </div>
+
+          <div class="model-picker">
+            <div class="panel-title compact">
+              <h2>Provider Models</h2>
+              <span id="providerModelStatus">Fetch models from this preset's Base URL.</span>
+            </div>
+            <div class="actions model-actions">
+              <button type="button" id="fetchProviderModelsBtn">Fetch Provider Models</button>
+            </div>
+            <div class="model-browser">
+              <input id="providerModelFilter" placeholder="Filter model ids..." />
+              <select id="providerModelSelect" size="8"></select>
+            </div>
+            <pre id="providerModelOutput" class="mini-output">No provider models fetched yet.</pre>
+          </div>
+
+          <div class="actions">
+            <button type="button" id="saveProfileBtn">Save Profile</button>
+            <button type="button" id="applyBtn" class="primary">Apply to Codex</button>
+          </div>
+        </form>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Smoke Tests</h2>
+            <span>Runs local Codex commands.</span>
+          </div>
+          <label>
+            Test CWD
+            <input id="testCwd" />
+          </label>
+          <label>
+            Exec Prompt
+            <input id="testPrompt" value="Reply exactly: MODELDOCK_OK" />
+          </label>
+          <div class="actions">
+            <button type="button" data-test="doctor">codex doctor</button>
+            <button type="button" data-test="models">debug models</button>
+            <button type="button" data-test="exec">small exec</button>
+          </div>
+          <pre id="testOutput" class="output">No tests run yet.</pre>
+        </section>
+      </section>
+
+      <section class="layout bottom">
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Backups</h2>
+            <span>Created before every apply or restore.</span>
+          </div>
+          <div id="backupList" class="backup-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>config.toml Preview</h2>
+            <span>Read-only preview.</span>
+          </div>
+          <pre id="configPreview" class="config-preview"></pre>
+        </section>
+      </section>
+
+      <div id="toast" class="toast" hidden></div>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

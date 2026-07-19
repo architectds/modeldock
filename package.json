@@ -1,0 +1,14 @@
+{
+  "name": "modeldock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Codex provider and model configuration workbench.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,98 @@
+[
+  {
+    "id": "openai-default",
+    "label": "OpenAI Default",
+    "providerId": "openai",
+    "providerName": "OpenAI",
+    "model": "gpt-5.5",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "",
+    "envKey": ""
+  },
+  {
+    "id": "openrouter",
+    "label": "OpenRouter",
+    "providerId": "openrouter",
+    "providerName": "OpenRouter",
+    "model": "openai/gpt-5.5",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "envKey": "OPENROUTER_API_KEY"
+  },
+  {
+    "id": "deepseek",
+    "label": "DeepSeek",
+    "providerId": "deepseek",
+    "providerName": "DeepSeek",
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "https://api.deepseek.com",
+    "envKey": "DEEPSEEK_API_KEY"
+  },
+  {
+    "id": "kimi",
+    "label": "Kimi / Moonshot",
+    "providerId": "kimi",
+    "providerName": "Kimi",
+    "model": "kimi-k3",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "https://api.moonshot.ai/v1",
+    "envKey": "MOONSHOT_API_KEY"
+  },
+  {
+    "id": "anthropic",
+    "label": "Anthropic",
+    "providerId": "anthropic",
+    "providerName": "Anthropic",
+    "model": "claude-sonnet-5",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "https://api.anthropic.com",
+    "envKey": "ANTHROPIC_API_KEY"
+  },
+  {
+    "id": "ollama",
+    "label": "Ollama Local",
+    "providerId": "local_ollama",
+    "providerName": "Ollama",
+    "model": "gpt-oss:20b",
+    "reasoningEffort": "",
+    "verbosity": "",
+    "wireApi": "chat",
+    "baseUrl": "http://localhost:11434/v1",
+    "envKey": ""
+  },
+  {
+    "id": "lmstudio",
+    "label": "LM Studio Local",
+    "providerId": "local_lmstudio",
+    "providerName": "LM Studio",
+    "model": "local-model",
+    "reasoningEffort": "",
+    "verbosity": "",
+    "wireApi": "chat",
+    "baseUrl": "http://localhost:1234/v1",
+    "envKey": ""
+  },
+  {
+    "id": "custom",
+    "label": "Custom Provider",
+    "providerId": "custom",
+    "providerName": "Custom",
+    "model": "",
+    "reasoningEffort": "",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "",
+    "envKey": ""
+  }
+]
