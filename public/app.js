@@ -15,6 +15,7 @@ const ids = [
   "baseUrl",
   "envKey",
   "profileName",
+  "aliasNotice",
   "providerModelStatus",
   "providerModelFilter",
   "providerModelSelect",
@@ -74,6 +75,25 @@ function activeFormData() {
   };
 }
 
+function isProviderAlias(data) {
+  return data.providerId.trim().toLowerCase() === "openai" && Boolean(data.baseUrl.trim() || data.envKey.trim());
+}
+
+function updateAliasNotice() {
+  const data = activeFormData();
+  if (!isProviderAlias(data)) {
+    el.aliasNotice.hidden = true;
+    el.aliasNotice.textContent = "";
+    return;
+  }
+  const label = data.providerName.trim() || "Custom provider";
+  el.aliasNotice.hidden = false;
+  el.aliasNotice.textContent = [
+    `Provider ID is being reused as an alias: openai -> ${label}.`,
+    `Apply will write [model_providers.openai] with ${data.baseUrl || "this endpoint"}; conversations may remain under openai after restart.`
+  ].join(" ");
+}
+
 function setForm(preset) {
   el.providerId.value = preset.providerId || "";
   el.providerName.value = preset.providerName || preset.providerId || "";
@@ -85,6 +105,7 @@ function setForm(preset) {
   el.envKey.value = preset.envKey || "";
   if (!el.profileName.value) el.profileName.value = preset.providerId || preset.id || "";
   clearProviderModels();
+  updateAliasNotice();
 }
 
 function clearProviderModels() {
@@ -182,6 +203,7 @@ function renderStatus(data) {
   el.restartNote.textContent = data.restartRequiredNote;
   el.configPreview.textContent = data.configText || "";
   el.testCwd.value ||= data.realCodexHome || data.codexHome;
+  updateAliasNotice();
 
   el.presetSelect.innerHTML = "";
   for (const preset of data.presets) {
@@ -240,6 +262,9 @@ document.getElementById("fetchProviderModelsBtn").addEventListener("click", () =
 el.providerModelFilter.addEventListener("input", renderProviderModels);
 el.providerModelSelect.addEventListener("change", () => {
   if (el.providerModelSelect.value) el.model.value = el.providerModelSelect.value;
+});
+["providerId", "providerName", "baseUrl", "envKey"].forEach((id) => {
+  el[id].addEventListener("input", updateAliasNotice);
 });
 el.presetSelect.addEventListener("change", () => {
   const preset = state?.presets.find((item) => item.id === el.presetSelect.value);

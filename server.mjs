@@ -162,8 +162,13 @@ function removeSection(configText, sectionName) {
   return lines.filter((_, index) => !removeIndexes.has(index)).join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
+function shouldWriteProviderBlock(preset) {
+  if (!CUSTOM_PROVIDER_RESERVED.has(preset.providerId)) return true;
+  return Boolean(preset.baseUrl || preset.envKey);
+}
+
 function appendProviderBlock(configText, preset) {
-  if (CUSTOM_PROVIDER_RESERVED.has(preset.providerId)) return configText;
+  if (!shouldWriteProviderBlock(preset)) return configText;
   const lines = [
     "",
     `[model_providers.${preset.providerId}]`,
@@ -181,7 +186,7 @@ function renderProfileConfig(preset) {
   if (preset.model) text += `model = ${tomlQuote(preset.model)}\n`;
   if (preset.reasoningEffort) text += `model_reasoning_effort = ${tomlQuote(preset.reasoningEffort)}\n`;
   if (preset.verbosity) text += `model_verbosity = ${tomlQuote(preset.verbosity)}\n`;
-  if (!CUSTOM_PROVIDER_RESERVED.has(preset.providerId)) {
+  if (shouldWriteProviderBlock(preset)) {
     text += `\n[model_providers.${preset.providerId}]\n`;
     text += `name = ${tomlQuote(preset.providerName || preset.providerId)}\n`;
     text += `base_url = ${tomlQuote(preset.baseUrl || "")}\n`;

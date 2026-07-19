@@ -173,6 +173,16 @@ select {
   grid-column: span 2;
 }
 
+.alias-notice {
+  margin-top: 12px;
+  border: 1px solid #f0c36d;
+  border-radius: 6px;
+  background: #fff8e6;
+  color: #6d4b00;
+  padding: 10px 12px;
+  font-weight: 650;
+}
+
 .actions {
   display: flex;
   gap: 8px;

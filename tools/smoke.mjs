@@ -54,10 +54,34 @@ if (summary.modelProvider !== "openrouter") throw new Error("provider was not ap
 if (!applied.includes("[model_providers.openrouter]")) throw new Error("provider block missing");
 if (!applied.includes("[projects.'d:\\projects\\stockscan']")) throw new Error("unrelated project config was not preserved");
 
+const initialApplyBackups = await listBackups(paths.backupsDir);
+if (!initialApplyBackups.length) throw new Error("backup was not created");
+const originalConfigBackupName = initialApplyBackups[0].name;
+
+const aliasPreset = {
+  providerId: "openai",
+  providerName: "DeepSeek via openai alias",
+  model: "deepseek-v4-flash",
+  reasoningEffort: "high",
+  verbosity: "",
+  wireApi: "responses",
+  baseUrl: "https://api.deepseek.com",
+  envKey: "DEEPSEEK_API_KEY"
+};
+await applyPresetToConfig(paths, aliasPreset);
+const aliased = await fs.readFile(paths.configPath, "utf8");
+if (!aliased.includes('model_provider = "openai"')) throw new Error("alias provider id was not preserved");
+if (!aliased.includes("[model_providers.openai]")) throw new Error("openai alias provider block missing");
+if (!aliased.includes('base_url = "https://api.deepseek.com"')) throw new Error("openai alias base url missing");
+
+const aliasProfile = await saveProfileConfig(paths, "openai-deepseek-alias", aliasPreset);
+const aliasProfileText = await fs.readFile(aliasProfile.profilePath, "utf8");
+if (!aliasProfileText.includes("[model_providers.openai]")) throw new Error("openai alias profile block missing");
+
 const backups = await listBackups(paths.backupsDir);
 if (!backups.length) throw new Error("backup was not created");
 
-await restoreConfigBackup(paths, backups[0].name);
+await restoreConfigBackup(paths, originalConfigBackupName);
 const restored = await fs.readFile(paths.configPath, "utf8");
 if (!restored.includes('model_provider = "openai"')) throw new Error("restore did not restore backup");
 
