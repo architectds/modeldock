@@ -162,9 +162,19 @@ function removeSection(configText, sectionName) {
   return lines.filter((_, index) => !removeIndexes.has(index)).join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
+function isReservedProviderOverride(preset) {
+  return CUSTOM_PROVIDER_RESERVED.has(preset.providerId) && Boolean(preset.baseUrl || preset.envKey);
+}
+
+function assertCanWriteConfig(preset) {
+  if (!isReservedProviderOverride(preset)) return;
+  throw new Error(
+    `Provider ID "${preset.providerId}" is reserved by Codex and cannot be overridden. Use a custom provider ID such as "deepseek" or "${preset.providerId}-custom".`
+  );
+}
+
 function shouldWriteProviderBlock(preset) {
-  if (!CUSTOM_PROVIDER_RESERVED.has(preset.providerId)) return true;
-  return Boolean(preset.baseUrl || preset.envKey);
+  return !CUSTOM_PROVIDER_RESERVED.has(preset.providerId);
 }
 
 function appendProviderBlock(configText, preset) {
@@ -250,6 +260,7 @@ async function readPresets() {
 
 export async function applyPresetToConfig(paths, presetInput) {
   const preset = normalizePreset(presetInput);
+  assertCanWriteConfig(preset);
   const current = await readText(paths.configPath, "");
   const backupPath = await makeBackup(paths.configPath, paths.backupsDir, "apply");
   let next = current;
@@ -269,6 +280,7 @@ export async function saveProfileConfig(paths, profileNameInput, presetInput) {
   const profileName = cleanIdentifier(profileNameInput);
   if (!profileName) throw new Error("Profile name is required.");
   const preset = normalizePreset(presetInput);
+  assertCanWriteConfig(preset);
   const profilePath = path.join(paths.profilesDir, `${profileName}.config.toml`);
   if (existsSync(profilePath)) await makeBackup(profilePath, paths.backupsDir, `profile-${profileName}`);
   await atomicWrite(profilePath, renderProfileConfig(preset));

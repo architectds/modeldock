@@ -16,6 +16,8 @@ const ids = [
   "envKey",
   "profileName",
   "aliasNotice",
+  "applyBtn",
+  "saveProfileBtn",
   "providerModelStatus",
   "providerModelFilter",
   "providerModelSelect",
@@ -75,22 +77,27 @@ function activeFormData() {
   };
 }
 
-function isProviderAlias(data) {
-  return data.providerId.trim().toLowerCase() === "openai" && Boolean(data.baseUrl.trim() || data.envKey.trim());
+const reservedProviderIds = new Set(["openai", "ollama", "lmstudio", "amazon-bedrock"]);
+
+function isReservedProviderOverride(data) {
+  return reservedProviderIds.has(data.providerId.trim().toLowerCase()) && Boolean(data.baseUrl.trim() || data.envKey.trim());
 }
 
 function updateAliasNotice() {
   const data = activeFormData();
-  if (!isProviderAlias(data)) {
+  if (!isReservedProviderOverride(data)) {
     el.aliasNotice.hidden = true;
     el.aliasNotice.textContent = "";
+    el.applyBtn.disabled = false;
+    el.saveProfileBtn.disabled = false;
     return;
   }
-  const label = data.providerName.trim() || "Custom provider";
   el.aliasNotice.hidden = false;
+  el.applyBtn.disabled = true;
+  el.saveProfileBtn.disabled = true;
   el.aliasNotice.textContent = [
-    `Provider ID is being reused as an alias: openai -> ${label}.`,
-    `Apply will write [model_providers.openai] with ${data.baseUrl || "this endpoint"}; conversations may remain under openai after restart.`
+    `Provider ID "${data.providerId.trim()}" is reserved by Codex and cannot be overridden.`,
+    `Use a custom Provider ID such as "deepseek" or "${data.providerId.trim()}-custom" for this endpoint.`
   ].join(" ");
 }
 
@@ -252,8 +259,8 @@ async function runTest(kind) {
 }
 
 document.getElementById("refreshBtn").addEventListener("click", () => loadStatus().catch((error) => showToast(error.message, true)));
-document.getElementById("applyBtn").addEventListener("click", () => applyConfig().catch((error) => showToast(error.message, true)));
-document.getElementById("saveProfileBtn").addEventListener("click", () => saveProfile().catch((error) => showToast(error.message, true)));
+el.applyBtn.addEventListener("click", () => applyConfig().catch((error) => showToast(error.message, true)));
+el.saveProfileBtn.addEventListener("click", () => saveProfile().catch((error) => showToast(error.message, true)));
 document.getElementById("fetchProviderModelsBtn").addEventListener("click", () => fetchProviderModels().catch((error) => {
   el.providerModelStatus.textContent = "Provider model fetch failed.";
   el.providerModelOutput.textContent = String(error.stack || error.message || error);

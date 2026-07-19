@@ -78,6 +78,11 @@ button:hover {
   border-color: #aab8cb;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 button.primary {
   background: var(--blue);
   border-color: var(--blue);

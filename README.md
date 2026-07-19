@@ -72,6 +72,8 @@ Default base URLs:
 
 Anthropic uses `x-api-key` and `/v1/models` for model discovery. DeepSeek and Kimi use OpenAI-compatible bearer auth for model discovery.
 
+Codex reserves built-in provider IDs such as `openai`, `ollama`, `lmstudio`, and `amazon-bedrock`. Do not reuse those IDs for a custom endpoint. For example, use `deepseek` or `openai-custom`, not `openai`, when pointing at DeepSeek.
+
 ## Smoke Tests
 
 The test panel runs:
