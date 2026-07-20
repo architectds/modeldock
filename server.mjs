@@ -190,6 +190,12 @@ function isUnsupportedChatWire(preset) {
   return preset.wireApi.toLowerCase() === "chat";
 }
 
+function isModelDockProxyPreset(preset) {
+  const providerId = String(preset.providerId || "").trim().toLowerCase();
+  const baseUrl = String(preset.baseUrl || "").trim().toLowerCase();
+  return providerId.endsWith("_proxy") || (baseUrl.includes("127.0.0.1") && baseUrl.includes("/proxy/"));
+}
+
 function assertCanWriteConfig(preset) {
   if (isReservedProviderOverride(preset)) {
     throw new Error(
@@ -244,7 +250,7 @@ function renderProfileConfig(preset) {
 export function normalizePreset(input) {
   const providerId = cleanIdentifier(input.providerId);
   if (!providerId) throw new Error("Provider id is required.");
-  return {
+  const preset = {
     providerId,
     providerName: String(input.providerName || providerId).trim(),
     model: String(input.model || "").trim(),
@@ -254,6 +260,8 @@ export function normalizePreset(input) {
     baseUrl: String(input.baseUrl || "").trim(),
     envKey: String(input.envKey || "").trim()
   };
+  if (isModelDockProxyPreset(preset)) preset.envKey = "";
+  return preset;
 }
 
 export async function makeBackup(configPath, backupsDir, reason = "manual") {

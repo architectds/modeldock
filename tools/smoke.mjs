@@ -104,9 +104,11 @@ const deepseekProxyPreset = {
   verbosity: "",
   wireApi: "responses",
   baseUrl: "http://127.0.0.1:8765/proxy/deepseek/v1",
-  envKey: ""
+  envKey: "OPENROUTER_API_KEY"
 };
-await saveProfileConfig(paths, "deepseek-proxy", deepseekProxyPreset);
+const deepseekProxyProfile = await saveProfileConfig(paths, "deepseek-proxy", deepseekProxyPreset);
+const deepseekProxyText = await fs.readFile(deepseekProxyProfile.profilePath, "utf8");
+if (deepseekProxyText.includes("env_key")) throw new Error("proxy profile should not write env_key");
 
 const directAnthropicPreset = {
   providerId: "anthropic",

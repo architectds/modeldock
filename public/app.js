@@ -15,6 +15,7 @@ const ids = [
   "wireApiHint",
   "baseUrl",
   "envKey",
+  "envKeyHint",
   "profileName",
   "aliasNotice",
   "applyBtn",
@@ -65,7 +66,7 @@ function formatBytes(bytes) {
 }
 
 function activeFormData() {
-  return {
+  const data = {
     providerId: el.providerId.value,
     providerName: el.providerName.value,
     model: el.model.value,
@@ -76,9 +77,17 @@ function activeFormData() {
     envKey: el.envKey.value,
     profileName: el.profileName.value
   };
+  if (isModelDockProxy(data)) data.envKey = "";
+  return data;
 }
 
 const reservedProviderIds = new Set(["openai", "ollama", "lmstudio", "amazon-bedrock"]);
+
+function isModelDockProxy(data) {
+  const providerId = String(data.providerId || "").trim().toLowerCase();
+  const baseUrl = String(data.baseUrl || "").trim().toLowerCase();
+  return providerId.endsWith("_proxy") || baseUrl.includes("127.0.0.1") && baseUrl.includes("/proxy/");
+}
 
 function isReservedProviderOverride(data) {
   return reservedProviderIds.has(data.providerId.trim().toLowerCase()) && Boolean(data.baseUrl.trim() || data.envKey.trim());
@@ -148,6 +157,23 @@ function updateWireApiHint() {
   el.wireApiHint.textContent = `Locked for this provider. Codex will call ${wireEndpoint(el.wireApi.value)}.`;
 }
 
+function updateEnvKeyState() {
+  const data = {
+    providerId: el.providerId.value,
+    baseUrl: el.baseUrl.value
+  };
+  if (isModelDockProxy(data)) {
+    el.envKey.value = "";
+    el.envKey.disabled = true;
+    el.envKey.placeholder = "Handled by ModelDock Runtime";
+    el.envKeyHint.textContent = "Proxy presets read provider keys from the ModelDock Runtime environment, not from Codex config.";
+    return;
+  }
+  el.envKey.disabled = false;
+  el.envKey.placeholder = "OPENROUTER_API_KEY";
+  el.envKeyHint.textContent = "Name of the API key environment variable Codex will use for this provider.";
+}
+
 function setForm(preset) {
   el.providerId.value = preset.providerId || "";
   el.providerName.value = preset.providerName || preset.providerId || "";
@@ -157,8 +183,9 @@ function setForm(preset) {
   el.wireApi.value = preset.wireApi || "";
   el.baseUrl.value = preset.baseUrl || "";
   el.envKey.value = preset.envKey || "";
-  if (!el.profileName.value) el.profileName.value = preset.providerId || preset.id || "";
+  el.profileName.value = preset.id || preset.providerId || "";
   clearProviderModels();
+  updateEnvKeyState();
   updateWireApiHint();
   updateAliasNotice();
 }
@@ -258,6 +285,7 @@ function renderStatus(data) {
   el.restartNote.textContent = data.restartRequiredNote;
   el.configPreview.textContent = data.configText || "";
   el.testCwd.value ||= data.realCodexHome || data.codexHome;
+  updateEnvKeyState();
   updateWireApiHint();
   updateAliasNotice();
 
@@ -321,6 +349,7 @@ el.providerModelSelect.addEventListener("change", () => {
 });
 ["providerId", "providerName", "baseUrl", "envKey"].forEach((id) => {
   el[id].addEventListener("input", () => {
+    updateEnvKeyState();
     updateWireApiHint();
     updateAliasNotice();
   });
