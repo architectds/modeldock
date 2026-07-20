@@ -4,11 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import {
   applyPresetToConfig,
+  chatCompletionToResponse,
   fetchProviderModels,
   listBackups,
   parseSummary,
+  responsesToChatRequest,
   restoreConfigBackup,
-  saveProfileConfig
+  saveProfileConfig,
+  server
 } from "../server.mjs";
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "modeldock-smoke-"));
@@ -93,6 +96,18 @@ const deepseekPreset = {
 await assertRejects(() => applyPresetToConfig(paths, deepseekPreset), "chat wire apply should be rejected");
 await assertRejects(() => saveProfileConfig(paths, "deepseek-chat", deepseekPreset), "chat wire profile should be rejected");
 
+const deepseekProxyPreset = {
+  providerId: "deepseek_proxy",
+  providerName: "DeepSeek via ModelDock Proxy",
+  model: "deepseek-v4-flash",
+  reasoningEffort: "high",
+  verbosity: "",
+  wireApi: "responses",
+  baseUrl: "http://127.0.0.1:8765/proxy/deepseek/v1",
+  envKey: ""
+};
+await saveProfileConfig(paths, "deepseek-proxy", deepseekProxyPreset);
+
 const directAnthropicPreset = {
   providerId: "anthropic",
   providerName: "Anthropic",
@@ -164,6 +179,109 @@ try {
 } finally {
   delete process.env.TEST_ANTHROPIC_API_KEY;
   await new Promise((resolve) => fakeAnthropic.close(resolve));
+}
+
+const kimiChat = responsesToChatRequest("kimi", {
+  model: "kimi-k3",
+  instructions: "Be brief.",
+  input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+  max_output_tokens: 32
+});
+if (kimiChat.max_completion_tokens !== 32) throw new Error("kimi proxy token field mismatch");
+if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
+
+const responseShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-test",
+    model: "deepseek-v4-flash",
+    choices: [{ message: { role: "assistant", content: "MODELDOCK_PROXY_OK" } }],
+    usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 }
+  }
+);
+if (responseShape.output_text !== "MODELDOCK_PROXY_OK") throw new Error("chat response was not wrapped");
+if (responseShape.usage.total_tokens !== 9) throw new Error("chat usage was not wrapped");
+
+const fakeChatProvider = createServer(async (request, response) => {
+  if (request.url === "/models" && request.method === "GET" && request.headers.authorization === "Bearer test-deepseek-key") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }));
+    return;
+  }
+  if (request.url === "/chat/completions" && request.method === "POST" && request.headers.authorization === "Bearer test-deepseek-key") {
+    let raw = "";
+    for await (const chunk of request) raw += chunk.toString();
+    const body = JSON.parse(raw);
+    if (body.max_tokens !== 64) {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "bad max token field" } }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        id: "chatcmpl-proxy",
+        model: body.model,
+        choices: [{ message: { role: "assistant", content: "MODELDOCK_PROXY_OK" } }],
+        usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 }
+      })
+    );
+    return;
+  }
+  response.writeHead(404);
+  response.end("not found");
+});
+
+await new Promise((resolve) => fakeChatProvider.listen(0, "127.0.0.1", resolve));
+process.env.DEEPSEEK_API_KEY = "test-deepseek-key";
+try {
+  const fakeAddress = fakeChatProvider.address();
+  process.env.MODELDOCK_PROXY_DEEPSEEK_ENDPOINT = `http://127.0.0.1:${fakeAddress.port}/chat/completions`;
+  process.env.MODELDOCK_PROXY_DEEPSEEK_MODELS_URL = `http://127.0.0.1:${fakeAddress.port}/models`;
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const dockAddress = server.address();
+  const modelsResponse = await fetch(`http://127.0.0.1:${dockAddress.port}/proxy/deepseek/v1/models`);
+  const modelsData = await modelsResponse.json();
+  if (!Array.isArray(modelsData.models) || modelsData.models[0]?.id !== "deepseek-v4-flash") {
+    throw new Error("proxy models route did not wrap Codex model list");
+  }
+  if (modelsData.models[0]?.slug !== "deepseek-v4-flash") throw new Error("proxy models route did not include slug");
+  if (modelsData.models[0]?.display_name !== "deepseek-v4-flash") throw new Error("proxy models route did not include display_name");
+  if (!Array.isArray(modelsData.models[0]?.supported_reasoning_levels)) {
+    throw new Error("proxy models route did not include reasoning metadata");
+  }
+  const response = await fetch(`http://127.0.0.1:${dockAddress.port}/proxy/deepseek/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: "reply exactly",
+      max_output_tokens: 64
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(`proxy route failed: ${JSON.stringify(data)}`);
+  if (data.output_text !== "MODELDOCK_PROXY_OK") throw new Error("proxy route did not wrap upstream response");
+  const sseResponse = await fetch(`http://127.0.0.1:${dockAddress.port}/proxy/deepseek/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      input: "reply exactly",
+      max_output_tokens: 64,
+      stream: true
+    })
+  });
+  const sseText = await sseResponse.text();
+  if (!sseResponse.ok || !sseText.includes("event: response.completed")) {
+    throw new Error("proxy route did not emit responses SSE");
+  }
+} finally {
+  delete process.env.DEEPSEEK_API_KEY;
+  delete process.env.MODELDOCK_PROXY_DEEPSEEK_ENDPOINT;
+  delete process.env.MODELDOCK_PROXY_DEEPSEEK_MODELS_URL;
+  await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => fakeChatProvider.close(resolve));
 }
 
 console.log(JSON.stringify({ ok: true, root, backups: backups.length }, null, 2));

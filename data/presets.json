@@ -36,6 +36,18 @@
     "envKey": "DEEPSEEK_API_KEY"
   },
   {
+    "id": "deepseek-proxy",
+    "label": "DeepSeek via ModelDock Proxy",
+    "providerId": "deepseek_proxy",
+    "providerName": "DeepSeek via ModelDock Proxy",
+    "model": "deepseek-v4-flash",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "http://127.0.0.1:8765/proxy/deepseek/v1",
+    "envKey": ""
+  },
+  {
     "id": "kimi",
     "label": "Kimi / Moonshot",
     "providerId": "kimi",
@@ -46,6 +58,18 @@
     "wireApi": "chat",
     "baseUrl": "https://api.moonshot.ai/v1",
     "envKey": "MOONSHOT_API_KEY"
+  },
+  {
+    "id": "kimi-proxy",
+    "label": "Kimi via ModelDock Proxy",
+    "providerId": "kimi_proxy",
+    "providerName": "Kimi via ModelDock Proxy",
+    "model": "kimi-k3",
+    "reasoningEffort": "high",
+    "verbosity": "",
+    "wireApi": "responses",
+    "baseUrl": "http://127.0.0.1:8765/proxy/kimi/v1",
+    "envKey": ""
   },
   {
     "id": "anthropic",

@@ -14,6 +14,22 @@ const COMMAND_TIMEOUT_MS = 120000;
 const COMMAND_OUTPUT_LIMIT = 16000;
 const PROVIDER_TIMEOUT_MS = 45000;
 const CUSTOM_PROVIDER_RESERVED = new Set(["openai", "ollama", "lmstudio", "amazon-bedrock"]);
+const CHAT_PROXY_PROVIDERS = {
+  deepseek: {
+    label: "DeepSeek",
+    endpoint: "https://api.deepseek.com/chat/completions",
+    modelsUrl: "https://api.deepseek.com/models",
+    envKeys: ["DEEPSEEK_API_KEY"],
+    maxTokensField: "max_tokens"
+  },
+  kimi: {
+    label: "Kimi",
+    endpoint: "https://api.moonshot.ai/v1/chat/completions",
+    modelsUrl: "https://api.moonshot.ai/v1/models",
+    envKeys: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+    maxTokensField: "max_completion_tokens"
+  }
+};
 
 function defaultCodexHome() {
   if (process.env.MODELDOCK_CODEX_HOME) return process.env.MODELDOCK_CODEX_HOME;
@@ -411,6 +427,210 @@ function envValue(name) {
   return process.env[envKey] || "";
 }
 
+function configuredChatProxy(providerId) {
+  const id = cleanIdentifier(providerId);
+  const provider = CHAT_PROXY_PROVIDERS[id];
+  if (!provider) throw new Error(`Unknown chat proxy provider: ${providerId}`);
+  const envPrefix = `MODELDOCK_PROXY_${id.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
+  return {
+    id,
+    ...provider,
+    endpoint: process.env[`${envPrefix}_ENDPOINT`] || provider.endpoint,
+    modelsUrl: process.env[`${envPrefix}_MODELS_URL`] || provider.modelsUrl
+  };
+}
+
+function chatProxyApiKey(provider) {
+  for (const key of provider.envKeys) {
+    const value = envValue(key);
+    if (value) return { key, value };
+  }
+  throw new Error(`${provider.label} proxy needs one of these environment variables: ${provider.envKeys.join(", ")}`);
+}
+
+function contentPartToText(part) {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return "";
+  if (typeof part.text === "string") return part.text;
+  if (typeof part.content === "string") return part.content;
+  if (typeof part.input_text === "string") return part.input_text;
+  if (typeof part.output_text === "string") return part.output_text;
+  return "";
+}
+
+function responseContentToText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(contentPartToText).filter(Boolean).join("\n");
+  return contentPartToText(content);
+}
+
+function responseInputToMessages(input) {
+  if (typeof input === "string") return [{ role: "user", content: input }];
+  if (!Array.isArray(input)) return [];
+  const messages = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    if (item.type && !["message", "input_text", "output_text"].includes(item.type) && !item.role) continue;
+    const content = responseContentToText(item.content ?? item.text ?? item);
+    if (!content) continue;
+    const role = ["system", "developer", "user", "assistant"].includes(item.role) ? item.role : "user";
+    messages.push({ role: role === "developer" ? "system" : role, content });
+  }
+  return messages;
+}
+
+function normalizeChatTools(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  const normalized = tools
+    .map((tool) => {
+      if (tool?.type !== "function" || !tool.name) return null;
+      return {
+        type: "function",
+        function: {
+          name: tool.name,
+          description: tool.description || "",
+          parameters: tool.parameters || { type: "object", properties: {} }
+        }
+      };
+    })
+    .filter(Boolean);
+  return normalized.length ? normalized : undefined;
+}
+
+export function responsesToChatRequest(providerId, body) {
+  const provider = configuredChatProxy(providerId);
+  const messages = [];
+  if (typeof body.instructions === "string" && body.instructions.trim()) {
+    messages.push({ role: "system", content: body.instructions.trim() });
+  }
+  messages.push(...responseInputToMessages(body.input));
+  if (!messages.length && typeof body.prompt === "string") {
+    messages.push({ role: "user", content: body.prompt });
+  }
+  if (!messages.length) throw new Error("Responses proxy could not find text input to forward.");
+
+  const chatBody = {
+    model: String(body.model || "").trim(),
+    messages,
+    stream: false
+  };
+  if (!chatBody.model) throw new Error("Responses proxy request is missing model.");
+  if (body.temperature !== undefined) chatBody.temperature = body.temperature;
+  if (body.top_p !== undefined) chatBody.top_p = body.top_p;
+  if (body.max_output_tokens !== undefined) chatBody[provider.maxTokensField] = body.max_output_tokens;
+  const tools = normalizeChatTools(body.tools);
+  if (tools) chatBody.tools = tools;
+  return chatBody;
+}
+
+export function chatCompletionToResponse(responsesBody, chatData) {
+  const choice = Array.isArray(chatData?.choices) ? chatData.choices[0] : null;
+  const message = choice?.message || {};
+  const content = responseContentToText(message.content) || responseContentToText(message.reasoning_content);
+  const createdAt = chatData?.created || Math.floor(Date.now() / 1000);
+  const usage = chatData?.usage || {};
+  return {
+    id: chatData?.id || `resp_${randomUUID().replace(/-/g, "")}`,
+    object: "response",
+    created_at: createdAt,
+    status: "completed",
+    model: chatData?.model || responsesBody.model,
+    output: [
+      {
+        id: `msg_${randomUUID().replace(/-/g, "")}`,
+        type: "message",
+        status: "completed",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: content || "",
+            annotations: []
+          }
+        ]
+      }
+    ],
+    output_text: content || "",
+    usage: {
+      input_tokens: usage.prompt_tokens ?? null,
+      output_tokens: usage.completion_tokens ?? null,
+      total_tokens: usage.total_tokens ?? null
+    }
+  };
+}
+
+function ssePayload(type, sequenceNumber, data) {
+  return {
+    type,
+    sequence_number: sequenceNumber,
+    ...data
+  };
+}
+
+function sendSseEvent(response, type, sequenceNumber, data) {
+  response.write(`event: ${type}\n`);
+  response.write(`data: ${JSON.stringify(ssePayload(type, sequenceNumber, data))}\n\n`);
+}
+
+function responseWantsSse(request, body) {
+  return body.stream === true || String(request.headers.accept || "").toLowerCase().includes("text/event-stream");
+}
+
+function sendResponseSse(response, responseBody) {
+  const item = responseBody.output?.[0] || {
+    id: `msg_${randomUUID().replace(/-/g, "")}`,
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: []
+  };
+  const contentPart = item.content?.[0] || { type: "output_text", text: responseBody.output_text || "", annotations: [] };
+  const inProgressResponse = {
+    ...responseBody,
+    status: "in_progress",
+    output: []
+  };
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no"
+  });
+  let sequenceNumber = 0;
+  sendSseEvent(response, "response.created", sequenceNumber++, { response: inProgressResponse });
+  sendSseEvent(response, "response.in_progress", sequenceNumber++, { response: inProgressResponse });
+  sendSseEvent(response, "response.output_item.added", sequenceNumber++, { output_index: 0, item: { ...item, content: [] } });
+  sendSseEvent(response, "response.content_part.added", sequenceNumber++, {
+    item_id: item.id,
+    output_index: 0,
+    content_index: 0,
+    part: { ...contentPart, text: "" }
+  });
+  if (contentPart.text) {
+    sendSseEvent(response, "response.output_text.delta", sequenceNumber++, {
+      item_id: item.id,
+      output_index: 0,
+      content_index: 0,
+      delta: contentPart.text
+    });
+  }
+  sendSseEvent(response, "response.output_text.done", sequenceNumber++, {
+    item_id: item.id,
+    output_index: 0,
+    content_index: 0,
+    text: contentPart.text || ""
+  });
+  sendSseEvent(response, "response.content_part.done", sequenceNumber++, {
+    item_id: item.id,
+    output_index: 0,
+    content_index: 0,
+    part: contentPart
+  });
+  sendSseEvent(response, "response.output_item.done", sequenceNumber++, { output_index: 0, item });
+  sendSseEvent(response, "response.completed", sequenceNumber++, { response: responseBody });
+  response.end();
+}
+
 function normalizeProviderModels(data) {
   const list = Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : Array.isArray(data) ? data : [];
   return list
@@ -463,6 +683,104 @@ export async function fetchProviderModels(presetInput) {
     throw new Error(`/models failed (${response.status}): ${message}`);
   }
   return { preset, models: normalizeProviderModels(data) };
+}
+
+async function handleChatProxy(request, response, providerId, endpointName) {
+  const provider = configuredChatProxy(providerId);
+  const { value: apiKey } = chatProxyApiKey(provider);
+  const headers = {
+    accept: "application/json",
+    authorization: `Bearer ${apiKey}`
+  };
+
+  if (endpointName === "models") {
+    if (request.method !== "GET") return sendJson(response, 405, { error: "Use GET for proxy /models." });
+    const upstream = await fetchWithTimeout(provider.modelsUrl, { headers });
+    const text = await upstream.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      return sendJson(response, 502, { error: `${provider.label} proxy returned non-JSON from /models: ${text.slice(0, 500)}` });
+    }
+    if (!upstream.ok) return sendJson(response, upstream.status, data || { error: `${provider.label} /models failed.` });
+    return sendJson(response, 200, {
+      models: normalizeProviderModels(data).map((model) => ({
+        id: model.id,
+        slug: model.id,
+        name: model.name || model.id,
+        display_name: model.name || model.id,
+        description: `${provider.label} model routed through ModelDock chat proxy.`,
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
+          { effort: "low", description: "Faster responses with lighter reasoning" },
+          { effort: "medium", description: "Balanced reasoning" },
+          { effort: "high", description: "More reasoning for complex work" }
+        ],
+        shell_type: "shell_command",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 50,
+        additional_speed_tiers: [],
+        service_tiers: [],
+        availability_nux: null,
+        upgrade: null,
+        base_instructions: "",
+        model_messages: null,
+        include_skills_usage_instructions: false,
+        default_reasoning_summary: "none",
+        support_verbosity: false,
+        default_verbosity: "low",
+        apply_patch_tool_type: "freeform",
+        web_search_tool_type: "text_and_image",
+        truncation_policy: { mode: "tokens", limit: 10000 },
+        supports_parallel_tool_calls: false,
+        supports_image_detail_original: false,
+        context_window: model.contextLength || 64000,
+        max_context_window: model.contextLength || 64000,
+        comp_hash: "modeldock-proxy",
+        effective_context_window_percent: 95,
+        experimental_supported_tools: [],
+        input_modalities: ["text"],
+        supports_search_tool: false,
+        use_responses_lite: true,
+        tool_mode: "code_mode_only",
+        multi_agent_version: "v2",
+        max_output_tokens: null,
+        supports_reasoning_summaries: false
+      }))
+    });
+  }
+
+  if (endpointName !== "responses") return sendJson(response, 404, { error: "Unknown proxy route." });
+  if (request.method !== "POST") return sendJson(response, 405, { error: "Use POST for proxy /responses." });
+
+  const body = await readBody(request);
+  const chatBody = responsesToChatRequest(provider.id, body);
+  const upstream = await fetchWithTimeout(provider.endpoint, {
+    method: "POST",
+    headers: {
+      ...headers,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(chatBody)
+  });
+  const text = await upstream.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    return sendJson(response, 502, { error: `${provider.label} proxy returned non-JSON: ${text.slice(0, 500)}` });
+  }
+  if (!upstream.ok) {
+    return sendJson(response, upstream.status, data || { error: `${provider.label} proxy failed.` });
+  }
+  const responseBody = chatCompletionToResponse(body, data);
+  if (responseWantsSse(request, body)) {
+    sendResponseSse(response, responseBody);
+    return;
+  }
+  return sendJson(response, 200, responseBody);
 }
 
 async function handleApi(request, response, pathname) {
@@ -550,6 +868,11 @@ async function handleApi(request, response, pathname) {
 export const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const proxyMatch = url.pathname.match(/^\/proxy\/([a-z0-9_-]+)\/v1\/(responses|models)$/);
+    if (proxyMatch) {
+      await handleChatProxy(request, response, proxyMatch[1], proxyMatch[2]);
+      return;
+    }
     if (url.pathname.startsWith("/api/")) {
       await handleApi(request, response, url.pathname);
       return;
