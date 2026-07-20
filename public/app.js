@@ -27,7 +27,8 @@ const ids = [
   "testCwd",
   "testPrompt",
   "testOutput",
-  "backupList",
+  "defaultRestoreBtn",
+  "defaultRestoreStatus",
   "configPreview",
   "toast",
   "restartNote"
@@ -57,12 +58,6 @@ function showToast(message, isError = false) {
   showToast.timer = window.setTimeout(() => {
     el.toast.hidden = true;
   }, 5200);
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes)) return "";
-  if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${Math.round(bytes / 1024)} KB`;
 }
 
 function activeFormData() {
@@ -285,6 +280,7 @@ function renderStatus(data) {
   el.restartNote.textContent = data.restartRequiredNote;
   el.configPreview.textContent = data.configText || "";
   el.testCwd.value ||= data.realCodexHome || data.codexHome;
+  el.defaultRestoreStatus.textContent = `${data.defaultRestore?.label || "OpenAI Default"} / ${data.defaultRestore?.model || "gpt-5.5"}`;
   updateEnvKeyState();
   updateWireApiHint();
   updateAliasNotice();
@@ -297,7 +293,6 @@ function renderStatus(data) {
     el.presetSelect.append(option);
   }
   if (!el.providerId.value && data.presets[0]) setForm(data.presets[0]);
-  renderBackups(data.backups || []);
 }
 
 async function loadStatus() {
@@ -322,6 +317,16 @@ async function saveProfile() {
   await loadStatus();
 }
 
+async function restoreDefault() {
+  if (!confirm("Restore OpenAI default baseline? Current config will be backed up first.")) return;
+  const result = await api("/api/restore-default", {
+    method: "POST",
+    body: "{}"
+  });
+  showToast(result.message);
+  await loadStatus();
+}
+
 async function runTest(kind) {
   el.testOutput.textContent = `Running ${kind}...`;
   const result = await api("/api/test", {
@@ -338,6 +343,7 @@ async function runTest(kind) {
 document.getElementById("refreshBtn").addEventListener("click", () => loadStatus().catch((error) => showToast(error.message, true)));
 el.applyBtn.addEventListener("click", () => applyConfig().catch((error) => showToast(error.message, true)));
 el.saveProfileBtn.addEventListener("click", () => saveProfile().catch((error) => showToast(error.message, true)));
+el.restoreDefaultBtn.addEventListener("click", () => restoreDefault().catch((error) => showToast(error.message, true)));
 document.getElementById("fetchProviderModelsBtn").addEventListener("click", () => fetchProviderModels().catch((error) => {
   el.providerModelStatus.textContent = "Provider model fetch failed.";
   el.providerModelOutput.textContent = String(error.stack || error.message || error);

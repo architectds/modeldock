@@ -151,10 +151,13 @@
       <section class="layout bottom">
         <section class="panel">
           <div class="panel-title">
-            <h2>Backups</h2>
-            <span>Created before every apply or restore.</span>
+            <h2>Default</h2>
+            <span>Restore the 5:09 PM OpenAI baseline.</span>
           </div>
-          <div id="backupList" class="backup-list"></div>
+          <p id="defaultRestoreStatus" class="restore-copy">OpenAI / gpt-5.5</p>
+          <div class="actions">
+            <button type="button" id="restoreDefaultBtn">Restore Default</button>
+          </div>
         </section>
 
         <section class="panel">
@@ -168,6 +171,6 @@
 
       <div id="toast" class="toast" hidden></div>
     </main>
-    <script src="/app.js?v=runtime-proxy-fields-1" type="module"></script>
+    <script src="/app.js?v=restore-default-1" type="module"></script>
   </body>
 </html>

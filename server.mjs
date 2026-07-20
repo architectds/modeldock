@@ -14,6 +14,8 @@ const COMMAND_TIMEOUT_MS = 120000;
 const COMMAND_OUTPUT_LIMIT = 16000;
 const PROVIDER_TIMEOUT_MS = 45000;
 const CUSTOM_PROVIDER_RESERVED = new Set(["openai", "ollama", "lmstudio", "amazon-bedrock"]);
+const DEFAULT_CONFIG_BACKUP_NAME = "2026-07-19T22-09-27-089Z-apply-b7814a6e.config.toml";
+const DEFAULT_CONFIG_TEXT = 'model_provider = "openai"\nmodel = "gpt-5.5"\n';
 const CHAT_PROXY_PROVIDERS = {
   deepseek: {
     label: "DeepSeek",
@@ -339,6 +341,18 @@ export async function restoreConfigBackup(paths, backupNameInput) {
   const backupText = await fs.readFile(backupPath, "utf8");
   await atomicWrite(paths.configPath, backupText);
   return { restoreBackupPath, backupPath };
+}
+
+export async function restoreDefaultConfig(paths) {
+  const restoreBackupPath = await makeBackup(paths.configPath, paths.backupsDir, "pre-restore-default");
+  const defaultBackupPath = path.join(paths.backupsDir, DEFAULT_CONFIG_BACKUP_NAME);
+  if (existsSync(defaultBackupPath)) {
+    const backupText = await fs.readFile(defaultBackupPath, "utf8");
+    await atomicWrite(paths.configPath, backupText);
+    return { restoreBackupPath, source: "backup", backupPath: defaultBackupPath };
+  }
+  await atomicWrite(paths.configPath, DEFAULT_CONFIG_TEXT);
+  return { restoreBackupPath, source: "built-in", backupPath: "" };
 }
 
 async function sendJson(response, status, data) {
@@ -802,6 +816,12 @@ async function handleApi(request, response, pathname) {
       configText,
       presets: await readPresets(),
       backups: await listBackups(paths.backupsDir),
+      defaultRestore: {
+        label: "OpenAI Default",
+        modelProvider: "openai",
+        model: "gpt-5.5",
+        backupName: DEFAULT_CONFIG_BACKUP_NAME
+      },
       restartRequiredNote: "Restart Codex Desktop after applying provider/model changes."
     });
   }
@@ -834,6 +854,17 @@ async function handleApi(request, response, pathname) {
       ok: true,
       restoreBackupPath,
       message: "Restored config.toml. Restart Codex Desktop for changes to fully apply."
+    });
+  }
+
+  if (request.method === "POST" && pathname === "/api/restore-default") {
+    const { restoreBackupPath, source, backupPath } = await restoreDefaultConfig(paths);
+    return sendJson(response, 200, {
+      ok: true,
+      source,
+      backupPath,
+      restoreBackupPath,
+      message: "Restored OpenAI default baseline. Restart Codex Desktop for changes to fully apply."
     });
   }
 

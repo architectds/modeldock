@@ -10,6 +10,7 @@ import {
   parseSummary,
   responsesToChatRequest,
   restoreConfigBackup,
+  restoreDefaultConfig,
   saveProfileConfig,
   server
 } from "../server.mjs";
@@ -126,6 +127,12 @@ if (!backups.length) throw new Error("backup was not created");
 await restoreConfigBackup(paths, originalConfigBackupName);
 const restored = await fs.readFile(paths.configPath, "utf8");
 if (!restored.includes('model_provider = "openai"')) throw new Error("restore did not restore backup");
+
+await restoreDefaultConfig(paths);
+const defaultRestored = await fs.readFile(paths.configPath, "utf8");
+if (!defaultRestored.includes('model_provider = "openai"') || !defaultRestored.includes('model = "gpt-5.5"')) {
+  throw new Error("default restore did not restore OpenAI baseline");
+}
 
 const fakeProvider = createServer((request, response) => {
   if (request.url === "/v1/models") {

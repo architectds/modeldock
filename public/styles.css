@@ -200,6 +200,10 @@ select {
   margin-top: 14px;
 }
 
+.restore-copy {
+  margin-top: 4px;
+}
+
 .model-picker {
   margin-top: 14px;
   border: 1px solid var(--line);
