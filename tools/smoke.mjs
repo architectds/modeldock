@@ -239,13 +239,26 @@ const kimiChat = responsesToChatRequest("kimi", {
       name: "update_plan",
       description: "Updates the task plan.",
       parameters: { type: "object", properties: {} }
+    },
+    {
+      type: "function",
+      name: "apply_patch",
+      description: "Apply patches.\n".repeat(200),
+      parameters: { type: "object", properties: { patch: { type: "string", description: "Patch text.".repeat(20) } }, required: ["patch"] }
+    },
+    {
+      type: "function",
+      name: "read_mcp_resource",
+      description: "MCP read.",
+      parameters: { type: "object", properties: {} }
     }
   ]
 });
 if (kimiChat.max_completion_tokens !== 32) throw new Error("kimi proxy token field mismatch");
 if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
 if (kimiChat.tools?.[0]?.function?.name !== "shell_command") throw new Error("responses tools were not mapped to chat tools");
-if (kimiChat.tools.length !== 1) throw new Error("kimi minimal policy should only expose shell_command");
+const kimiToolNames = kimiChat.tools.map((tool) => tool.function.name).join(",");
+if (kimiToolNames !== "shell_command,update_plan,apply_patch") throw new Error(`kimi coding policy exposed wrong tools: ${kimiToolNames}`);
 if (kimiChat.tools[0].function.description.length > 120) throw new Error("kimi tool description was not compressed");
 if (kimiChat.tools[0].function.parameters.properties.sandbox_permissions) throw new Error("kimi shell schema should be compact");
 if (kimiChat.tool_choice !== "auto") throw new Error("chat tool_choice was not enabled");

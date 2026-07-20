@@ -34,7 +34,7 @@ const CHAT_PROXY_PROVIDERS = {
     modelsUrl: "https://api.moonshot.ai/v1/models",
     envKeys: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
     maxTokensField: "max_completion_tokens",
-    toolPolicy: "minimal",
+    toolPolicy: "coding",
     toolInstructions:
       "Use the provided tools through standard Chat Completions tool_calls only. Do not explain that you will use a tool; call it."
   }
