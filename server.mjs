@@ -40,10 +40,12 @@ const CHAT_PROXY_PROVIDERS = {
   }
 };
 const TOOL_POLICIES = {
-  minimal: new Set(["shell_command"]),
-  coding: new Set(["shell_command", "apply_patch", "update_plan"]),
+  minimal: new Set(["shell_command", "apply_patch", "read_file", "write_file", "update_plan"]),
+  coding: new Set(["shell_command", "apply_patch", "read_file", "write_file", "update_plan"]),
   full: null
 };
+const TOOL_CALL_MEMORY_LIMIT = 1000;
+const toolCallMemory = new Map();
 
 function defaultCodexHome() {
   if (process.env.MODELDOCK_CODEX_HOME) return process.env.MODELDOCK_CODEX_HOME;
@@ -498,33 +500,66 @@ function responseContentToText(content) {
   return contentPartToText(content);
 }
 
+function rememberToolCall(callId, data) {
+  if (!callId) return;
+  if (toolCallMemory.has(callId)) toolCallMemory.delete(callId);
+  toolCallMemory.set(callId, data);
+  while (toolCallMemory.size > TOOL_CALL_MEMORY_LIMIT) {
+    const oldest = toolCallMemory.keys().next().value;
+    toolCallMemory.delete(oldest);
+  }
+}
+
+function chatToolCallFromResponseItem(item) {
+  const callId = item.call_id || item.id || `call_${randomUUID().replace(/-/g, "")}`;
+  const remembered = toolCallMemory.get(callId) || {};
+  const name = item.name || remembered.name || "unknown_tool";
+  const args = typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || remembered.arguments || {});
+  return {
+    id: callId,
+    type: "function",
+    function: {
+      name,
+      arguments: args
+    }
+  };
+}
+
 function responseInputToMessages(input) {
   if (typeof input === "string") return [{ role: "user", content: input }];
   if (!Array.isArray(input)) return [];
   const messages = [];
-  for (const item of input) {
+  const callNames = new Map();
+  for (let index = 0; index < input.length; index += 1) {
+    const item = input[index];
     if (!item || typeof item !== "object") continue;
     if (item.type === "function_call") {
+      const toolCalls = [chatToolCallFromResponseItem(item)];
+      callNames.set(toolCalls[0].id, toolCalls[0].function.name);
+      let reasoningContent = item.reasoning_content || toolCallMemory.get(toolCalls[0].id)?.reasoning_content;
+      while (input[index + toolCalls.length]?.type === "function_call") {
+        const next = input[index + toolCalls.length];
+        const nextToolCall = chatToolCallFromResponseItem(next);
+        toolCalls.push(nextToolCall);
+        callNames.set(nextToolCall.id, nextToolCall.function.name);
+        if (!reasoningContent) reasoningContent = next.reasoning_content || toolCallMemory.get(nextToolCall.id)?.reasoning_content;
+      }
+      index += toolCalls.length - 1;
       messages.push({
         role: "assistant",
         content: null,
-        tool_calls: [
-          {
-            id: item.call_id || item.id || `call_${randomUUID().replace(/-/g, "")}`,
-            type: "function",
-            function: {
-              name: item.name || "unknown_tool",
-              arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {})
-            }
-          }
-        ]
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+        tool_calls: toolCalls
       });
       continue;
     }
     if (item.type === "function_call_output") {
+      const callId = item.call_id || item.id || "";
+      const remembered = toolCallMemory.get(callId) || {};
       messages.push({
         role: "tool",
-        tool_call_id: item.call_id || item.id || "",
+        tool_call_id: callId,
+        ...(item.name || remembered.name || callNames.get(callId) ? { name: item.name || remembered.name || callNames.get(callId) } : {}),
         content: responseContentToText(item.output ?? item.content ?? item.text ?? "")
       });
       continue;
@@ -557,7 +592,7 @@ function compactParameters(toolName, parameters) {
       properties: {
         command: {
           type: "string",
-          description: "PowerShell command to run."
+          description: "Command to run in the current Codex shell."
         },
         workdir: {
           type: "string",
@@ -586,8 +621,10 @@ function compactParameters(toolName, parameters) {
 }
 
 function compactToolDescription(toolName, description) {
-  if (toolName === "shell_command") return "Execute a PowerShell command and return the result.";
+  if (toolName === "shell_command") return "Execute a command in the current Codex shell and return the result.";
   if (toolName === "apply_patch") return "Apply a patch to files in the workspace.";
+  if (toolName === "read_file") return "Read a file from the workspace.";
+  if (toolName === "write_file") return "Write a file in the workspace.";
   if (toolName === "update_plan") return "Update the visible task plan.";
   return String(description || "").split(/\r?\n/)[0].slice(0, 240);
 }
@@ -656,10 +693,15 @@ function extractShellCommand(text) {
   return "";
 }
 
-function responseFunctionCallItem(toolCall) {
+function responseFunctionCallItem(toolCall, reasoningContent = "") {
   const fn = toolCall?.function || {};
   const callId = toolCall?.id || `call_${randomUUID().replace(/-/g, "")}`;
   const args = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments || {});
+  rememberToolCall(callId, {
+    name: fn.name || "unknown_tool",
+    arguments: args,
+    reasoning_content: reasoningContent || ""
+  });
   return {
     id: `fc_${randomUUID().replace(/-/g, "")}`,
     type: "function_call",
@@ -707,6 +749,7 @@ export function responsesToChatRequest(providerId, body) {
   if (body.top_p !== undefined) chatBody.top_p = body.top_p;
   if (body.max_output_tokens !== undefined) chatBody[provider.maxTokensField] = body.max_output_tokens;
   if (provider.extraBody) Object.assign(chatBody, provider.extraBody);
+  if (provider.id === "kimi" && /^kimi-k3(?:$|[-_:.])/i.test(chatBody.model)) chatBody.reasoning_effort = "max";
   const tools = normalizeChatTools(body.tools, provider);
   if (tools) {
     addSystemInstruction(messages, provider.toolInstructions);
@@ -720,7 +763,9 @@ export function chatCompletionToResponse(responsesBody, chatData) {
   const choice = Array.isArray(chatData?.choices) ? chatData.choices[0] : null;
   const message = choice?.message || {};
   const content = responseContentToText(message.content) || responseContentToText(message.reasoning_content);
-  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map(responseFunctionCallItem) : [];
+  const toolCalls = Array.isArray(message.tool_calls)
+    ? message.tool_calls.map((toolCall) => responseFunctionCallItem(toolCall, message.reasoning_content))
+    : [];
   if (!toolCalls.length) {
     const command = extractShellCommand(content);
     const name = command ? shellToolName(responsesBody.tools) || "shell_command" : "";

@@ -255,6 +255,7 @@ const kimiChat = responsesToChatRequest("kimi", {
   ]
 });
 if (kimiChat.max_completion_tokens !== 32) throw new Error("kimi proxy token field mismatch");
+if (kimiChat.reasoning_effort !== "max") throw new Error("kimi k3 should use reasoning_effort=max");
 if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
 if (kimiChat.tools?.[0]?.function?.name !== "shell_command") throw new Error("responses tools were not mapped to chat tools");
 const kimiToolNames = kimiChat.tools.map((tool) => tool.function.name).join(",");
@@ -340,6 +341,52 @@ const toolCallShape = chatCompletionToResponse(
 if (toolCallShape.output[0]?.type !== "function_call") throw new Error("chat tool_calls were not wrapped as responses function_call");
 if (toolCallShape.output[0]?.call_id !== "call_shell") throw new Error("tool call id was not preserved");
 if (toolCallShape.usage.total_tokens !== 0) throw new Error("missing usage should default to numeric zero");
+
+const kimiReasoningToolCallShape = chatCompletionToResponse(
+  { model: "kimi-k3" },
+  {
+    id: "chatcmpl-kimi-tool",
+    model: "kimi-k3",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          reasoning_content: "Need to inspect the directory with a shell command.",
+          tool_calls: [
+            {
+              id: "kimi_shell_call",
+              type: "function",
+              function: { name: "shell_command", arguments: "{\"command\":\"Get-ChildItem -Name\"}" }
+            }
+          ]
+        }
+      }
+    ],
+    usage: {}
+  }
+);
+const kimiReasoningRoundtrip = responsesToChatRequest("kimi", {
+  model: "kimi-k3",
+  input: [
+    kimiReasoningToolCallShape.output[0],
+    {
+      type: "function_call_output",
+      call_id: "kimi_shell_call",
+      output: "server.mjs\npackage.json"
+    },
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "summarize" }]
+    }
+  ]
+});
+if (kimiReasoningRoundtrip.messages[0]?.reasoning_content !== "Need to inspect the directory with a shell command.") {
+  throw new Error("kimi reasoning_content was not preserved across tool roundtrip");
+}
+if (kimiReasoningRoundtrip.messages[1]?.name !== "shell_command") throw new Error("kimi tool result did not include tool name");
+if (kimiReasoningRoundtrip.messages[1]?.tool_call_id !== "kimi_shell_call") throw new Error("kimi tool result call id was not preserved");
 
 const bashFallbackShape = chatCompletionToResponse(
   {
