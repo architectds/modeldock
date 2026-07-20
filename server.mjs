@@ -166,11 +166,30 @@ function isReservedProviderOverride(preset) {
   return CUSTOM_PROVIDER_RESERVED.has(preset.providerId) && Boolean(preset.baseUrl || preset.envKey);
 }
 
+function isDirectAnthropicProvider(preset) {
+  return preset.providerId === "anthropic" || preset.baseUrl.toLowerCase().includes("api.anthropic.com");
+}
+
+function isUnsupportedChatWire(preset) {
+  return preset.wireApi.toLowerCase() === "chat";
+}
+
 function assertCanWriteConfig(preset) {
-  if (!isReservedProviderOverride(preset)) return;
-  throw new Error(
-    `Provider ID "${preset.providerId}" is reserved by Codex and cannot be overridden. Use a custom provider ID such as "deepseek" or "${preset.providerId}-custom".`
-  );
+  if (isReservedProviderOverride(preset)) {
+    throw new Error(
+      `Provider ID "${preset.providerId}" is reserved by Codex and cannot be overridden. Use a custom provider ID such as "deepseek" or "${preset.providerId}-custom".`
+    );
+  }
+  if (isDirectAnthropicProvider(preset)) {
+    throw new Error(
+      "Direct Anthropic uses /v1/messages, which is not supported by this Codex wire API setting yet. Use Anthropic through OpenRouter or another OpenAI-compatible gateway for now."
+    );
+  }
+  if (isUnsupportedChatWire(preset)) {
+    throw new Error(
+      'This provider expects /chat/completions, but the current Codex CLI no longer supports wire_api = "chat". Use a /responses-compatible gateway or proxy before applying this provider.'
+    );
+  }
 }
 
 function shouldWriteProviderBlock(preset) {
@@ -376,8 +395,7 @@ function providerApiUrl(baseUrl, endpoint) {
 }
 
 function isAnthropicPreset(preset) {
-  const provider = `${preset.providerId} ${preset.providerName} ${preset.baseUrl}`.toLowerCase();
-  return provider.includes("anthropic") || provider.includes("api.anthropic.com");
+  return isDirectAnthropicProvider(preset);
 }
 
 function providerModelsUrl(preset) {

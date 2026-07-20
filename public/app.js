@@ -12,6 +12,7 @@ const ids = [
   "reasoningEffort",
   "verbosity",
   "wireApi",
+  "wireApiHint",
   "baseUrl",
   "envKey",
   "profileName",
@@ -83,9 +84,28 @@ function isReservedProviderOverride(data) {
   return reservedProviderIds.has(data.providerId.trim().toLowerCase()) && Boolean(data.baseUrl.trim() || data.envKey.trim());
 }
 
+function isDirectAnthropic(data) {
+  const providerId = data.providerId.trim().toLowerCase();
+  const baseUrl = data.baseUrl.trim().toLowerCase();
+  return providerId === "anthropic" || baseUrl.includes("api.anthropic.com");
+}
+
+function isUnsupportedChatWire(data) {
+  return data.wireApi.trim().toLowerCase() === "chat";
+}
+
+function wireEndpoint(wireApi) {
+  if (wireApi === "responses") return "/responses";
+  if (wireApi === "chat") return "/chat/completions";
+  return "Codex default";
+}
+
 function updateAliasNotice() {
   const data = activeFormData();
-  if (!isReservedProviderOverride(data)) {
+  const reservedOverride = isReservedProviderOverride(data);
+  const unsupportedAnthropic = isDirectAnthropic(data);
+  const unsupportedChat = isUnsupportedChatWire(data);
+  if (!reservedOverride && !unsupportedAnthropic && !unsupportedChat) {
     el.aliasNotice.hidden = true;
     el.aliasNotice.textContent = "";
     el.applyBtn.disabled = false;
@@ -95,10 +115,37 @@ function updateAliasNotice() {
   el.aliasNotice.hidden = false;
   el.applyBtn.disabled = true;
   el.saveProfileBtn.disabled = true;
-  el.aliasNotice.textContent = [
+  if (reservedOverride) {
+    el.aliasNotice.textContent = [
     `Provider ID "${data.providerId.trim()}" is reserved by Codex and cannot be overridden.`,
     `Use a custom Provider ID such as "deepseek" or "${data.providerId.trim()}-custom" for this endpoint.`
+    ].join(" ");
+    return;
+  }
+  el.aliasNotice.textContent = [
+    "Direct Anthropic uses /v1/messages, which is not supported by this Codex wire API setting yet.",
+    "Use Anthropic through OpenRouter or another OpenAI-compatible gateway for now."
   ].join(" ");
+  if (unsupportedChat) {
+    el.aliasNotice.textContent = [
+      "This provider expects /chat/completions, but the current Codex CLI no longer supports wire_api = chat.",
+      "Fetch Models is still available; Apply/Profile requires a /responses-compatible gateway or proxy."
+    ].join(" ");
+  }
+}
+
+function updateWireApiHint() {
+  el.wireApi.disabled = true;
+  const data = activeFormData();
+  if (isDirectAnthropic(data)) {
+    el.wireApiHint.textContent = "Direct Anthropic uses /v1/messages; Apply is blocked until Codex supports that wire API.";
+    return;
+  }
+  if (isUnsupportedChatWire(data)) {
+    el.wireApiHint.textContent = "Provider expects /chat/completions, but current Codex cannot apply chat wire configs.";
+    return;
+  }
+  el.wireApiHint.textContent = `Locked for this provider. Codex will call ${wireEndpoint(el.wireApi.value)}.`;
 }
 
 function setForm(preset) {
@@ -112,6 +159,7 @@ function setForm(preset) {
   el.envKey.value = preset.envKey || "";
   if (!el.profileName.value) el.profileName.value = preset.providerId || preset.id || "";
   clearProviderModels();
+  updateWireApiHint();
   updateAliasNotice();
 }
 
@@ -210,6 +258,7 @@ function renderStatus(data) {
   el.restartNote.textContent = data.restartRequiredNote;
   el.configPreview.textContent = data.configText || "";
   el.testCwd.value ||= data.realCodexHome || data.codexHome;
+  updateWireApiHint();
   updateAliasNotice();
 
   el.presetSelect.innerHTML = "";
@@ -271,7 +320,10 @@ el.providerModelSelect.addEventListener("change", () => {
   if (el.providerModelSelect.value) el.model.value = el.providerModelSelect.value;
 });
 ["providerId", "providerName", "baseUrl", "envKey"].forEach((id) => {
-  el[id].addEventListener("input", updateAliasNotice);
+  el[id].addEventListener("input", () => {
+    updateWireApiHint();
+    updateAliasNotice();
+  });
 });
 el.presetSelect.addEventListener("change", () => {
   const preset = state?.presets.find((item) => item.id === el.presetSelect.value);

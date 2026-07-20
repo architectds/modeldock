@@ -70,7 +70,19 @@ Default base URLs:
 - Kimi / Moonshot: `https://api.moonshot.ai/v1`
 - Anthropic: `https://api.anthropic.com`
 
-Anthropic uses `x-api-key` and `/v1/models` for model discovery. DeepSeek and Kimi use OpenAI-compatible bearer auth for model discovery.
+Default Codex wire APIs:
+
+- OpenAI: `responses` (`/responses`)
+- OpenRouter: `responses` (`/responses`, OpenRouter beta Responses API)
+- DeepSeek: `chat` (`/chat/completions`)
+- Kimi / Moonshot: `chat` (`/chat/completions`)
+- Ollama and LM Studio: `chat` (`/chat/completions`)
+
+The Wire API field is locked in the UI because it determines the HTTP path Codex calls. A wrong value can make Codex call an endpoint that the provider does not implement, such as DeepSeek `/responses`.
+
+Current Codex CLI builds reject `wire_api = "chat"`, so chat-only providers such as direct DeepSeek, direct Kimi, Ollama, and LM Studio are blocked from Apply/Profile for now. Their presets are still useful for model discovery. To use them with Codex, route through a `/responses`-compatible gateway or proxy.
+
+Anthropic uses `x-api-key` and `/v1/models` for model discovery. Direct Anthropic generation uses `/v1/messages`, which is not supported by ModelDock's Codex `responses`/`chat` wire setting yet, so direct Anthropic Apply/Profile actions are blocked for now. Use Anthropic through OpenRouter or another OpenAI-compatible gateway.
 
 Codex reserves built-in provider IDs such as `openai`, `ollama`, `lmstudio`, and `amazon-bedrock`. Do not reuse those IDs for a custom endpoint. For example, use `deepseek` or `openai-custom`, not `openai`, when pointing at DeepSeek.
 

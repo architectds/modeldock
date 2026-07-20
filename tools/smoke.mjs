@@ -80,6 +80,29 @@ const aliasPreset = {
 await assertRejects(() => applyPresetToConfig(paths, aliasPreset), "reserved provider apply should be rejected");
 await assertRejects(() => saveProfileConfig(paths, "openai-deepseek-alias", aliasPreset), "reserved provider profile should be rejected");
 
+const deepseekPreset = {
+  providerId: "deepseek",
+  providerName: "DeepSeek",
+  model: "deepseek-v4-flash",
+  reasoningEffort: "high",
+  verbosity: "",
+  wireApi: "chat",
+  baseUrl: "https://api.deepseek.com",
+  envKey: "DEEPSEEK_API_KEY"
+};
+await assertRejects(() => applyPresetToConfig(paths, deepseekPreset), "chat wire apply should be rejected");
+await assertRejects(() => saveProfileConfig(paths, "deepseek-chat", deepseekPreset), "chat wire profile should be rejected");
+
+const directAnthropicPreset = {
+  providerId: "anthropic",
+  providerName: "Anthropic",
+  model: "claude-sonnet-5",
+  wireApi: "responses",
+  baseUrl: "https://api.anthropic.com",
+  envKey: "ANTHROPIC_API_KEY"
+};
+await assertRejects(() => applyPresetToConfig(paths, directAnthropicPreset), "direct anthropic apply should be rejected");
+
 const backups = await listBackups(paths.backupsDir);
 if (!backups.length) throw new Error("backup was not created");
 

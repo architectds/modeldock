@@ -31,7 +31,7 @@
     "model": "deepseek-v4-flash",
     "reasoningEffort": "high",
     "verbosity": "",
-    "wireApi": "responses",
+    "wireApi": "chat",
     "baseUrl": "https://api.deepseek.com",
     "envKey": "DEEPSEEK_API_KEY"
   },
@@ -43,7 +43,7 @@
     "model": "kimi-k3",
     "reasoningEffort": "high",
     "verbosity": "",
-    "wireApi": "responses",
+    "wireApi": "chat",
     "baseUrl": "https://api.moonshot.ai/v1",
     "envKey": "MOONSHOT_API_KEY"
   },
@@ -91,7 +91,7 @@
     "model": "",
     "reasoningEffort": "",
     "verbosity": "",
-    "wireApi": "responses",
+    "wireApi": "chat",
     "baseUrl": "",
     "envKey": ""
   }
