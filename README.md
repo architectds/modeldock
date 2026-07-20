@@ -4,6 +4,31 @@ ModelDock is a local provider and model workbench for Codex. The first version i
 
 ## Run
 
+Recommended on Windows: install the runtime as an independent user startup process. This keeps the local proxy alive across Codex Desktop restarts.
+
+```powershell
+cd D:\projects\modeldock
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 install
+```
+
+Check it:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 status
+```
+
+Start or stop it manually:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 start
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\runtime.ps1 stop
+```
+
+The installer writes a startup launcher to `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\ModelDockRuntime.cmd`.
+The runtime logs to `%LOCALAPPDATA%\ModelDock\runtime.log`.
+
+Development-only foreground run:
+
 ```powershell
 cd D:\projects\modeldock
 node server.mjs

@@ -6,7 +6,11 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs"
+    "check": "node --check server.mjs",
+    "runtime:status": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 status",
+    "runtime:start": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 start",
+    "runtime:install": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 install",
+    "runtime:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/runtime.ps1 stop"
   },
   "engines": {
     "node": ">=18"
