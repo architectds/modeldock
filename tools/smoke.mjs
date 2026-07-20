@@ -218,10 +218,25 @@ const kimiChat = responsesToChatRequest("kimi", {
   model: "kimi-k3",
   instructions: "Be brief.",
   input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
-  max_output_tokens: 32
+  max_output_tokens: 32,
+  tools: [
+    {
+      type: "function",
+      name: "shell_command",
+      description: "Runs a shell command.",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+        required: ["command"],
+        additionalProperties: false
+      }
+    }
+  ]
 });
 if (kimiChat.max_completion_tokens !== 32) throw new Error("kimi proxy token field mismatch");
 if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
+if (kimiChat.tools?.[0]?.function?.name !== "shell_command") throw new Error("responses tools were not mapped to chat tools");
+if (kimiChat.tool_choice !== "auto") throw new Error("chat tool_choice was not enabled");
 
 const responseShape = chatCompletionToResponse(
   { model: "deepseek-v4-flash" },
@@ -234,6 +249,202 @@ const responseShape = chatCompletionToResponse(
 );
 if (responseShape.output_text !== "MODELDOCK_PROXY_OK") throw new Error("chat response was not wrapped");
 if (responseShape.usage.total_tokens !== 9) throw new Error("chat usage was not wrapped");
+
+const toolCallShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_shell",
+              type: "function",
+              function: { name: "shell_command", arguments: "{\"command\":\"Get-ChildItem\"}" }
+            }
+          ]
+        }
+      }
+    ],
+    usage: {}
+  }
+);
+if (toolCallShape.output[0]?.type !== "function_call") throw new Error("chat tool_calls were not wrapped as responses function_call");
+if (toolCallShape.output[0]?.call_id !== "call_shell") throw new Error("tool call id was not preserved");
+if (toolCallShape.usage.total_tokens !== 0) throw new Error("missing usage should default to numeric zero");
+
+const bashFallbackShape = chatCompletionToResponse(
+  {
+    model: "deepseek-v4-flash",
+    tools: [
+      {
+        type: "function",
+        name: "shell_command",
+        description: "Runs a Powershell command.",
+        parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+      }
+    ]
+  },
+  {
+    id: "chatcmpl-bash",
+    model: "deepseek-v4-flash",
+    choices: [{ message: { role: "assistant", content: "当然可以。\n<bash>Get-ChildItem</bash>" } }]
+  }
+);
+if (!bashFallbackShape.output.some((item) => item.type === "function_call" && item.name === "shell_command")) {
+  throw new Error("bash text fallback was not converted to a function_call");
+}
+
+const xmlFallbackShape = chatCompletionToResponse(
+  {
+    model: "deepseek-v4-flash",
+    tools: [
+      {
+        type: "function",
+        name: "shell_command",
+        description: "Runs a Powershell command.",
+        parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+      }
+    ]
+  },
+  {
+    id: "chatcmpl-xml-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "<functions><function><name>functions.exec</name><parameters><command>Get-ChildItem -Name</command></parameters></function></functions>"
+        }
+      }
+    ]
+  }
+);
+const xmlFunctionCall = xmlFallbackShape.output.find((item) => item.type === "function_call");
+if (!xmlFunctionCall || !xmlFunctionCall.arguments.includes("Get-ChildItem -Name")) {
+  throw new Error("xml function fallback was not converted to a function_call");
+}
+
+const xmlCodeFallbackShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-xml-code-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "<functions><function_call><invoke><tool>functions.exec</tool><parameters><code>Get-ChildItem -Name</code></parameters></invoke></function_call></functions>"
+        }
+      }
+    ]
+  }
+);
+const xmlCodeFunctionCall = xmlCodeFallbackShape.output.find((item) => item.type === "function_call");
+if (!xmlCodeFunctionCall || !xmlCodeFunctionCall.arguments.includes("Get-ChildItem -Name")) {
+  throw new Error("xml code fallback was not converted to a function_call");
+}
+
+const namedArgumentFallbackShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-named-argument-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content:
+            "<functions><argument name=\"command\">$command = \"powershell -Command \\\"Get-ChildItem -Name\\\"\"</argument></functions>"
+        }
+      }
+    ]
+  }
+);
+const namedArgumentFunctionCall = namedArgumentFallbackShape.output.find((item) => item.type === "function_call");
+if (!namedArgumentFunctionCall || !namedArgumentFunctionCall.arguments.includes("powershell -Command \\\"Get-ChildItem -Name\\\"")) {
+  throw new Error("named command argument fallback was not converted to a function_call");
+}
+
+const cdataFallbackShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-cdata-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "<functions><argument name=\"command\"><![CDATA[Get-ChildItem -Name]]></argument></functions>"
+        }
+      }
+    ]
+  }
+);
+const cdataFunctionCall = cdataFallbackShape.output.find((item) => item.type === "function_call");
+if (!cdataFunctionCall || cdataFunctionCall.arguments.includes("CDATA") || !cdataFunctionCall.arguments.includes("Get-ChildItem -Name")) {
+  throw new Error("cdata command fallback was not cleaned");
+}
+
+const dsmlFallbackShape = chatCompletionToResponse(
+  {
+    model: "deepseek-v4-flash",
+    tools: [
+      {
+        type: "function",
+        name: "shell_command",
+        description: "Runs a Powershell command.",
+        parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+      }
+    ]
+  },
+  {
+    id: "chatcmpl-dsml-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content:
+            "<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"functions.exec\"><｜｜DSML｜｜parameter name=\"command\" string=\"true\">Get-ChildItem -Name</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>"
+        }
+      }
+    ]
+  }
+);
+const dsmlFunctionCall = dsmlFallbackShape.output.find((item) => item.type === "function_call");
+if (!dsmlFunctionCall || !dsmlFunctionCall.arguments.includes("Get-ChildItem -Name")) {
+  throw new Error("dsml function fallback was not converted to a function_call");
+}
+
+const toolResultChat = responsesToChatRequest("deepseek", {
+  model: "deepseek-v4-flash",
+  input: [
+    {
+      type: "function_call",
+      call_id: "call_shell",
+      name: "shell_command",
+      arguments: "{\"command\":\"Get-ChildItem\"}"
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_shell",
+      output: "server.mjs\npackage.json"
+    },
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "what files did you see?" }]
+    }
+  ]
+});
+if (toolResultChat.messages[0]?.tool_calls?.[0]?.id !== "call_shell") throw new Error("function_call input was not mapped to chat assistant tool_calls");
+if (toolResultChat.messages[1]?.role !== "tool") throw new Error("function_call_output input was not mapped to chat tool message");
+if (toolResultChat.thinking?.type !== "disabled") throw new Error("deepseek proxy should disable thinking mode for tool loops");
 
 const fakeChatProvider = createServer(async (request, response) => {
   if (request.url === "/models" && request.method === "GET" && request.headers.authorization === "Bearer test-deepseek-key") {

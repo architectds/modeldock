@@ -22,7 +22,8 @@ const CHAT_PROXY_PROVIDERS = {
     endpoint: "https://api.deepseek.com/chat/completions",
     modelsUrl: "https://api.deepseek.com/models",
     envKeys: ["DEEPSEEK_API_KEY"],
-    maxTokensField: "max_tokens"
+    maxTokensField: "max_tokens",
+    extraBody: { thinking: { type: "disabled" } }
   },
   kimi: {
     label: "Kimi",
@@ -492,6 +493,31 @@ function responseInputToMessages(input) {
   const messages = [];
   for (const item of input) {
     if (!item || typeof item !== "object") continue;
+    if (item.type === "function_call") {
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: item.call_id || item.id || `call_${randomUUID().replace(/-/g, "")}`,
+            type: "function",
+            function: {
+              name: item.name || "unknown_tool",
+              arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {})
+            }
+          }
+        ]
+      });
+      continue;
+    }
+    if (item.type === "function_call_output") {
+      messages.push({
+        role: "tool",
+        tool_call_id: item.call_id || item.id || "",
+        content: responseContentToText(item.output ?? item.content ?? item.text ?? "")
+      });
+      continue;
+    }
     if (item.type && !["message", "input_text", "output_text"].includes(item.type) && !item.role) continue;
     const content = responseContentToText(item.content ?? item.text ?? item);
     if (!content) continue;
@@ -505,18 +531,74 @@ function normalizeChatTools(tools) {
   if (!Array.isArray(tools)) return undefined;
   const normalized = tools
     .map((tool) => {
-      if (tool?.type !== "function" || !tool.name) return null;
+      if (tool?.type !== "function") return null;
+      const source = tool.function && typeof tool.function === "object" ? tool.function : tool;
+      if (!source.name) return null;
       return {
         type: "function",
         function: {
-          name: tool.name,
-          description: tool.description || "",
-          parameters: tool.parameters || { type: "object", properties: {} }
+          name: source.name,
+          description: source.description || "",
+          parameters: source.parameters || { type: "object", properties: {} },
+          ...(typeof source.strict === "boolean" ? { strict: source.strict } : {})
         }
       };
     })
     .filter(Boolean);
   return normalized.length ? normalized : undefined;
+}
+
+function shellToolName(tools) {
+  if (!Array.isArray(tools)) return "";
+  const functionTools = tools
+    .filter((tool) => tool?.type === "function")
+    .map((tool) => (tool.function && typeof tool.function === "object" ? tool.function : tool));
+  const exact = functionTools.find((tool) => ["shell_command", "exec_command", "bash", "shell"].includes(tool.name));
+  if (exact?.name) return exact.name;
+  const described = functionTools.find((tool) => /shell|bash|powershell|command/i.test(`${tool.name || ""} ${tool.description || ""}`));
+  return described?.name || "";
+}
+
+function cleanExtractedCommand(command) {
+  const trimmed = String(command || "").trim().replace(/^<!\[CDATA\[\s*/i, "").replace(/\s*\]\]>$/i, "");
+  const assignmentMatch = trimmed.match(/^\$?command\s*=\s*["']([\s\S]*)["']$/i);
+  if (assignmentMatch?.[1]?.trim()) {
+    return assignmentMatch[1].replace(/\\"/g, "\"").replace(/\\'/g, "'").trim();
+  }
+  return trimmed;
+}
+
+function extractShellCommand(text) {
+  const value = String(text || "");
+  const tagMatch = value.match(/<(?:bash|shell|powershell)>\s*([\s\S]*?)\s*<\/(?:bash|shell|powershell)>/i);
+  if (tagMatch?.[1]?.trim()) return cleanExtractedCommand(tagMatch[1]);
+  const functionCommandMatch = value.match(/<functions?>[\s\S]*?<(?:command|code)>\s*([\s\S]*?)\s*<\/(?:command|code)>[\s\S]*?<\/functions?>/i);
+  if (functionCommandMatch?.[1]?.trim()) return cleanExtractedCommand(functionCommandMatch[1]);
+  const namedCommandMatch = value.match(/<[^>]+\sname=["']command["'][^>]*>\s*([\s\S]*?)\s*<\//i);
+  if (namedCommandMatch?.[1]?.trim()) return cleanExtractedCommand(namedCommandMatch[1]);
+  const dsmlCommandMatch = value.match(/parameter\s+name=["']command["'][^>]*>\s*([\s\S]*?)\s*<\//i);
+  if (dsmlCommandMatch?.[1]?.trim()) return cleanExtractedCommand(dsmlCommandMatch[1]);
+  const fenceMatch = value.match(/```(?:bash|sh|shell|powershell|ps1)?\s*([\s\S]*?)```/i);
+  if (fenceMatch?.[1]?.trim()) return cleanExtractedCommand(fenceMatch[1]);
+  return "";
+}
+
+function responseFunctionCallItem(toolCall) {
+  const fn = toolCall?.function || {};
+  const callId = toolCall?.id || `call_${randomUUID().replace(/-/g, "")}`;
+  const args = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments || {});
+  return {
+    id: `fc_${randomUUID().replace(/-/g, "")}`,
+    type: "function_call",
+    status: "completed",
+    call_id: callId,
+    name: fn.name || "unknown_tool",
+    arguments: args
+  };
+}
+
+function numericUsage(value) {
+  return Number.isFinite(value) ? value : 0;
 }
 
 export function responsesToChatRequest(providerId, body) {
@@ -540,8 +622,12 @@ export function responsesToChatRequest(providerId, body) {
   if (body.temperature !== undefined) chatBody.temperature = body.temperature;
   if (body.top_p !== undefined) chatBody.top_p = body.top_p;
   if (body.max_output_tokens !== undefined) chatBody[provider.maxTokensField] = body.max_output_tokens;
+  if (provider.extraBody) Object.assign(chatBody, provider.extraBody);
   const tools = normalizeChatTools(body.tools);
-  if (tools) chatBody.tools = tools;
+  if (tools) {
+    chatBody.tools = tools;
+    chatBody.tool_choice = body.tool_choice || "auto";
+  }
   return chatBody;
 }
 
@@ -549,6 +635,37 @@ export function chatCompletionToResponse(responsesBody, chatData) {
   const choice = Array.isArray(chatData?.choices) ? chatData.choices[0] : null;
   const message = choice?.message || {};
   const content = responseContentToText(message.content) || responseContentToText(message.reasoning_content);
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map(responseFunctionCallItem) : [];
+  if (!toolCalls.length) {
+    const command = extractShellCommand(content);
+    const name = command ? shellToolName(responsesBody.tools) || "shell_command" : "";
+    if (name) {
+      toolCalls.push(
+        responseFunctionCallItem({
+          id: `call_${randomUUID().replace(/-/g, "")}`,
+          function: { name, arguments: JSON.stringify({ command }) }
+        })
+      );
+    }
+  }
+  const cleanedContent = toolCalls.length ? "" : content || "";
+  const output = [];
+  if (cleanedContent || !toolCalls.length) {
+    output.push({
+      id: `msg_${randomUUID().replace(/-/g, "")}`,
+      type: "message",
+      status: "completed",
+      role: "assistant",
+      content: [
+        {
+          type: "output_text",
+          text: cleanedContent || "",
+          annotations: []
+        }
+      ]
+    });
+  }
+  output.push(...toolCalls);
   const createdAt = chatData?.created || Math.floor(Date.now() / 1000);
   const usage = chatData?.usage || {};
   return {
@@ -557,26 +674,12 @@ export function chatCompletionToResponse(responsesBody, chatData) {
     created_at: createdAt,
     status: "completed",
     model: chatData?.model || responsesBody.model,
-    output: [
-      {
-        id: `msg_${randomUUID().replace(/-/g, "")}`,
-        type: "message",
-        status: "completed",
-        role: "assistant",
-        content: [
-          {
-            type: "output_text",
-            text: content || "",
-            annotations: []
-          }
-        ]
-      }
-    ],
-    output_text: content || "",
+    output,
+    output_text: cleanedContent || "",
     usage: {
-      input_tokens: usage.prompt_tokens ?? null,
-      output_tokens: usage.completion_tokens ?? null,
-      total_tokens: usage.total_tokens ?? null
+      input_tokens: numericUsage(usage.prompt_tokens),
+      output_tokens: numericUsage(usage.completion_tokens),
+      total_tokens: numericUsage(usage.total_tokens)
     }
   };
 }
@@ -598,15 +701,61 @@ function responseWantsSse(request, body) {
   return body.stream === true || String(request.headers.accept || "").toLowerCase().includes("text/event-stream");
 }
 
+function sendMessageItemSse(response, sequenceNumber, outputIndex, item) {
+  const contentPart = item.content?.[0] || { type: "output_text", text: "", annotations: [] };
+  sendSseEvent(response, "response.output_item.added", sequenceNumber++, { output_index: outputIndex, item: { ...item, content: [] } });
+  sendSseEvent(response, "response.content_part.added", sequenceNumber++, {
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    part: { ...contentPart, text: "" }
+  });
+  if (contentPart.text) {
+    sendSseEvent(response, "response.output_text.delta", sequenceNumber++, {
+      item_id: item.id,
+      output_index: outputIndex,
+      content_index: 0,
+      delta: contentPart.text
+    });
+  }
+  sendSseEvent(response, "response.output_text.done", sequenceNumber++, {
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    text: contentPart.text || ""
+  });
+  sendSseEvent(response, "response.content_part.done", sequenceNumber++, {
+    item_id: item.id,
+    output_index: outputIndex,
+    content_index: 0,
+    part: contentPart
+  });
+  sendSseEvent(response, "response.output_item.done", sequenceNumber++, { output_index: outputIndex, item });
+  return sequenceNumber;
+}
+
+function sendFunctionCallItemSse(response, sequenceNumber, outputIndex, item) {
+  sendSseEvent(response, "response.output_item.added", sequenceNumber++, {
+    output_index: outputIndex,
+    item: { ...item, status: "in_progress", arguments: "" }
+  });
+  if (item.arguments) {
+    sendSseEvent(response, "response.function_call_arguments.delta", sequenceNumber++, {
+      item_id: item.id,
+      output_index: outputIndex,
+      delta: item.arguments
+    });
+  }
+  sendSseEvent(response, "response.function_call_arguments.done", sequenceNumber++, {
+    item_id: item.id,
+    output_index: outputIndex,
+    arguments: item.arguments || ""
+  });
+  sendSseEvent(response, "response.output_item.done", sequenceNumber++, { output_index: outputIndex, item });
+  return sequenceNumber;
+}
+
 function sendResponseSse(response, responseBody) {
-  const item = responseBody.output?.[0] || {
-    id: `msg_${randomUUID().replace(/-/g, "")}`,
-    type: "message",
-    status: "completed",
-    role: "assistant",
-    content: []
-  };
-  const contentPart = item.content?.[0] || { type: "output_text", text: responseBody.output_text || "", annotations: [] };
   const inProgressResponse = {
     ...responseBody,
     status: "in_progress",
@@ -621,34 +770,25 @@ function sendResponseSse(response, responseBody) {
   let sequenceNumber = 0;
   sendSseEvent(response, "response.created", sequenceNumber++, { response: inProgressResponse });
   sendSseEvent(response, "response.in_progress", sequenceNumber++, { response: inProgressResponse });
-  sendSseEvent(response, "response.output_item.added", sequenceNumber++, { output_index: 0, item: { ...item, content: [] } });
-  sendSseEvent(response, "response.content_part.added", sequenceNumber++, {
-    item_id: item.id,
-    output_index: 0,
-    content_index: 0,
-    part: { ...contentPart, text: "" }
-  });
-  if (contentPart.text) {
-    sendSseEvent(response, "response.output_text.delta", sequenceNumber++, {
-      item_id: item.id,
-      output_index: 0,
-      content_index: 0,
-      delta: contentPart.text
-    });
+  const output = Array.isArray(responseBody.output) && responseBody.output.length
+    ? responseBody.output
+    : [
+        {
+          id: `msg_${randomUUID().replace(/-/g, "")}`,
+          type: "message",
+          status: "completed",
+          role: "assistant",
+          content: [{ type: "output_text", text: responseBody.output_text || "", annotations: [] }]
+        }
+      ];
+  for (let outputIndex = 0; outputIndex < output.length; outputIndex += 1) {
+    const item = output[outputIndex];
+    if (item.type === "function_call") {
+      sequenceNumber = sendFunctionCallItemSse(response, sequenceNumber, outputIndex, item);
+    } else {
+      sequenceNumber = sendMessageItemSse(response, sequenceNumber, outputIndex, item);
+    }
   }
-  sendSseEvent(response, "response.output_text.done", sequenceNumber++, {
-    item_id: item.id,
-    output_index: 0,
-    content_index: 0,
-    text: contentPart.text || ""
-  });
-  sendSseEvent(response, "response.content_part.done", sequenceNumber++, {
-    item_id: item.id,
-    output_index: 0,
-    content_index: 0,
-    part: contentPart
-  });
-  sendSseEvent(response, "response.output_item.done", sequenceNumber++, { output_index: 0, item });
   sendSseEvent(response, "response.completed", sequenceNumber++, { response: responseBody });
   response.end();
 }
