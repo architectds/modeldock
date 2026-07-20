@@ -1,7 +1,9 @@
 import { promises as fs } from "node:fs";
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   applyPresetToConfig,
   chatCompletionToResponse,
@@ -15,6 +17,7 @@ import {
   server
 } from "../server.mjs";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = await fs.mkdtemp(path.join(os.tmpdir(), "modeldock-smoke-"));
 const paths = {
   codexHome: root,
@@ -23,6 +26,26 @@ const paths = {
   backupsDir: path.join(root, "modeldock-backups"),
   profilesDir: root
 };
+
+function runNodeScript(scriptPath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      cwd: path.dirname(path.dirname(scriptPath)),
+      windowsHide: true
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(stderr || `${scriptPath} failed with exit code ${code}`));
+    });
+  });
+}
+
+await runNodeScript(path.join(__dirname, "check-dom-ids.mjs"));
 
 async function assertRejects(action, label) {
   try {

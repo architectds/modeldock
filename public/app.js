@@ -27,7 +27,7 @@ const ids = [
   "testCwd",
   "testPrompt",
   "testOutput",
-  "defaultRestoreBtn",
+  "restoreDefaultBtn",
   "defaultRestoreStatus",
   "configPreview",
   "toast",
