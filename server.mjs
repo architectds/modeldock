@@ -23,15 +23,26 @@ const CHAT_PROXY_PROVIDERS = {
     modelsUrl: "https://api.deepseek.com/models",
     envKeys: ["DEEPSEEK_API_KEY"],
     maxTokensField: "max_tokens",
-    extraBody: { thinking: { type: "disabled" } }
+    extraBody: { thinking: { type: "disabled" } },
+    toolPolicy: "coding",
+    toolInstructions:
+      "Use the provided tools through standard Chat Completions tool_calls only. Do not write XML, DSML, markdown code blocks, or fake tool transcripts."
   },
   kimi: {
     label: "Kimi",
     endpoint: "https://api.moonshot.ai/v1/chat/completions",
     modelsUrl: "https://api.moonshot.ai/v1/models",
     envKeys: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-    maxTokensField: "max_completion_tokens"
+    maxTokensField: "max_completion_tokens",
+    toolPolicy: "minimal",
+    toolInstructions:
+      "Use the provided tools through standard Chat Completions tool_calls only. Do not explain that you will use a tool; call it."
   }
+};
+const TOOL_POLICIES = {
+  minimal: new Set(["shell_command"]),
+  coding: new Set(["shell_command", "apply_patch", "update_plan"]),
+  full: null
 };
 
 function defaultCodexHome() {
@@ -527,19 +538,72 @@ function responseInputToMessages(input) {
   return messages;
 }
 
-function normalizeChatTools(tools) {
+function normalizeToolSource(tool) {
+  if (tool?.type !== "function") return null;
+  const source = tool.function && typeof tool.function === "object" ? tool.function : tool;
+  if (!source.name) return null;
+  return source;
+}
+
+function toolPolicyAllows(provider, toolName) {
+  const policy = TOOL_POLICIES[provider.toolPolicy || "full"];
+  return !policy || policy.has(toolName);
+}
+
+function compactParameters(toolName, parameters) {
+  if (toolName === "shell_command") {
+    return {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description: "PowerShell command to run."
+        },
+        workdir: {
+          type: "string",
+          description: "Working directory. Defaults to the task cwd."
+        }
+      },
+      required: ["command"],
+      additionalProperties: false
+    };
+  }
+  if (!parameters || typeof parameters !== "object") return { type: "object", properties: {} };
+  const copy = structuredClone(parameters);
+  const stripDescriptions = (value) => {
+    if (!value || typeof value !== "object") return;
+    delete value.description;
+    for (const child of Object.values(value)) {
+      if (Array.isArray(child)) {
+        for (const item of child) stripDescriptions(item);
+      } else {
+        stripDescriptions(child);
+      }
+    }
+  };
+  stripDescriptions(copy);
+  return copy;
+}
+
+function compactToolDescription(toolName, description) {
+  if (toolName === "shell_command") return "Execute a PowerShell command and return the result.";
+  if (toolName === "apply_patch") return "Apply a patch to files in the workspace.";
+  if (toolName === "update_plan") return "Update the visible task plan.";
+  return String(description || "").split(/\r?\n/)[0].slice(0, 240);
+}
+
+function normalizeChatTools(tools, provider) {
   if (!Array.isArray(tools)) return undefined;
   const normalized = tools
     .map((tool) => {
-      if (tool?.type !== "function") return null;
-      const source = tool.function && typeof tool.function === "object" ? tool.function : tool;
-      if (!source.name) return null;
+      const source = normalizeToolSource(tool);
+      if (!source || !toolPolicyAllows(provider, source.name)) return null;
       return {
         type: "function",
         function: {
           name: source.name,
-          description: source.description || "",
-          parameters: source.parameters || { type: "object", properties: {} },
+          description: compactToolDescription(source.name, source.description),
+          parameters: compactParameters(source.name, source.parameters),
           ...(typeof source.strict === "boolean" ? { strict: source.strict } : {})
         }
       };
@@ -574,6 +638,15 @@ function extractShellCommand(text) {
   if (tagMatch?.[1]?.trim()) return cleanExtractedCommand(tagMatch[1]);
   const functionCommandMatch = value.match(/<functions?>[\s\S]*?<(?:command|code)>\s*([\s\S]*?)\s*<\/(?:command|code)>[\s\S]*?<\/functions?>/i);
   if (functionCommandMatch?.[1]?.trim()) return cleanExtractedCommand(functionCommandMatch[1]);
+  const functionArgumentsMatch = value.match(/<functions?>[\s\S]*?<arguments>\s*([\s\S]*?)\s*<\/arguments>[\s\S]*?<\/functions?>/i);
+  if (functionArgumentsMatch?.[1]?.trim()) {
+    try {
+      const args = JSON.parse(functionArgumentsMatch[1].trim());
+      if (args?.command) return cleanExtractedCommand(args.command);
+    } catch {
+      return cleanExtractedCommand(functionArgumentsMatch[1]);
+    }
+  }
   const namedCommandMatch = value.match(/<[^>]+\sname=["']command["'][^>]*>\s*([\s\S]*?)\s*<\//i);
   if (namedCommandMatch?.[1]?.trim()) return cleanExtractedCommand(namedCommandMatch[1]);
   const dsmlCommandMatch = value.match(/parameter\s+name=["']command["'][^>]*>\s*([\s\S]*?)\s*<\//i);
@@ -601,6 +674,17 @@ function numericUsage(value) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function addSystemInstruction(messages, instruction) {
+  const text = String(instruction || "").trim();
+  if (!text) return;
+  const existing = messages.find((message) => message.role === "system");
+  if (existing) {
+    existing.content = `${existing.content || ""}\n\n${text}`.trim();
+    return;
+  }
+  messages.unshift({ role: "system", content: text });
+}
+
 export function responsesToChatRequest(providerId, body) {
   const provider = configuredChatProxy(providerId);
   const messages = [];
@@ -623,8 +707,9 @@ export function responsesToChatRequest(providerId, body) {
   if (body.top_p !== undefined) chatBody.top_p = body.top_p;
   if (body.max_output_tokens !== undefined) chatBody[provider.maxTokensField] = body.max_output_tokens;
   if (provider.extraBody) Object.assign(chatBody, provider.extraBody);
-  const tools = normalizeChatTools(body.tools);
+  const tools = normalizeChatTools(body.tools, provider);
   if (tools) {
+    addSystemInstruction(messages, provider.toolInstructions);
     chatBody.tools = tools;
     chatBody.tool_choice = body.tool_choice || "auto";
   }

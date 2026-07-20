@@ -223,20 +223,71 @@ const kimiChat = responsesToChatRequest("kimi", {
     {
       type: "function",
       name: "shell_command",
-      description: "Runs a shell command.",
+      description: "Runs a shell command.\n".repeat(200),
       parameters: {
         type: "object",
-        properties: { command: { type: "string" } },
+        properties: {
+          command: { type: "string", description: "Shell script to run in the user's default shell.".repeat(20) },
+          sandbox_permissions: { type: "string", enum: ["use_default", "require_escalated"] }
+        },
         required: ["command"],
         additionalProperties: false
       }
+    },
+    {
+      type: "function",
+      name: "update_plan",
+      description: "Updates the task plan.",
+      parameters: { type: "object", properties: {} }
     }
   ]
 });
 if (kimiChat.max_completion_tokens !== 32) throw new Error("kimi proxy token field mismatch");
 if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
 if (kimiChat.tools?.[0]?.function?.name !== "shell_command") throw new Error("responses tools were not mapped to chat tools");
+if (kimiChat.tools.length !== 1) throw new Error("kimi minimal policy should only expose shell_command");
+if (kimiChat.tools[0].function.description.length > 120) throw new Error("kimi tool description was not compressed");
+if (kimiChat.tools[0].function.parameters.properties.sandbox_permissions) throw new Error("kimi shell schema should be compact");
 if (kimiChat.tool_choice !== "auto") throw new Error("chat tool_choice was not enabled");
+
+const deepseekPolicyChat = responsesToChatRequest("deepseek", {
+  model: "deepseek-v4-flash",
+  input: "inspect and edit",
+  tools: [
+    {
+      type: "function",
+      name: "shell_command",
+      description: "Runs a shell command.\n".repeat(200),
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+    },
+    {
+      type: "function",
+      name: "apply_patch",
+      description: "Apply patches.\n".repeat(200),
+      parameters: { type: "object", properties: { patch: { type: "string", description: "Patch text.".repeat(20) } }, required: ["patch"] }
+    },
+    {
+      type: "function",
+      name: "update_plan",
+      description: "Plan tool.\n".repeat(200),
+      parameters: { type: "object", properties: { plan: { type: "array", items: { type: "object", description: "Plan item.".repeat(20) } } } }
+    },
+    {
+      type: "function",
+      name: "read_mcp_resource",
+      description: "MCP read.",
+      parameters: { type: "object", properties: {} }
+    }
+  ]
+});
+const deepseekToolNames = deepseekPolicyChat.tools.map((tool) => tool.function.name).join(",");
+if (deepseekToolNames !== "shell_command,apply_patch,update_plan") throw new Error(`deepseek coding policy exposed wrong tools: ${deepseekToolNames}`);
+if (!deepseekPolicyChat.messages[0]?.content.includes("standard Chat Completions tool_calls")) {
+  throw new Error("deepseek tool adapter instruction was not injected");
+}
+if (JSON.stringify(deepseekPolicyChat.tools).includes("Shell script to run in the user's default shell")) {
+  throw new Error("deepseek tool descriptions were not compressed");
+}
 
 const responseShape = chatCompletionToResponse(
   { model: "deepseek-v4-flash" },
@@ -347,6 +398,26 @@ const xmlCodeFallbackShape = chatCompletionToResponse(
 const xmlCodeFunctionCall = xmlCodeFallbackShape.output.find((item) => item.type === "function_call");
 if (!xmlCodeFunctionCall || !xmlCodeFunctionCall.arguments.includes("Get-ChildItem -Name")) {
   throw new Error("xml code fallback was not converted to a function_call");
+}
+
+const xmlArgumentsFallbackShape = chatCompletionToResponse(
+  { model: "deepseek-v4-flash" },
+  {
+    id: "chatcmpl-xml-arguments-tool",
+    model: "deepseek-v4-flash",
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "<functions><function><name>functions.exec</name><arguments>{\"command\":\"Get-ChildItem -Name\"}</arguments></function></functions>"
+        }
+      }
+    ]
+  }
+);
+const xmlArgumentsFunctionCall = xmlArgumentsFallbackShape.output.find((item) => item.type === "function_call");
+if (!xmlArgumentsFunctionCall || !xmlArgumentsFunctionCall.arguments.includes("Get-ChildItem -Name")) {
+  throw new Error("xml arguments fallback was not converted to a function_call");
 }
 
 const namedArgumentFallbackShape = chatCompletionToResponse(
