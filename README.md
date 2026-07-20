@@ -116,7 +116,16 @@ ModelDock routes DeepSeek and Kimi through local compatibility endpoints:
 
 These presets expose `wire_api = "responses"` to Codex, then ModelDock translates `POST /responses` into the provider's `POST /chat/completions` upstream call and wraps the result as Responses SSE events when Codex asks for streaming. The remote API key stays in the ModelDock process environment, so the generated Codex provider block does not need an `env_key`.
 
-The proxy requires ModelDock to keep running while Codex uses that provider. It is text-first and intentionally conservative; direct chat providers still cannot be applied unless they go through this `/responses` adapter.
+The proxy requires ModelDock to keep running while Codex uses that provider. Direct chat providers still cannot be applied unless they go through this `/responses` adapter.
+
+### Model Adapters
+
+Provider/model-specific behavior lives in adapter profiles under `adapters/`.
+
+- `adapters/deepseek-v4.json`: disables DeepSeek thinking for tool loops, uses the compact coding tool policy, and keeps DeepSeek-specific fallback parsers for XML/DSML/markdown pseudo tool calls.
+- `adapters/kimi-k3.json`: uses standard OpenAI-style `tools`/`tool_calls`, sets `reasoning_effort = "max"`, and preserves Kimi K3 `reasoning_content` across tool-call loops.
+
+Adapters describe model behavior; the shared proxy code handles the common Responses-to-Chat translation. This keeps model-specific tool semantics out of the generic compatibility layer.
 
 Anthropic uses `x-api-key` and `/v1/models` for model discovery. Direct Anthropic generation uses `/v1/messages`, which is not supported by ModelDock's Codex `responses`/`chat` wire setting yet, so direct Anthropic Apply/Profile actions are blocked for now. Use Anthropic through OpenRouter or another OpenAI-compatible gateway.
 

@@ -1,0 +1,28 @@
+{
+  "id": "deepseek-v4",
+  "provider": "deepseek",
+  "modelPatterns": ["^deepseek-v4(?:$|[-_:.])"],
+  "api": {
+    "wire": "chat_completions",
+    "maxTokensField": "max_tokens",
+    "extraBody": {
+      "thinking": {
+        "type": "disabled"
+      }
+    }
+  },
+  "tools": {
+    "format": "openai_tools",
+    "toolPolicy": "coding",
+    "instructions": "Use the provided tools through standard Chat Completions tool_calls only. Do not write XML, DSML, markdown code blocks, or fake tool transcripts.",
+    "fallbackParsers": ["bash_tag", "functions_xml", "dsml", "markdown_shell"]
+  },
+  "roundtrip": {
+    "preserveReasoningContent": false,
+    "toolResultName": "if_known"
+  },
+  "notes": [
+    "Disable thinking for tool loops unless reasoning_content passthrough is implemented for DeepSeek.",
+    "DeepSeek V4 may emit XML, DSML, or markdown pseudo tool calls in Codex context; keep fallback parsers enabled."
+  ]
+}

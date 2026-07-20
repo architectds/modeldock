@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, promises as fs, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,23 +22,18 @@ const CHAT_PROXY_PROVIDERS = {
     endpoint: "https://api.deepseek.com/chat/completions",
     modelsUrl: "https://api.deepseek.com/models",
     envKeys: ["DEEPSEEK_API_KEY"],
-    maxTokensField: "max_tokens",
-    extraBody: { thinking: { type: "disabled" } },
-    toolPolicy: "coding",
-    toolInstructions:
-      "Use the provided tools through standard Chat Completions tool_calls only. Do not write XML, DSML, markdown code blocks, or fake tool transcripts."
+    defaultAdapter: "deepseek-v4"
   },
   kimi: {
     label: "Kimi",
     endpoint: "https://api.moonshot.ai/v1/chat/completions",
     modelsUrl: "https://api.moonshot.ai/v1/models",
     envKeys: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
-    maxTokensField: "max_completion_tokens",
-    toolPolicy: "coding",
-    toolInstructions:
-      "Use the provided tools through standard Chat Completions tool_calls only. Do not explain that you will use a tool; call it."
+    defaultAdapter: "kimi-k3"
   }
 };
+const MODEL_ADAPTER_DIR = path.join(__dirname, "adapters");
+const MODEL_ADAPTERS = loadModelAdapters();
 const TOOL_POLICIES = {
   minimal: new Set(["shell_command", "apply_patch", "read_file", "write_file", "update_plan"]),
   coding: new Set(["shell_command", "apply_patch", "read_file", "write_file", "update_plan"]),
@@ -46,6 +41,22 @@ const TOOL_POLICIES = {
 };
 const TOOL_CALL_MEMORY_LIMIT = 1000;
 const toolCallMemory = new Map();
+
+function loadModelAdapters() {
+  const adapters = new Map();
+  try {
+    const files = existsSync(MODEL_ADAPTER_DIR) ? readdirSync(MODEL_ADAPTER_DIR) : [];
+    for (const file of files) {
+      if (!file.endsWith(".json")) continue;
+      const filePath = path.join(MODEL_ADAPTER_DIR, file);
+      const adapter = JSON.parse(readFileSync(filePath, "utf8"));
+      if (adapter?.id) adapters.set(adapter.id, adapter);
+    }
+  } catch {
+    return adapters;
+  }
+  return adapters;
+}
 
 function defaultCodexHome() {
   if (process.env.MODELDOCK_CODEX_HOME) return process.env.MODELDOCK_CODEX_HOME;
@@ -476,6 +487,25 @@ function configuredChatProxy(providerId) {
   };
 }
 
+function modelAdapterForProvider(provider, model) {
+  const providerId = provider.id || "";
+  const modelName = String(model || "");
+  for (const adapter of MODEL_ADAPTERS.values()) {
+    if (adapter.provider !== providerId) continue;
+    const patterns = Array.isArray(adapter.modelPatterns) ? adapter.modelPatterns : [];
+    if (patterns.some((pattern) => new RegExp(pattern, "i").test(modelName))) return adapter;
+  }
+  return MODEL_ADAPTERS.get(provider.defaultAdapter) || null;
+}
+
+function adapterMaxTokensField(adapter) {
+  return adapter?.api?.maxTokensField || "max_tokens";
+}
+
+function adapterExtraBody(adapter) {
+  return adapter?.api?.extraBody && typeof adapter.api.extraBody === "object" ? adapter.api.extraBody : null;
+}
+
 function chatProxyApiKey(provider) {
   for (const key of provider.envKeys) {
     const value = envValue(key);
@@ -580,8 +610,8 @@ function normalizeToolSource(tool) {
   return source;
 }
 
-function toolPolicyAllows(provider, toolName) {
-  const policy = TOOL_POLICIES[provider.toolPolicy || "full"];
+function toolPolicyAllows(adapter, toolName) {
+  const policy = TOOL_POLICIES[adapter?.tools?.toolPolicy || "full"];
   return !policy || policy.has(toolName);
 }
 
@@ -629,12 +659,12 @@ function compactToolDescription(toolName, description) {
   return String(description || "").split(/\r?\n/)[0].slice(0, 240);
 }
 
-function normalizeChatTools(tools, provider) {
+function normalizeChatTools(tools, adapter) {
   if (!Array.isArray(tools)) return undefined;
   const normalized = tools
     .map((tool) => {
       const source = normalizeToolSource(tool);
-      if (!source || !toolPolicyAllows(provider, source.name)) return null;
+      if (!source || !toolPolicyAllows(adapter, source.name)) return null;
       return {
         type: "function",
         function: {
@@ -745,14 +775,15 @@ export function responsesToChatRequest(providerId, body) {
     stream: false
   };
   if (!chatBody.model) throw new Error("Responses proxy request is missing model.");
+  const adapter = modelAdapterForProvider(provider, chatBody.model);
   if (body.temperature !== undefined) chatBody.temperature = body.temperature;
   if (body.top_p !== undefined) chatBody.top_p = body.top_p;
-  if (body.max_output_tokens !== undefined) chatBody[provider.maxTokensField] = body.max_output_tokens;
-  if (provider.extraBody) Object.assign(chatBody, provider.extraBody);
-  if (provider.id === "kimi" && /^kimi-k3(?:$|[-_:.])/i.test(chatBody.model)) chatBody.reasoning_effort = "max";
-  const tools = normalizeChatTools(body.tools, provider);
+  if (body.max_output_tokens !== undefined) chatBody[adapterMaxTokensField(adapter)] = body.max_output_tokens;
+  const extraBody = adapterExtraBody(adapter);
+  if (extraBody) Object.assign(chatBody, structuredClone(extraBody));
+  const tools = normalizeChatTools(body.tools, adapter);
   if (tools) {
-    addSystemInstruction(messages, provider.toolInstructions);
+    addSystemInstruction(messages, adapter?.tools?.instructions);
     chatBody.tools = tools;
     chatBody.tool_choice = body.tool_choice || "auto";
   }

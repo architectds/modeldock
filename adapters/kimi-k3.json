@@ -1,0 +1,26 @@
+{
+  "id": "kimi-k3",
+  "provider": "kimi",
+  "modelPatterns": ["^kimi-k3(?:$|[-_:.])"],
+  "api": {
+    "wire": "chat_completions",
+    "maxTokensField": "max_completion_tokens",
+    "extraBody": {
+      "reasoning_effort": "max"
+    }
+  },
+  "tools": {
+    "format": "openai_tools",
+    "toolPolicy": "coding",
+    "instructions": "Use the provided tools through standard Chat Completions tool_calls only. Do not explain that you will use a tool; call it.",
+    "fallbackParsers": []
+  },
+  "roundtrip": {
+    "preserveReasoningContent": true,
+    "toolResultName": "required_if_known"
+  },
+  "notes": [
+    "Kimi K3 uses standard OpenAI-style tools/tool_calls.",
+    "Kimi K3 always reasons; preserve reasoning_content in tool-call loops and replay the assistant tool_calls message before tool results."
+  ]
+}

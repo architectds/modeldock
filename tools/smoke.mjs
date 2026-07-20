@@ -248,6 +248,18 @@ const kimiChat = responsesToChatRequest("kimi", {
     },
     {
       type: "function",
+      name: "read_file",
+      description: "Read file.",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+    },
+    {
+      type: "function",
+      name: "write_file",
+      description: "Write file.",
+      parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }
+    },
+    {
+      type: "function",
       name: "read_mcp_resource",
       description: "MCP read.",
       parameters: { type: "object", properties: {} }
@@ -259,7 +271,7 @@ if (kimiChat.reasoning_effort !== "max") throw new Error("kimi k3 should use rea
 if (kimiChat.messages[0]?.role !== "system") throw new Error("instructions were not mapped to system");
 if (kimiChat.tools?.[0]?.function?.name !== "shell_command") throw new Error("responses tools were not mapped to chat tools");
 const kimiToolNames = kimiChat.tools.map((tool) => tool.function.name).join(",");
-if (kimiToolNames !== "shell_command,update_plan,apply_patch") throw new Error(`kimi coding policy exposed wrong tools: ${kimiToolNames}`);
+if (kimiToolNames !== "shell_command,update_plan,apply_patch,read_file,write_file") throw new Error(`kimi coding policy exposed wrong tools: ${kimiToolNames}`);
 if (kimiChat.tools[0].function.description.length > 120) throw new Error("kimi tool description was not compressed");
 if (kimiChat.tools[0].function.parameters.properties.sandbox_permissions) throw new Error("kimi shell schema should be compact");
 if (kimiChat.tool_choice !== "auto") throw new Error("chat tool_choice was not enabled");
@@ -288,6 +300,18 @@ const deepseekPolicyChat = responsesToChatRequest("deepseek", {
     },
     {
       type: "function",
+      name: "read_file",
+      description: "Read file.",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }
+    },
+    {
+      type: "function",
+      name: "write_file",
+      description: "Write file.",
+      parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }
+    },
+    {
+      type: "function",
       name: "read_mcp_resource",
       description: "MCP read.",
       parameters: { type: "object", properties: {} }
@@ -295,7 +319,7 @@ const deepseekPolicyChat = responsesToChatRequest("deepseek", {
   ]
 });
 const deepseekToolNames = deepseekPolicyChat.tools.map((tool) => tool.function.name).join(",");
-if (deepseekToolNames !== "shell_command,apply_patch,update_plan") throw new Error(`deepseek coding policy exposed wrong tools: ${deepseekToolNames}`);
+if (deepseekToolNames !== "shell_command,apply_patch,update_plan,read_file,write_file") throw new Error(`deepseek coding policy exposed wrong tools: ${deepseekToolNames}`);
 if (!deepseekPolicyChat.messages[0]?.content.includes("standard Chat Completions tool_calls")) {
   throw new Error("deepseek tool adapter instruction was not injected");
 }
