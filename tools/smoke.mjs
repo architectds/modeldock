@@ -46,6 +46,7 @@ function runNodeScript(scriptPath) {
 }
 
 await runNodeScript(path.join(__dirname, "check-dom-ids.mjs"));
+await runNodeScript(path.join(__dirname, "check-presets.mjs"));
 
 async function assertRejects(action, label) {
   try {

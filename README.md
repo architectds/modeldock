@@ -77,7 +77,7 @@ Then choose the OpenRouter preset, click `Fetch Provider Models`, select a model
 
 ## Provider Presets
 
-The preset list includes OpenRouter, DeepSeek, Kimi / Moonshot, Anthropic, Ollama, LM Studio, and Custom.
+The preset list includes OpenRouter, DeepSeek, Kimi, Anthropic, Ollama, LM Studio, and Custom.
 For hosted providers, set the API key in the environment that starts ModelDock:
 
 ```powershell
@@ -91,28 +91,28 @@ node server.mjs
 Default base URLs:
 
 - OpenRouter: `https://openrouter.ai/api/v1`
-- DeepSeek: `https://api.deepseek.com`
-- Kimi / Moonshot: `https://api.moonshot.ai/v1`
+- DeepSeek: `http://127.0.0.1:8765/proxy/deepseek/v1`
+- Kimi: `http://127.0.0.1:8765/proxy/kimi/v1`
 - Anthropic: `https://api.anthropic.com`
 
 Default Codex wire APIs:
 
 - OpenAI: `responses` (`/responses`)
 - OpenRouter: `responses` (`/responses`, OpenRouter beta Responses API)
-- DeepSeek: `chat` (`/chat/completions`)
-- Kimi / Moonshot: `chat` (`/chat/completions`)
+- DeepSeek: `responses` through ModelDock Runtime
+- Kimi: `responses` through ModelDock Runtime
 - Ollama and LM Studio: `chat` (`/chat/completions`)
 
 The Wire API field is locked in the UI because it determines the HTTP path Codex calls. A wrong value can make Codex call an endpoint that the provider does not implement, such as DeepSeek `/responses`.
 
-Current Codex CLI builds reject `wire_api = "chat"`, so chat-only providers such as direct DeepSeek, direct Kimi, Ollama, and LM Studio are blocked from Apply/Profile for now. Their presets are still useful for model discovery. To use them with Codex, route through a `/responses`-compatible gateway or proxy.
+Current Codex CLI builds reject `wire_api = "chat"`, so chat-only providers such as Ollama and LM Studio are blocked from Apply/Profile for now. DeepSeek and Kimi use the ModelDock Runtime automatically.
 
 ## ModelDock Chat Proxy
 
-ModelDock includes experimental proxy presets for DeepSeek and Kimi:
+ModelDock routes DeepSeek and Kimi through local compatibility endpoints:
 
-- DeepSeek via ModelDock Proxy: `http://127.0.0.1:8765/proxy/deepseek/v1`
-- Kimi via ModelDock Proxy: `http://127.0.0.1:8765/proxy/kimi/v1`
+- DeepSeek: `http://127.0.0.1:8765/proxy/deepseek/v1`
+- Kimi: `http://127.0.0.1:8765/proxy/kimi/v1`
 
 These presets expose `wire_api = "responses"` to Codex, then ModelDock translates `POST /responses` into the provider's `POST /chat/completions` upstream call and wraps the result as Responses SSE events when Codex asks for streaming. The remote API key stays in the ModelDock process environment, so the generated Codex provider block does not need an `env_key`.
 
