@@ -185,6 +185,42 @@ function setForm(preset) {
   updateAliasNotice();
 }
 
+function formFromCurrentConfig(data) {
+  const current = data.current || {};
+  const providerId = current.modelProvider || "openai";
+  const provider = (current.providers || []).find((item) => item.id === providerId) || {};
+  const preset =
+    (data.presets || []).find((item) => item.providerId === providerId && (!current.model || item.model === current.model)) ||
+    (data.presets || []).find((item) => item.providerId === providerId);
+  if (preset) {
+    return {
+      ...preset,
+      model: current.model || preset.model,
+      reasoningEffort: current.reasoningEffort || preset.reasoningEffort,
+      verbosity: current.verbosity || preset.verbosity
+    };
+  }
+  return {
+    id: "custom",
+    providerId,
+    providerName: provider.name || providerId,
+    model: current.model || "",
+    reasoningEffort: current.reasoningEffort || "",
+    verbosity: current.verbosity || "",
+    wireApi: provider.wireApi || "",
+    baseUrl: provider.baseUrl || "",
+    envKey: provider.envKey || ""
+  };
+}
+
+function syncFormWithCurrentConfig(data) {
+  const currentForm = formFromCurrentConfig(data);
+  if ([...el.presetSelect.options].some((option) => option.value === currentForm.id)) {
+    el.presetSelect.value = currentForm.id;
+  }
+  setForm(currentForm);
+}
+
 function clearProviderModels() {
   providerModels = [];
   el.providerModelSelect.innerHTML = "";
@@ -292,7 +328,7 @@ function renderStatus(data) {
     option.textContent = preset.label;
     el.presetSelect.append(option);
   }
-  if (!el.providerId.value && data.presets[0]) setForm(data.presets[0]);
+  syncFormWithCurrentConfig(data);
 }
 
 async function loadStatus() {
