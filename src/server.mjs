@@ -1524,6 +1524,17 @@ export function createApp(services = createServices()) {
   const { config, metrics, mediaStore, upstreams, configSwitcher, autostart, routeAffinity } = services;
   const app = createMcpExpressApp({ host: config.host, jsonLimit: "25mb" });
   app.disable("x-powered-by");
+  const _rlCounts = new Map();
+  app.use((req, res, next) => {
+    const key = req.ip || "local";
+    const now = Date.now();
+    const entry = _rlCounts.get(key) || { count: 0, reset: now + 60000 };
+    if (now > entry.reset) { entry.count = 0; entry.reset = now + 60000; }
+    entry.count += 1;
+    _rlCounts.set(key, entry);
+    if (entry.count > 200) return res.status(429).json({ error: { message: "Too many requests" } });
+    next();
+  });
 
   const mcpHandler = createMcpNodeHandler({
     upstreams,
