@@ -109,8 +109,17 @@ function inputToChatMessages(input, reasoningLookup) {
       continue;
     }
     if (item?.role === "user") {
-      const text = typeof item.content === "string" ? item.content : Array.isArray(item.content) ? item.content.map((part) => part?.text || "").join("") : "";
-      if (text) out.push({ role: "user", content: text });
+      const isArray = Array.isArray(item.content);
+      const text = typeof item.content === "string" ? item.content : isArray ? item.content.map((part) => part?.text || "").join("") : "";
+      const imageParts = isArray ? item.content.filter((part) => part?.type === "input_image" && typeof part?.image_url === "string") : [];
+      if (text && imageParts.length === 0) {
+        out.push({ role: "user", content: text });
+      } else if (text || imageParts.length > 0) {
+        const content = [];
+        if (text) content.push({ type: "text", text });
+        for (const img of imageParts) content.push({ type: "image_url", image_url: { url: img.image_url } });
+        out.push({ role: "user", content });
+      }
       index += 1;
       continue;
     }
