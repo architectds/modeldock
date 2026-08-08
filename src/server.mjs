@@ -279,6 +279,12 @@ function configMutationGuard(config) {
     if (origin && !allowedOrigins.has(origin)) {
       return res.status(403).json({ error: { type: "origin_not_allowed", message: "Config changes are allowed only from this local dashboard." } });
     }
+    if (!origin) {
+      const addr = req.socket?.remoteAddress;
+      if (addr !== "127.0.0.1" && addr !== "::1" && addr !== "::ffff:127.0.0.1") {
+        return res.status(403).json({ error: { type: "origin_not_allowed", message: "Config changes are allowed only from this local dashboard." } });
+      }
+    }
     if (!req.is("application/json")) {
       return res.status(415).json({ error: { type: "content_type_required", message: "Config changes require application/json." } });
     }
