@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bareModelId, profileById, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
+import { buildNativeAliasAssignments } from "./native-alias.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,10 +61,70 @@ export function catalogFor(config) {
   // "see it, can't use it" noise (every request 401s), so subscribers keep the
   // merge and everyone else gets the curated catalog only.
   if (config.nativeMerge === false) {
+    // Login-free picker aliasing: the Codex App filters model_catalog_json
+    // against its native-GPT slug allowlist (codex-router native-alias.mjs:10-13
+    // documents the same mechanism), so without aliases a signed-out user's
+    // picker shows nothing but "Custom". Republish external models under the
+    // captured native slugs (verified live: only native-catalog slugs pass the
+    // allowlist - shape alone is not enough) with the external model's own
+    // display name; routing keeps resolving through the hidden canonical entry.
+    if (config.nativeAlias !== false) {
+      return buildLoginFreeCatalog({ ...catalog, models }, config);
+    }
     return { ...catalog, models: orderCatalogByProvider(models) };
   }
   const merged = mergeNativeCatalog({ ...catalog, models }, config);
   return { ...merged, models: orderCatalogByProvider(merged.models) };
+}
+
+// Login-free catalog builder: the Codex App picker filters model_catalog_json
+// against its native-GPT slug allowlist, so signed-out external models are
+// republished under the captured native slugs (the slots the allowlist admits)
+// with the external model's own display name, description, and reasoning
+// levels. Each aliased model keeps a hidden entry under its canonical slug so
+// routing, doctor checks, and saved configs keep resolving; the returned alias
+// map is written to native-aliases.json and consulted by the gateway before
+// the native leg (see gateway.mjs).
+export function buildLoginFreeCatalog(catalog, config) {
+  const native = readNativeCatalog(config);
+  if (!native?.models?.length) {
+    return { ...catalog, models: orderCatalogByProvider(catalog.models || []), aliases: {} };
+  }
+  const external = (catalog.models || []).filter((entry) => !(entry?.visibility === "hide"));
+  // Prefer the models the user actually selected first, then paid models over
+  // free-tier ones, then catalog priority. Native slots are scarce (the allowlist
+  // only admits the captured GPT slugs), so the picker should show the most
+  // useful models - burning a slot on a free-tier model the user never picked
+  // hides a real one.
+  const mainId = bareModelId(config.mainModel);
+  const visionId = bareModelId(config.visionModel);
+  const ranked = [...external].sort((left, right) => {
+    const score = (entry) => {
+      const id = bareModelId(entry.slug);
+      if (id === mainId) return 0;
+      if (id === visionId) return 1;
+      if (String(entry.slug).endsWith("-free") || /-free$/.test(id)) return 4;
+      return 2;
+    };
+    const s = score(left) - score(right);
+    return s || Number(left.priority ?? 999) - Number(right.priority ?? 999);
+  });
+  const assignments = buildNativeAliasAssignments(native.models, ranked);
+  const aliasedSlugs = new Set(assignments.map(({ model }) => model.slug));
+  const aliases = Object.fromEntries(
+    assignments.map(({ nativeModel, model }) => [nativeModel.slug, model.slug]),
+  );
+  const models = [
+    ...assignments.map(({ nativeModel, model }) => ({
+      ...model,
+      slug: nativeModel.slug,
+      priority: nativeModel.priority,
+    })),
+    ...external.map((model) =>
+      aliasedSlugs.has(model.slug) ? { ...model, visibility: "hide" } : model,
+    ),
+  ];
+  return { ...catalog, models: orderCatalogByProvider(models), aliases };
 }
 
 // The Codex App picker list is the model_catalog_json file when configured, not

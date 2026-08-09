@@ -9,6 +9,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
+import { readNativeAliases, writeNativeAliases, nativeSlugForExternal } from "./native-alias.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
@@ -462,6 +463,7 @@ async function relayGatewayRequest(req, res, services) {
     routeAffinity,
     knownModels: publishedModelIds(config),
     nativeSlugs: services.nativeSlugs,
+    nativeAliases: services.nativeAliases,
     mainModel: modelSelection?.mainModel || config.mainModel,
     visionModel: modelSelection?.visionModel || config.visionModel,
     // The native passthrough leg forwards these to ChatGPT's backend untouched.
@@ -666,6 +668,14 @@ export function createServices(config = loadConfig()) {
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
   const mcpUrl = `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}/mcp`;
+  // Login-free alias map (native slug -> external slug), persisted next to the
+  // catalog and read fresh by the gateway on every relay. Empty when aliasing
+  // is off (subscribers) or no native capture exists.
+  const nativeAliases = readNativeAliases(mutableConfig);
+  // The Codex config `model` key is the alias slug in login-free mode so the
+  // App picker highlights the active model; routing resolves it back through
+  // the gateway alias map.
+  const switcherModel = nativeSlugForExternal(mutableConfig.mainModel, nativeAliases) || mutableConfig.mainModel;
   const configSwitcher = new CodexConfigSwitcher({
     codexHome: mutableConfig.codexHome,
     baseUrl: `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}${callerBasePath(callerKey)}`,
@@ -675,7 +685,7 @@ export function createServices(config = loadConfig()) {
     mcpCommand: mutableConfig.mcpTransport === "stdio" ? process.execPath : "",
     mcpArgs: mutableConfig.mcpTransport === "stdio" ? [path.join(dirname, "mcp-standalone.mjs")] : [],
     mcpEnv: mutableConfig.mcpTransport === "stdio" ? { MODELDOCK_GATEWAY_URL: mcpUrl.replace(/\/mcp$/, "") } : {},
-    model: mutableConfig.mainModel,
+    model: switcherModel,
     catalogFile,
   });
   const autostart = createAutostart();
@@ -696,11 +706,20 @@ export function createServices(config = loadConfig()) {
   // config at it. The CLI keeps using /v1/models; both then see one list.
   const writeCatalogFile = () => {
     try {
-      const catalog = codexModelCatalog({
+      const built = codexModelCatalog({
         ...mutableConfig,
         mainModel: modelSelection.mainModel,
         visionModel: modelSelection.visionModel,
       });
+      const { aliases = {}, ...catalog } = built;
+      if (Object.keys(aliases).length > 0) {
+        services.nativeAliases = aliases;
+        try {
+          writeNativeAliases(aliases, mutableConfig);
+        } catch (error) {
+          console.log(`[gate] native alias file write failed: ${error.message}`);
+        }
+      }
       mkdirSync(path.dirname(catalogFile), { recursive: true });
       writeFileSync(catalogFile, JSON.stringify(catalog, null, 2), "utf8");
       return catalog.models?.length || 0;
@@ -742,6 +761,7 @@ export function createServices(config = loadConfig()) {
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
+    nativeAliases,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, modelRefreshTimer,
   });

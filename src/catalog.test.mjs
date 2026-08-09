@@ -151,7 +151,54 @@ test("catalogFor with nativeMerge=false skips the native GPT merge for non-subsc
     const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false });
     const slugs = catalog.models.map((entry) => entry.slug);
     assert.ok(slugs.includes("deepseek-v4-flash"), "curated Go models stay published");
-    assert.ok(!slugs.includes("gpt-5.6-luna"), "native GPT models are hidden without a subscription (nativeMerge=false)");
+    const nativeIdentity = catalog.models.find((entry) => String(entry.display_name).startsWith("OpenAI -"));
+    assert.ok(!nativeIdentity, "no native GPT identity is published (no 'OpenAI -' entry)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalogFor login-free aliasing republishes external models under native slug slots", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-alias-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [
+      { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list", priority: 1 },
+      { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 },
+      { slug: "codex-auto-review", display_name: "Codex Auto Review", visibility: "hide", priority: 43 },
+    ],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false });
+    const slugs = catalog.models.map((entry) => entry.slug);
+    assert.ok(slugs.includes("gpt-5.6-sol"), "the first native slot is occupied by an aliased external model");
+    assert.ok(slugs.includes("gpt-5.6-luna"), "the second native slot is occupied by an aliased external model");
+    assert.ok(!slugs.includes("codex-auto-review"), "the reserved auto-review slot is never aliased");
+    const aliased = catalog.models.find((entry) => entry.slug === "gpt-5.6-sol");
+    assert.ok(aliased, "aliased entry exists");
+    assert.match(aliased.display_name, /OpenCode Go/, "the external model's own display name is kept");
+    assert.equal(aliased.visibility, "list", "aliased entries stay picker-visible");
+    const canonical = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash");
+    assert.equal(canonical?.visibility, "hide", "the canonical external slug stays published but hidden for routing");
+    assert.ok(catalog.aliases && catalog.aliases["gpt-5.6-sol"] === "deepseek-v4-flash", "the alias map points the native slot at the external model");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("catalogFor login-free aliasing honors MODELDOCK_NATIVE_ALIAS=0 opt-out", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-alias-off-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list", priority: 1 }],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false, nativeAlias: false });
+    const slugs = catalog.models.map((entry) => entry.slug);
+    assert.ok(!slugs.includes("gpt-5.6-sol"), "native slot is not occupied when aliasing is disabled");
+    assert.ok(!catalog.aliases, "no alias map when aliasing is disabled");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

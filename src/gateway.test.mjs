@@ -797,6 +797,79 @@ test("relayResponses rejects requests without a configured upstream token", asyn
   assert.match(body, /configuration_error/);
 });
 
+test("relayResponses resolves a native alias slug back to the external model", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let calledUrl = "";
+  globalThis.fetch = async (url, options) => {
+    calledUrl = String(url);
+    const body = options?.body ? JSON.parse(String(options.body)) : null;
+    return new Response(
+      JSON.stringify({
+        id: "resp_alias",
+        status: "completed",
+        model: body?.model || "gpt-5.6-sol",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "OK" }] }],
+        usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  try {
+    const result = await relayResponses(
+      { model: "gpt-5.6-sol", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-sol"]),
+        nativeSlugs: new Set(["gpt-5.6-sol"]),
+        nativeAliases: { "gpt-5.6-sol": "deepseek-v4-flash" },
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "deepseek-v4-flash", "the alias resolves to the external model for routing");
+    assert.match(calledUrl, /opencode\.ai\/zen\/go\/v1\/responses/, "the request reaches the external upstream, not ChatGPT");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses keeps unaliased native slugs on the native leg", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let calledUrl = "";
+  globalThis.fetch = async (url, options) => {
+    calledUrl = String(url);
+    return new Response("not-json-this-test-only-checks-the-url", { status: 200 });
+  };
+  try {
+    const result = await relayResponses(
+      { model: "gpt-5.6-terra", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash"]),
+        nativeSlugs: new Set(["gpt-5.6-terra"]),
+        nativeAliases: { "gpt-5.6-sol": "deepseek-v4-flash" },
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.match(calledUrl, /chatgpt\.com\/backend-api\/codex/, "an unaliased native slug still goes to the ChatGPT backend");
+    assert.equal(result.route?.reason, "native_passthrough");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("isNativeModel distinguishes catalog slugs from native GPT ids", () => {
   const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna"]);
   assert.equal(isNativeModel("gpt-5.6-sol", known), true);

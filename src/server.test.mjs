@@ -311,12 +311,17 @@ test("config mode ON writes the wizard nativeMerge switch and drops native GPT m
   assert.ok(JSON.parse(await readFile(catalogFile, "utf8")).models.some((model) => model.slug === "gpt-5.6-luna"),
     "nativeMerge=true keeps the native GPT model in the catalog file");
 
-  // Non-subscriber (nativeMerge=false): native GPT models are dropped from the catalog.
+  // Non-subscriber (nativeMerge=false): native GPT models are dropped from the
+  // catalog; login-free aliasing republishes external models under the native
+  // slots instead, so the slot slug appears but never as an OpenAI entry.
   const nomerge = await (await post({ mode: "on", nativeMerge: false })).json();
   assert.equal(nomerge.enabled, true);
   assert.match(await readFile(envFile, "utf8"), /MODELDOCK_NATIVE_MERGE=0/);
-  assert.equal(JSON.parse(await readFile(catalogFile, "utf8")).models.some((model) => model.slug === "gpt-5.6-luna"),
-    false, "nativeMerge=false drops the native GPT model from the catalog file");
+  const nomergeCatalog = JSON.parse(await readFile(catalogFile, "utf8"));
+  const lunaEntry = nomergeCatalog.models.find((model) => model.slug === "gpt-5.6-luna");
+  assert.ok(lunaEntry, "nativeMerge=false aliases an external model onto the native slot");
+  assert.ok(!String(lunaEntry.display_name).startsWith("OpenAI -"),
+    "the aliased slot carries the external model's name, not OpenAI's");
 
   // Trial also persists the switch: a non-subscriber moving trial -> on must not get
   // the native GPT catalog back.

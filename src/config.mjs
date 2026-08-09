@@ -391,6 +391,20 @@ export function loadConfig() {
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).
     nativeMerge,
+    // Login-free picker aliases: when the native GPT merge is off, the Codex
+    // App only surfaces catalog slugs that pass its native-GPT allowlist, so
+    // external models are republished under captured native GPT slugs (each
+    // with the external model's own display name) and a hidden canonical entry
+    // keeps routing resolving. On by default for signed-out users; the wizard
+    // nativeMerge toggle implicitly controls this pair.
+    nativeAlias: !["0", "false", "off"].includes(
+      String(process.env.MODELDOCK_NATIVE_ALIAS || "").toLowerCase(),
+    ),
+    // The alias mapping file (native slug -> external slug), written next to the
+    // catalog whenever login-free aliasing is active.
+    nativeAliasesFile: process.env.MODELDOCK_NATIVE_ALIASES_FILE
+      ? path.resolve(process.env.MODELDOCK_NATIVE_ALIASES_FILE)
+      : "",
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
     mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
@@ -426,6 +440,13 @@ export function loadConfig() {
     // lives at ~/.modeldock/native-catalog.json by default.
     nativeCatalogFile: process.env.MODELDOCK_NATIVE_CATALOG_FILE
       ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
+      : "",
+    // Where the gateway publishes the Codex model catalog. Defaults to
+    // ~/.modeldock/codex-model-catalog.json; point MODELDOCK_CODEX_CATALOG_FILE
+    // at the path your Codex config reads via model_catalog_json (e.g. the
+    // DeepSeek-script layout puts it in the codex home as models.json).
+    codexCatalogFile: process.env.MODELDOCK_CODEX_CATALOG_FILE
+      ? path.resolve(process.env.MODELDOCK_CODEX_CATALOG_FILE)
       : "",
     refreshNativeCatalog: !["0", "false", "off"].includes(
       String(process.env.MODELDOCK_REFRESH_NATIVE_CATALOG || "").toLowerCase(),

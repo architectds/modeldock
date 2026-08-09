@@ -8,6 +8,7 @@ import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
 import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
+import { externalModelForAlias } from "./native-alias.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -1360,7 +1361,16 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 export async function relayResponses(payload, res, services, { signal } = {}) {
   const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
-  const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
+  let requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
+  // Login-free alias: the picker surfaces external models under captured native
+  // slugs, so resolve those back to the canonical external slug before the
+  // native-leg check. An aliased slug must route to its external upstream, not
+  // to the ChatGPT backend.
+  const aliasTarget = externalModelForAlias(requestedModel, services.nativeAliases);
+  if (aliasTarget && aliasTarget !== requestedModel) {
+    requestedModel = aliasTarget;
+    payload = { ...payload, model: aliasTarget };
+  }
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
