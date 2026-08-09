@@ -308,3 +308,51 @@ test("enable and disable append audit entries to the config manifest", async (t)
   assert.ok(enabled.at <= disabled.at, "entries are append-ordered");
   assert.match(await readFile(configPath, "utf8"), /^model = "gpt-5.6-sol"/m, "disable restores the original config");
 });
+
+test("login-free managed config writes the provider table instead of openai_base_url", () => {
+  const managed = buildManagedCodexConfig(originalConfig, {
+    baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
+    model: "deepseek-v4-flash",
+    catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
+    mcpUrl: "http://127.0.0.1:4097/mcp",
+    loginFree: true,
+  });
+  assert.match(managed, /^model_provider = "modeldock"$/m, "login-free sets the custom provider");
+  assert.doesNotMatch(managed, /openai_base_url/, "no transparent redirect in login-free mode");
+  assert.doesNotMatch(managed, /experimental_realtime_/, "no realtime endpoints in login-free mode");
+  assert.match(managed, /^\[model_providers\.modeldock\]$/m, "the provider table exists");
+  assert.match(managed, /base_url = "http:\/\/127\.0\.0\.1:4097\/c\/callerkey\/v1"/);
+  assert.match(managed, /wire_api = "responses"/);
+  assert.match(managed, /experimental_bearer_token = "modeldock-placeholder"/);
+  assert.match(managed, /# BEGIN modeldock-managed/);
+  assert.match(managed, /^model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"$/m);
+  assert.match(managed, /\[mcp_servers\.modeldock\]/);
+  const table = managed.indexOf("[features]");
+  const provider = managed.indexOf("model_provider");
+  assert.ok(provider < table, "model_provider sits before any [table]");
+});
+
+test("login-free enable writes the provider table and disable restores the original config", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-config-switch-loginfree-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  await writeFile(configPath, originalConfig, "utf8");
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
+    model: "deepseek-v4-flash",
+    loginFree: true,
+  });
+
+  const enabled = await switcher.enable();
+  assert.equal(enabled.targetProvider, "modeldock");
+  assert.equal(enabled.targetMode, "provider_table");
+  const managed = await readFile(configPath, "utf8");
+  assert.match(managed, /^model_provider = "modeldock"$/m);
+  assert.match(managed, /^\[model_providers\.modeldock\]$/m);
+  assert.doesNotMatch(managed, /openai_base_url/);
+
+  await switcher.disable();
+  assert.equal(await readFile(configPath, "utf8"), originalConfig, "disable restores the exact original config");
+  assert.doesNotMatch(await readFile(configPath, "utf8"), /model_providers\.modeldock/, "restore removes the provider table");
+});

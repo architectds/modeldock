@@ -687,6 +687,10 @@ export function createServices(config = loadConfig()) {
     mcpEnv: mutableConfig.mcpTransport === "stdio" ? { MODELDOCK_GATEWAY_URL: mcpUrl.replace(/\/mcp$/, "") } : {},
     model: switcherModel,
     catalogFile,
+    // Signed-out (no ChatGPT subscription): write the login-free provider table
+    // instead of the transparent openai_base_url redirect, so the App never asks
+    // for ChatGPT credentials. Mirrors the catalog's nativeMerge opt-out.
+    loginFree: mutableConfig.nativeMerge === false,
   });
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
