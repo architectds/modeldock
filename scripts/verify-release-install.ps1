@@ -49,8 +49,12 @@ $env:MODELDOCK_AUTOSTART_NAME = $autostartName
 # in that state. Use a disposable test token so the first-start check verifies
 # the actual launch path without contacting a real provider.
 $env:OPENCODE_GO_TOKEN = "release-verify-probe-token"
-# The memory vault is always on; the release probe asserts the full six-tool
-# surface and keeps its vault inside the throwaway work dir.
+# The release probe asserts the full six-tool surface (recall_memory /
+# store_memory included). Published bundles before the memory-default-on change
+# keep the vault opt-in, so pin it on explicitly here; it is a no-op for bundles
+# that already default the vault on. The vault itself stays inside the
+# throwaway work dir.
+$env:MODELDOCK_MEMORY = "1"
 $env:MODELDOCK_MEMORY_DIR = Join-Path $work "memory"
 
 function Write-Step($message) {
@@ -105,7 +109,7 @@ try {
   # environment, so a non-default test port must be pinned there.
   [System.IO.File]::WriteAllText(
     (Join-Path $root ".env"),
-    "MODELDOCK_PORT=$port`r`n",
+    "MODELDOCK_PORT=$port`r`nMODELDOCK_MEMORY=1`r`n",
     (New-Object System.Text.UTF8Encoding($false))
   )
 
