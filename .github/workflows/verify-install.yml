@@ -1,7 +1,9 @@
-name: Verify install (manual)
+name: Verify install
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read

@@ -5,7 +5,8 @@ import { extractOutputText } from "../src/upstreams.mjs";
 import { startServer } from "../src/server.mjs";
 
 const config = loadConfig();
-if (!config.goToken) throw new Error("Set OPENCODE_GO_TOKEN or add it to .env before running npm run probe:live");
+const hasAnyToken = Object.values(config.tokens || {}).some(Boolean);
+if (!hasAnyToken) throw new Error("Set a provider token (OPENCODE_GO_TOKEN, DEEPSEEK_API_KEY, or MODELDOCK_CUSTOM_API_KEY) or add it to .env before running npm run probe:live");
 
 const instance = await startServer({ ...config, port: 0 });
 const port = instance.server.address().port;
