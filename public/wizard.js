@@ -67,6 +67,7 @@
       "reco.trialMode": "Mode: TRIAL (free)",
       "reco.offMode": "Mode: OFF (unchanged)",
       "reco.catalogFull": "Full OpenCode Go catalog",
+      "reco.catalogProvider": "Full catalog for the configured provider",
       "reco.catalogTrial": "Only the two free zen models",
       "reco.nativeOn": "Native GPT models stay in the picker",
       "reco.nativeOff": "Native GPT models hidden (no subscription)",
@@ -76,11 +77,15 @@
       "reco.rerun": "Then re-run this guide from Settings",
       "reco.paidGpt": "OpenCode Go with native GPT models",
       "reco.paidNoGpt": "OpenCode Go only (GPT models hidden)",
+      "reco.providerGpt": "Configured API with native GPT models",
+      "reco.providerNoGpt": "Configured API only (GPT models hidden)",
       "reco.trial": "Free trial on the two zen-free models",
       "reco.offGpt": "Keep your ChatGPT setup (OFF)",
       "reco.guide": "No third-party account yet",
       "warn.noToken": "No OpenCode Go token detected.",
       "warn.noTokenHint": "Add it in Settings or register first, then apply.",
+      "warn.noProviderToken": "No provider token detected.",
+      "warn.noProviderTokenHint": "Add an OpenCode Go, DeepSeek, or custom provider key in Settings, then apply.",
       "warn.register": "Register OpenCode Go",
       "warn.openSettings": "Open Settings",
       "warn.applyDisabled": "Apply unlocks after a token is configured.",
@@ -705,13 +710,13 @@
       return state.hasGpt
         ? {
           mode: "on", nativeMerge: true, tokenNeeded: !anyToken, variant: "on",
-          title: L("reco.paidGpt"),
-          bullets: [L("reco.onMode"), L("reco.catalogFull"), L("reco.nativeOn")],
+          title: L("reco.providerGpt"),
+          bullets: [L("reco.onMode"), L("reco.catalogProvider"), L("reco.nativeOn")],
         }
         : {
           mode: "on", nativeMerge: false, tokenNeeded: !anyToken, variant: "on",
-          title: L("reco.paidNoGpt"),
-          bullets: [L("reco.onMode"), L("reco.catalogFull"), L("reco.nativeOff")],
+          title: L("reco.providerNoGpt"),
+          bullets: [L("reco.onMode"), L("reco.catalogProvider"), L("reco.nativeOff")],
         };
     }
     if (state.goTier === "free") {
@@ -872,15 +877,14 @@
     reco.append(h3, ul);
     body.append(reco);
 
-    const goToken = Boolean(state.onboard?.tokenConfigured?.["opencode-go"]);
     let applyDisabled = state.applying;
     if (rec.tokenNeeded) {
       const warning = document.createElement("div");
       warning.className = "wz-warning";
       const strong = document.createElement("strong");
-      strong.textContent = L("warn.noToken");
+      strong.textContent = L(rec.mode === "trial" ? "warn.noToken" : "warn.noProviderToken");
       const hint = document.createElement("span");
-      hint.textContent = L("warn.noTokenHint");
+      hint.textContent = L(rec.mode === "trial" ? "warn.noTokenHint" : "warn.noProviderTokenHint");
       const row = document.createElement("div");
       row.className = "wz-warn-row";
       const register = document.createElement("a");

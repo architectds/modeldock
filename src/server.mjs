@@ -143,19 +143,19 @@ function modelOptions(config, profileId) {
       all.push({ ...withTierLabel(model), id, provider: entry.id });
     }
   }
-  // Config ids may be the published slug or a bare legacy id (pre-qualification .env).
-  // Resolve both to the same published form so a bare gpt-5.6-luna never duplicates
-  // the gpt-5.6-luna@opencode-go entry the profile loop already published.
+  // Config ids may be published slugs or bare legacy ids. Only add an id when
+  // its real owner is enabled and actually catalogs that model; assigning a
+  // stale OpenCode fallback to the active DeepSeek profile would manufacture a
+  // vision route that DeepSeek does not provide.
   for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
     if (!id) continue;
-    const resolved = publishedSlugFor(config.profileId, id);
+    const owner = providerForModel(config, id);
+    if (!enabledProviders(config).some((provider) => provider.id === owner)) continue;
+    const known = profileById(owner)?.availableModels?.find((model) => model.id === bareModelId(id));
+    if (!known || known.status === "unavailable" || known.endpoint === "chat") continue;
+    const resolved = publishedSlugFor(owner, known);
     if (all.some((existing) => existing.id === resolved)) continue;
-    all.push({
-      id: resolved,
-      label: id,
-      provider: config.profileId,
-      supportsVision: id === config.visionModel || id === config.visionFallbackModel || resolved === config.visionModel || resolved === config.visionFallbackModel,
-    });
+    all.push({ ...withTierLabel(known), id: resolved, provider: owner });
   }
   return all;
 }
@@ -182,6 +182,52 @@ function enabledProviders(config) {
   });
 }
 
+function providerModels(providerId) {
+  return (profileById(providerId)?.availableModels || [])
+    .filter((model) => model.status !== "unavailable" && model.endpoint !== "chat");
+}
+
+function providerTokenConfigured(config, providerId) {
+  return Boolean(config.tokens?.[providerId] && providerModels(providerId).length);
+}
+
+function anyProviderTokenConfigured(config) {
+  return profileOptions().some((provider) => providerTokenConfigured(config, provider.id));
+}
+
+// Pick one complete route for ON mode. The current provider wins when it is
+// usable; otherwise the first configured provider becomes active. Main and
+// vision are selected from that same provider so a DeepSeek-only install does
+// not keep advertising an unauthenticated OpenCode vision route.
+function onModeSelection(services) {
+  const { config, modelSelection } = services;
+  const currentProvider = providerForModel(config, modelSelection.mainModel);
+  const providerId = providerTokenConfigured(config, currentProvider)
+    ? currentProvider
+    : ["opencode-go", "deepseek-official", "custom"]
+      .find((id) => providerTokenConfigured(config, id));
+  if (!providerId) return null;
+
+  const models = providerModels(providerId);
+  const currentMain = models.find((model) => (
+    providerForModel(config, modelSelection.mainModel) === providerId
+      && model.id === bareModelId(modelSelection.mainModel)
+  ));
+  const main = currentMain || models[0];
+  const visionModels = models.filter((model) => model.supportsVision);
+  const currentVision = visionModels.find((model) => (
+    providerForModel(config, modelSelection.visionModel) === providerId
+      && model.id === bareModelId(modelSelection.visionModel)
+  ));
+  const vision = currentVision || visionModels[0] || null;
+  return {
+    providerId,
+    profile: profileById(providerId),
+    mainModel: publishedSlugFor(providerId, main),
+    visionModel: vision ? publishedSlugFor(providerId, vision) : "",
+  };
+}
+
 // Trial mode narrows the dashboard options to the fixed free pair so the pickers
 // and route card cannot advertise paid models while the free experience runs.
 function visibleModelOptions(config, options) {
@@ -201,7 +247,7 @@ function modelsPayload(services) {
     providers: providerOptions(services.config),
     selectedProvider: services.config.profileId || "opencode-go",
     visionProviders,
-    selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : services.config.profileId,
+    selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : "",
   };
 }
 
@@ -213,7 +259,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = visibleModelOptions(config, modelOptions(config));
   const visionOptions = options.filter((entry) => entry.supportsVision);
-  const mainTokenReady = Boolean(tokenFor(config, selected.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
+  const mainTokenReady = Boolean(tokenFor(config, selected.mainModel));
   const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
   const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
   // The route card shows the most recent actual request first, falling back to
@@ -243,7 +289,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       mainProviderLabel: providerLabel,
       mainUpstreamUrl: upstreamBaseForModel(config, selected.mainModel),
       mainWire: "responses",
-      visionUpstreamUrl: upstreamBaseForModel(config, selected.visionModel),
+      visionUpstreamUrl: selected.visionModel ? upstreamBaseForModel(config, selected.visionModel) : "",
     },
     models: {
       selected,
@@ -251,7 +297,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       providers: providerOptions(config),
       selectedProvider: config.profileId || "opencode-go",
       visionProviders: providerOptions(config).filter((provider) => visionOptions.some((model) => model.provider === provider.id)),
-      selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : config.profileId,
+      selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : "",
     },
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
@@ -268,7 +314,7 @@ function settingsPayload(services) {
   const mainToken = config.tokens?.["opencode-go"] || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
   return {
-    tokenConfigured: Boolean(mainToken || deepseekToken),
+    tokenConfigured: anyProviderTokenConfigured(config),
     providers: [
       { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
       { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
@@ -381,7 +427,7 @@ function serveModels(req, res, { config, modelSelection }) {
   return res.json(codexModelCatalog({
     ...config,
     mainModel: modelSelection?.mainModel || config.mainModel,
-    visionModel: modelSelection?.visionModel || config.visionModel,
+    visionModel: modelSelection?.visionModel ?? config.visionModel,
   }));
 }
 
@@ -953,7 +999,7 @@ export function createApp(services = createServices()) {
   app.post([...NATIVE_IMAGE_PATHS], bareNativeImageRelay);
   app.get(["/v1/models", "/models"], (req, res) => serveModels(req, res, services));
   app.get("/healthz", (req, res) => {
-    const tokenReady = Boolean(tokenFor(config, services.modelSelection?.mainModel) || (config.tokens && Object.values(config.tokens).some(Boolean)));
+    const tokenReady = Boolean(tokenFor(config, services.modelSelection?.mainModel));
     return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
   });
   app.get("/api/status", (req, res) => res.json(statusPayload(services)));
@@ -1041,7 +1087,46 @@ export function createApp(services = createServices()) {
           config.trialMode = false;
           writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
         } else {
-          result = await configSwitcher.enable();
+          let onSelection = null;
+          let previousSelection = null;
+          if (mode === "on") {
+            onSelection = onModeSelection(services);
+            if (!onSelection) {
+              const error = new Error("Configure a provider token before enabling ON mode.");
+              error.code = "provider_token_required";
+              throw error;
+            }
+            previousSelection = {
+              profile: config.profile,
+              profileId: config.profileId,
+              mainModel: config.mainModel,
+              visionModel: config.visionModel,
+              selectedMainModel: services.modelSelection.mainModel,
+              selectedVisionModel: services.modelSelection.visionModel,
+              switcherModel: services.configSwitcher.model,
+            };
+            config.profile = onSelection.profile;
+            config.profileId = onSelection.providerId;
+            config.mainModel = onSelection.mainModel;
+            config.visionModel = onSelection.visionModel;
+            services.modelSelection.mainModel = onSelection.mainModel;
+            services.modelSelection.visionModel = onSelection.visionModel;
+            services.configSwitcher.model = onSelection.mainModel;
+          }
+          try {
+            result = await configSwitcher.enable();
+          } catch (error) {
+            if (previousSelection) {
+              config.profile = previousSelection.profile;
+              config.profileId = previousSelection.profileId;
+              config.mainModel = previousSelection.mainModel;
+              config.visionModel = previousSelection.visionModel;
+              services.modelSelection.mainModel = previousSelection.selectedMainModel;
+              services.modelSelection.visionModel = previousSelection.selectedVisionModel;
+              services.configSwitcher.model = previousSelection.switcherModel;
+            }
+            throw error;
+          }
           if (mode === "trial") {
             config.trialMode = true;
             // The catalog is fully owner-qualified, so the selected pair is
@@ -1063,11 +1148,15 @@ export function createApp(services = createServices()) {
             if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           } else {
             config.trialMode = false;
-            writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
-            if (nativeMerge !== undefined) {
-              config.nativeMerge = nativeMerge;
-              writeEnvFile({ MODELDOCK_NATIVE_MERGE: nativeMerge ? "1" : "0" }, config.envFile);
-            }
+            const onEnv = {
+              MODELDOCK_TRIAL: "0",
+              MODELDOCK_PROFILE: onSelection.providerId,
+              MODELDOCK_MAIN_MODEL: onSelection.mainModel,
+              MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
+            };
+            if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
+            writeEnvFile(onEnv, config.envFile);
+            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           }
           services.writeCatalogFile();
         }
@@ -1079,7 +1168,8 @@ export function createApp(services = createServices()) {
     } catch (error) {
       recordConfigAction(metrics, `config_mode_${mode}`, { ok: false, error: error.message });
       const conflict = error.code === "STATE_INVALID";
-      return res.status(conflict ? 409 : 500).json({ error: { type: error.code || "config_switch_error", message: error.message } });
+      const badRequest = error.code === "provider_token_required";
+      return res.status(conflict ? 409 : badRequest ? 400 : 500).json({ error: { type: error.code || "config_switch_error", message: error.message } });
     }
   });
   // First-run onboarding: what the wizard pre-fills (token presence, autostart)
@@ -1100,7 +1190,7 @@ export function createApp(services = createServices()) {
         },
         // Any provider token unlocks the ON mode (the wizard's Apply gate); the
         // trial pair still requires the OpenCode token specifically.
-        anyTokenConfigured: Boolean(Object.values(config.tokens || {}).some(Boolean)),
+        anyTokenConfigured: anyProviderTokenConfigured(config),
         autostart: settings.autostart,
       });
     } catch (error) {
@@ -1141,13 +1231,18 @@ export function createApp(services = createServices()) {
       config.profileId = nextProvider;
       const profileModels = modelCatalogModels(config, config.profileId);
       if (!profileModels.some((entry) => entry.id === nextMain)) nextMain = profileModels[0]?.id || nextMain;
+      if (!profileModels.some((entry) => entry.id === nextVision && entry.supportsVision)) {
+        nextVision = profileModels.find((entry) => entry.supportsVision)?.id || "";
+      }
     }
     const options = modelOptions(config, config.profileId);
     const main = options.find((entry) => entry.id === nextMain);
-    const vision = options.find((entry) => entry.id === nextVision);
-    if (!main || !vision || !vision.supportsVision) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be selected from a vision-capable model." } });
+    const vision = nextVision ? options.find((entry) => entry.id === nextVision) : null;
+    if (!main || (nextVision && (!vision || !vision.supportsVision))) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be None or selected from a vision-capable model." } });
     services.modelSelection.mainModel = nextMain;
     services.modelSelection.visionModel = nextVision;
+    config.mainModel = nextMain;
+    config.visionModel = nextVision;
     services.configSwitcher.model = nextMain;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));

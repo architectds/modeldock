@@ -410,39 +410,89 @@ test("a just-saved OpenCode token is visible to the wizard's onboarding check in
   assert.equal(after.anyTokenConfigured, true);
 });
 
-test("onboarding unlocks apply with any provider token, not only the OpenCode one", async (t) => {
+test("DeepSeek-only onboarding selects a working DeepSeek main route with no vision model", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-any-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const envFile = path.join(dir, "modeldock.env");
+  const configPath = path.join(dir, "config.toml");
+  await writeFile(configPath, 'model = "gpt-5.6-sol"\n', "utf8");
+  const upstreamRequests = [];
+  const upstream = createServer(async (req, res) => {
+    upstreamRequests.push({
+      url: req.url,
+      authorization: req.headers.authorization,
+      body: await jsonBody(req),
+    });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const instance = await startApp({
     goToken: null,
+    codexHome: dir,
     envFile,
+    deepseekBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
     settingsEventsFile: path.join(dir, "settings-events.jsonl"),
   });
   t.after(instance.stop);
 
-  const originalFetch = globalThis.fetch;
-  try {
-    globalThis.fetch = async (url, options) => {
-      if (String(url) === "https://api.deepseek.com/v1/responses") {
-        return { ok: true, status: 200, json: async () => ({ id: "resp_probe", usage: { input_tokens: 5, output_tokens: 1 } }) };
-      }
-      return originalFetch(url, options);
-    };
-    const saved = await fetch(`${instance.base}/api/settings`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ deepseekApiKey: "sk-deepseek-only-12345678" }),
-    });
-    assert.equal(saved.status, 200);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
+  const saved = await fetch(`${instance.base}/api/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deepseekApiKey: "sk-deepseek-only-12345678" }),
+  });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).tokenConfigured, true);
 
   const onboard = await (await fetch(`${instance.base}/api/onboarding`)).json();
   assert.deepEqual(onboard.tokenConfigured, { "opencode-go": false, "deepseek-official": true });
   assert.equal(onboard.anyTokenConfigured, true,
     "a DeepSeek-only install still unlocks ON mode in the wizard's apply gate");
+
+  assert.equal((await fetch(`${instance.base}/healthz`)).status, 503,
+    "an unrelated token must not mark the still-selected OpenCode route ready");
+
+  const applied = await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "on", nativeMerge: false }),
+  });
+  assert.equal(applied.status, 200);
+
+  const models = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(models.selectedProvider, "deepseek-official");
+  assert.deepEqual(models.selected, {
+    mainModel: "deepseek-v4-flash@deepseek-official",
+    visionModel: "",
+  });
+  assert.deepEqual(models.visionProviders, []);
+  assert.equal(models.selectedVisionProvider, "");
+
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.ready, true);
+  assert.equal(status.config.mainProvider, "deepseek-official");
+  assert.equal(status.config.visionModel, "");
+  assert.equal(status.config.visionUpstreamUrl, "");
+  assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
+
+  const env = await readFile(envFile, "utf8");
+  assert.match(env, /^MODELDOCK_PROFILE=deepseek-official$/m);
+  assert.match(env, /^MODELDOCK_MAIN_MODEL=deepseek-v4-flash@deepseek-official$/m);
+  assert.match(env, /^MODELDOCK_VISION_MODEL=none$/m);
+  assert.match(await readFile(configPath, "utf8"), /model = "deepseek-v4-flash@deepseek-official"/);
+
+  const relayed = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ input: "hello", stream: false }),
+  });
+  assert.equal(relayed.status, 200);
+  assert.equal((await relayed.json()).status, "completed");
+  const routed = upstreamRequests.at(-1);
+  assert.equal(routed.url, "/v1/responses");
+  assert.equal(routed.authorization, "Bearer sk-deepseek-only-12345678");
+  assert.equal(routed.body.model, "deepseek-v4-flash");
 });
 
 test("api/events streams an initial snapshot", async (t) => {
@@ -759,6 +809,10 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     assert.equal(add.settings.custom.apiKeyConfigured, true);
     assert.equal(add.settings.custom.model, "vendor/model-x");
     assert.equal(add.settings.custom.asMain, true);
+    assert.equal(add.settings.tokenConfigured, true, "a usable custom token satisfies the shared settings gate");
+
+    const onboarding = await (await fetch(`${instance.base}/api/onboarding`)).json();
+    assert.equal(onboarding.anyTokenConfigured, true, "a usable custom token unlocks ON mode too");
 
     // Persisted to the isolated env file.
     const env = await readFile(envFile, "utf8");

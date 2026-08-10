@@ -73,8 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 ```
 
 The installer checks Node.js >= 22, downloads Model Dock For Codex to
-`~/.modeldock`, starts it in the background, and opens the dashboard. Paste your
-[opencode.ai](https://opencode.ai/auth) token in the Settings dialog that opens.
+`~/.modeldock`, starts it in the background, and opens the dashboard. Add at
+least one provider token in Settings: [OpenCode Go](https://opencode.ai/auth),
+DeepSeek official, or a configured custom Responses endpoint.
 It also installs the `content-to-video` skill into Codex's skills directory
 (`~/.codex/skills/content-to-video`), so the video capability is available as
 soon as Codex restarts.
@@ -95,13 +96,18 @@ Model Dock shows the active provider and model read-only on the dashboard; it
 does not change your Codex model.
 
 **Vision model** - choose the vision model from the dashboard picker. It is
-used for pasted images and for `vision_inspect` calls.
+used for pasted images and for `vision_inspect` calls. Providers without a
+vision-capable model show `None` instead of advertising an unusable route.
 
 **Upstreams** - OpenCode Go and DeepSeek official are both supported. The
 owner suffix in the model id (for example `deepseek-v4-flash@deepseek-official`)
 selects the upstream; plain ids resolve to OpenCode Go. Native GPT ids
 (`gpt-5.6-sol`, `gpt-5.5`, ...) are passthrough models: they route to your
 ChatGPT subscription instead of an external upstream.
+
+The setup guide accepts any configured provider token for ON mode. On a
+DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
+main model and `None` for vision, and persists that route across restarts.
 
 **Speech** - open the TTS / STT tile on the dashboard and toggle TTS or STT on.
 The `speak` and `hear` tools become available to the model.

@@ -13,6 +13,13 @@ function percent(value) {
   return `${(value * 100).toFixed(1)}%`;
 }
 
+// Per-call output-token throughput (tokens/sec) for the wave stats and hover
+// tooltip; uses the same compact notation as number() with a tps suffix.
+function tps(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "\u2014";
+  return `${number(value)} tps`;
+}
+
 function rgba(hex, alpha) {
   const value = parseInt(hex.slice(1), 16);
   return `rgba(${(value >> 16) & 255},${(value >> 8) & 255},${value & 255},${alpha})`;
@@ -471,40 +478,43 @@ function renderDataWave(recent) {
 
 let lastData = null;
 
-// Reasoning-intensity waveform on the Tokens card: per-call reasoning/output
-// ratio (how much of each response's output tokens went to thinking) from the
-// same trace records as the token waves, plotted on a fixed 0..100% scale.
-// History lives in the browser so the plot persists across SSE updates.
-const reasonHistory = [];
-const reasonHoverState = { hover: -1 };
-const reasonWavePoints = [];
+// Output-token throughput waveform on the Tokens card: per-call tokens per
+// second (outputTokens / wall-clock seconds) from the same trace records as the
+// token waves, plotted with a dynamic peak. History lives in the browser so the
+// plot persists across SSE updates.
+const tpsHistory = [];
+const tpsPeakState = { peak: 0 };
+const tpsHoverState = { hover: -1 };
+const tpsWavePoints = [];
 
-function renderReasonWave(recent) {
-  const canvas = $("reason-wave");
+function renderTpsWave(recent) {
+  const canvas = $("tps-wave");
   if (!canvas) return;
-  const seen = new Set(reasonHistory.map((point) => point.id));
+  const seen = new Set(tpsHistory.map((point) => point.id));
   for (const item of recent) {
-    // Only completed responses with real output tokens carry a usable ratio;
-    // in-flight and failed records have none and would pin a flat zero.
+    // Only completed responses with real output tokens and a wall-clock
+    // duration carry a usable rate; in-flight and failed records have neither.
     if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
     const output = Number(item.outputTokens) || 0;
-    if (output <= 0) continue;
-    reasonHistory.push({
+    const latencyMs = Number(item.latencyMs) || 0;
+    if (output <= 0 || latencyMs <= 0) continue;
+    tpsHistory.push({
       id: item.id,
       t: item.startedAt || 0,
-      v: Math.min(1, Math.max(0, (Number(item.reasoningTokens) || 0) / output)),
+      v: output / (latencyMs / 1000),
     });
   }
-  reasonHistory.sort((a, b) => a.t - b.t);
-  if (reasonHistory.length > WAVE_MAX_POINTS) reasonHistory.splice(0, reasonHistory.length - WAVE_MAX_POINTS);
-  const last = reasonHistory.length ? reasonHistory[reasonHistory.length - 1].v : null;
-  const avg = reasonHistory.length ? reasonHistory.reduce((sum, point) => sum + point.v, 0) / reasonHistory.length : null;
-  set("reason-last", percent(last));
-  set("reason-avg", percent(avg));
+  tpsHistory.sort((a, b) => a.t - b.t);
+  if (tpsHistory.length > WAVE_MAX_POINTS) tpsHistory.splice(0, tpsHistory.length - WAVE_MAX_POINTS);
+  const last = tpsHistory.length ? tpsHistory[tpsHistory.length - 1].v : null;
+  const avg = tpsHistory.length ? tpsHistory.reduce((sum, point) => sum + point.v, 0) / tpsHistory.length : null;
+  set("tps-last", tps(last));
+  set("tps-avg", tps(avg));
 
-  // peak=1 fixes the y scale at 0..100% (the ratio is a 0..1 fraction); the
-  // violet reuses the Tokens card accent so no new color is introduced.
-  drawWave(canvas, reasonHistory, 1, reasonHoverState.hover, WAVE_VIOLET, reasonWavePoints);
+  // Dynamic peak keeps the whole curve visible as the rate varies; the violet
+  // reuses the Tokens card accent so no new color is introduced.
+  tpsPeakState.peak = tpsHistory.reduce((max, point) => Math.max(max, point.v), 0);
+  drawWave(canvas, tpsHistory, tpsPeakState.peak, tpsHoverState.hover, WAVE_VIOLET, tpsWavePoints);
 }
 
 function render(data) {
@@ -534,7 +544,7 @@ function render(data) {
   renderContextWave(data.recent || []);
   renderCacheWave(data.recent || []);
   renderDataWave(data.recent || []);
-  renderReasonWave(data.recent || []);
+  renderTpsWave(data.recent || []);
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));
@@ -546,9 +556,9 @@ function render(data) {
   const upstreamDd = $("cfg-go");
   if (upstreamDd) upstreamDd.title = mainUpstream;
   set("cfg-main", data.config.mainModel);
-  set("cfg-vision", data.config.visionModel);
+  set("cfg-vision", data.config.visionModel || t("models.none"));
   const visionDd = $("cfg-vision");
-  if (visionDd && data.config.visionUpstreamUrl) visionDd.title = t("runtime.via", { url: data.config.visionUpstreamUrl });
+  if (visionDd) visionDd.title = data.config.visionUpstreamUrl ? t("runtime.via", { url: data.config.visionUpstreamUrl }) : "";
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   renderAutostart(data);
@@ -621,7 +631,7 @@ function renderModelOptions(data) {
   const providers = models.providers || [];
   const selectedProvider = models.selectedProvider || "other";
   const visionProviders = models.visionProviders || providers;
-  const selectedVisionProvider = models.selectedVisionProvider || selectedProvider;
+  const selectedVisionProvider = models.selectedVisionProvider || "";
   const providerLabel = providers.find((provider) => provider.id === selectedProvider)?.label || selectedProvider;
   const mainModelLabel = models.options.find((model) => model.id === selected.mainModel)?.label || selected.mainModel;
   const providerDisplay = $("main-provider-display");
@@ -633,16 +643,23 @@ function renderModelOptions(data) {
   if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
   if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
   const visionProviderSelect = $("vision-provider-select");
-  if (visionProviderSelect && visionProviders.length) {
+  if (visionProviderSelect) {
     visionProviderSelect.replaceChildren();
-    for (const provider of visionProviders) {
+    if (visionProviders.length) {
+      for (const provider of visionProviders) {
+        const option = document.createElement("option");
+        option.value = provider.id;
+        option.textContent = provider.label;
+        visionProviderSelect.append(option);
+      }
+    } else {
       const option = document.createElement("option");
-      option.value = provider.id;
-      option.textContent = provider.label;
+      option.value = "";
+      option.textContent = t("models.none");
       visionProviderSelect.append(option);
     }
     visionProviderSelect.value = selectedVisionProvider;
-    visionProviderSelect.disabled = modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
+    visionProviderSelect.disabled = !visionProviders.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
   }
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
   for (const [id, filter, value, sortBy] of [["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
@@ -652,16 +669,23 @@ function renderModelOptions(data) {
     select.replaceChildren();
     const filtered = models.options.filter(filter);
     if (sortBy) filtered.sort((a, b) => (b[sortBy] ?? -1) - (a[sortBy] ?? -1) || a.id.localeCompare(b.id));
-    for (const model of filtered) {
+    if (filtered.length) {
+      for (const model of filtered) {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label;
+        option.dataset.provider = model.provider || "";
+        option.dataset.tier = model.visionTier || "";
+        select.append(option);
+      }
+    } else {
       const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label;
-      option.dataset.provider = model.provider || "";
-      option.dataset.tier = model.visionTier || "";
+      option.value = "";
+      option.textContent = t("models.none");
       select.append(option);
     }
-    select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || previous);
-    select.disabled = modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
+    select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || "");
+    select.disabled = !filtered.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
   }
 }
 
@@ -864,7 +888,7 @@ events.onerror = () => {
   attachAreaWaveHover({ canvasId: "context-wave", tooltipId: "wave-tooltip", pointsRef: wavePoints, hoverState: waveHoverState, draw: (canvas, hover) => drawWave(canvas, waveHistory, wavePeakState.peak, hover, WAVE_AMBER, wavePoints), formatValue: number });
   attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawCacheWave(canvas, cacheHistory, hover), formatValue: percent });
   attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, dataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
-  attachAreaWaveHover({ canvasId: "reason-wave", tooltipId: "reason-wave-tooltip", pointsRef: reasonWavePoints, hoverState: reasonHoverState, draw: (canvas, hover) => drawWave(canvas, reasonHistory, 1, hover, WAVE_VIOLET, reasonWavePoints), formatValue: percent });
+  attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, tpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
 
 poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
@@ -964,8 +988,8 @@ async function openSettings() {
     const dsInput = $("settings-deepseek-token");
     goInput.value = "";
     dsInput.value = "";
-    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : t("settings.required");
-    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : t("settings.optional");
+    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
+    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
     $("settings-status").textContent = "";
     renderAutostart(data);
     renderCustomSection(data.custom);

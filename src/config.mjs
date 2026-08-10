@@ -356,7 +356,13 @@ export function loadConfig() {
     return hasChatGptLogin(codexHome);
   })();
   const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
-  const visionModel = modelRef(process.env.MODELDOCK_VISION_MODEL || (customVision && customSlug ? customSlug : defaultVisionModel));
+  const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
+  // "none" is the durable representation for a provider with no vision model.
+  // An empty env value cannot represent this because it intentionally falls back
+  // to the mode-aware default above on the next process start.
+  const visionModel = configuredVision.toLowerCase() === "none"
+    ? ""
+    : modelRef(configuredVision || (customVision && customSlug ? customSlug : defaultVisionModel));
   const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
 
   const debug = {
@@ -464,7 +470,7 @@ export function publicConfig(config) {
     exaMcpUrl: config.exaMcpUrl,
     // Provider tokens live in one place: the per-provider map. goToken was the
     // pre-multi-provider single field and is gone; readers must use tokens.
-    tokenConfigured: Boolean(config.tokens?.["opencode-go"]),
+    tokenConfigured: Boolean(Object.values(config.tokens || {}).some(Boolean)),
     tokenSource: config.goTokenSource || (config.tokens?.["opencode-go"] ? "configured" : "missing"),
     debug: {
       enabled: Boolean(config.debug?.enabled),
