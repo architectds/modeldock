@@ -200,9 +200,16 @@ try {
   }
   if (-not $upstreamPort) { throw "stream probe upstream did not publish a port" }
   Write-Step "stream probe upstream listening on $upstreamPort"
+  # The installed gateway reads tokens from the inherited environment first and
+  # .env second, and a persisted token shorter than 12 chars is treated as a
+  # placeholder and ignored. Re-pin both the env and the file with a realistic
+  # token so a restart through the installed launcher always comes up healthy,
+  # regardless of what the first install wrote into .env.
+  $env:OPENCODE_GO_TOKEN = "sk-probe-token-123456"
+  $env:MODELDOCK_UPSTREAM_BASE_URL = "http://127.0.0.1:$upstreamPort"
   [System.IO.File]::AppendAllText(
     (Join-Path $root ".env"),
-    "MODELDOCK_UPSTREAM_BASE_URL=http://127.0.0.1:$upstreamPort`r`nOPENCODE_GO_TOKEN=probe-token`r`n",
+    "MODELDOCK_UPSTREAM_BASE_URL=http://127.0.0.1:$upstreamPort`r`nOPENCODE_GO_TOKEN=sk-probe-token-123456`r`n",
     (New-Object System.Text.UTF8Encoding($false))
   )
 
