@@ -101,9 +101,10 @@ vision-capable model show `None` instead of advertising an unusable route.
 
 **Upstreams** - OpenCode Go and DeepSeek official are both supported. The
 owner suffix in the model id (for example `deepseek-v4-flash@deepseek-official`)
-selects the upstream; plain ids resolve to OpenCode Go. Native GPT ids
-(`gpt-5.6-sol`, `gpt-5.5`, ...) are passthrough models: they route to your
-ChatGPT subscription instead of an external upstream.
+selects the upstream; plain ids resolve to OpenCode Go. Native GPT
+models stay in the Codex model picker. Codex's own authenticated requests
+are passed through unchanged to OpenAI. ModelDock never accesses, stores,
+copies, or replays OpenAI credentials.
 
 The setup guide accepts any configured provider token for ON mode. On a
 DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
@@ -248,8 +249,8 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 **上游** - 同时支持 OpenCode Go 和 DeepSeek 官方。模型 id 中的 owner 后缀
 （例如 `deepseek-v4-flash@deepseek-official`）选择上游；不带后缀的 id 走
-OpenCode Go。原生 GPT id（`gpt-5.6-sol`、`gpt-5.5` 等）是透传模型，走你的
-ChatGPT 订阅而不是外部上游。
+OpenCode Go。原生 GPT 模型保留在 Codex 的模型选单中。Codex 自身已认证的请
+求会原样透传给 OpenAI。ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
 
 **语音** - 打开仪表盘的 TTS / STT 磁贴并启用 TTS 或 STT，`speak` 和 `hear`
 工具即可供模型使用。
@@ -373,9 +374,10 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 **上流** - OpenCode Go と DeepSeek 公式の両方をサポートします。モデル ID の
 owner サフィックス（例 `deepseek-v4-flash@deepseek-official`）で上流を選択。
-サフィックスなしは OpenCode Go になります。ネイティブ GPT ID（`gpt-5.6-sol`、
-`gpt-5.5` など）はパススルーモデルで、外部の上流ではなく ChatGPT
-サブスクリプションにルーティングされます。
+サフィックスなしは OpenCode Go になります。ネイティブ GPT モデルは Codex の
+モデルピッカーに残ります。Codex 自身の認証済みリクエストは変更されずに
+OpenAI へ転送されます。ModelDock は OpenAI の認証情報にアクセスせず、保存・
+コピー・再生もしません。
 
 **音声** - ダッシュボードの TTS / STT タイルで有効にすると、`speak` と
 `hear` ツールがモデルから使えます。
@@ -506,9 +508,10 @@ est utilisé pour les images collées et les appels `vision_inspect`.
 **Amonts** - OpenCode Go et DeepSeek officiel sont pris en charge. Le suffixe
 owner dans l'id du modèle (par exemple
 `deepseek-v4-flash@deepseek-official`) sélectionne l'amont ; les ids simples
-passent par OpenCode Go. Les ids GPT natifs (`gpt-5.6-sol`, `gpt-5.5`, ...) sont
-des modèles passthrough : ils passent par votre abonnement ChatGPT plutôt que
-par un amont externe.
+passent par OpenCode Go. Les modèles GPT natifs restent dans le sélecteur de
+modèles de Codex. Les requêtes authentifiées de Codex sont transmises telles
+quelles à OpenAI. ModelDock n'accède jamais aux identifiants OpenAI, ne les
+stocke pas, ne les copie pas et ne les rejoue pas.
 
 **Parole** - ouvrez la tuile TTS / STT sur le tableau de bord et activez TTS ou
 STT. Les outils `speak` et `hear` deviennent disponibles.
@@ -642,9 +645,10 @@ imágenes pegadas y llamadas `vision_inspect`.
 
 **Upstreams** - se admiten OpenCode Go y DeepSeek oficial. El sufijo owner en el
 id del modelo (por ejemplo `deepseek-v4-flash@deepseek-official`) selecciona el
-upstream; los ids simples usan OpenCode Go. Los ids GPT nativos (`gpt-5.6-sol`,
-`gpt-5.5`, ...) son modelos passthrough: van a tu suscripción de ChatGPT en
-lugar de un upstream externo.
+upstream; los ids simples usan OpenCode Go. Los modelos GPT nativos permanecen
+en el selector de modelos de Codex. Las solicitudes autenticadas de Codex se
+reenvían sin cambios a OpenAI. ModelDock nunca accede, almacena, copia ni
+reproduce las credenciales de OpenAI.
 
 **Voz** - abre la tarjeta TTS / STT en el panel y activa TTS o STT. Las
 herramientas `speak` y `hear` quedan disponibles.
