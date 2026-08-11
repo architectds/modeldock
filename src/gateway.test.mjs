@@ -517,9 +517,12 @@ test("routeGatewayRequest escalates current-turn images to the vision model", ()
   assert.equal(route.reason, "current_turn_image");
 });
 
-test("routeGatewayRequest pins tool continuations to the vision model", () => {
+test("routeGatewayRequest lets an explicit client model reclaim a stale vision pin", () => {
   const affinity = new RouteAffinity();
   affinity.register("call_00_vision", "gpt-5.6-luna");
+  // Codex sends its picker model (deepseek) on the continuation. It must win over
+  // the Luna pin left by an earlier image turn, so a single visual turn cannot
+  // cascade the whole session onto Luna and never return to the selected model.
   const source = {
     model: "deepseek-v4-flash",
     input: [
@@ -532,8 +535,8 @@ test("routeGatewayRequest pins tool continuations to the vision model", () => {
     affinity,
     knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-luna"]),
   });
-  assert.equal(route.model, "gpt-5.6-luna");
-  assert.equal(route.reason, "luna_tool_continuation");
+  assert.equal(route.model, "deepseek-v4-flash");
+  assert.notEqual(route.reason, "luna_tool_continuation");
 });
 
 test("routeGatewayRequest defaults to the main model without images", () => {

@@ -71,6 +71,38 @@ test("pins a Luna tool continuation by call_id and consumes the pin", () => {
   });
 });
 
+test("an explicit client model overrides a stale cross-model pin (the stuck-on-Luna fix)", () => {
+  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna"]);
+  const affinity = new RouteAffinity();
+  affinity.register("call_luna", "gpt-5.6-luna");
+  // Codex sends its picker model (deepseek) on the continuation. It must win over
+  // the stale Luna pin so a single visual turn cannot cascade the whole session
+  // onto Luna and never return to the model the user selected.
+  const source = { model: "deepseek-v4-flash", input: [{ type: "function_call_output", call_id: "call_luna", output: "done" }] };
+  const route = routeResponsesRequest(source, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known, affinity });
+  assert.equal(route.model, "deepseek-v4-flash", "the user's explicit selection reclaims the wheel");
+  assert.notEqual(route.reason, "luna_tool_continuation");
+});
+
+test("a same-model tool continuation still pins so the tool loop stays coherent", () => {
+  const known = new Set(["deepseek-v4-flash"]);
+  const affinity = new RouteAffinity();
+  affinity.register("call_ds", "deepseek-v4-flash");
+  const source = { model: "deepseek-v4-flash", input: [{ type: "function_call_output", call_id: "call_ds", output: "done" }] };
+  const route = routeResponsesRequest(source, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known, affinity });
+  assert.equal(route.model, "deepseek-v4-flash");
+  assert.equal(route.reason, "luna_tool_continuation", "same-model pin still applies");
+});
+
+test("a pin with no client model still holds (continuation without a picker model)", () => {
+  const affinity = new RouteAffinity();
+  affinity.register("call_luna", "gpt-5.6-luna");
+  const source = { input: [{ type: "function_call_output", call_id: "call_luna", output: "done" }] };
+  const route = routeResponsesRequest(source, { ...models, affinity });
+  assert.equal(route.model, "gpt-5.6-luna", "no explicit client signal -> the pin decides");
+  assert.equal(route.reason, "luna_tool_continuation");
+});
+
 test("old completed Luna call output does not pin a later independent turn", () => {
   const affinity = new RouteAffinity();
   affinity.register("call_old", "gpt-5.6-luna");

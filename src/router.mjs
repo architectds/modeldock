@@ -67,8 +67,16 @@ export class RouteAffinity {
 
 export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels }) {
   const current = currentTurnItems(source?.input);
+  const requested = source?.model;
   const pinned = affinity?.consumeFrom(current);
-  if (pinned) {
+  // An explicit, known client model reclaims the wheel from a stale cross-model
+  // pin. Without this, one visual turn routed to the vision model (e.g. Luna) pins
+  // that model, and every following tool continuation cascades onto it - never
+  // returning to the model the user actually selected. When the client sends the
+  // same model or no known model, the pin still holds, so a single model's own
+  // multi-step tool loop stays coherent.
+  const clientOverridesPin = pinned && requested && requested !== pinned.model && knownModels?.has(requested);
+  if (pinned && !clientOverridesPin) {
     return { model: pinned.model, reason: "luna_tool_continuation", directVision: pinned.model === visionModel, pinnedCallId: pinned.callId };
   }
   if (source?.model === visionModel && source?.model !== mainModel) {
@@ -82,7 +90,6 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   // and let the caller sync the dashboard to match. Anything unrecognised (a stale id, a
   // provider default) falls back to the dashboard selection rather than being forwarded
   // to an upstream that would reject it.
-  const requested = source?.model;
   if (requested && requested !== mainModel && knownModels?.has(requested)) {
     return { model: requested, reason: "client_selected", directVision: false };
   }

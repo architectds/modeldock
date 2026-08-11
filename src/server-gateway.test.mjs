@@ -87,7 +87,7 @@ function sseResponse(events) {
   });
 }
 
-test("gateway: image turns escalate to the vision model and tool continuations stay pinned", async (t) => {
+test("gateway: image turns escalate to the vision model; an explicit client model reclaims the continuation", async (t) => {
   const seen = [];
   const upstream = createServer(async (req, res) => {
     const body = await jsonBody(req);
@@ -133,7 +133,7 @@ test("gateway: image turns escalate to the vision model and tool continuations s
   });
   assert.equal(continuation.status, 200);
   await continuation.text();
-  assert.equal(seen[1].model, "gpt-5.6-luna", "tool continuation stays on the vision model");
+  assert.equal(seen[1].model, "deepseek-v4-flash", "the explicit client model reclaims the wheel - no cascade onto the vision model");
 
   const textTurn = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
