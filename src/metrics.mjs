@@ -26,7 +26,7 @@ export class Metrics extends EventEmitter {
       fallbackToolResults: 0,
       imageAttachments: 0,
       directVisionRoutes: 0,
-      lunaToolContinuations: 0,
+      toolContinuations: 0,
     };
     this.web = emptyBucket();
     this.vision = { ...emptyBucket(), fallback: 0, byModel: {} };
@@ -85,7 +85,7 @@ export class Metrics extends EventEmitter {
     this.responses.fallbackToolResults += Number(report.fallbackToolResults || 0);
     this.responses.imageAttachments += report.imageRefs.length;
     this.responses.directVisionRoutes += report.directVision ? 1 : 0;
-    this.responses.lunaToolContinuations += routeReason === "luna_tool_continuation" ? 1 : 0;
+    this.responses.toolContinuations += routeReason === "tool_continuation" ? 1 : 0;
     this.responses.streaming += streaming ? 1 : 0;
   }
 

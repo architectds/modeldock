@@ -77,7 +77,7 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   // multi-step tool loop stays coherent.
   const clientOverridesPin = pinned && requested && requested !== pinned.model && knownModels?.has(requested);
   if (pinned && !clientOverridesPin) {
-    return { model: pinned.model, reason: "luna_tool_continuation", directVision: pinned.model === visionModel, pinnedCallId: pinned.callId };
+    return { model: pinned.model, reason: "tool_continuation", directVision: pinned.model === visionModel, pinnedCallId: pinned.callId };
   }
   if (source?.model === visionModel && source?.model !== mainModel) {
     return { model: visionModel, reason: "vision_model_requested", directVision: true };

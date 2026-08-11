@@ -536,7 +536,7 @@ test("routeGatewayRequest lets an explicit client model reclaim a stale vision p
     knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-luna"]),
   });
   assert.equal(route.model, "deepseek-v4-flash");
-  assert.notEqual(route.reason, "luna_tool_continuation");
+  assert.notEqual(route.reason, "tool_continuation");
 });
 
 test("routeGatewayRequest defaults to the main model without images", () => {
