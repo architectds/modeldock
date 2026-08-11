@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { startMcpServer } from "./mcp-server.mjs";
 
 function configStub() {
@@ -67,6 +67,8 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-memory-"));
   const config = { ...configStub(), memoryEnabled: true, memoryDir: dir };
   const instance = await startMcpServer(config, { port: 0 });
+  const project = path.join(dir, "proj-mcp");
+  mkdirSync(project);
   try {
     const { status, parsed } = await rpc(instance.url, "tools/list");
     assert.equal(status, 200);
@@ -82,7 +84,7 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
 
     const call = await rpc(instance.url, "tools/call", {
       name: "recall_memory",
-      arguments: { query: "baseline", scope_dir: "D:\\projects\\stockscan", scope_only: true },
+      arguments: { query: "baseline", scope_dir: project, scope_only: true },
     });
     assert.equal(call.status, 200);
     const text = call.parsed.result?.content?.[0]?.text || "";
@@ -90,16 +92,16 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
 
     const store = await rpc(instance.url, "tools/call", {
       name: "store_memory",
-      arguments: { content: "A test baseline for the vault.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" },
+      arguments: { content: "A test baseline for the vault.", kind: "baseline", scope_dir: project },
     });
     assert.equal(store.status, 200);
     const stored = JSON.parse(store.parsed.result?.content?.[0]?.text || "{}");
     assert.equal(stored.stored, true);
-    assert.equal(stored.scope, "D:\\projects\\stockscan");
+    assert.equal(stored.scope, project);
 
     const recalled = await rpc(instance.url, "tools/call", {
       name: "recall_memory",
-      arguments: { query: "test baseline", scope_dir: "D:\\projects\\stockscan" },
+      arguments: { query: "test baseline", scope_dir: project },
     });
     assert.equal(recalled.status, 200);
     const recallText = recalled.parsed.result?.content?.[0]?.text || "";

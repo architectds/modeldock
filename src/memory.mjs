@@ -7,15 +7,17 @@
 // The schema is a trimmed form of Backed 1.0's capture model: sources,
 // source_items, source_revisions, content_units, plus an FTS5 index.
 //
-// The vault is node-based: every memory owner is its own SQLite database
-// (global.db plus one file per project node under nodes/), so a project's
-// knowledge is a self-contained portable unit. Structure is relational, not
-// textual: `node_meta` holds the parent pointer (upward recall fallback) and
-// `links` holds cross-node references (fusion). No index file is generated;
-// tables are the only source of truth.
+// The vault is node-based: every memory owner is its own SQLite database.
+// Project nodes live inside the project folder (<project>/.modeldock/memory.db)
+// so the knowledge travels with the project; a read-only or missing project
+// folder falls back to a centralized copy under nodes/. `node_registry` in the
+// global db indexes every project node (discovery), while `node_meta` holds
+// the parent pointer (upward recall fallback) and `links` holds cross-node
+// references (fusion). No index file is generated; tables are the only source
+// of truth.
 
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -77,6 +79,15 @@ CREATE TABLE IF NOT EXISTS links (
   target_node_id TEXT NOT NULL,
   label TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_registry (
+  node_id TEXT PRIMARY KEY,
+  node_path TEXT NOT NULL DEFAULT '',
+  slug TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
 );
 `;
 
@@ -192,6 +203,7 @@ export class MemoryStore {
     this.memoryDir = path.resolve(memoryDir);
     mkdirSync(path.join(this.memoryDir, "nodes"), { recursive: true });
     this.dbs = new Map();
+    this.dbFiles = new Map();
     // The global node always exists; it is also the home of the event feed.
     this.db = this.#open(GLOBAL_NODE, { create: true });
   }
@@ -201,6 +213,7 @@ export class MemoryStore {
       try { db.close(); } catch { /* already closed */ }
     }
     this.dbs.clear();
+    this.dbFiles.clear();
   }
 
   // Public accessor for tooling/tests; returns null when the node has no db.
@@ -212,22 +225,111 @@ export class MemoryStore {
     return this.#ensureNode(nodeId || GLOBAL_NODE);
   }
 
-  #open(nodeId, { create = false } = {}) {
+  // Project nodes prefer <project>/.modeldock/memory.db (portable, travels with
+  // the repo). A missing or read-only project folder falls back to the
+  // centralized nodes/ store so a locked directory never loses a memory.
+  #open(nodeId, { create = false, scopePath = null } = {}) {
     if (this.dbs.has(nodeId)) return this.dbs.get(nodeId);
-    const file = nodeDbPathFor(this.memoryDir, nodeId);
-    if (!create && !existsSync(file)) return null;
+    if (!nodeId || nodeId === GLOBAL_NODE) {
+      const file = path.join(this.memoryDir, "global.db");
+      if (!create && !existsSync(file)) return null;
+      return this.#openFile(nodeId, file, { create });
+    }
+    let lastError;
+    for (const file of this.#nodeCandidates(nodeId, scopePath)) {
+      if (!create && !existsSync(file)) continue;
+      try {
+        if (create) mkdirSync(path.dirname(file), { recursive: true });
+        return this.#openFile(nodeId, file, { create });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    if (create) throw lastError || new Error(`cannot open memory node ${nodeId}`);
+    return null;
+  }
+
+  // Ordered candidate files for a project node: the in-project db first (from
+  // the caller's scope path or the global registry), then the centralized
+  // fallback. Only existing directories are considered for in-project storage,
+  // so a bogus scope never creates directories outside the vault.
+  #nodeCandidates(nodeId, scopePath) {
+    const fallback = path.join(this.memoryDir, "nodes", `${nodeSlug(nodeId)}.db`);
+    const candidates = [];
+    const knownPath = scopePath || this.#scopePathFor(nodeId);
+    if (knownPath) {
+      let resolved;
+      try { resolved = path.resolve(knownPath); } catch { resolved = null; }
+      if (resolved && existsSync(resolved) && statSync(resolved).isDirectory()) {
+        candidates.push(path.join(resolved, ".modeldock", "memory.db"));
+      }
+    }
+    candidates.push(fallback);
+    return candidates;
+  }
+
+  // The registry is the discovery layer: it remembers where a project's db
+  // lives so recall and enumeration can open it without the caller repeating
+  // the scope path.
+  #scopePathFor(nodeId) {
+    if (!nodeId || nodeId === GLOBAL_NODE) return null;
+    try {
+      const row = this.db.prepare("SELECT node_path FROM node_registry WHERE node_id = ? AND status = 'active'").get(nodeId);
+      return row?.node_path || null;
+    } catch {
+      return null;
+    }
+  }
+
+  #openFile(nodeId, file, { create = false } = {}) {
     // Wait for the write lock instead of failing immediately when another
     // process (a second Codex session on the same project) holds it.
     const db = new DatabaseSync(file, { timeout: 5000 });
-    db.exec("PRAGMA journal_mode = WAL");
+    if (create) {
+      // A read-only project folder fails here and triggers the fallback.
+      db.exec("PRAGMA journal_mode = WAL");
+    } else {
+      try { db.exec("PRAGMA journal_mode = WAL"); } catch { /* read-only open still works */ }
+    }
     db.exec(MEMORY_SCHEMA);
     this.dbs.set(nodeId, db);
+    this.dbFiles.set(nodeId, file);
     return db;
   }
 
-  #ensureNode(nodeId) {
-    const db = this.#open(nodeId, { create: true });
+  // Explicit writes also register the node in the global discovery index. The
+  // registry is cheap metadata; a busy or locked global db must never fail a
+  // committed project write.
+  #registerNode(nodeId, scopePath) {
+    if (!nodeId || nodeId === GLOBAL_NODE || !scopePath) return;
+    let resolved;
+    try { resolved = path.resolve(scopePath); } catch { return; }
+    const now = new Date().toISOString();
+    const slug = nodeSlug(nodeId);
+    const label = path.basename(resolved) || slug;
+    // The registry is discovery metadata, not canonical memory: a locked
+    // global db must never block a committed project write.
+    this.#tryEventWrite(() => {
+      this.db.prepare(`
+        INSERT INTO node_registry (node_id, node_path, slug, label, first_seen, last_seen, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'active')
+        ON CONFLICT(node_id) DO UPDATE SET
+          node_path = excluded.node_path,
+          label = excluded.label,
+          last_seen = excluded.last_seen,
+          status = 'active'
+      `).run(nodeId, resolved, slug, label, now, now);
+    });
+  }
+
+  #ensureNode(nodeId, scopePath = null) {
+    const db = this.#open(nodeId, { create: true, scopePath });
     this.#setMeta(db, "node_id", nodeId);
+    if (scopePath) {
+      let resolved;
+      try { resolved = path.resolve(scopePath); } catch { resolved = String(scopePath); }
+      this.#setMeta(db, "scope_path", resolved);
+    }
     if (nodeId !== GLOBAL_NODE && !this.#getMeta(db, "parent_id")) {
       this.#setMeta(db, "parent_id", GLOBAL_NODE);
     }
@@ -272,7 +374,8 @@ export class MemoryStore {
   captureText({ text, sourceDir, fileName, filePath = null, adapter, trustClass, itemKey = null, nodeId = GLOBAL_NODE }) {
     const sha = createHash("sha256").update(text).digest("hex");
     const sourceDirAbs = sourceDir ? path.resolve(sourceDir) : "<global>";
-    const db = this.#ensureNode(nodeId);
+    const db = this.#ensureNode(nodeId, nodeId === GLOBAL_NODE ? null : sourceDirAbs);
+    if (nodeId !== GLOBAL_NODE) this.#registerNode(nodeId, sourceDirAbs);
     // One write transaction per capture: a concurrent second writer (another
     // session on the same scope) must never observe the "old revision marked
     // superseded, new one not yet inserted" intermediate state.
@@ -438,7 +541,9 @@ export class MemoryStore {
     const fromNode = scopeNodeId(fromScope);
     const toNode = scopeNodeId(toScope);
     if (!toScope) throw new Error("link_memory requires a target scope");
-    const db = this.#ensureNode(fromNode);
+    const db = this.#ensureNode(fromNode, fromScope);
+    this.#registerNode(fromNode, fromScope);
+    this.#registerNode(toNode, toScope);
     const id = stableId("lnk", fromNode, toNode, kind, label);
     db.prepare("INSERT OR IGNORE INTO links (id, kind, target_node_id, label, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(id, kind, toNode, label, new Date().toISOString());
@@ -545,8 +650,8 @@ export class MemoryStore {
 
     const merged = [];
     const seen = new Set();
-    const pushNode = (nodeId, { filterScope = false, provenance = null } = {}) => {
-      const db = this.#open(nodeId);
+    const pushNode = (nodeId, { filterScope = false, provenance = null, scopePath = null } = {}) => {
+      const db = this.#open(nodeId, { scopePath });
       if (!db) return;
       let rows = this.#query(db, exact, loose, limitRows);
       if (filterScope && cwd) {
@@ -571,7 +676,7 @@ export class MemoryStore {
       return { count: hits.length, text: formatHits(hits) };
     }
 
-    pushNode(start, { filterScope: false });
+    pushNode(start, { filterScope: false, scopePath: scopeDir });
     const startDb = this.#open(start);
     if (startDb) {
       const links = startDb.prepare("SELECT kind, target_node_id, label FROM links ORDER BY created_at").all();
@@ -582,12 +687,45 @@ export class MemoryStore {
     for (const parent of this.#parentChain(start).slice(1)) {
       pushNode(parent, { filterScope: parent === GLOBAL_NODE });
     }
+    // Project discovery: the global registry maps project names to their
+    // in-project memory dbs, so an unscoped recall can find a project and the
+    // model can drill into it with an explicit scope_dir.
+    for (const row of this.#registryRows(terms)) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      merged.push(row);
+      if (merged.length >= limitRows) break;
+    }
     const hits = merged.slice(0, limit);
     return { count: hits.length, text: formatHits(hits) };
   }
 
+  #registryRows(terms) {
+    try {
+      const clauses = terms.map(() => "(label LIKE ? OR slug LIKE ? OR node_path LIKE ?)").join(" OR ");
+      const params = terms.flatMap((term) => [`%${term}%`, `%${term}%`, `%${term}%`]);
+      const rows = this.db
+        .prepare(`SELECT node_id, node_path, slug, label FROM node_registry WHERE status = 'active' AND ${clauses}`)
+        .all(...params);
+      return rows.map((row) => ({
+        id: `registry_${row.node_id}`,
+        head: row.label || row.slug,
+        text: `project memory: ${row.node_path}\nrecall with scope_dir "${row.node_path}" for project-scoped hits`,
+        trust_class: "node_registry",
+        memory_state: "captured",
+        locator: JSON.stringify({ source: "node_registry", heading: row.label || row.slug }),
+        key: row.node_id,
+        node: row.node_id,
+        provenance: "project index",
+      }));
+    } catch {
+      return [];
+    }
+  }
+
   #nodeFiles() {
     const files = [{ nodeId: GLOBAL_NODE, path: nodeDbPathFor(this.memoryDir, GLOBAL_NODE) }];
+    const byNode = new Map();
     const nodesDir = path.join(this.memoryDir, "nodes");
     if (existsSync(nodesDir)) {
       for (const name of readdirSync(nodesDir)) {
@@ -601,9 +739,22 @@ export class MemoryStore {
         } catch {
           // Ignore incomplete or non-ModelDock database files.
         }
-        if (nodeId) files.push({ nodeId, path: filePath });
+        if (nodeId && !byNode.has(nodeId)) byNode.set(nodeId, filePath);
       }
     }
+    // In-project dbs (discovered through the registry) take precedence over a
+    // centralized fallback for the same node.
+    try {
+      const rows = this.db.prepare("SELECT node_id, node_path FROM node_registry WHERE status = 'active'").all();
+      for (const row of rows) {
+        if (!row.node_path) continue;
+        const file = path.join(path.resolve(row.node_path), ".modeldock", "memory.db");
+        if (existsSync(file)) byNode.set(row.node_id, file);
+      }
+    } catch {
+      // Registry is best-effort discovery.
+    }
+    for (const [nodeId, filePath] of byNode) files.push({ nodeId, path: filePath });
     return files;
   }
 
@@ -627,7 +778,7 @@ export class MemoryStore {
       list.push({
         nodeId,
         parentId: this.#getMeta(db, "parent_id"),
-        dbPath: nodeDbPathFor(this.memoryDir, nodeId),
+        dbPath: this.dbFiles.get(nodeId) || nodeDbPathFor(this.memoryDir, nodeId),
         ...this.#counts(db),
       });
     }
@@ -724,7 +875,7 @@ export class MemoryStore {
 
   purgeScope(scopeDir) {
     const nodeId = scopeNodeId(scopeDir);
-    const db = this.#open(nodeId);
+    const db = this.#open(nodeId, { scopePath: scopeDir });
     if (!db) return { ok: true, nodeId, deleted: 0, fts: 0 };
 
     if (nodeId !== GLOBAL_NODE) {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { MEMORY_SCHEMA, MemoryStore, migrateLegacyMemory, nodeDbPathFor, scopeNodeId } from "./memory.mjs";
 
@@ -92,27 +92,30 @@ test("recall filters by working-directory scope", () => {
 test("scopeOnly restricts recall to the project bucket and never falls back to global", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);
+  const projA = path.join(dir, "proj-a");
+  const projB = path.join(dir, "proj-b");
+  mkdirSync(projA);
   try {
     store.storeMemory({ content: "General note visible everywhere.", scopeDir: null, kind: "knowledge" });
     store.storeMemory({
       content: "StockScan strict baseline lives in stockscan only.",
-      scopeDir: "D:\\projects\\stockscan",
+      scopeDir: projA,
       kind: "baseline",
     });
 
-    const layered = store.search({ query: "visible everywhere", scopeDir: "D:\\projects\\other-project" });
+    const layered = store.search({ query: "visible everywhere", scopeDir: projB });
     assert.ok(layered.count >= 1, "layered recall falls back to global when the project misses");
 
     const strictMiss = store.search({
       query: "visible everywhere",
-      scopeDir: "D:\\projects\\other-project",
+      scopeDir: projB,
       scopeOnly: true,
     });
     assert.equal(strictMiss.count, 0, "strict recall never sees global memory from another project");
 
     const strictHit = store.search({
       query: "strict baseline",
-      scopeDir: "D:\\projects\\stockscan",
+      scopeDir: projA,
       scopeOnly: true,
     });
     assert.ok(strictHit.count >= 1, "strict recall still finds the project's own memory");
@@ -126,18 +129,20 @@ test("scopeOnly restricts recall to the project bucket and never falls back to g
 test("storeMemory persists an explicit memory scoped to a project", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);
+  const project = path.join(dir, "proj-stockscan");
+  mkdirSync(project);
   try {
     const saved = store.storeMemory({
       content: "The QCM baseline uses the DIVO cash-sleeve version with quality >= 280.",
-      scopeDir: "D:\\projects\\stockscan",
+      scopeDir: project,
       kind: "baseline",
     });
     assert.equal(saved.stored, true);
     assert.equal(saved.revision, 1);
     assert.equal(saved.units, 1);
-    assert.equal(saved.scope, "D:\\projects\\stockscan");
+    assert.equal(saved.scope, project);
 
-    const hit = store.search({ query: "DIVO baseline", scopeDir: "D:\\projects\\stockscan" });
+    const hit = store.search({ query: "DIVO baseline", scopeDir: project });
     assert.equal(hit.count, 1);
     assert.match(hit.text, /\[1\] baseline/);
     assert.match(hit.text, /agent_output/);
@@ -153,10 +158,12 @@ test("storeMemory persists an explicit memory scoped to a project", () => {
 test("search layers project hits first and falls back to global", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);
+  const project = path.join(dir, "proj-stockscan");
+  mkdirSync(project);
   try {
     store.storeMemory({
       content: "The QCM baseline uses the DIVO cash-sleeve version.",
-      scopeDir: "D:\\projects\\stockscan",
+      scopeDir: project,
       kind: "baseline",
     });
     store.storeMemory({
@@ -164,11 +171,11 @@ test("search layers project hits first and falls back to global", () => {
       kind: "preference",
     });
 
-    const projectOnly = store.search({ query: "baseline", scopeDir: "D:\\projects\\stockscan", limit: 1 });
+    const projectOnly = store.search({ query: "baseline", scopeDir: project, limit: 1 });
     assert.equal(projectOnly.count, 1, "the project-scoped hit fills the single slot");
     assert.match(projectOnly.text, /\[1\] baseline/);
 
-    const layered = store.search({ query: "baseline", scopeDir: "D:\\projects\\stockscan", limit: 5 });
+    const layered = store.search({ query: "baseline", scopeDir: project, limit: 5 });
     assert.equal(layered.count, 2, "project miss falls back upward to the global bucket");
     assert.ok(
       layered.text.indexOf("[1] baseline") < layered.text.indexOf("[2] preference"),
@@ -274,14 +281,16 @@ test("memory events and content view track stores and captures", () => {
   const { dir, memories } = memoryDir();
   writeFixture(memories);
   const store = storeFor(dir);
+  const proj = path.join(dir, "proj-stockscan");
+  mkdirSync(proj);
   try {
     store.captureCodexMemories(dir);
-    store.storeMemory({ content: "Remember the DIVO baseline.", scopeDir: "D:\\projects\\stockscan", kind: "baseline" });
+    store.storeMemory({ content: "Remember the DIVO baseline.", scopeDir: proj, kind: "baseline" });
 
     const events = store.recentEvents(10);
     assert.ok(events.some((event) => event.kind === "capture"), "capture event recorded");
     assert.ok(
-      events.some((event) => event.kind === "store_memory" && event.scope === "D:\\projects\\stockscan"),
+      events.some((event) => event.kind === "store_memory" && event.scope === proj),
       "store event recorded with scope",
     );
     assert.ok(events.some((event) => event.detail.stored === true), "store event carries detail");
@@ -393,14 +402,16 @@ test("post-commit maintenance contention does not report a committed store as fa
   const store = storeFor(dir);
   const globalFile = nodeDbPathFor(path.join(dir, "vault"), "global");
   const lock = new DatabaseSync(globalFile);
+  const project = path.join(dir, "proj-locked");
+  mkdirSync(project);
   try {
     lock.exec("BEGIN EXCLUSIVE");
     const startedAt = Date.now();
-    const result = store.storeMemory({ content: "committed under event contention", scopeDir: "D:/project", key: "locked-event" });
+    const result = store.storeMemory({ content: "committed under event contention", scopeDir: project, key: "locked-event" });
     assert.equal(result.ok, true);
     assert.ok(Date.now() - startedAt < 2000, "soft event maintenance must not wait for the canonical-write busy timeout");
-    const project = store.nodeDb(scopeNodeId("D:/project"));
-    assert.equal(project.prepare("SELECT COUNT(*) AS n FROM source_revisions").get().n, 1, "the capture was committed");
+    const projectDb = store.nodeDb(scopeNodeId(project));
+    assert.equal(projectDb.prepare("SELECT COUNT(*) AS n FROM source_revisions").get().n, 1, "the capture was committed");
   } finally {
     try { lock.exec("ROLLBACK"); } catch { /* already released */ }
     lock.close();
@@ -412,15 +423,74 @@ test("post-commit maintenance contention does not report a committed store as fa
 test("stores project memories in independent nodes and exposes node aggregates", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);
-  const project = "D:\\projects\\modeldock";
+  const project = path.join(dir, "proj-modeldock");
+  mkdirSync(project);
   try {
     store.storeMemory({ content: "Project-only routing rule.", scopeDir: project, kind: "decision" });
     const projectNode = scopeNodeId(project);
-    assert.equal(nodeDbPathFor(path.join(dir, "vault"), projectNode), store.nodes().find((node) => node.nodeId === projectNode)?.dbPath);
+    const projectDb = path.join(project, ".modeldock", "memory.db");
+    assert.equal(existsSync(projectDb), true, "the project db lives inside the project folder");
+    assert.equal(projectDb, store.nodes().find((node) => node.nodeId === projectNode)?.dbPath);
     assert.equal(store.nodeDb(projectNode).prepare("SELECT COUNT(*) AS n FROM content_units").get().n, 1);
     assert.equal(store.nodeDb("global").prepare("SELECT COUNT(*) AS n FROM content_units").get().n, 0);
+    const registry = store.nodeDb("global").prepare("SELECT node_id, node_path, label FROM node_registry WHERE node_id = ?").get(projectNode);
+    assert.ok(registry, "the project node is registered in the global index");
+    assert.equal(registry.node_path, project);
     assert.deepEqual(store.status().nodes.sort(), ["global", projectNode].sort());
     assert.ok(store.contentView(20).some((row) => row.node === projectNode));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("global registry indexes project memories and discovery recalls them", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const stockscan = path.join(dir, "proj-stockscan");
+  const voxel = path.join(dir, "proj-voxel");
+  for (const scope of [stockscan, voxel]) mkdirSync(scope);
+  try {
+    store.storeMemory({ content: "DIVO cash-sleeve baseline with quality >= 280.", scopeDir: stockscan, kind: "baseline" });
+    store.storeMemory({ content: "Deterministic frame capture pipeline.", scopeDir: voxel, kind: "knowledge" });
+
+    const found = store.search({ query: "stockscan" });
+    assert.equal(found.count, 1, "the registry surfaces the project node by name");
+    assert.match(found.text, /project memory: /);
+    assert.match(found.text, /node_registry/);
+
+    const drilled = store.search({ query: "DIVO cash-sleeve", scopeDir: stockscan });
+    assert.ok(drilled.count >= 1, "the project's own db is reachable through its registered path");
+    assert.match(drilled.text, /DIVO cash-sleeve baseline/);
+
+    const all = store.nodes().map((node) => node.nodeId);
+    assert.ok(all.includes(scopeNodeId(stockscan)), "project nodes are enumerated through the registry");
+    assert.ok(all.includes(scopeNodeId(voxel)));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a non-directory scope falls back to the centralized vault", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const blocker = path.join(dir, "not-a-directory");
+  writeFileSync(blocker, "blocking file", "utf8");
+  try {
+    const result = store.storeMemory({ content: "Portable fallback memory.", scopeDir: blocker, kind: "knowledge" });
+    assert.equal(result.ok, true);
+    const nodeId = scopeNodeId(blocker);
+    const node = store.nodeDb(nodeId);
+    assert.ok(node, "the node still exists through the fallback");
+    assert.equal(node.prepare("SELECT COUNT(*) AS n FROM content_units").get().n, 1);
+    const hit = store.search({ query: "Portable fallback", scopeDir: blocker });
+    assert.equal(hit.count, 1);
+    const fallbackFile = path.join(dir, "vault", "nodes");
+    assert.ok(
+      existsSync(fallbackFile),
+      "the fallback lives under the centralized vault rather than creating directories from a bogus scope",
+    );
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -430,9 +500,10 @@ test("stores project memories in independent nodes and exposes node aggregates",
 test("links compose recall across nodes without copying knowledge", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);
-  const project = "D:\\projects\\modeldock";
-  const sharedCore = "D:\\projects\\shared-core";
-  const linked = "D:\\projects\\shared-patterns";
+  const project = path.join(dir, "proj-modeldock");
+  const sharedCore = path.join(dir, "proj-shared-core");
+  const linked = path.join(dir, "proj-shared-patterns");
+  for (const scope of [project, sharedCore, linked]) mkdirSync(scope);
   try {
     store.storeMemory({ content: "Shared rule: preserve stable interfaces across tools.", scopeDir: sharedCore, kind: "knowledge" });
     store.storeMemory({ content: "Linked pattern: use append-only event records.", scopeDir: linked, kind: "knowledge" });

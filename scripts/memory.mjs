@@ -10,7 +10,7 @@ import { memoryStoreFor } from "../src/memory.mjs";
 
 const config = loadConfig();
 if (!config.memoryEnabled) {
-  console.log("Memory vault disabled. Set MODELDOCK_MEMORY=1 in .env to enable it.");
+  console.log("Memory vault is disabled via MODELDOCK_MEMORY=0; remove it or set MODELDOCK_MEMORY=1 in .env to re-enable.");
   process.exit(0);
 }
 

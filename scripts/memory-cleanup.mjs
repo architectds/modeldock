@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Delete memory units in a disposable node (e.g. the benchmark scope written
 // through MODELDOCK_MEMORY_SCOPE), so a test run leaves no content residue in
-// the shared vault. Requires MODELDOCK_MEMORY=1.
+// the shared vault. The vault is default-on; an explicit MODELDOCK_MEMORY=0
+// disables it (and this cleanup refuses to run).
 //
 //   node scripts/memory-cleanup.mjs --scope "D:\bench\deepswe"
 
@@ -18,7 +19,7 @@ const scope = argv[idx + 1];
 
 const config = loadConfig();
 if (!config.memoryEnabled) {
-  console.error("memory is disabled; set MODELDOCK_MEMORY=1 first");
+  console.error("memory is disabled via MODELDOCK_MEMORY=0; remove it or set MODELDOCK_MEMORY=1 to re-enable");
   process.exit(1);
 }
 

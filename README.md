@@ -42,8 +42,8 @@ without rewriting the conversation history:
 - **Search** - the `web_search_exa` tool queries the web through Exa.
 - **Remember** - `store_memory` and `recall_memory` give the model a lightweight
   cross-session memory, so decisions and baselines survive between sessions. It
-  is opt-in: set `MODELDOCK_MEMORY=1` in `~/.modeldock/.env` and restart to
-  enable it.
+  is on by default; set `MODELDOCK_MEMORY=0` in `~/.modeldock/.env` and restart
+  to disable it.
 - **Make** - the `content-to-video` skill lets the model produce finished MP4
   videos end-to-end: classify content, storyboard per-shot tech stacks, narrate
   with measured durations, build three.js / HTML or HyperFrames scenes, assemble
@@ -205,7 +205,7 @@ DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话�
 - **说话** - `speak` 工具把文本合成本地音频文件。
 - **听写** - `hear` 工具把音频文件转写成文本。
 - **搜索** - `web_search_exa` 工具通过 Exa 查询网络。
-- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。此功能为可选：在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=1` 并重启即可启用。
+- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。此功能默认开启；如需关闭，在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=0` 并重启即可。
 
 桥接层是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生通道一致。
 
@@ -320,8 +320,8 @@ Codex はこれら 5 つをツールとして追加し、会話履歴は書き�
 - **聞く** - `hear` ツールが音声ファイルをテキストに書き起こします。
 - **検索** - `web_search_exa` ツールが Exa 経由でウェブ検索します。
 - **記憶** - `store_memory` と `recall_memory` で軽量なクロスセッション記憶を
-  提供します。オプトインです：`~/.modeldock/.env` で `MODELDOCK_MEMORY=1` を
-  設定して再起動すると有効になります。
+  提供します。デフォルトで有効です；無効にするには `~/.modeldock/.env` で
+  `MODELDOCK_MEMORY=0` を設定して再起動してください。
 
 ブリッジは Responses ストリームをバッファリングも再合成もせずそのまま転送
 します。書き換えは文書化された最小限のものだけです：コンパクトタスクが
@@ -453,8 +453,8 @@ conversation :
 - **Écouter** - l'outil `hear` transcrit un fichier audio en texte.
 - **Chercher** - l'outil `web_search_exa` interroge le web via Exa.
 - **Se souvenir** - `store_memory` et `recall_memory` offrent au modèle une
-  mémoire légère entre sessions. C'est optionnel : définissez
-  `MODELDOCK_MEMORY=1` dans `~/.modeldock/.env` et redémarrez pour l'activer.
+  mémoire légère entre sessions. C'est activé par défaut : définissez
+  `MODELDOCK_MEMORY=0` dans `~/.modeldock/.env` et redémarrez pour le désactiver.
 
 Le pont relaie le flux Responses sans bufferiser ni resynthétiser le SSE. Ses
 seules réécritures sont chirurgicales et documentées : les lignes d'outils
@@ -590,8 +590,8 @@ conversación:
 - **Escuchar** - la herramienta `hear` transcribe un archivo de audio a texto.
 - **Buscar** - la herramienta `web_search_exa` consulta la web mediante Exa.
 - **Recordar** - `store_memory` y `recall_memory` dan al modelo una memoria
-  ligera entre sesiones. Es opcional: define `MODELDOCK_MEMORY=1` en
-  `~/.modeldock/.env` y reinicia para activarla.
+  ligera entre sesiones. Está activada por defecto: define `MODELDOCK_MEMORY=0` en
+  `~/.modeldock/.env` y reinicia para desactivarla.
 
 El puente retransmite el flujo Responses sin almacenar ni resintetizar SSE. Sus
 únicas reescrituras son quirúrgicas y documentadas: las filas de herramientas

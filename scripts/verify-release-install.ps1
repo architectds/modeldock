@@ -51,9 +51,9 @@ $env:MODELDOCK_AUTOSTART_NAME = $autostartName
 $env:OPENCODE_GO_TOKEN = "release-verify-probe-token"
 # The release probe asserts the full six-tool surface (recall_memory /
 # store_memory included). Published bundles before the memory-default-on change
-# keep the vault opt-in, so pin it on explicitly here; it is a no-op for bundles
-# that already default the vault on. The vault itself stays inside the
-# throwaway work dir.
+# New bundles default the vault on; pinning it explicitly also covers older
+# pre-default bundles that would otherwise keep the vault off. The vault itself
+# stays inside the throwaway work dir.
 $env:MODELDOCK_MEMORY = "1"
 $env:MODELDOCK_MEMORY_DIR = Join-Path $work "memory"
 
