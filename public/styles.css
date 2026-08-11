@@ -262,6 +262,91 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   white-space: nowrap;
 }
 .field-head a:hover { text-decoration: underline; }
+/* Endpoint combobox: the URL field is a two-in-one control - free typing plus a
+   dropdown of common endpoint presets. The toggle merges into the input's right
+   edge (shared 44px height and border); the menu is an absolute listbox below. */
+.endpoint-combo {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.endpoint-combo input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  border-radius: 10px 0 0 10px;
+  border-right: 0;
+}
+.endpoint-combo:focus-within input {
+  border-color: var(--blue, #4f8cff);
+  background: #162c3e;
+  box-shadow: 0 0 0 3px rgba(80,183,255,.1);
+}
+.combo-toggle {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 44px;
+  border: 1px solid var(--line, #2b2f3a);
+  border-left: 0;
+  border-radius: 0 10px 10px 0;
+  background: #14283a;
+  color: #8bb3c9;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s, box-shadow .15s;
+}
+.combo-toggle:hover, .combo-toggle[aria-expanded="true"] {
+  border-color: var(--blue, #4f8cff);
+  background: #162c3e;
+  color: var(--text, #ecf4f8);
+}
+.endpoint-combo:focus-within .combo-toggle { box-shadow: 0 0 0 3px rgba(80,183,255,.1); }
+.combo-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border: 1px solid var(--line, #2b2f3a);
+  border-radius: 10px;
+  background: var(--panel-2, #181b24);
+  box-shadow: 0 10px 28px rgba(0,0,0,.45);
+}
+.combo-menu button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text, #ecf4f8);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.combo-menu button:hover { background: rgba(80,183,255,.1); color: #fff; }
+.combo-menu small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted, #8b90a0);
+  font-size: 11px;
+  font-weight: 400;
+  word-break: break-all;
+}
+.combo-menu button + button { margin-top: 2px; }
 /* Keep the language select in the same visual system as the token inputs instead of
    allowing each browser to apply its own native control treatment. */
 .field input,

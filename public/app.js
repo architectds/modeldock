@@ -1079,6 +1079,66 @@ if (customEndpointInput) {
   });
 }
 
+// Endpoint presets for the two-in-one endpoint field: typing is always free, and
+// the dropdown next to the input fills a common provider base URL. autoList is
+// true only for endpoints whose /models is public (no key needed), so picking
+// OpenRouter lands straight on model selection; the others list after a key.
+const ENDPOINT_PRESETS = [
+  { label: "OpenRouter", url: "https://openrouter.ai/api/v1", autoList: true },
+  { label: "OpenAI", url: "https://api.openai.com/v1", autoList: false },
+  { label: "Ollama (local)", url: "http://127.0.0.1:11434/v1", autoList: false },
+];
+const customEndpointPresetsBtn = $("custom-endpoint-presets");
+const customEndpointMenu = $("custom-endpoint-menu");
+// Localized tooltip/aria labels for the preset dropdown; re-applied on language
+// change through refreshDynamicText.
+function applyPresetToggleLabel() {
+  if (!customEndpointPresetsBtn || !customEndpointMenu) return;
+  const label = t("custom.presetLabel");
+  customEndpointPresetsBtn.title = label;
+  customEndpointPresetsBtn.setAttribute("aria-label", label);
+  customEndpointMenu.setAttribute("aria-label", label);
+}
+if (customEndpointPresetsBtn && customEndpointMenu) {
+  applyPresetToggleLabel();
+  const renderPresetMenu = () => {
+    customEndpointMenu.replaceChildren();
+    for (const preset of ENDPOINT_PRESETS) {
+      const item = document.createElement("li");
+      item.setAttribute("role", "option");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = preset.label;
+      button.append(Object.assign(document.createElement("small"), { textContent: preset.url }));
+      button.addEventListener("click", () => {
+        customEndpointInput.value = preset.url;
+        customShowHint(customResponsesUrlPreview(customEndpointInput.value));
+        customEndpointMenu.hidden = true;
+        customEndpointPresetsBtn.setAttribute("aria-expanded", "false");
+        if (preset.autoList) customListModelsBtn?.click();
+      });
+      item.append(button);
+      customEndpointMenu.append(item);
+    }
+  };
+  const closePresetMenu = () => {
+    customEndpointMenu.hidden = true;
+    customEndpointPresetsBtn.setAttribute("aria-expanded", "false");
+  };
+  customEndpointPresetsBtn.addEventListener("click", () => {
+    const opening = customEndpointMenu.hidden;
+    renderPresetMenu();
+    customEndpointMenu.hidden = !opening;
+    customEndpointPresetsBtn.setAttribute("aria-expanded", String(opening));
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".endpoint-combo")) closePresetMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closePresetMenu();
+  });
+}
+
 if (customListModelsBtn) {
   customListModelsBtn.addEventListener("click", async () => {
     const baseUrl = customEndpointInput.value.trim();
@@ -1218,6 +1278,7 @@ $("update-button")?.addEventListener("click", applyUpdate);
 // Language selector: re-apply static text and refresh dynamic text in place.
 function refreshDynamicText() {
   applyStaticI18n();
+  if (typeof applyPresetToggleLabel === "function") applyPresetToggleLabel();
   if (typeof lastData !== "undefined" && lastData) render(lastData);
   pollConfig().catch(() => {});
 }

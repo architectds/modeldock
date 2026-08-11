@@ -179,7 +179,11 @@
             <label class="field">
               <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
               <div class="custom-row">
-                <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" />
+                <div class="endpoint-combo">
+                  <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" aria-label="Endpoint (base URL)" />
+                  <button id="custom-endpoint-presets" type="button" class="combo-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="Preset endpoints" title="Preset endpoints">&#9662;</button>
+                  <ul id="custom-endpoint-menu" class="combo-menu" role="listbox" aria-label="Preset endpoints" hidden></ul>
+                </div>
                 <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
               </div>
               <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
