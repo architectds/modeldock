@@ -3,13 +3,27 @@ function inputItems(input) {
   return Array.isArray(input) ? input : [];
 }
 
+// The end of the previous assistant turn. In the Responses history an assistant
+// turn is NOT always a role:"assistant" message - an agentic turn is frequently
+// just a function_call / reasoning item with no text. If we only look for
+// role:"assistant", a tool-driven turn leaves lastMarker at -1 and the "current
+// turn" swallows the entire history, so a stale image (or a stale tool call) from
+// many turns ago keeps re-triggering vision routing on every request.
+function isAssistantMarker(item) {
+  if (!item || typeof item !== "object") return false;
+  if (item.role === "assistant") return true;
+  return item.type === "function_call"
+    || item.type === "custom_tool_call"
+    || item.type === "reasoning";
+}
+
 function currentTurnItems(input) {
   const items = inputItems(input);
-  let lastAssistant = -1;
+  let lastMarker = -1;
   for (let index = 0; index < items.length; index += 1) {
-    if (items[index]?.role === "assistant") lastAssistant = index;
+    if (isAssistantMarker(items[index])) lastMarker = index;
   }
-  return items.slice(lastAssistant + 1);
+  return items.slice(lastMarker + 1);
 }
 
 function parts(item) {

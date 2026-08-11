@@ -42,6 +42,36 @@ test("returns to DeepSeek on the next independent nonvisual turn", () => {
   assert.deepEqual(route, { model: "deepseek-v4-flash", reason: "default_main", directVision: false });
 });
 
+test("a tool-call-only assistant turn ends the turn; a stale image behind it does not re-trigger vision", () => {
+  // The assistant turn is a bare function_call (no role:assistant message), as in
+  // an agentic coding loop. The current turn is only the tool output, so the image
+  // from the earlier user turn must NOT keep routing every continuation to vision.
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash",
+    input: [
+      { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] },
+      { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+      { type: "function_call_output", call_id: "c1", output: "done" },
+    ],
+  }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: new Set(["deepseek-v4-flash"]) });
+  assert.notEqual(route.reason, "current_turn_image", "a stale image behind a tool-call turn must not re-trigger vision");
+  assert.equal(route.model, "deepseek-v4-flash");
+});
+
+test("a genuinely new image after a tool-call turn still routes to vision", () => {
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "start" }] },
+      { type: "function_call", call_id: "c1", name: "shell", arguments: "{}" },
+      { type: "function_call_output", call_id: "c1", output: "done" },
+      { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,BB==" }] },
+    ],
+  }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: new Set(["deepseek-v4-flash"]) });
+  assert.equal(route.reason, "current_turn_image");
+  assert.equal(route.model, "gpt-5.6-luna");
+});
+
 test("does not treat Codex developer instructions about image support as user visual intent", () => {
   const route = routeResponsesRequest({ input: [
     { role: "developer", content: [{ type: "input_text", text: "When users attach an image, inspect it carefully." }] },
