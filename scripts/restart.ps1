@@ -74,7 +74,13 @@ if ($listener) {
     exit 2
   }
   Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
-  Stop-Process -Id $oldPid -Force
+  if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+    Stop-Process -Id $oldPid -Force
+  } else {
+    # The gateway (e.g. the updater process) may have exited between the port
+    # probe and here; that is not a failure, just start fresh below.
+    Write-Status "restart.ps1: PID $oldPid already exited; continuing"
+  }
   for ($i = 0; $i -lt 20; $i += 1) {
     Start-Sleep -Milliseconds 250
     if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }

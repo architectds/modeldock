@@ -10,7 +10,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -321,31 +321,39 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
   }
 }
 
-// Relaunch after the current process exits: a detached shell waits for the port to
-// free up, then runs the hidden-start script. unref() so it survives our exit.
+// Relaunch through the platform restart script, which is the supervisor for an
+// upgrade: it stops the old listener, starts the new gateway, waits for
+// /healthz, and prints every step. The updater is the gateway itself, so the
+// script is spawned detached with -Force (deliberate takeover of our own port;
+// the owner guard's CIM command-line probe can come back empty for elevated
+// processes). Output is appended to modeldock.log - never discarded - so an
+// upgrade restart is traceable. No process.exit() here: the restart script
+// stops the old process, and if spawning it fails the current gateway keeps
+// serving instead of leaving the port dead.
 function scheduleRestart(rootDir) {
+  const logPath = path.join(rootDir, "modeldock.log");
+  const logFd = openSync(logPath, "a");
+  const onSpawnError = (error) => {
+    try { appendFileSync(logPath, `[update] restart spawn failed: ${error.message}\n`); } catch { /* no recovery */ }
+  };
+  try {
   if (process.platform === "win32") {
-    const script = path.join(rootDir, "scripts", "start-hidden.ps1");
-    // Single quotes in the path (e.g. a user name with an apostrophe) are escaped by
-    // doubling, per PowerShell single-quoted string rules.
-    const quoted = script.replace(/'/g, "''");
-    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", `Start-Sleep -Seconds 2; & '${quoted}'`], {
+    const script = path.join(rootDir, "scripts", "restart.ps1");
+    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Force"], {
       detached: true,
-      stdio: "ignore",
+      stdio: ["ignore", logFd, logFd],
       windowsHide: true,
-    }).unref();
+    }).on("error", onSpawnError).unref();
   } else {
-    const script = path.join(rootDir, "scripts", "start-hidden.sh");
-    const quoted = script.replace(/(["$`\\])/g, "\\$1");
-    // "sh script" needs no executable bit; PATH gains this node's directory so the
-    // launcher's bare "node" resolves even under launchd's minimal environment.
-    spawn("sh", ["-c", `sleep 2; sh "${quoted}"`], {
+    const script = path.join(rootDir, "scripts", "restart.sh");
+    spawn("sh", [script, "-Force"], {
       detached: true,
-      stdio: "ignore",
-      env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH || ""}` },
-    }).unref();
+      stdio: ["ignore", logFd, logFd],
+    }).on("error", onSpawnError).unref();
   }
-  setTimeout(() => process.exit(0), 700).unref();
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 export function createUpdater({
