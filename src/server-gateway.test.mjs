@@ -292,7 +292,7 @@ test("gateway: historical images are replaced with refs, current images stay for
   assert.equal(historyPart.type, "input_text", "historical image is not re-sent as bytes");
   assert.match(historyPart.text, /\[Image attachment img_[a-f0-9]+/);
   assert.equal(seen[1].input[2].content[0].type, "input_text");
-  const hasImageAnywhere = seen[1].input.some((item) => item.content?.some((part) => part.type === "input_image"));
+  const hasImageAnywhere = seen[1].input.some((item) => Array.isArray(item.content) && item.content.some((part) => part.type === "input_image"));
   assert.equal(hasImageAnywhere, false, "the main model request carries no input_image at all");
 });
 

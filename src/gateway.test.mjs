@@ -21,7 +21,9 @@ import {
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
+  normalizeOpenCodeProInput,
   pipeGatewayStream,
+  pipeNormalizedStream,
   redactBearer,
   relayCompaction,
   relayNativeImage,
@@ -182,6 +184,53 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   ];
   const normalized = normalizeGatewayInput(input);
   assert.deepEqual(normalized, input);
+});
+
+test("normalizeOpenCodeProInput fills reasoning ids missing from Codex's wire input", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "reasoning", content: [{ type: "reasoning_text", text: "think one" }] },
+    { type: "reasoning", id: "kept", content: [{ type: "reasoning_text", text: "think two" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.match(normalized[1].id, /^reasoning_[0-9a-f]{16}$/, "missing id is synthesized");
+  assert.equal(normalized[2].id, "kept", "existing id is untouched");
+  assert.equal(normalized[0].id, undefined, "non-reasoning items are untouched");
+});
+
+test("normalizeOpenCodeProInput synthesizes reasoning ids deterministically per content", () => {
+  const base = [{ type: "reasoning", content: [{ type: "reasoning_text", text: "same thought" }] }];
+  const first = normalizeOpenCodeProInput(base);
+  const second = normalizeOpenCodeProInput(base);
+  assert.equal(first[0].id, second[0].id, "identical content yields a stable id across turns");
+  const other = normalizeOpenCodeProInput([{ type: "reasoning", content: [{ type: "reasoning_text", text: "different thought" }] }]);
+  assert.notEqual(first[0].id, other[0].id, "different content yields a different id");
+});
+
+test("normalizeOpenCodeProInput flattens assistant content arrays into chat-style strings", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { type: "reasoning", id: "r1", content: [{ type: "reasoning_text", text: "think" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "pong" }] },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.equal(normalized[0].content[0].type, "input_text", "user content stays an array");
+  assert.equal(normalized[2].content, "pong", "assistant content array flattens to a string");
+});
+
+test("normalizeOpenCodeProInput leaves string assistant content and tool turns untouched", () => {
+  const input = [
+    { type: "message", role: "assistant", content: "already string" },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "call" }] },
+    { type: "function_call", call_id: "call_1", name: "x", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_1", output: "ok" },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.equal(normalized[0].content, "already string");
+  assert.equal(normalized[1].content, "call");
+  assert.equal(normalized[2].type, "function_call", "tool items stay as items");
+  assert.equal(normalized[3].type, "function_call_output");
 });
 
 test("describeInputShape reports item counts and reasoning shapes for the trace", () => {
@@ -638,6 +687,87 @@ test("pipeGatewayStream settles when the client disconnects mid-stream", async (
   const result = await piping;
   assert.equal(result.interrupted, true, "a close before a terminal event remains a real interruption");
   assert.equal(upstreamCancelled, true, "upstream body must be cancelled on client disconnect");
+});
+
+test("pipeNormalizedStream synthesizes the lifecycle for a bare-delta stream", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.output_text.delta","delta":"ping","response":{"id":"resp_1","model":"deepseek-v4-pro"}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.completed","response":{"id":"resp_1","model":"deepseek-v4-pro","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"ping","cost":"0"}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.equal(result.rewrote, true);
+  assert.match(forwarded, /"type":"response\.created"/);
+  assert.match(forwarded, /"type":"response\.output_item\.added"/);
+  assert.match(forwarded, /"type":"response\.content_part\.added"/);
+  assert.match(forwarded, /"type":"response\.output_text\.done"/);
+  assert.match(forwarded, /"type":"response\.content_part\.done"/);
+  assert.match(forwarded, /"type":"response\.output_item\.done"/);
+  assert.match(forwarded, /"output":\[\{[^}]*"type":"message"/);
+  assert.match(forwarded, /"delta":"ping"/);
+  const parsedEvents = forwarded
+    .split(/\r\n\r\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  const addedItem = parsedEvents.find((event) => event.type === "response.output_item.added")?.item;
+  const delta = parsedEvents.find((event) => event.type === "response.output_text.delta");
+  assert.equal(delta.item_id, addedItem.id, "delta is framed onto the synthesized item");
+  assert.equal(delta.output_index, 0);
+  assert.equal(delta.content_index, 0);
+});
+
+test("pipeNormalizedStream passes a full lifecycle stream through unchanged", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const full = [
+    'data: {"id":"resp_1","type":"response.created","response":{"id":"resp_1","model":"deepseek-v4-flash"}}\n\n',
+    'data: {"id":"resp_1","type":"response.output_item.added","item":{"id":"m1","type":"message","role":"assistant","status":"in_progress"}}\n\n',
+    'data: {"id":"resp_1","type":"response.content_part.added","item_id":"m1","part":{"type":"output_text","text":""}}\n\n',
+    'data: {"id":"resp_1","type":"response.output_text.delta","delta":"ping","item_id":"m1"}\n\n',
+    'data: {"id":"resp_1","type":"response.output_item.done","item":{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ping"}]}}\n\n',
+    'data: {"id":"resp_1","type":"response.completed","response":{"id":"resp_1","model":"deepseek-v4-flash","output":[{"id":"m1","type":"message","role":"assistant","content":[{"type":"output_text","text":"ping"}]}]}}\n\n',
+  ].join("");
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(full));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.equal(result.rewrote, false, "a complete stream is not rewritten");
+  assert.equal(forwarded, full, "bytes pass through unchanged");
+});
+
+test("pipeNormalizedStream frames a sparse function_call stream onto its item", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.output_item.added","output_index":0,"item":{"id":"call_1","type":"function_call","name":"shell_command","call_id":"call_1","arguments":""}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"dir\\"}"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.completed","response":{"id":"resp_1","model":"deepseek-v4-pro","usage":{"input_tokens":1,"output_tokens":1}}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.equal(result.rewrote, true);
+  const parsedEvents = forwarded
+    .split(/\r\n\r\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  const delta = parsedEvents.find((event) => event.type === "response.function_call_arguments.delta");
+  assert.equal(delta.item_id, "call_1", "argument delta is framed onto the function_call item");
+  assert.ok(parsedEvents.some((event) => event.type === "response.function_call_arguments.done"), "argument done is synthesized");
+  assert.ok(parsedEvents.some((event) => event.type === "response.output_item.done"), "output_item.done is synthesized");
+  const completed = parsedEvents.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output[0].type, "function_call", "completed carries the function_call output");
+  assert.match(completed.response.output[0].arguments, /"command":"dir"/);
 });
 
 test("redactBearer masks upstream tokens in error bodies", () => {

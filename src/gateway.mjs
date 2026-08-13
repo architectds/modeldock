@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
@@ -487,6 +487,51 @@ function relocateToolOutputs(items) {
 // history must pass through untouched. Tool items are additionally paired so a
 // sliced compact history (call without output, or output without call) cannot
 // fail the whole request under Go's strict validation; paired history survives.
+// Reasoning items get a content-stable id when Codex omitted one: native OpenAI
+// tolerates id-less reasoning, but opencode's deepseek-v4-pro route deserializes
+// each replayed reasoning item as a chat message and rejects the whole history
+// with "missing field `id`" when it is absent. The id is derived from the item's
+// text so the request prefix stays byte-identical across turns (cache-friendly)
+// instead of churning a random uuid on every request.
+function fillReasoningIds(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = input.map((item) => {
+    if (item?.type !== "reasoning" || (typeof item.id === "string" && item.id.length > 0)) return item;
+    const text = Array.isArray(item.content)
+      ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("")
+      : "";
+    changed = true;
+    return {
+      ...item,
+      id: `reasoning_${createHash("sha256").update(text || "reasoning").digest("hex").slice(0, 16)}`,
+    };
+  });
+  return changed ? out : input;
+}
+
+// opencode's responses-to-chat translator replays an assistant history message
+// as a chat-style `content` string. Codex replays `output_text` part arrays,
+// which the translator turns into an empty content and rejects on its
+// thinking-model routes ("Invalid assistant message: content or tool_calls
+// must be set"). Flatten the parts to a plain string so every opencode route
+// accepts the history. Non-assistant items and already-string content pass
+// through untouched.
+function flattenAssistantContent(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = input.map((item) => {
+    if (item?.type !== "message" || item?.role !== "assistant" || typeof item.content === "string") return item;
+    if (!Array.isArray(item.content)) return item;
+    const text = item.content
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("");
+    changed = true;
+    return { ...item, content: text };
+  });
+  return changed ? out : input;
+}
+
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
   return dropUnpairedToolItems(input)
@@ -500,6 +545,16 @@ export function normalizeGatewayInput(input) {
         content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
       };
     });
+}
+
+// opencode's deepseek-v4-pro route deserializes replayed reasoning items as
+// chat messages (a stable id is required) and its responses-to-chat translator
+// needs assistant content as a plain string. These rewrites are strictly
+// pro+opencode-go: the generic routed path (flash, official, custom) works
+// without them, and byte-stable flash traffic must stay untouched.
+export function normalizeOpenCodeProInput(input) {
+  if (!Array.isArray(input)) return input;
+  return flattenAssistantContent(fillReasoningIds(normalizeGatewayInput(input)));
 }
 
 // A message is "current" when it follows the last assistant turn. Only those
@@ -545,7 +600,7 @@ export function rewriteHistoricalImages(input, mediaStore) {
       }
       return {
         type: "input_text",
-        text: `[Image attachment ${ref}. Its visual contents were handled in a prior turn. Use vision_inspect with image_ref "${ref}" if a new visual question arises.]`,
+        text: `[Image attachment ${ref}. Its visual contents were handled in a prior turn. To re-inspect it, use vision_inspect with image_ref "${ref}", or spawn a vision subagent (agent_type="modeldock_subagent", fork_turns="none") to analyze it.]`,
       };
     });
     return changed ? { ...item, content } : item;
@@ -741,6 +796,345 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
     stream.pipe(res);
   });
   return { bytes, interrupted };
+}
+
+// opencode's thinking-model stream (deepseek-v4-pro today) does not honor the
+// Responses item/part lifecycle the way Codex expects. Text turns arrive as a
+// bare response.output_text.delta with no item context; tool turns arrive as an
+// output_item.added(function_call) followed by function_call_arguments.delta
+// events with no item_id and no trailing done events; and response.completed
+// never carries an output array. Codex renders from the
+// output_item.added / content_part.added / output_item.done sequence and
+// attaches deltas by item_id, so these streams render as empty turns. This pipe
+// re-frames such streams into the standard sequence, synthesizing missing
+// lifecycle events and the completed response's output array. Streams that
+// already carry the full lifecycle pass through event-for-event.
+export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse) {
+  if (!upstreamBody) {
+    res.end();
+    return { bytes: 0, rewrote: false };
+  }
+  let bytes = 0;
+  let sseBuffer = "";
+  let rewrote = false;
+  let interrupted = false;
+  // Rewrite state. A full stream starts with response.created and is passed
+  // through untouched; a thinking stream starts straight into a delta (bare) or
+  // an output_item.added without the rest of the lifecycle (sparse), and is
+  // re-framed. Detection is sticky - once a full sequence is seen we never
+  // rewrite.
+  let bare = null; // { respId, model, items: Map<partType, { itemId, text, index }> }
+  let track = null; // { respId, model, items: Map<index, { itemId, partType, text, name, callId, status }>, nextIndex }
+  let sawFirstEvent = false;
+  let normal = false;
+  const writeOut = (text) => res.write(text);
+  const sseEvent = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
+  const itemIdFor = (respId, partType, index) => `${respId}-${partType === "reasoning_text" ? "reasoning" : "message"}-${index}`;
+  const partItem = (partType, itemId, index) => ({
+    ...(partType === "reasoning_text"
+      ? { id: itemId, type: "reasoning", status: "in_progress", summary: [] }
+      : { id: itemId, type: "message", role: "assistant", status: "in_progress", content: [] }),
+    output_index: index,
+  });
+  const openBareItem = (parsed) => {
+    const respId = parsed.id || parsed.response?.id || `resp_${Date.now()}`;
+    const model = parsed.response?.model || "";
+    bare = { respId, model, items: new Map(), nextIndex: 0 };
+    rewrote = true;
+    writeOut(sseEvent({ id: respId, type: "response.created", response: { id: respId, model } }));
+    writeOut(sseEvent({ id: respId, type: "response.in_progress", response: { id: respId, model } }));
+  };
+  const ensureBareItem = (parsed, partType) => {
+    if (!bare || bare.items.has(partType)) return;
+    const index = bare.nextIndex;
+    bare.nextIndex += 1;
+    const itemId = itemIdFor(bare.respId, partType, index);
+    bare.items.set(partType, { itemId, text: "", index });
+    const item = partItem(partType, itemId, index);
+    writeOut(sseEvent({ id: bare.respId, type: "response.output_item.added", item, response_id: bare.respId }));
+    writeOut(sseEvent({
+      id: bare.respId,
+      type: "response.content_part.added",
+      item_id: itemId,
+      output_index: index,
+      content_index: 0,
+      part: { type: partType, text: "" },
+      response_id: bare.respId,
+    }));
+  };
+  const closeBare = (parsed) => {
+    if (!bare) return parsed;
+    for (const [partType, { itemId, text }] of bare.items) {
+      const index = bare.nextIndex === 1 && bare.items.size === 1 ? 0 : Array.from(bare.items.keys()).indexOf(partType);
+      writeOut(sseEvent({
+        id: bare.respId,
+        type: partType === "reasoning_text" ? "response.reasoning_text.done" : "response.output_text.done",
+        item_id: itemId,
+        output_index: index,
+        content_index: 0,
+        text,
+        response_id: bare.respId,
+      }));
+      writeOut(sseEvent({
+        id: bare.respId,
+        type: "response.content_part.done",
+        item_id: itemId,
+        output_index: index,
+        content_index: 0,
+        part: { type: partType, text },
+        response_id: bare.respId,
+      }));
+      const doneItem = partItem(partType, itemId, index);
+      if (partType === "reasoning_text") {
+        doneItem.status = "completed";
+        doneItem.content = [{ type: "reasoning_text", text }];
+      } else {
+        doneItem.status = "completed";
+        doneItem.content = [{ type: "output_text", text }];
+      }
+      writeOut(sseEvent({ id: bare.respId, type: "response.output_item.done", item: doneItem, response_id: bare.respId }));
+    }
+    const response = parsed?.response || {};
+    const output = Array.from(bare.items.entries()).map(([partType, { itemId, text }]) => {
+      const item = partItem(partType, itemId, Array.from(bare.items.keys()).indexOf(partType));
+      item.status = "completed";
+      item.content = partType === "reasoning_text"
+        ? [{ type: "reasoning_text", text }]
+        : [{ type: "output_text", text }];
+      return item;
+    });
+    bare = null;
+    return { ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } };
+  };
+  const openTrack = (parsed) => {
+    const respId = parsed.id || parsed.response?.id || `resp_${Date.now()}`;
+    const model = parsed.response?.model || "";
+    track = { respId, model, items: new Map(), nextIndex: 0 };
+    rewrote = true;
+  };
+  const trackItem = (parsed) => {
+    if (!track) return;
+    const index = Number.isInteger(parsed.output_index) ? parsed.output_index : track.nextIndex;
+    if (track.items.has(index)) return;
+    const item = parsed.item || {};
+    const partType = item.type === "function_call" ? "function_call" : (item.type === "reasoning" ? "reasoning_text" : "output_text");
+    track.items.set(index, {
+      itemId: item.id || itemIdFor(track.respId, partType, index),
+      partType,
+      text: "",
+      name: item.name || "",
+      callId: item.call_id || item.id || "",
+      status: "in_progress",
+    });
+    if (track.nextIndex <= index) track.nextIndex = index + 1;
+  };
+  const trackDelta = (parsed, partType) => {
+    if (!track) return parsed;
+    const index = Number.isInteger(parsed.output_index) ? parsed.output_index : 0;
+    const entry = track.items.get(index);
+    if (!entry) return parsed;
+    entry.text += typeof parsed.delta === "string" ? parsed.delta : "";
+    return {
+      ...parsed,
+      item_id: entry.itemId,
+      output_index: index,
+      content_index: 0,
+      response_id: track.respId,
+    };
+  };
+  const closeTrack = (parsed) => {
+    if (!track) return parsed;
+    for (const [index, entry] of track.items) {
+      if (entry.partType === "function_call") {
+        writeOut(sseEvent({
+          id: track.respId,
+          type: "response.function_call_arguments.done",
+          item_id: entry.itemId,
+          output_index: index,
+          arguments: entry.text,
+          response_id: track.respId,
+        }));
+      } else if (entry.partType === "reasoning_text") {
+        writeOut(sseEvent({
+          id: track.respId,
+          type: "response.reasoning_text.done",
+          item_id: entry.itemId,
+          output_index: index,
+          content_index: 0,
+          text: entry.text,
+          response_id: track.respId,
+        }));
+      } else {
+        writeOut(sseEvent({
+          id: track.respId,
+          type: "response.output_text.done",
+          item_id: entry.itemId,
+          output_index: index,
+          content_index: 0,
+          text: entry.text,
+          response_id: track.respId,
+        }));
+      }
+      const doneItem = entry.partType === "function_call"
+        ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, call_id: entry.callId, arguments: entry.text }
+        : entry.partType === "reasoning_text"
+          ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
+          : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] };
+      writeOut(sseEvent({ id: track.respId, type: "response.output_item.done", item: doneItem, response_id: track.respId }));
+    }
+    const response = parsed?.response || {};
+    const output = Array.from(track.items.values()).map((entry, index) => entry.partType === "function_call"
+      ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, call_id: entry.callId, arguments: entry.text, output_index: index }
+      : entry.partType === "reasoning_text"
+        ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
+        : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] });
+    track = null;
+    return { ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } };
+  };
+  const processBlock = (block, delim) => {
+    if (normal) {
+      writeOut(block + delim);
+      return;
+    }
+    for (const line of block.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (!sawFirstEvent) {
+        sawFirstEvent = true;
+        const kind = parsed?.type;
+        if (kind === "response.output_text.delta" || kind === "response.reasoning_text.delta") {
+          openBareItem(parsed);
+          ensureBareItem(parsed, kind === "response.output_text.delta" ? "output_text" : "reasoning_text");
+        } else if (kind === "response.output_item.added" && parsed.item?.type === "function_call") {
+          openTrack(parsed);
+          trackItem(parsed);
+          writeOut(sseEvent(parsed));
+          continue;
+        } else {
+          normal = true;
+          writeOut(block + delim);
+          return;
+        }
+      }
+      if (track) {
+        if (parsed?.type === "response.output_item.added") {
+          trackItem(parsed);
+          writeOut(sseEvent(parsed));
+          continue;
+        }
+        if (parsed?.type === "response.function_call_arguments.delta") {
+          trackItem(parsed);
+          writeOut(sseEvent(trackDelta(parsed, "function_call")));
+          continue;
+        }
+        if (parsed?.type === "response.output_text.delta") {
+          trackItem(parsed);
+          writeOut(sseEvent(trackDelta(parsed, "output_text")));
+          continue;
+        }
+        if (parsed?.type === "response.reasoning_text.delta") {
+          trackItem(parsed);
+          writeOut(sseEvent(trackDelta(parsed, "reasoning_text")));
+          continue;
+        }
+        if (parsed?.type === "response.completed") {
+          const rewritten = closeTrack(parsed);
+          writeOut(sseEvent(rewritten));
+          continue;
+        }
+      }
+      if (bare) {
+        if (parsed?.type === "response.output_text.delta") {
+          ensureBareItem(parsed, "output_text");
+          const entry = bare.items.get("output_text");
+          entry.text += typeof parsed.delta === "string" ? parsed.delta : "";
+          // The upstream delta carries no item context; Codex attaches deltas by
+          // item_id, so re-frame it onto the synthesized message item.
+          writeOut(sseEvent({
+            ...parsed,
+            item_id: entry.itemId,
+            output_index: entry.index,
+            content_index: 0,
+            response_id: bare.respId,
+          }));
+          continue;
+        }
+        if (parsed?.type === "response.reasoning_text.delta") {
+          ensureBareItem(parsed, "reasoning_text");
+          const entry = bare.items.get("reasoning_text");
+          entry.text += typeof parsed.delta === "string" ? parsed.delta : "";
+          writeOut(sseEvent({
+            ...parsed,
+            item_id: entry.itemId,
+            output_index: entry.index,
+            content_index: 0,
+            response_id: bare.respId,
+          }));
+          continue;
+        }
+        if (parsed?.type === "response.completed") {
+          const rewritten = closeBare(parsed);
+          writeOut(sseEvent(rewritten));
+          continue;
+        }
+      }
+      writeOut(sseEvent(parsed));
+    }
+  };
+  await new Promise((resolve, reject) => {
+    const stream = Readable.fromWeb(upstreamBody);
+    let firstResponseMarked = false;
+    let settled = false;
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    stream.on("data", (chunk) => {
+      if (!firstResponseMarked) {
+        firstResponseMarked = true;
+        onFirstResponse?.();
+      }
+      tee?.push(chunk);
+      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      bytes += Buffer.byteLength(text);
+      sseBuffer += text;
+      while (true) {
+        const match = sseBuffer.match(/\r?\n\r?\n/);
+        if (!match) break;
+        const block = sseBuffer.slice(0, match.index);
+        const delim = match[0];
+        sseBuffer = sseBuffer.slice(match.index + delim.length);
+        processBlock(block, delim);
+      }
+      if (sseBuffer.length > 1_000_000) sseBuffer = sseBuffer.slice(-500_000);
+    });
+    stream.once("end", () => {
+      tee?.end?.();
+      if (sseBuffer) writeOut(sseBuffer);
+      res.end();
+      settle();
+    });
+    stream.once("error", settle);
+    res.once("finish", () => settle());
+    res.once("error", settle);
+    res.once("close", () => {
+      if (!settled) {
+        interrupted = true;
+        stream.destroy();
+      }
+      settle();
+    });
+  });
+  return { bytes, rewrote, interrupted };
 }
 
 // Classify a 200 zen-free response body that silently failed. Returns
@@ -1475,9 +1869,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     knownModels,
   });
 
+  // opencode's pro route needs the reasoning-id and assistant-content rewrites;
+  // every other routed model (flash, official, custom) keeps the plain path so
+  // its byte-stable history is never touched.
+  const proOpenCodeGo =
+    bareModelId(route.model) === "deepseek-v4-pro" && providerForModel(config, route.model) === "opencode-go";
   const normalizedPayload = {
     ...payload,
-    input: rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore),
+    input: rewriteHistoricalImages(
+      proOpenCodeGo ? normalizeOpenCodeProInput(payload.input) : normalizeGatewayInput(payload.input),
+      mediaStore,
+    ),
     model: route.model,
   };
   delete normalizedPayload.client_metadata;
@@ -1656,7 +2058,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
-      const piped = await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
+      const bareId = bareModelId(route.model);
+      // opencode's pro translation emits a bare-delta stream; the official
+      // DeepSeek route is a standard Responses implementation and stays native.
+      const piped = normalizedPayload.stream === true && bareId === "deepseek-v4-pro" && target.provider === "opencode-go"
+        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
+        : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
       interrupted = piped.interrupted && !responseCompleted;
     }

@@ -468,6 +468,14 @@ export class CodexConfigSwitcher {
     return this.status();
   }
 
+  // Non-config files Codex only reads at startup (e.g. agent files) need the
+  // same "restart Codex" banner as an enable/disable switch.
+  async markRestartRequired() {
+    const state = await this.#readState();
+    await this.#writeState({ ...state, restartRequired: true });
+    return this.status();
+  }
+
   async markOnboarded() {
     const state = await this.#readState();
     if (state.stateError) throw new Error(`Cannot read switch state: ${state.stateError}`);

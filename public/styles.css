@@ -92,7 +92,6 @@ h2 { margin: 0; font-size: 17px; }
 .model-select:disabled { opacity: .55; cursor: wait; }
 .model-static { display: flex; align-items: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-static.busy { opacity: .55; }
-.debug-default { display: flex; flex-direction: column; justify-content: center; }
 .mode-toggle { position: relative; display: flex; align-items: center; gap: 8px; width: max-content; cursor: pointer; user-select: none; }
 .mode-toggle input { position: absolute; opacity: 0; pointer-events: none; }
 .mode-toggle b { color: var(--muted); font: 700 10px ui-monospace, monospace; text-transform: uppercase; transition: color .2s ease; }

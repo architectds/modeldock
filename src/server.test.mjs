@@ -153,6 +153,65 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   assert.equal(invalid.status, 400);
 });
 
+test("subagent API exposes routed + native options and persists the agent file", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-subagent-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const nativeDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-subagent-native-"));
+  t.after(() => rm(nativeDir, { recursive: true, force: true }));
+  const nativeCatalogFile = path.join(nativeDir, "native-catalog.json");
+  await writeFile(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [
+      { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" },
+      { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol" },
+    ],
+  }), "utf8");
+  const instance = await startApp({ codexHome, nativeCatalogFile });
+  t.after(instance.stop);
+
+  const initial = await (await fetch(`${instance.base}/api/subagent`)).json();
+  assert.equal(initial.selected, "deepseek-v4-flash@opencode-go", "defaults to the Flash routed model");
+  const nativeEntry = initial.options.find((model) => model.id === "gpt-5.6-luna");
+  assert.ok(nativeEntry, "native GPT slug is selectable as a subagent");
+  assert.equal(nativeEntry.provider, "openai");
+  assert.equal(nativeEntry.native, true);
+  assert.ok(initial.options.some((model) => model.id === "deepseek-v4-flash@opencode-go"), "routed model stays selectable");
+  assert.ok(initial.providers.some((provider) => provider.id === "openai" && provider.label === "ChatGPT (native)"));
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.subagent.selected, "deepseek-v4-flash@opencode-go", "status payload carries the subagent state");
+
+  const changed = await fetch(`${instance.base}/api/subagent`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "gpt-5.6-luna" }),
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).selected, "gpt-5.6-luna");
+  const agentFile = path.join(codexHome, "agents", "modeldock-subagent.toml");
+  const written = await readFile(agentFile, "utf8");
+  assert.match(written, /^name = "modeldock_subagent"$/m, "agent file exposes the role name");
+  assert.match(written, /^model_provider = "openai"$/m, "native roles use the built-in openai provider");
+  assert.match(written, /^model = "gpt-5.6-luna"$/m, "agent file stores the chosen model");
+  assert.equal((await (await fetch(`${instance.base}/api/config`)).json()).restartRequired, true,
+    "agent file changes require a Codex restart banner");
+
+  const invalid = await fetch(`${instance.base}/api/subagent`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "not-a-real-model" }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const routed = await fetch(`${instance.base}/api/subagent`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "deepseek-v4-flash@opencode-go" }),
+  });
+  assert.equal(routed.status, 200);
+  assert.match(await readFile(agentFile, "utf8"), /^model = "deepseek-v4-flash@opencode-go"$/m,
+    "routed models persist with the qualified provider slug");
+});
+
 test("models endpoint serves the local Codex catalog", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

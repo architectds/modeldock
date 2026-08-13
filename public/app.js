@@ -524,6 +524,7 @@ function render(data) {
   status.className = `status-pill ${ready ? "ready" : "error"}`;
   status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
   renderModelOptions(data);
+  renderSubagent(data.subagent, { trial: Boolean(data.config?.trial) });
   set("uptime", "v" + (data.update?.currentVersion || "") + " " + t("status.uptime") + " " + uptime(data.uptimeMs));
   set("main-model", data.config.routeModel || data.config.mainModel);
   if (data.config.routeProviderLabel || data.config.mainProviderLabel) set("route-provider", data.config.routeProviderLabel || data.config.mainProviderLabel);
@@ -689,6 +690,60 @@ function renderModelOptions(data) {
   }
 }
 
+// Sub Agent mirrors the vision provider/model pair but with no capability
+// filter: every enabled routed provider plus the native ChatGPT provider is
+// open, and the choice persists to the ModelDock-managed agent file.
+let lastSubagentPayload = null;
+
+function renderSubagent(payload, options = {}) {
+  if (!payload) return;
+  lastSubagentPayload = payload;
+  const providerSelect = $("subagent-provider-select");
+  const modelSelect = $("subagent-model-select");
+  if (!providerSelect || !modelSelect) return;
+  const providers = payload.providers || [];
+  const entries = payload.options || [];
+  const disabled = !entries.length || modelBusy || currentMode === "trial" || Boolean(options.trial);
+  providerSelect.replaceChildren();
+  for (const provider of providers) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.label;
+    providerSelect.append(option);
+  }
+  const selectedProvider = payload.selectedProvider || providers[0]?.id || "";
+  providerSelect.value = providers.some((provider) => provider.id === selectedProvider) ? selectedProvider : (providers[0]?.id || "");
+  providerSelect.disabled = disabled;
+  renderSubagentModels(payload, providerSelect.value, disabled);
+}
+
+// Provider and model selects stay bound: switching the provider re-renders the
+// model list from the full payload instead of filtering the stale option set.
+function renderSubagentModels(payload, provider, disabled) {
+  const modelSelect = $("subagent-model-select");
+  if (!modelSelect) return;
+  const entries = payload.options || [];
+  const filtered = entries.filter((model) => model.provider === provider);
+  const selected = payload.selected || "";
+  modelSelect.replaceChildren();
+  if (filtered.length) {
+    for (const model of filtered) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.label;
+      option.dataset.provider = model.provider || "";
+      modelSelect.append(option);
+    }
+  } else {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = t("models.none");
+    modelSelect.append(option);
+  }
+  modelSelect.value = filtered.some((model) => model.id === selected) ? selected : (filtered[0]?.id || "");
+  modelSelect.disabled = disabled;
+}
+
 let autostartBusy = false;
 let modelBusy = false;
 let autostartEnabled = false;
@@ -701,6 +756,28 @@ async function setModels() {
     const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: $("vision-model-select").value }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    modelBusy = false;
+    poll().catch(() => {});
+  }
+}
+
+async function saveSubagent() {
+  modelBusy = true;
+  $("subagent-model-select").disabled = true;
+  $("subagent-provider-select").disabled = true;
+  try {
+    const response = await fetch("/api/subagent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: $("subagent-model-select").value }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Subagent update ${response.status}`);
+    renderSubagent(body, { trial: Boolean(lastData?.config?.trial) });
+    pollConfig().catch(() => {});
   } catch (error) {
     window.alert(error.message);
   } finally {
@@ -923,6 +1000,12 @@ $("vision-provider-select").addEventListener("change", () => {
   const modelSelect = $("vision-model-select");
   const options = Array.from(modelSelect.options).filter((option) => option.dataset.provider === provider);
   if (options.length) modelSelect.value = options[0].value;
+});
+
+$("subagent-model-select").addEventListener("change", saveSubagent);
+$("subagent-provider-select").addEventListener("change", () => {
+  if (!lastSubagentPayload) return;
+  renderSubagentModels(lastSubagentPayload, $("subagent-provider-select").value, $("subagent-model-select").disabled);
 });
 
 $("restart-ack").addEventListener("click", async () => {

@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
-import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
+import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
@@ -255,7 +255,88 @@ function modelProviderOf(options, modelId) {
   return options.find((entry) => entry.id === modelId)?.provider || "other";
 }
 
-function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater }) {
+// Sub Agent selector: the dashboard writes a ModelDock-managed Codex agent file
+// (~/.codex/agents/modeldock-subagent.toml) whose `model`/`model_provider` fields
+// define the role Codex exposes for spawned subagents. The picker mirrors the
+// main provider/model pair, and every native GPT slug is selectable alongside
+// the routed catalog so subagents stop silently defaulting to native models.
+// Native roles keep the built-in "openai" provider (base_url pointed at this
+// gate in transparent mode); routed roles keep the published "@provider" slug,
+// which the gateway parses for upstream routing.
+const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
+const SUBAGENT_FILE_NAME = "modeldock-subagent.toml";
+const SUBAGENT_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
+
+function subagentModelOptions(config) {
+  const options = modelOptions(config, config.profileId);
+  for (const model of readNativeCatalog(config)?.models || []) {
+    if (typeof model?.slug !== "string" || !model.slug) continue;
+    if (options.some((entry) => entry.id === model.slug)) continue;
+    options.push({
+      id: model.slug,
+      label: model.display_name || model.slug,
+      provider: SUBAGENT_PROVIDER.id,
+      native: true,
+    });
+  }
+  return options;
+}
+
+function subagentProviders(config) {
+  return [...providerOptions(config).map((entry) => ({ id: entry.id, label: entry.label })), SUBAGENT_PROVIDER];
+}
+
+function subagentAgentFilePath(config) {
+  if (!config.codexHome) return null;
+  return path.join(config.codexHome, "agents", SUBAGENT_FILE_NAME);
+}
+
+function readSubagentModel(config) {
+  try {
+    const source = readFileSync(subagentAgentFilePath(config), "utf8");
+    return source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSubagentAgentFile(config, model) {
+  const agentsDir = path.join(config.codexHome, "agents");
+  mkdirSync(agentsDir, { recursive: true });
+  const file = path.join(agentsDir, SUBAGENT_FILE_NAME);
+  const content = [
+    "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",
+    'name = "modeldock_subagent"',
+    'description = "Subagent routed through the local ModelDock gate (managed by ModelDock)."',
+    'model_provider = "openai"',
+    `model = "${model}"`,
+    'model_reasoning_effort = "high"',
+    'developer_instructions = """',
+    "Complete the bounded task assigned by the parent agent.",
+    "Respect repository instructions, keep changes surgical, and run relevant verification.",
+    "Return a concise summary of work completed, checks run, and remaining risks.",
+    '"""',
+    "",
+  ].join("\n");
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, content, "utf8");
+  renameSync(temporary, file);
+}
+
+function subagentPayload(services) {
+  const options = subagentModelOptions(services.config);
+  const selected = readSubagentModel(services.config) || SUBAGENT_DEFAULT_MODEL;
+  const selectedEntry = options.find((entry) => entry.id === selected);
+  return {
+    selected: selectedEntry ? selected : (options[0]?.id || SUBAGENT_DEFAULT_MODEL),
+    options,
+    providers: subagentProviders(services.config),
+    selectedProvider: selectedEntry?.provider || options[0]?.provider || SUBAGENT_PROVIDER.id,
+  };
+}
+
+function statusPayload(services) {
+  const { config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater } = services;
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const options = visibleModelOptions(config, modelOptions(config));
   const visionOptions = options.filter((entry) => entry.supportsVision);
@@ -299,6 +380,7 @@ function statusPayload({ config, metrics, mediaStore, routeAffinity, modelSelect
       visionProviders: providerOptions(config).filter((provider) => visionOptions.some((model) => model.provider === provider.id)),
       selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : "",
     },
+    subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
     autostart: {
@@ -1246,6 +1328,26 @@ export function createApp(services = createServices()) {
     services.configSwitcher.model = nextMain;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
+  });
+  app.get("/api/subagent", (req, res) => res.json(subagentPayload(services)));
+  app.post("/api/subagent", mutateConfig, async (req, res) => {
+    const model = req.body?.model;
+    if (typeof model !== "string" || !model) {
+      return res.status(400).json({ error: { type: "invalid_subagent_model", message: "A subagent model id is required." } });
+    }
+    const options = subagentModelOptions(config);
+    if (!options.some((entry) => entry.id === model)) {
+      return res.status(400).json({ error: { type: "invalid_subagent_model", message: `Unknown subagent model: ${model}` } });
+    }
+    try {
+      writeSubagentAgentFile(config, model);
+      await services.configSwitcher.markRestartRequired();
+    } catch (error) {
+      recordConfigAction(metrics, "subagent_update", { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "subagent_write_failed", message: error.message } });
+    }
+    recordConfigAction(metrics, "subagent_update", { ok: true });
+    return res.json(subagentPayload(services));
   });
   app.post("/api/debug", mutateConfig, (req, res) => {
     const enabled = Boolean(req.body?.enabled);

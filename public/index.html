@@ -62,6 +62,13 @@
             </div>
           </div>
           <div>
+            <span data-i18n="defaults.subagent">Sub Agent</span>
+            <div class="select-pair">
+              <select id="subagent-provider-select" class="model-select" aria-label="Subagent provider"></select>
+              <select id="subagent-model-select" class="model-select" aria-label="Subagent model"></select>
+            </div>
+          </div>
+          <div>
             <span data-i18n="defaults.tts">TTS · STT</span>
             <div class="select-pair speech-pair">
               <strong id="speech-tts-status" class="speech-status model-static">checking…</strong>
@@ -69,7 +76,6 @@
               <button id="speech-tts-install" type="button" class="mini-button" hidden>Install</button>
             </div>
           </div>
-          <div class="debug-default" aria-hidden="true"></div>
         </div>
         <div class="control-meta">
           <strong id="switch-message" aria-live="polite"></strong>
