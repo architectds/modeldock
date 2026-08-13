@@ -40,7 +40,9 @@ export { redactBearer };
 function dumpRequestBody(dir, body) {
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(path.join(dir, `request-${Date.now()}.json`), JSON.stringify(body, null, 2), "utf8");
+    // Redact any bearer/sk tokens before a diagnostic dump leaves process
+    // memory, so a debug artifact never becomes a credential leak.
+    writeFileSync(path.join(dir, `request-${Date.now()}.json`), redactBearer(JSON.stringify(body, null, 2)), "utf8");
   } catch {
     // Diagnostics only.
   }

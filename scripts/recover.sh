@@ -127,7 +127,7 @@ restore_native() {
   fi
   NODE_BIN="$(resolve_node)"
   if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-    echo "node not found; cannot restore the Codex config. Install Node 22+ or re-run the installer." >&2
+    echo "node not found; cannot restore the Codex config. Install Node 24+ or re-run the installer." >&2
     exit 1
   fi
   "$NODE_BIN" --input-type=module - "$STATE" "$CONFIG" <<'NODE'

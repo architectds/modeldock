@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
       # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
       # Real end-to-end install verification, not the mock: downloads install.ps1
       # from the main branch (the exact user bootstrap URL), installs the just-
       # published release assets into a temp root, boots the gateway, checks

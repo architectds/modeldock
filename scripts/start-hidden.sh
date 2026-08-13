@@ -40,7 +40,7 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   fi
 fi
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-  echo "ERROR: node not found; install Node 22+ or re-run the ModelDock installer" >&2
+  echo "ERROR: node not found; install Node 24+ or re-run the ModelDock installer" >&2
   exit 1
 fi
 cd "$ROOT"

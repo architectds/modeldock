@@ -8,8 +8,8 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 #
 # What it does:
-#   1. Use Node >= 22 (a bundled copy under <root>\node wins, then PATH). If none
-#      is found, download the latest Node 22 LTS zip from nodejs.org, verify its
+#   1. Use Node >= 24 (a bundled copy under <root>\node wins, then PATH). If none
+#      is found, download the latest Node 24 LTS zip from nodejs.org, verify its
 #      SHA256 and unpack it under <root>\node so the install is self-contained.
 #   2. Lay out the install dir at ~\.modeldock: dist\modeldock.mjs (downloaded from the
 #      newest GitHub Release) + scripts\start-hidden.ps1 (hidden launcher used by the
@@ -28,7 +28,7 @@
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
 #   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
 #   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
-#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "22.14.0" (default: latest 22 LTS)
+#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "24.5.0" (default: latest 24 LTS)
 #   MODELDOCK_NODE_BASE_URL mirror of https://nodejs.org/dist (tests/mirrors)
 #   MODELDOCK_SKIP_START    set to "1" to lay out files without starting the gateway
 #   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
@@ -44,9 +44,9 @@ $ProgressPreference = "SilentlyContinue"
 
 Write-Host "ModelDock installer" -ForegroundColor Cyan
 
-# 1. Node >= 22. Prefer an explicit path, then a bundled Node (installed here on a
+# 1. Node >= 24. Prefer an explicit path, then a bundled Node (installed here on a
 #    previous run, or by the download step below), then a PATH node. When nothing
-#    suitable exists, download the latest Node 22 LTS zip, verify its SHA256 and
+#    suitable exists, download the latest Node 24 LTS zip, verify its SHA256 and
 #    unpack it under <root>\node - the launcher and restart script resolve the same
 #    bundled-first way, so the installed layout stays self-contained.
 $nodeExe = $null
@@ -66,7 +66,7 @@ if (-not $nodeExe) {
 if (-not $nodeExe) {
     try {
         $v = (& node --version) 2>$null
-        if ($v -match "^v(\d+)\." -and [int]$Matches[1] -ge 22) {
+        if ($v -match "^v(\d+)\." -and [int]$Matches[1] -ge 24) {
             $systemNodeVersion = $v
             $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
         }
@@ -79,14 +79,14 @@ if (-not $nodeExe) {
         $nodeVer = $env:MODELDOCK_NODE_VERSION
         if ($nodeVer -and -not $nodeVer.StartsWith("v")) { $nodeVer = "v" + $nodeVer }
         if (-not $nodeVer) {
-            Write-Host "  resolving latest Node 22 LTS..."
+            Write-Host "  resolving latest Node 24 LTS..."
             $index = Invoke-RestMethod -Uri "$nodeBase/index.json" -TimeoutSec 30
             foreach ($entry in $index) {
-                if ($entry.lts -and $entry.version -match "^v22\.\d+\.\d+$") { $nodeVer = $entry.version; break }
+                if ($entry.lts -and $entry.version -match "^v24\.\d+\.\d+$") { $nodeVer = $entry.version; break }
             }
         }
         if (-not $nodeVer -or $nodeVer -notmatch "^v\d+\.\d+\.\d+$") {
-            throw "Could not resolve a Node 22 LTS version from $nodeBase/index.json (set MODELDOCK_NODE_VERSION to pin one)"
+            throw "Could not resolve a Node 24 LTS version from $nodeBase/index.json (set MODELDOCK_NODE_VERSION to pin one)"
         }
         $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
         $zipName = "node-$nodeVer-win-$arch.zip"
@@ -129,7 +129,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe)) {
     Write-Host ""
-    Write-Host "Node.js 22 or newer is required but could not be installed automatically." -ForegroundColor Yellow
+    Write-Host "Node.js 24 or newer is required but could not be installed automatically." -ForegroundColor Yellow
     Write-Host "Install the LTS version from https://nodejs.org , reopen your terminal,"
     Write-Host "then run this installer again."
     if (-not $skipOpen) { Start-Process "https://nodejs.org" }
@@ -205,7 +205,7 @@ $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
-# downloads Node 22 LTS there when none is on PATH), then PATH.
+# downloads Node 24 LTS there when none is on PATH), then PATH.
 $nodeExe = $null
 if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
@@ -221,7 +221,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-    Write-Output "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+    Write-Output "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
     exit 1
 }
 
@@ -386,7 +386,7 @@ if (-not $logsReady) {
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
-# downloads Node 22 LTS there when none is on PATH), then PATH.
+# downloads Node 24 LTS there when none is on PATH), then PATH.
 $nodeExe = $null
 if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
@@ -402,7 +402,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
 }
 

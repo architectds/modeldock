@@ -72,7 +72,7 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-The installer checks Node.js >= 22, downloads Model Dock For Codex to
+The installer checks Node.js >= 24, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Add at
 least one provider token in Settings: [OpenCode Go](https://opencode.ai/auth),
 DeepSeek official, or a configured custom Responses endpoint.
@@ -226,7 +226,7 @@ macOS：
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-安装程序会检查 Node.js >= 22，把 Model Dock For Codex 下载到
+安装程序会检查 Node.js >= 24，把 Model Dock For Codex 下载到
 `~/.modeldock`，在后台启动并打开仪表盘。在弹出的设置对话框中粘贴你的
 [opencode.ai](https://opencode.ai/auth) token。
 
@@ -347,7 +347,7 @@ macOS：
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-インストーラーは Node.js >= 22 を確認し、Model Dock For Codex を
+インストーラーは Node.js >= 24 を確認し、Model Dock For Codex を
 `~/.modeldock` にダウンロードしてバックグラウンドで起動し、ダッシュボード
 を開きます。表示された設定ダイアログに [opencode.ai](https://opencode.ai/auth)
 のトークンを貼り付けます。
@@ -481,7 +481,7 @@ macOS :
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-L'installeur vérifie Node.js >= 22, télécharge Model Dock For Codex dans
+L'installeur vérifie Node.js >= 24, télécharge Model Dock For Codex dans
 `~/.modeldock`, le démarre en arrière-plan et ouvre le tableau de bord. Collez
 votre jeton [opencode.ai](https://opencode.ai/auth) dans la boîte de dialogue.
 
@@ -619,7 +619,7 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 ```
 
-El instalador verifica Node.js >= 22, descarga Model Dock For Codex en
+El instalador verifica Node.js >= 24, descarga Model Dock For Codex en
 `~/.modeldock`, lo inicia en segundo plano y abre el panel. Pega tu token de
 [opencode.ai](https://opencode.ai/auth) en el diálogo de configuración.
 

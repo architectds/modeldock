@@ -855,14 +855,14 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(await waitForPortFree(appPort), "final gateway should stop");
 });
 
-test("mock install: auto-download a bundled Node 22 LTS when none is suitable", async (t) => {
+test("mock install: auto-download a bundled Node 24 LTS when none is suitable", async (t) => {
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const fakeBridge = Buffer.from("// fake mcp bridge\n");
-  const nodeVer = "22.4.0";
+  const nodeVer = "24.5.0";
   const distName = "v" + nodeVer;
 
   // Fake nodejs.org/dist server. The version index is ordered newest-first with a
-  // non-LTS v23 ahead of the v22 LTS entries, so resolution must pick v22.4.0.
+  // non-LTS v25 ahead of the v24 LTS entries, so resolution must pick v24.5.0.
   const zipEntry = { name: `node-${distName}-win-x64/node.exe`, data: "fake node.exe for download test\n" };
   const zip = buildZip([zipEntry]);
   const nodeBin = "#!/bin/sh\nexec node \"$@\"\n";
@@ -895,9 +895,9 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
       `${sha256(tgzDarwinX64)}  node-${distName}-darwin-x64.tar.gz`,
     ].join("\n") + "\n";
   const indexJson = JSON.stringify([
-    { version: "v23.1.0", lts: false, npm: "11.0.0" },
-    { version: "v22.4.0", lts: "Jod", npm: "10.8.0" },
-    { version: "v22.3.0", lts: "Jod", npm: "10.8.0" },
+    { version: "v25.1.0", lts: false, npm: "11.0.0" },
+    { version: "v24.5.0", lts: "Krypton", npm: "10.8.0" },
+    { version: "v24.4.0", lts: "Krypton", npm: "10.8.0" },
   ]);
   const server = createServer((req, res) => {
     const url = req.url;
@@ -973,7 +973,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
   const exitCode = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(exitCode, 0, `installer failed:\n${out}\n${err}`);
 
-  // The bundled node landed under <root>/node/v22.4.0 with the archive's content.
+  // The bundled node landed under <root>/node/v24.5.0 with the archive's content.
   const bundledNode = isWindows
     ? path.join(installDir, "node", `v${nodeVer}`, "node.exe")
     : path.join(installDir, "node", `v${nodeVer}`, "bin", "node");
@@ -1021,7 +1021,7 @@ test("mock install: auto-download a bundled Node 22 LTS when none is suitable", 
 });
 
 test("mock install: rejects a Node download whose SHA256 does not match", async (t) => {
-  const nodeVer = "22.4.0";
+  const nodeVer = "24.5.0";
   const distName = "v" + nodeVer;
   const fakeBridge = Buffer.from("// fake mcp bridge\n");
   const zip = buildZip([{ name: `node-${distName}-win-x64/node.exe`, data: "fake\n" }]);
@@ -1039,7 +1039,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
     `${wrong}  node-${distName}-darwin-arm64.tar.gz`,
     `${wrong}  node-${distName}-darwin-x64.tar.gz`,
   ].join("\n") + "\n";
-  const indexJson = JSON.stringify([{ version: "v22.4.0", lts: "Jod", npm: "10.8.0" }]);
+  const indexJson = JSON.stringify([{ version: "v24.5.0", lts: "Krypton", npm: "10.8.0" }]);
   const server = createServer((req, res) => {
     const url = req.url;
     if (url === "/modeldock.mjs") {

@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
+import { dpapiSupported } from "./secrets.mjs";
 
 // Bare-path tests exercise the app wiring, not the caller-key guard. Enforcement
 // is ON by default since 0.1.10, so this file opts out explicitly; the default
@@ -255,6 +256,18 @@ test("api/status returns expected shape", async (t) => {
   assert.ok(body.vision);
   assert.ok(Array.isArray(body.recent));
   assert.ok(body.media);
+});
+
+test("api endpoints reject cross-origin browser reads", async (t) => {
+  const instance = await startApp();
+  t.after(instance.stop);
+  const response = await fetch(`${instance.base}/api/status`, {
+    headers: { origin: "https://evil.example" },
+  });
+  assert.equal(response.status, 403);
+  const body = await response.json();
+  assert.equal(body.error?.code, -32000);
+  assert.match(body.error?.message, /Invalid Origin/);
 });
 
 test("config API defaults off and performs reversible user-triggered switching", async (t) => {
@@ -876,7 +889,13 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     // Persisted to the isolated env file.
     const env = await readFile(envFile, "utf8");
     assert.match(env, /MODELDOCK_CUSTOM_BASE_URL=https:\/\/vendor\.example\/v1/);
-    assert.match(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+    if (dpapiSupported()) {
+      // On Windows the custom key is DPAPI-encrypted like every other token.
+      assert.match(env, /MODELDOCK_CUSTOM_API_KEY=dpapi:/);
+      assert.doesNotMatch(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+    } else {
+      assert.match(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+    }
     assert.match(env, /MODELDOCK_CUSTOM_MODEL=vendor\/model-x/);
     assert.match(env, /MODELDOCK_CUSTOM_MAIN=1/);
     assert.match(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);

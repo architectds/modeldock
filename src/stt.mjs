@@ -1,5 +1,5 @@
 // Local STT (WINDOWS ONLY): transcribe an audio file using the Windows SAPI dictation
-// engine (System.Speech, ships with Windows — no install). The audio must be converted
+// engine (System.Speech, ships with Windows; no install needed). The audio must be converted
 // to 16kHz mono PCM WAV first; ffmpeg is used when present, otherwise the tool reports
 // that transcription needs ffmpeg. Chinese and English are the primary targets; any
 // installed SAPI recognizer culture works. Non-Windows platforms get available:false.

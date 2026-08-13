@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Give DeepSeek eyes, ears, a voice, a web connection, and a memory inside Codex - a thin local Responses bridge for OpenCode Go and DeepSeek official, with native GPT passthrough and live token, latency, and trace observability.",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "start": "node src/server.mjs",

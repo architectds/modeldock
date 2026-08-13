@@ -1016,6 +1016,12 @@ export function createApp(services = createServices()) {
   const app = createMcpExpressApp({ host: config.host, jsonLimit: "25mb" });
   app.disable("x-powered-by");
 
+  // Dashboard /api/* endpoints are same-origin only: a cross-origin browser
+  // page must not be able to read status/settings or drive config writes
+  // through the loopback listener. curl and Codex send no Origin header, so
+  // they are unaffected; the route-level guards add the same rule to /mcp.
+  app.use("/api", crossOriginGuard(config));
+
   const mcpHandler = createMcpNodeHandler({
     upstreams,
     onError: (error) => {

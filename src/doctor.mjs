@@ -25,10 +25,10 @@ export async function checkDoctor({
   // 1. Node.js
   const [major, minor] = process.versions.node.split(".").map(Number);
   add(
-    major > 22 || (major === 22 && minor >= 0) ? "ok" : "fail",
+    major > 24 || (major === 24 && minor >= 0) ? "ok" : "fail",
     "Node.js",
-    `${process.version}; Node 22+ required`,
-    "Install Node.js 22 LTS or newer, then restart the gateway.",
+    `${process.version}; Node 24+ required`,
+    "Install Node.js 24 LTS or newer, then restart the gateway.",
   );
 
   // 2. Service health on the configured port.

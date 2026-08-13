@@ -7,8 +7,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
 #
 # What it does:
-#   1. Use Node >= 22 (a bundled copy under ~/.modeldock/node wins, then PATH). If
-#      none is found, download the latest Node 22 LTS tarball from nodejs.org, verify
+#   1. Use Node >= 24 (a bundled copy under ~/.modeldock/node wins, then PATH). If
+#      none is found, download the latest Node 24 LTS tarball from nodejs.org, verify
 #      its SHA256 and unpack it under ~/.modeldock/node so the install is self-contained.
 #   2. Lay out the install dir at ~/.modeldock: dist/modeldock.mjs (downloaded from the
 #      newest GitHub Release) + scripts/start-hidden.sh (background launcher used by the
@@ -28,7 +28,7 @@
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
 #   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
 #   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
-#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "22.14.0" (default: latest 22 LTS)
+#   MODELDOCK_NODE_VERSION  pin a Node version, e.g. "24.5.0" (default: latest 24 LTS)
 #   MODELDOCK_NODE_BASE_URL mirror of https://nodejs.org/dist (tests/mirrors)
 #   MODELDOCK_SKIP_START    set to "1" to lay out files without starting the gateway
 #   MODELDOCK_SKIP_OPEN     set to "1" to not open a browser
@@ -44,9 +44,9 @@ SKIP_START="${MODELDOCK_SKIP_START:-0}"
 
 echo "ModelDock installer"
 
-# 1. Node >= 22. Prefer an explicit path, then a bundled Node (installed here on a
+# 1. Node >= 24. Prefer an explicit path, then a bundled Node (installed here on a
 #    previous run, or by the download step below), then a PATH node. When nothing
-#    suitable exists, download the latest Node 22 LTS tarball, verify its SHA256 and
+#    suitable exists, download the latest Node 24 LTS tarball, verify its SHA256 and
 #    unpack it under "$ROOT/node" - the launcher and restart script resolve the same
 #    bundled-first way, so the installed layout stays self-contained.
 NODE_BIN=""
@@ -63,7 +63,7 @@ if [ -z "$NODE_BIN" ]; then
 fi
 if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
   NODE_MAJOR="$(node --version | sed -n 's/^v\([0-9]*\).*/\1/p')"
-  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 22 ]; then
+  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 24 ]; then
     NODE_SYSTEM_VERSION="$(node --version)"
     NODE_BIN="$(command -v node)"
   fi
@@ -75,8 +75,8 @@ if [ -z "$NODE_BIN" ]; then
   NODE_BASE="${MODELDOCK_NODE_BASE_URL:-https://nodejs.org/dist}"
   NODE_VER="${MODELDOCK_NODE_VERSION:-}"
   if [ -z "$NODE_VER" ]; then
-    echo "  resolving latest Node 22 LTS..."
-    NODE_VER="$(curl -fsSL --max-time 30 "$NODE_BASE/index.json" 2>/dev/null | tr '{' '\n' | grep '"version":"v22\.' | grep '"lts":"' | sed -n 's/.*"version":"\(v22\.[0-9]*\.[0-9]*\)".*/\1/p' | head -n 1 || true)"
+    echo "  resolving latest Node 24 LTS..."
+    NODE_VER="$(curl -fsSL --max-time 30 "$NODE_BASE/index.json" 2>/dev/null | tr '{' '\n' | grep '"version":"v24\.' | grep '"lts":"' | sed -n 's/.*"version":"\(v24\.[0-9]*\.[0-9]*\)".*/\1/p' | head -n 1 || true)"
   fi
   case "$NODE_VER" in
     v[0-9]*.[0-9]*.[0-9]*) ;;
@@ -131,7 +131,7 @@ if [ -z "$NODE_BIN" ]; then
 fi
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo ""
-  echo "Node.js 22 or newer is required but could not be installed automatically."
+  echo "Node.js 24 or newer is required but could not be installed automatically."
   echo "Install the LTS version from https://nodejs.org (or: brew install node),"
   echo "reopen your terminal, then run this installer again."
   exit 1
@@ -232,7 +232,7 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   fi
 fi
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-  echo "ERROR: node not found; install Node 22+ or re-run the ModelDock installer" >&2
+  echo "ERROR: node not found; install Node 24+ or re-run the ModelDock installer" >&2
   exit 1
 fi
 cd "$ROOT"
@@ -387,7 +387,7 @@ if (-not $logsReady) {
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
-# downloads Node 22 LTS there when none is on PATH), then PATH.
+# downloads Node 24 LTS there when none is on PATH), then PATH.
 $nodeExe = $null
 if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
@@ -403,7 +403,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
 }
 
@@ -538,7 +538,7 @@ resolve_node() {
 
 NODE_BIN="$(resolve_node)"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-  status "ERROR: node not found; install Node 22+ or re-run the ModelDock installer"
+  status "ERROR: node not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
 fi
 
@@ -817,7 +817,7 @@ restore_native() {
   fi
   NODE_BIN="$(resolve_node)"
   if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-    echo "node not found; cannot restore the Codex config. Install Node 22+ or re-run the installer." >&2
+    echo "node not found; cannot restore the Codex config. Install Node 24+ or re-run the installer." >&2
     exit 1
   fi
   "$NODE_BIN" --input-type=module - "$STATE" "$CONFIG" <<'NODE'

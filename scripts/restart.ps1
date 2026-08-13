@@ -131,7 +131,7 @@ if (-not $logsReady) {
 }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
-# downloads Node 22 LTS there when none is on PATH), then PATH.
+# downloads Node 24 LTS there when none is on PATH), then PATH.
 $nodeExe = $null
 if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
 if (-not $nodeExe) {
@@ -147,7 +147,7 @@ if (-not $nodeExe) {
 }
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
-  Write-Status "ERROR: node.exe not found; install Node 22+ or re-run the ModelDock installer"
+  Write-Status "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
 }
 

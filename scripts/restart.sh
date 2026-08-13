@@ -81,7 +81,7 @@ resolve_node() {
 
 NODE_BIN="$(resolve_node)"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
-  status "ERROR: node not found; install Node 22+ or re-run the ModelDock installer"
+  status "ERROR: node not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
 fi
 
