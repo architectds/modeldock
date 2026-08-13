@@ -9,7 +9,7 @@ function inputItems(input) {
 // role:"assistant", a tool-driven turn leaves lastMarker at -1 and the "current
 // turn" swallows the entire history, so a stale image (or a stale tool call) from
 // many turns ago keeps re-triggering vision routing on every request.
-function isAssistantMarker(item) {
+export function isAssistantMarker(item) {
   if (!item || typeof item !== "object") return false;
   if (item.role === "assistant") return true;
   return item.type === "function_call"

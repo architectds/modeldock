@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
-import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
+import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
@@ -671,16 +671,16 @@ export function normalizeOpenCodeProInput(input) {
   return attachProExecutionGuidance(continued);
 }
 
-// A message is "current" when it follows the last assistant turn. Only those
-// images may reach the upstream: the request is either escalated to the vision
-// model or the main model itself can see images. Images in earlier turns were
-// already handled (often by the vision model) and re-sending their bytes on every
-// turn burns tokens the text-only main model cannot use.
+// A message is "current" when it follows the last assistant turn. In the
+// Responses wire an assistant turn is not always a role:"assistant" message: an
+// agentic turn is frequently a bare function_call / reasoning item. This mirrors
+// router.mjs's isAssistantMarker so the rewrite's notion of "current" matches the
+// turn that triggered vision escalation.
 function currentTurnStart(input) {
   if (!Array.isArray(input)) return 0;
   let start = 0;
   for (let index = 0; index < input.length; index += 1) {
-    if (input[index]?.role === "assistant") start = index + 1;
+    if (isAssistantMarker(input[index])) start = index + 1;
   }
   return start;
 }
@@ -689,16 +689,21 @@ export function currentTurnStartForTesting(input) {
   return currentTurnStart(input);
 }
 
-// Replace input_image parts in non-current turns with a lightweight image_ref
-// placeholder. The media store keeps the image so vision_inspect can re-read it.
-// Current-turn images stay untouched (they are either escalated or read by a
-// vision-capable main model). Without a media store the rewrite is a no-op, so a
-// partial services stub stays safe.
-export function rewriteHistoricalImages(input, mediaStore) {
+// Replace input_image parts with a lightweight image_ref placeholder so a text
+// main model never re-receives image bytes. By default every input_image is
+// rewritten (no turn gating), which keeps the text model's history byte-stable:
+// an image serializes the same way whether it sits in the current turn or an
+// older one, so the upstream prefix cache is not invalidated as turns advance.
+// preserveCurrentImages=true keeps current-turn images (index >= turnStart) as
+// real input_image parts for the vision escalation path, which must see the
+// bytes. Without a media store the rewrite is a no-op, so a partial services stub
+// stays safe.
+export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImages = false } = {}) {
   if (!Array.isArray(input)) return input;
   const turnStart = currentTurnStart(input);
   return input.map((item, index) => {
-    if (!item || typeof item !== "object" || !Array.isArray(item.content) || index >= turnStart) return item;
+    if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
+    if (preserveCurrentImages && index >= turnStart) return item;
     let changed = false;
     const content = item.content.map((part) => {
       if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
@@ -1828,7 +1833,12 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     stream: false,
     tools: [],
     tool_choice: "none",
-    input: [...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore), messageItem(COMPACT_PROMPT)],
+    input: [
+      ...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore, {
+        preserveCurrentImages: route.directVision,
+      }),
+      messageItem(COMPACT_PROMPT),
+    ],
   };
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
@@ -2089,6 +2099,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     input: rewriteHistoricalImages(
       proOpenCodeGo ? normalizeOpenCodeProInput(payload.input) : normalizeGatewayInput(payload.input),
       mediaStore,
+      { preserveCurrentImages: route.directVision },
     ),
     model: route.model,
   };

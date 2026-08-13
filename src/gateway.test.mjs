@@ -510,7 +510,7 @@ test("normalizeGatewayInput repairs the real severed compact history shape", () 
   }
 });
 
-test("currentTurnStart is the item after the last assistant turn", () => {
+test("currentTurnStart is the item after the last assistant turn (or agentic marker)", () => {
   const input = [
     { type: "message", role: "user", content: [] },
     { type: "message", role: "assistant", content: [] },
@@ -518,9 +518,17 @@ test("currentTurnStart is the item after the last assistant turn", () => {
   ];
   assert.equal(currentTurnStartForTesting(input), 2);
   assert.equal(currentTurnStartForTesting([{ type: "message", role: "user", content: [] }]), 0);
+  assert.equal(
+    currentTurnStartForTesting([
+      { type: "message", role: "user", content: [] },
+      { type: "function_call", name: "shell_command", arguments: "{}" },
+      { type: "message", role: "user", content: [] },
+    ]),
+    2,
+  );
 });
 
-test("rewriteHistoricalImages replaces only non-current images with refs", () => {
+test("rewriteHistoricalImages replaces all images with refs by default", () => {
   const mediaStore = {
     put: (url) => `img_${url.length}`,
   };
@@ -532,8 +540,22 @@ test("rewriteHistoricalImages replaces only non-current images with refs", () =>
   const rewritten = rewriteHistoricalImages(input, mediaStore);
   assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+\./);
   assert.equal(rewritten[0].content[1].type, "input_text");
-  assert.equal(rewritten[2].content[1].type, "input_image", "current-turn image stays untouched");
+  assert.equal(rewritten[2].content[1].type, "input_text", "current-turn image is also replaced by default");
   assert.equal(rewritten[1], input[1], "assistant history is untouched");
+});
+
+test("rewriteHistoricalImages preserves current images when requested", () => {
+  const mediaStore = {
+    put: (url) => `img_${url.length}`,
+  };
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "handled" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "current" }, { type: "input_image", image_url: "data:image/png;base64,BBBB" }] },
+  ];
+  const rewritten = rewriteHistoricalImages(input, mediaStore, { preserveCurrentImages: true });
+  assert.equal(rewritten[0].content[0].type, "input_text", "historical image is replaced");
+  assert.equal(rewritten[2].content[1].type, "input_image", "current-turn image stays untouched");
 });
 
 test("rewriteHistoricalImages degrades to a plain placeholder without a media store", () => {
