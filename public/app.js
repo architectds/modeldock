@@ -562,6 +562,12 @@ function render(data) {
   if (visionDd) visionDd.title = data.config.visionUpstreamUrl ? t("runtime.via", { url: data.config.visionUpstreamUrl }) : "";
   set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
+  const runtime = data.runtime || {};
+  set("cfg-node", runtime.nodeVersion || "n/a");
+  const nodeDd = $("cfg-node");
+  if (nodeDd) nodeDd.title = `zstd: ${runtime.zstdBackend || "unknown"}`;
+  const migration = $("runtime-migration");
+  if (migration) migration.hidden = !runtime.migrationRequired;
   renderAutostart(data);
   renderSpeech(data);
   renderUpdate(data);

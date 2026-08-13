@@ -5,6 +5,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import zlib from "node:zlib";
+import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
@@ -383,6 +384,11 @@ function statusPayload(services) {
     subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
+    runtime: {
+      nodeVersion: process.version,
+      zstdBackend: typeof zlib.zstdDecompress === "function" ? "native" : "fallback",
+      migrationRequired: Number(process.versions.node.split(".", 1)[0]) < 24,
+    },
     autostart: {
       supported: Boolean(autostart?.supported?.()),
       enabled: Boolean(autostart?.enabled?.()),
@@ -959,14 +965,10 @@ function protectedRelayPath(pathname) {
 }
 
 function zstdRequestDecoder(callerKey) {
-  const canZstd = typeof zlib.zstdDecompress === "function";
   const maxInput = 16 * 1024 * 1024;
   const maxOutput = 64 * 1024 * 1024;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
-    if (!canZstd) {
-      return res.status(415).json({ error: { type: "unsupported_encoding", message: "zstd request bodies require Node 23.8+ (run ModelDock on Node 24)." } });
-    }
     const pathname = String(req.url || "").split("?", 1)[0];
     const keyMatch = pathname.match(/^\/c\/([^/]+)/);
     if (keyMatch && (!callerKey || !callerKeyEqual(keyMatch[1], callerKey))) {
@@ -991,7 +993,8 @@ function zstdRequestDecoder(callerKey) {
     req.on("error", next);
     req.on("end", () => {
       if (tooLarge) return;
-      zlib.zstdDecompress(Buffer.concat(chunks), { maxOutputLength: maxOutput }, (error, body) => {
+      const compressed = Buffer.concat(chunks);
+      const onDecoded = (error, body) => {
         if (error) {
           if (error.code === "ERR_BUFFER_TOO_LARGE") {
             return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
@@ -1006,9 +1009,39 @@ function zstdRequestDecoder(callerKey) {
         } catch (decodeError) {
           res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${decodeError.message}` } });
         }
-      });
+      };
+      decodeZstdBody(compressed, maxOutput).then(
+        (body) => onDecoded(null, body),
+        (error) => onDecoded(error),
+      );
     });
   };
+}
+
+export function decodeZstdBody(compressed, maxOutput = 64 * 1024 * 1024, nativeDecoder = zlib.zstdDecompress) {
+  if (typeof nativeDecoder === "function") {
+    return new Promise((resolve, reject) => {
+      nativeDecoder(compressed, { maxOutputLength: maxOutput }, (error, body) => {
+        if (error) reject(error);
+        else resolve(Buffer.from(body));
+      });
+    });
+  }
+  return Promise.resolve().then(() => {
+    const chunks = [];
+    let length = 0;
+    const decoder = new ZstdFallbackDecoder((chunk) => {
+      length += chunk.length;
+      if (length > maxOutput) {
+        const error = new Error("decompressed body exceeds limit");
+        error.code = "ERR_BUFFER_TOO_LARGE";
+        throw error;
+      }
+      chunks.push(Buffer.from(chunk));
+    });
+    decoder.push(compressed, true);
+    return Buffer.concat(chunks, length);
+  });
 }
 
 export function createApp(services = createServices()) {

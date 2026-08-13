@@ -7,7 +7,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog } from "./server.mjs";
+import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "./server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
 import { dpapiSupported } from "./secrets.mjs";
 
@@ -256,6 +256,9 @@ test("api/status returns expected shape", async (t) => {
   assert.ok(body.vision);
   assert.ok(Array.isArray(body.recent));
   assert.ok(body.media);
+  assert.equal(body.runtime.nodeVersion, process.version);
+  assert.equal(body.runtime.zstdBackend, typeof zlib.zstdDecompress === "function" ? "native" : "fallback");
+  assert.equal(body.runtime.migrationRequired, Number(process.versions.node.split(".", 1)[0]) < 24);
 });
 
 test("api endpoints reject cross-origin browser reads", async (t) => {
@@ -662,6 +665,20 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
     body: huge,
   });
   assert.equal(tooLong.status, 413);
+});
+
+test("zstd fallback decodes Node 22 request bodies and enforces the output cap", async (t) => {
+  if (typeof zlib.zstdCompressSync !== "function") {
+    t.skip("zstd fixture generation requires Node 23.8+");
+    return;
+  }
+  const payload = Buffer.from(JSON.stringify({ input: "resume the long context" }));
+  const compressed = zlib.zstdCompressSync(payload);
+  assert.deepEqual(await decodeZstdBody(compressed, 1024, null), payload);
+  await assert.rejects(
+    decodeZstdBody(zlib.zstdCompressSync(Buffer.alloc(2048)), 1024, null),
+    (error) => error?.code === "ERR_BUFFER_TOO_LARGE",
+  );
 });
 
 test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) => {

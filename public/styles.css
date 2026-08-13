@@ -177,6 +177,7 @@ th:nth-child(1),td:nth-child(1){width:12%} th:nth-child(2),td:nth-child(2){width
 td.empty { text-align: center; color: var(--muted); padding: 42px; }
 .trace-status { display: inline-flex; align-items: center; gap: 6px; }.trace-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }.trace-status.error i { background: #ff6b6b; }.trace-status.active i { background: var(--amber); }
 .config-list { margin: 0; }.config-list div { display: grid; grid-template-columns: 105px minmax(0,1fr); padding: 10px 0; border-bottom: 1px solid var(--line); }.config-list dt { color: var(--muted); font-size: 10px; }.config-list dd { margin: 0; text-align: right; font: 10px ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-migration { margin: 12px 0 0; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--amber) 9%, transparent); color: var(--amber); font-size: 10px; line-height: 1.45; }
 .security-note { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 12px; border: 1px solid rgba(72,214,160,.18); border-radius: 9px; background: rgba(72,214,160,.05); }.security-note span { color: var(--green); font: 700 9px ui-monospace, monospace; }.security-note p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 
 @media (max-width: 1200px) { .shell { width: calc(100% - 36px); }.control-meta { gap: 12px; } }

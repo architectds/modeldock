@@ -64,6 +64,7 @@ const I18N_EN = {
   "runtime.eyebrow": "RUNTIME",
   "runtime.fallback": "Fallback",
   "runtime.main": "Main model",
+  "runtime.migration": "Node.js 24 migration required. Re-run the ModelDock installer, then restart ModelDock.",
   "runtime.title": "Configuration",
   "runtime.upstream": "Upstream",
   "runtime.via": "via",

@@ -51,10 +51,37 @@ Write-Host "ModelDock installer" -ForegroundColor Cyan
 #    bundled-first way, so the installed layout stays self-contained.
 $nodeExe = $null
 $systemNodeVersion = $null
-if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) { $nodeExe = $env:MODELDOCK_NODE_PATH }
-if (-not $nodeExe) {
-    $bestDir = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" } |
+$managedNodeUpgrade = $false
+$nodeMigrationNeeded = $false
+$explicitNodeWasManaged = $false
+$nodeDownloaded = $false
+if ($env:MODELDOCK_NODE_PATH -and (Test-Path -LiteralPath $env:MODELDOCK_NODE_PATH)) {
+    try {
+        $v = (& $env:MODELDOCK_NODE_PATH --version) 2>$null
+        if ($v -match "^v(\d+)\." -and [int]$Matches[1] -ge 24) { $nodeExe = $env:MODELDOCK_NODE_PATH }
+    } catch {}
+    $explicitNode = [System.IO.Path]::GetFullPath($env:MODELDOCK_NODE_PATH)
+    $managedNodeRoot = [System.IO.Path]::GetFullPath((Join-Path $root "node")) + [System.IO.Path]::DirectorySeparatorChar
+    $explicitNodeWasManaged = $explicitNode.StartsWith($managedNodeRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $nodeExe -and $explicitNodeWasManaged) {
+        $managedNodeUpgrade = $true
+        $nodeMigrationNeeded = $true
+    } elseif (-not $nodeExe) {
+        throw "MODELDOCK_NODE_PATH must point to Node.js 24 or newer: $($env:MODELDOCK_NODE_PATH)"
+    }
+}
+$bundledDirs = @(Get-ChildItem -LiteralPath (Join-Path $root "node") -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match "^v\d+\.\d+\.\d+$" })
+if (@($bundledDirs | Where-Object { $_.Name -match "^v(\d+)\." -and [int]$Matches[1] -lt 24 }).Count -gt 0) {
+    # Do not leave an old bundled runtime behind an external Node 24 path: the
+    # login launcher is bundled-first and would otherwise select Node 22 later.
+    $nodeMigrationNeeded = $true
+    $managedNodeUpgrade = $true
+    $nodeExe = $null
+}
+if (-not $nodeExe -and (-not $env:MODELDOCK_NODE_PATH -or $explicitNodeWasManaged -or $managedNodeUpgrade)) {
+    $bestDir = @($bundledDirs |
+        Where-Object { $_.Name -match "^v(\d+)\.\d+\.\d+$" -and [int]$Matches[1] -ge 24 } |
         Sort-Object @{ Expression = {
                 if ($_.Name -match "^v(\d+)\.(\d+)\.(\d+)$") { [long]$Matches[1] * 1000000 + [long]$Matches[2] * 1000 + [long]$Matches[3] } else { -1 }
             }; Descending = $true } |
@@ -62,8 +89,9 @@ if (-not $nodeExe) {
     if ($bestDir -and (Test-Path -LiteralPath (Join-Path $bestDir.FullName "node.exe"))) {
         $nodeExe = Join-Path $bestDir.FullName "node.exe"
     }
+    if ($bundledDirs.Count -gt 0 -and -not $nodeExe) { $managedNodeUpgrade = $true }
 }
-if (-not $nodeExe) {
+if (-not $nodeExe -and -not $managedNodeUpgrade) {
     try {
         $v = (& node --version) 2>$null
         if ($v -match "^v(\d+)\." -and [int]$Matches[1] -ge 24) {
@@ -117,6 +145,8 @@ if (-not $nodeExe) {
             if (Test-Path -LiteralPath $targetDir) { Remove-Item -LiteralPath $targetDir -Recurse -Force }
             Move-Item -LiteralPath $extracted -Destination $targetDir
             $nodeExe = Join-Path $targetDir "node.exe"
+            $nodeDownloaded = $true
+            $nodeMigrationNeeded = $true
             Write-Host ("  bundled node {0} installed at {1}" -f $nodeVer, $targetDir)
         } finally {
             Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -127,6 +157,7 @@ if (-not $nodeExe) {
         $nodeExe = $null
     }
 }
+$env:MODELDOCK_NODE_PATH = $nodeExe
 if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe)) {
     Write-Host ""
     Write-Host "Node.js 24 or newer is required but could not be installed automatically." -ForegroundColor Yellow
@@ -744,7 +775,10 @@ if ($skipStart) {
         # /healthz answers 503 until a token is configured - that still means running
         if ($_.Exception.Response) { $running = $true }
     }
-    if ($running) {
+    if ($running -and ($nodeDownloaded -or $nodeMigrationNeeded)) {
+        Write-Host "  restarting ModelDock on the new Node runtime..."
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $restart -Force
+    } elseif ($running) {
         Write-Host "  ModelDock is already running on port $port - keeping it."
     } else {
         Write-Host "  starting ModelDock in the background..."

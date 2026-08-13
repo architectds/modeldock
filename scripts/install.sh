@@ -51,17 +51,52 @@ echo "ModelDock installer"
 #    bundled-first way, so the installed layout stays self-contained.
 NODE_BIN=""
 NODE_SYSTEM_VERSION=""
+MANAGED_NODE_UPGRADE=0
+NODE_MIGRATION_NEEDED=0
 if [ -n "${MODELDOCK_NODE_PATH:-}" ] && [ -x "$MODELDOCK_NODE_PATH" ]; then
-  NODE_BIN="$MODELDOCK_NODE_PATH"
+  NODE_MAJOR="$($MODELDOCK_NODE_PATH --version 2>/dev/null | sed -n 's/^v\([0-9]*\).*/\1/p' || true)"
+  if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 24 ]; then
+    NODE_BIN="$MODELDOCK_NODE_PATH"
+  else
+    case "$MODELDOCK_NODE_PATH" in
+      "$ROOT"/node/*) MANAGED_NODE_UPGRADE=1 ;;
+      *) echo "ERROR: MODELDOCK_NODE_PATH must point to Node.js 24 or newer: $MODELDOCK_NODE_PATH" >&2; exit 1 ;;
+    esac
+  fi
 fi
-if [ -z "$NODE_BIN" ]; then
+for d in "$ROOT"/node/v*; do
+  [ -d "$d" ] && [ -x "$d/bin/node" ] || continue
+  NODE_DIR_MAJOR="$(basename "$d" | sed -n 's/^v\([0-9]*\).*/\1/p')"
+  if [ -n "$NODE_DIR_MAJOR" ] && [ "$NODE_DIR_MAJOR" -lt 24 ]; then
+    # The login launcher is bundled-first. Ensure it cannot fall back to an old
+    # managed Node after this installer stops exporting an external one.
+    NODE_MIGRATION_NEEDED=1
+    MANAGED_NODE_UPGRADE=1
+    NODE_BIN=""
+  fi
+done
+if [ "$MANAGED_NODE_UPGRADE" -eq 1 ]; then NODE_MIGRATION_NEEDED=1; fi
+if [ -z "$NODE_BIN" ] && { [ -z "${MODELDOCK_NODE_PATH:-}" ] || [ "$MANAGED_NODE_UPGRADE" -eq 1 ]; }; then
+  BEST_NODE_BIN=""
+  BEST_NODE_VERSION=""
   for d in "$ROOT"/node/v*; do
     [ -d "$d" ] || continue
     [ -x "$d/bin/node" ] || continue
-    NODE_BIN="$d/bin/node"
+    NODE_DIR_VERSION="$(basename "$d" | sed 's/^v//')"
+    NODE_DIR_MAJOR="$(printf '%s' "$NODE_DIR_VERSION" | cut -d. -f1)"
+    if [ "$NODE_DIR_MAJOR" -lt 24 ]; then
+      NODE_MIGRATION_NEEDED=1
+      MANAGED_NODE_UPGRADE=1
+      continue
+    fi
+    if [ -z "$BEST_NODE_VERSION" ] || [ "$(printf '%s\n%s\n' "$NODE_DIR_VERSION" "$BEST_NODE_VERSION" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)" = "$NODE_DIR_VERSION" ]; then
+      BEST_NODE_BIN="$d/bin/node"
+      BEST_NODE_VERSION="$NODE_DIR_VERSION"
+    fi
   done
+  if [ -n "$BEST_NODE_BIN" ]; then NODE_BIN="$BEST_NODE_BIN"; MANAGED_NODE_UPGRADE=0; fi
 fi
-if [ -z "$NODE_BIN" ] && command -v node >/dev/null 2>&1; then
+if [ -z "$NODE_BIN" ] && [ "$MANAGED_NODE_UPGRADE" -eq 0 ] && command -v node >/dev/null 2>&1; then
   NODE_MAJOR="$(node --version | sed -n 's/^v\([0-9]*\).*/\1/p')"
   if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 24 ]; then
     NODE_SYSTEM_VERSION="$(node --version)"
@@ -123,12 +158,15 @@ if [ -z "$NODE_BIN" ]; then
   mv "$STAGE/node-$NODE_VER-$NODE_OS-$NODE_ARCH" "$TARGET"
   rm -rf "$STAGE"
   NODE_BIN="$TARGET/bin/node"
+  NODE_DOWNLOADED=1
+  NODE_MIGRATION_NEEDED=1
   if [ ! -x "$NODE_BIN" ]; then
     echo "ERROR: extracted archive is missing bin/node" >&2
     exit 1
   fi
   echo "  bundled node $NODE_VER installed at $TARGET"
 fi
+export MODELDOCK_NODE_PATH="$NODE_BIN"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo ""
   echo "Node.js 24 or newer is required but could not be installed automatically."
@@ -1047,6 +1085,9 @@ fi
 #    feeds the installer a fake node that may not be executable).
 if [ "$SKIP_START" = "1" ]; then
   echo "  MODELDOCK_SKIP_START=1 - not starting the gateway."
+elif curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" && { [ "${NODE_DOWNLOADED:-0}" = "1" ] || [ "$NODE_MIGRATION_NEEDED" = "1" ]; }; then
+  echo "  restarting ModelDock on the new Node runtime..."
+  sh "$RESTART_SH" --force
 elif curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
   echo "  ModelDock is already running on port $PORT - keeping it."
 else

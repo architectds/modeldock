@@ -134,6 +134,27 @@ test("createUpdater.apply refuses when no update is available", async () => {
   await assert.rejects(() => updater.apply(), /No update available/);
 });
 
+test("createUpdater.apply blocks Node-24-only releases before downloading or replacing files", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-node-gate-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.3.3" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const oldBundle = "installed bridge bundle";
+  writeFileSync(path.join(rootDir, "dist", "modeldock.mjs"), oldBundle);
+  let assetDownloads = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.4.0", { "modeldock.mjs": "new" }, "sums");
+    assetDownloads += 1;
+    return responseBody("unreachable");
+  };
+  const updater = createUpdater({ fetchImpl, rootDir, platform: "win32", nodeMajor: 22 });
+  await updater.check();
+  await assert.rejects(() => updater.apply(), /Re-run the ModelDock installer/);
+  assert.equal(assetDownloads, 0);
+  assert.equal(readFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "utf8"), oldBundle);
+});
+
 test("createUpdater.apply deploys the complete Windows install and rechecks at click time", async (t) => {
   const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-"));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));

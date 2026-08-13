@@ -51,7 +51,7 @@ function writeFakeMacTools(binDir) {
     "#!/bin/sh\necho \"$*\" >> \"$MODELDOCK_FAKE_LAUNCHCTL_LOG\"\nexit 0\n",
     { mode: 0o755 },
   );
-  writeFileSync(path.join(binDir, "node"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(path.join(binDir, "node"), "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo v24.5.0; fi\nexit 0\n", { mode: 0o755 });
 }
 
 // Env shared by the install.sh sandbox. `fakeBin` must already exist and be

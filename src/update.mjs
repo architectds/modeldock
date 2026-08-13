@@ -22,6 +22,10 @@ const SUMS_NAME = "SHA256SUMS";
 const CHECK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+// The 0.3.x bridge can run on old managed Node 22 installations long enough to
+// install Node 24. The 0.4 line removes that bridge and must never be deployed
+// onto the old runtime.
+const NODE_24_REQUIRED_FROM = "0.4.0";
 // Rollback snapshots kept per install: one is the recovery material for the
 // current update, the second covers the previous update's recover menu while a
 // user works through it. Older full-layout copies would otherwise pile up.
@@ -362,6 +366,7 @@ export function createUpdater({
   autoCheckMs = 0,
   rootDir = root,
   platform = process.platform,
+  nodeMajor = Number(process.versions.node.split(".", 1)[0]),
 } = {}) {
   const restart = restartImpl || (() => scheduleRestart(rootDir));
   const state = {
@@ -421,6 +426,9 @@ export function createUpdater({
         // apply() must deploy the newest release, not a cached one.
         await check();
         if (!state.available) throw new Error("No update available");
+        if (nodeMajor < 24 && compareVersions(state.latestVersion, NODE_24_REQUIRED_FROM) >= 0) {
+          throw new Error("Node.js 24 or newer is required for this update. Re-run the ModelDock installer to migrate the managed runtime, then update again.");
+        }
         if (!assetUrl) throw new Error("Release has no modeldock.mjs asset");
         const sums = await fetchSums(sumsUrl, fetchImpl);
         // Download and verify the whole set first; only then touch the installed

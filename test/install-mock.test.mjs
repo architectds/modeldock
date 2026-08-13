@@ -4,7 +4,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
 import { once } from "node:events";
@@ -855,7 +855,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(await waitForPortFree(appPort), "final gateway should stop");
 });
 
-test("mock install: auto-download a bundled Node 24 LTS when none is suitable", async (t) => {
+test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) => {
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const fakeBridge = Buffer.from("// fake mcp bridge\n");
   const nodeVer = "24.5.0";
@@ -866,6 +866,7 @@ test("mock install: auto-download a bundled Node 24 LTS when none is suitable", 
   const zipEntry = { name: `node-${distName}-win-x64/node.exe`, data: "fake node.exe for download test\n" };
   const zip = buildZip([zipEntry]);
   const nodeBin = "#!/bin/sh\nexec node \"$@\"\n";
+  const oldNodeBin = "#!/bin/sh\nif [ \"\${1:-}\" = \"--version\" ]; then echo v22.18.0; exit 0; fi\nexec node \"$@\"\n";
   const tgz = gzipSync(
     buildTar([
       { name: `node-${distName}-linux-x64/`, type: "dir" },
@@ -947,6 +948,12 @@ test("mock install: auto-download a bundled Node 24 LTS when none is suitable", 
   t.after(() => rmSync(installDir, { recursive: true, force: true }));
   const autostartEnv = installAutostartEnv(installDir);
   if (isWindows) t.after(() => deleteWinRegistryKey(autostartEnv.MODELDOCK_AUTOSTART_KEY));
+  const oldBundledNode = isWindows
+    ? path.join(installDir, "node", "v22.18.0", "node.exe")
+    : path.join(installDir, "node", "v22.18.0", "bin", "node");
+  mkdirSync(path.dirname(oldBundledNode), { recursive: true });
+  if (isWindows) copyFileSync(process.execPath, oldBundledNode);
+  else writeFileSync(oldBundledNode, oldNodeBin, { mode: 0o755 });
 
   const env = {
     ...process.env,
@@ -955,7 +962,7 @@ test("mock install: auto-download a bundled Node 24 LTS when none is suitable", 
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
     MODELDOCK_SUMS_URL: `http://127.0.0.1:${serverPort}/SHA256SUMS`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
-    MODELDOCK_FORCE_NODE_DOWNLOAD: "1",
+    MODELDOCK_NODE_PATH: oldBundledNode,
     // The Windows fixture node.exe is a text file; executing it would make Windows
     // pop an "Unsupported 16-Bit Application" dialog and hang the test's launcher.
     // Skip the start on Windows so only download/verify/extract/layout is asserted.

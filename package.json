@@ -23,6 +23,7 @@
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "express": "5.2.1",
+    "fzstd": "0.1.1",
     "msedge-tts": "^2.0.7",
     "zod": "4.4.3"
   },
