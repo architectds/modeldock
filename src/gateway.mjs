@@ -620,6 +620,26 @@ function appendProToolContinuation(input) {
   ];
 }
 
+const PRO_EXECUTION_GUIDANCE = [
+  "ModelDock execution protocol for this Codex turn:",
+  "When the user requests an action, do not end with a progress update, plan, or future-tense promise.",
+  "Use the available tools now and continue through their results until the requested action is complete or a concrete blocker prevents it.",
+  "A final answer must report completed evidence or the blocker; statements such as 'I will do it' or 'doing it now' are not a completed result.",
+].join(" ");
+
+function attachProExecutionGuidance(input) {
+  if (!Array.isArray(input)) return input;
+  const index = input.findLastIndex((item) => item?.type === "message" && item?.role === "user");
+  if (index < 0) return input;
+  const message = input[index];
+  const content = Array.isArray(message.content)
+    ? [...message.content, { type: "input_text", text: PRO_EXECUTION_GUIDANCE }]
+    : `${String(message.content || "")}\n\n${PRO_EXECUTION_GUIDANCE}`;
+  const out = [...input];
+  out[index] = { ...message, content };
+  return out;
+}
+
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
   return dropUnpairedToolItems(input)
@@ -647,7 +667,8 @@ export function normalizeOpenCodeProInput(input) {
   const withToolCallIds = fillProToolCallIds(interleaved);
   const withReasoningIds = fillReasoningIds(withToolCallIds);
   const flattened = flattenAssistantContent(withReasoningIds);
-  return appendProToolContinuation(flattened);
+  const continued = appendProToolContinuation(flattened);
+  return attachProExecutionGuidance(continued);
 }
 
 // A message is "current" when it follows the last assistant turn. Only those

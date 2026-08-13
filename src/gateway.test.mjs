@@ -317,6 +317,23 @@ test("normalizeOpenCodeProInput appends a continuation after dropping a trailing
   assert.match(normalized[2].content[0].text, /Continue from the tool results/);
 });
 
+test("normalizeOpenCodeProInput keeps action persistence guidance next to the current user turn", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "earlier" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "push now" }] },
+  ]);
+  assert.equal(normalized[0].content.length, 1, "historical user messages stay untouched");
+  assert.equal(normalized[2].content[0].text, "push now");
+  assert.match(normalized[2].content[1].text, /do not end with a progress update/);
+  assert.match(normalized[2].content[1].text, /completed evidence or the blocker/);
+});
+
+test("normalizeGatewayInput does not add Pro execution guidance", () => {
+  const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "push now" }] }];
+  assert.deepEqual(normalizeGatewayInput(input), input);
+});
+
 test("describeInputShape reports item counts and reasoning shapes for the trace", () => {
   const shape = describeInputShape([
     { type: "message", role: "user" },
