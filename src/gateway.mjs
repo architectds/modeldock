@@ -529,6 +529,35 @@ function fillReasoningIds(input) {
   return changed ? out : input;
 }
 
+// Codex can replay native/OpenAI reasoning after compaction as an opaque
+// encrypted_content item with only a public summary. Console Go cannot decrypt
+// that provider-private payload and its Pro thinking route requires a concrete
+// reasoning_text part. Promote the existing summary (never invented text) into
+// the replayable content shape. An opaque item with neither content nor summary
+// carries nothing this provider can consume, so omit it instead of sending an
+// invalid thinking message that rejects the entire long-running session.
+function normalizeProReasoningContent(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = input.flatMap((item) => {
+    if (item?.type !== "reasoning") return [item];
+    const content = Array.isArray(item.content) ? item.content : [];
+    const hasReasoningText = content.some((part) =>
+      part?.type === "reasoning_text" && typeof part.text === "string" && part.text.trim());
+    if (hasReasoningText) return [item];
+    const summaryText = (Array.isArray(item.summary) ? item.summary : [])
+      .filter((part) => ["summary_text", "text"].includes(part?.type) && typeof part.text === "string")
+      .map((part) => part.text.trim())
+      .filter(Boolean)
+      .join("\n");
+    changed = true;
+    if (!summaryText) return [];
+    const { encrypted_content: _opaque, ...rest } = item;
+    return [{ ...rest, content: [{ type: "reasoning_text", text: summaryText }] }];
+  });
+  return changed ? out : input;
+}
+
 function fillProToolCallIds(input) {
   if (!Array.isArray(input)) return input;
   let changed = false;
@@ -665,7 +694,8 @@ export function normalizeOpenCodeProInput(input) {
   const normalized = normalizeGatewayInput(input);
   const interleaved = interleaveToolOutputs(normalized);
   const withToolCallIds = fillProToolCallIds(interleaved);
-  const withReasoningIds = fillReasoningIds(withToolCallIds);
+  const withReasoningContent = normalizeProReasoningContent(withToolCallIds);
+  const withReasoningIds = fillReasoningIds(withReasoningContent);
   const flattened = flattenAssistantContent(withReasoningIds);
   const continued = appendProToolContinuation(flattened);
   return attachProExecutionGuidance(continued);

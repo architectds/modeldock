@@ -208,6 +208,33 @@ test("normalizeOpenCodeProInput synthesizes reasoning ids deterministically per 
   assert.notEqual(first[0].id, other[0].id, "different content yields a different id");
 });
 
+test("normalizeOpenCodeProInput promotes a compacted reasoning summary to reasoning_text", () => {
+  const normalized = normalizeOpenCodeProInput([
+    {
+      type: "reasoning",
+      id: "rs_compacted",
+      content: [],
+      summary: [{ type: "summary_text", text: "  Recovered public reasoning summary.  " }],
+      encrypted_content: "opaque-native-provider-state",
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ]);
+  assert.equal(normalized[0].id, "rs_compacted");
+  assert.deepEqual(normalized[0].content, [
+    { type: "reasoning_text", text: "Recovered public reasoning summary." },
+  ]);
+  assert.equal(normalized[0].encrypted_content, undefined, "provider-private state is not sent to Console Go");
+});
+
+test("normalizeOpenCodeProInput drops opaque reasoning with no replayable text", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "reasoning", id: "rs_opaque", content: [], summary: [], encrypted_content: "opaque" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ]);
+  assert.equal(normalized.some((item) => item.id === "rs_opaque"), false);
+  assert.equal(normalized[0].role, "user");
+});
+
 test("normalizeOpenCodeProInput flattens assistant content arrays into chat-style strings", () => {
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -1458,6 +1485,57 @@ test("relayResponses registers Pro tool affinity from the rewritten completion",
     );
     assert.equal(result.ok, true);
     assert.equal(affinity.snapshot().activeCallIds, 1, "the synthesized completed output registers its call id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses sends compacted Pro reasoning to Console Go as reasoning_text", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let upstreamBody;
+  globalThis.fetch = async (_url, options) => {
+    upstreamBody = JSON.parse(options.body);
+    return new Response(
+      'data: {"type":"response.output_text.delta","delta":"done","response":{"id":"resp_pro_compact","model":"deepseek-v4-pro"}}\n\n' +
+      'data: {"type":"response.completed","response":{"id":"resp_pro_compact","model":"deepseek-v4-pro"}}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-pro@opencode-go",
+        stream: true,
+        input: [
+          {
+            type: "reasoning",
+            id: "rs_compacted",
+            content: [],
+            summary: [{ type: "summary_text", text: "Compacted reasoning summary" }],
+            encrypted_content: "opaque-native-provider-state",
+          },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+        ],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(upstreamBody.input[0].content, [
+      { type: "reasoning_text", text: "Compacted reasoning summary" },
+    ]);
+    assert.equal(upstreamBody.input[0].encrypted_content, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }
