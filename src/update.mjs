@@ -4,13 +4,15 @@
 // architectds/modeldock). The check runs once at startup (fire-and-forget); the
 // dashboard shows a small Update button when a newer version exists. Applying:
 //   - git checkout (a .git directory next to src/): `git pull --ff-only`
-//   - installed bundle: download the release's modeldock.mjs into dist/ atomically
-// then relaunch through scripts/start-hidden.* (detached, delayed so the port is
-// free) and exit the current process.
+//   - installed bundle: download and atomically deploy the complete platform
+//     layout from the newest release
+// Old Node 22 bridges first migrate their runtime, then the dashboard resumes
+// the same latest-release deployment without another user action.
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -360,15 +362,67 @@ function scheduleRestart(rootDir) {
   }
 }
 
+// A bridge runtime cannot execute a Node-24-only bundle, but it can hand the
+// runtime migration to the installer from that same verified release. The old
+// bridge restarts on Node 24, then the dashboard resumes the normal atomic
+// updater directly against latest without another user action.
+function scheduleInstallerMigration({ body, installerName, rootDir, repo }) {
+  const extension = installerName.endsWith(".ps1") ? "ps1" : "sh";
+  const installerPath = path.join(os.tmpdir(), `modeldock-update-${process.pid}-${Date.now()}.${extension}`);
+  writeFileSync(installerPath, body, { mode: extension === "sh" ? 0o700 : 0o600 });
+  const logPath = path.join(rootDir, "modeldock.log");
+  const logFd = openSync(logPath, "a");
+  const env = {
+    ...process.env,
+    MODELDOCK_ROOT: rootDir,
+    MODELDOCK_REPO: repo,
+    MODELDOCK_INSTALLER_TEMP: installerPath,
+    MODELDOCK_NODE_PATH: "",
+    MODELDOCK_RUNTIME_ONLY: "1",
+    MODELDOCK_SKIP_OPEN: "1",
+  };
+  const command = extension === "ps1" ? "powershell.exe" : "sh";
+  const args = extension === "ps1"
+    ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installerPath]
+    : [installerPath];
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(command, args, {
+        detached: true,
+        env,
+        stdio: ["ignore", logFd, logFd],
+        windowsHide: true,
+      });
+    } catch (error) {
+      closeSync(logFd);
+      removeFileIfPresent(installerPath);
+      reject(error);
+      return;
+    }
+    closeSync(logFd);
+    child.once("error", (error) => {
+      removeFileIfPresent(installerPath);
+      reject(error);
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 export function createUpdater({
   fetchImpl = fetch,
   restartImpl,
+  migrateImpl,
   autoCheckMs = 0,
   rootDir = root,
   platform = process.platform,
   nodeMajor = Number(process.versions.node.split(".", 1)[0]),
 } = {}) {
   const restart = restartImpl || (() => scheduleRestart(rootDir));
+  const migrate = migrateImpl || scheduleInstallerMigration;
   const state = {
     currentVersion: localVersion(rootDir),
     latestVersion: "",
@@ -404,7 +458,13 @@ export function createUpdater({
       sumsUrl = parsed.sumsUrl || "";
       releaseAssets = parsed.assets || {};
     } catch (error) {
+      state.available = false;
+      state.latestVersion = "";
+      state.notesUrl = "";
       state.error = error.message;
+      assetUrl = "";
+      sumsUrl = "";
+      releaseAssets = {};
     }
     state.checkedAt = Date.now();
     return state;
@@ -412,9 +472,10 @@ export function createUpdater({
 
   async function apply() {
     if (state.updating) throw new Error("Update already in progress");
-    if (!state.available) throw new Error("No update available");
     state.updating = true;
     try {
+      if (!state.available) await check();
+      if (!state.available) throw new Error("No update available");
       let mode;
       if (isGitCheckout(rootDir)) {
         mode = "git";
@@ -427,7 +488,35 @@ export function createUpdater({
         await check();
         if (!state.available) throw new Error("No update available");
         if (nodeMajor < 24 && compareVersions(state.latestVersion, NODE_24_REQUIRED_FROM) >= 0) {
-          throw new Error("Node.js 24 or newer is required for this update. Re-run the ModelDock installer to migrate the managed runtime, then update again.");
+          const installerName = platform === "win32" ? "install.ps1" : "install.sh";
+          const bridgeUrl = releaseAssets["mcp-standalone.mjs"];
+          if (!releaseAssets[installerName]) throw new Error(`Release is missing ${installerName}`);
+          if (!assetUrl) throw new Error("Release has no modeldock.mjs asset");
+          if (!bridgeUrl) throw new Error("Release has no mcp-standalone.mjs asset");
+          const sums = await fetchSums(sumsUrl, fetchImpl);
+          for (const target of deployTargetsFor(platform)) {
+            if (!releaseAssets[target.asset]) throw new Error(`Release is missing ${target.asset}`);
+            if (!sums[target.asset]) throw new Error(`SHA256SUMS has no entry for ${target.asset}`);
+          }
+          // Use this bridge release's installer for runtime migration, not the
+          // future latest installer. That keeps the migration protocol pinned
+          // and lets later releases delete it without stranding old bridges.
+          const currentReleaseBase = `https://github.com/${updateRepo()}/releases/download/v${state.currentVersion}`;
+          const currentSums = await fetchSums(`${currentReleaseBase}/${SUMS_NAME}`, fetchImpl);
+          const expected = currentSums[installerName];
+          if (!expected) throw new Error(`Current release SHA256SUMS has no entry for ${installerName}`);
+          const body = await fetchVerified(`${currentReleaseBase}/${installerName}`, expected, { fetchImpl });
+          await migrate({
+            body,
+            installerName,
+            rootDir,
+            repo: updateRepo(),
+          });
+          // The detached installer may fail before it restarts this process.
+          // Release the in-memory lock so the still-running bridge can retry;
+          // the dashboard itself remains disabled while it monitors migration.
+          state.updating = false;
+          return { ok: true, mode: "installer", latestVersion: state.latestVersion, restarting: true };
         }
         if (!assetUrl) throw new Error("Release has no modeldock.mjs asset");
         const sums = await fetchSums(sumsUrl, fetchImpl);

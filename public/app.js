@@ -857,7 +857,8 @@ async function applyUpdate() {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Update ${response.status}`);
     button.textContent = t("update.restarting");
-    awaitRestartThenReload();
+    if (body.mode === "installer") awaitRuntimeMigrationThenUpdate(body.latestVersion);
+    else awaitRestartThenReload(body.latestVersion);
   } catch (error) {
     updateBusy = false;
     button.disabled = false;
@@ -868,12 +869,13 @@ async function applyUpdate() {
 
 // The old process exits ~1s after responding and the relauncher waits 2s before
 // starting the new one, so begin probing after 4s and reload on the first answer.
-function awaitRestartThenReload() {
+function awaitRestartThenReload(expectedVersion = "") {
   const started = Date.now();
   setTimeout(function probe() {
     fetch("/api/status", { cache: "no-store" })
-      .then((response) => {
-        if (response.ok) window.location.reload();
+      .then(async (response) => {
+        const status = response.ok ? await response.json() : null;
+        if (response.ok && (!expectedVersion || status?.update?.currentVersion === expectedVersion)) window.location.reload();
         else throw new Error("not ready");
       })
       .catch(() => {
@@ -1166,6 +1168,56 @@ if (customEndpointInput) {
   customEndpointInput.addEventListener("input", () => {
     customShowHint(customResponsesUrlPreview(customEndpointInput.value));
   });
+}
+
+function awaitRuntimeMigrationThenUpdate(expectedVersion) {
+  const started = Date.now();
+  setTimeout(function probe() {
+    fetch("/api/status", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("not ready");
+        const status = await response.json();
+        const nodeMajor = Number(String(status?.runtime?.nodeVersion || "").replace(/^v/, "").split(".", 1)[0]);
+        if (nodeMajor < 24) throw new Error("runtime migration still in progress");
+        const updateResponse = await fetch("/api/update", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const body = await updateResponse.json();
+        if (!updateResponse.ok) {
+          updateBusy = false;
+          const button = $("update-button");
+          if (button) {
+            button.disabled = false;
+            button.textContent = t("button.update");
+          }
+          window.alert(body.error?.message || `Update ${updateResponse.status}`);
+          return;
+        }
+        awaitRestartThenReload(body.latestVersion || expectedVersion);
+      })
+      .catch((error) => {
+        if (Date.now() - started > 120_000) {
+          updateBusy = false;
+          const button = $("update-button");
+          if (button) {
+            button.disabled = false;
+            button.textContent = t("button.update");
+          }
+          window.alert("Node.js runtime migration did not complete. Check modeldock.log and try again.");
+        } else if (error.message === "runtime migration still in progress" || error.message === "not ready" || error instanceof TypeError) setTimeout(probe, 2_000);
+        else {
+          updateBusy = false;
+          const button = $("update-button");
+          if (button) {
+            button.disabled = false;
+            button.textContent = t("button.update");
+          }
+          window.alert(error.message);
+        }
+      });
+  }, 2_000);
 }
 
 // Endpoint presets for the two-in-one endpoint field: typing is always free, and

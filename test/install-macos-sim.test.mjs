@@ -184,6 +184,64 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   assert.match(launchctlCalls, /load -w/, `launchctl should load the plist: ${launchctlCalls}`);
   assert.ok(launchctlCalls.includes("com.modeldock.gateway.plist"), "launchctl should target our plist");
 
+  // Runtime-only migration must preserve the installed bundle while refreshing
+  // launchd so the existing bridge restarts on the selected Node 24 binary.
+  const bundleBeforeRuntimeMigration = readFileSync(path.join(installDir, "dist", "modeldock.mjs"));
+  const runtimeLoadCountBefore = (readFileSync(launchctlLog, "utf8").match(/load -w/g) || []).length;
+  let runtimeExit;
+  let runtimeOut = "";
+  let runtimeErr = "";
+  if (isWindows) {
+    const wslRoot = toWslPath(installDir);
+    const wslFakeBin = toWslPath(fakeBin);
+    const runtimeEnv = {
+      ...sandboxEnv({
+        root: wslRoot,
+        fakeBin: wslFakeBin,
+        launchctlLog: toWslPath(launchctlLog),
+        releaseUrl,
+        bridgeUrl,
+        sumsUrl,
+        skillBaseUrl,
+        port: appPort,
+      }),
+      MODELDOCK_RUNTIME_ONLY: "1",
+    };
+    const runner = path.join(installDir, "run-macos-runtime-only.sh");
+    const lines = [
+      "#!/bin/sh",
+      "set -eu",
+      `chmod +x '${wslFakeBin}/uname' '${wslFakeBin}/launchctl' '${wslFakeBin}/node'`,
+      ...Object.entries(runtimeEnv).map(([key, value]) => `export ${key}='${value}'`),
+      `exec sh '${toWslPath(installer)}'`,
+    ];
+    writeFileSync(runner, `${lines.join("\n")}\n`, "utf8");
+    const child = spawn("wsl", ["bash", toWslPath(runner)], { stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.on("data", (d) => (runtimeOut += d));
+    child.stderr.on("data", (d) => (runtimeErr += d));
+    runtimeExit = await new Promise((resolve) => child.on("close", resolve));
+  } else {
+    const child = spawn("sh", [installer], {
+      env: { ...env, MODELDOCK_RUNTIME_ONLY: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => (runtimeOut += d));
+    child.stderr.on("data", (d) => (runtimeErr += d));
+    runtimeExit = await new Promise((resolve) => child.on("close", resolve));
+  }
+  assert.equal(runtimeExit, 0, `runtime-only install.sh failed:\n${runtimeOut}\n${runtimeErr}`);
+  assert.deepEqual(
+    readFileSync(path.join(installDir, "dist", "modeldock.mjs")),
+    bundleBeforeRuntimeMigration,
+    "runtime-only migration must not replace the installed bundle",
+  );
+  const runtimeLaunchctlCalls = readFileSync(launchctlLog, "utf8");
+  const runtimeLoadCountAfter = (runtimeLaunchctlCalls.match(/load -w/g) || []).length;
+  assert.equal(runtimeLoadCountAfter, runtimeLoadCountBefore + 1, "runtime-only migration should reload launchd once");
+  const expectedPlistNode = isWindows ? `${toWslPath(fakeBin)}/node` : `${fakeBin}/node`;
+  assert.ok(readFileSync(plist, "utf8").includes(expectedPlistNode),
+    "runtime-only migration should keep the selected Node binary in the plist");
+
   assert.ok(existsSync(path.join(installDir, ".modeldock", "autostart-initialized")), "installer should record the decision marker");
 
   // Reinstall with the decision marker already present: start at login must be

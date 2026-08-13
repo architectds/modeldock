@@ -954,6 +954,9 @@ test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) 
   mkdirSync(path.dirname(oldBundledNode), { recursive: true });
   if (isWindows) copyFileSync(process.execPath, oldBundledNode);
   else writeFileSync(oldBundledNode, oldNodeBin, { mode: 0o755 });
+  const sentinelBundle = Buffer.from("runtime-only must preserve this bundle\n");
+  mkdirSync(path.join(installDir, "dist"), { recursive: true });
+  writeFileSync(path.join(installDir, "dist", "modeldock.mjs"), sentinelBundle);
 
   const env = {
     ...process.env,
@@ -972,6 +975,23 @@ test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) 
     MODELDOCK_STATE_DIR: path.join(installDir, ".modeldock"),
     ...autostartEnv,
   };
+  const runtimeOnly = runInstaller(path.join(repoRoot, "scripts", installerScript), {
+    ...env,
+    MODELDOCK_RUNTIME_ONLY: "1",
+    MODELDOCK_SKIP_START: "1",
+  });
+  let runtimeOnlyOut = "";
+  let runtimeOnlyErr = "";
+  runtimeOnly.stdout.on("data", (d) => (runtimeOnlyOut += d));
+  runtimeOnly.stderr.on("data", (d) => (runtimeOnlyErr += d));
+  const runtimeOnlyExit = await new Promise((resolve) => runtimeOnly.on("close", resolve));
+  assert.equal(runtimeOnlyExit, 0, `runtime-only migration failed:\n${runtimeOnlyOut}\n${runtimeOnlyErr}`);
+  assert.deepEqual(
+    readFileSync(path.join(installDir, "dist", "modeldock.mjs")),
+    sentinelBundle,
+    "runtime-only migration must not replace the installed bundle",
+  );
+
   const child = runInstaller(path.join(repoRoot, "scripts", installerScript), env);
   let out = "";
   let err = "";

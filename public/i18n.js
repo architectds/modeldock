@@ -149,7 +149,7 @@ const I18N_EN = {
   "unit.s": "s",
   "update.available": "Update v{n}",
   "update.restarting": "Restarting...",
-  "update.title": "New version available (current v{current}). One click to update and restart.",
+  "update.title": "New version available (current v{current}). One click updates directly to the latest release and restarts.",
   "update.updating": "Updating...",
 };
 
@@ -300,7 +300,7 @@ const I18N_ZH = {
   "unit.s": "秒",
   "update.available": "更新 v{n}",
   "update.restarting": "重启中...",
-  "update.title": "发现新版本（当前 v{n}）。一键更新并重启。",
+  "update.title": "\u53d1\u73b0\u65b0\u7248\u672c\uff08\u5f53\u524d v{current}\uff09\u3002\u4e00\u952e\u76f4\u63a5\u66f4\u65b0\u5230\u6700\u65b0\u7248\u672c\u5e76\u91cd\u542f\u3002",
   "update.updating": "更新中...",
 };
 
@@ -451,7 +451,7 @@ const I18N_JA = {
   "unit.s": "秒",
   "update.available": "更新 v{n}",
   "update.restarting": "再起動中...",
-  "update.title": "新しいバージョンがあります（現在 v{current}）。ワンクリックで更新・再起動します。",
+  "update.title": "\u65b0\u3057\u3044\u30d0\u30fc\u30b8\u30e7\u30f3\u304c\u3042\u308a\u307e\u3059\uff08\u73fe\u5728 v{current}\uff09\u3002\u30ef\u30f3\u30af\u30ea\u30c3\u30af\u3067\u6700\u65b0\u7248\u3078\u76f4\u63a5\u66f4\u65b0\u3057\u3066\u518d\u8d77\u52d5\u3057\u307e\u3059\u3002",
   "update.updating": "更新中...",
 };
 
@@ -602,7 +602,7 @@ const I18N_FR = {
   "unit.s": "s",
   "update.available": "Mettre à jour v{n}",
   "update.restarting": "Redémarrage...",
-  "update.title": "Nouvelle version disponible (actuelle v{current}). Un clic pour mettre à jour et redémarrer.",
+  "update.title": "Nouvelle version disponible (actuelle v{current}). Un clic met directement \u00e0 jour vers la derni\u00e8re version et red\u00e9marre.",
   "update.updating": "Mise à jour...",
 };
 
@@ -753,7 +753,7 @@ const I18N_ES = {
   "unit.s": "s",
   "update.available": "Actualizar v{n}",
   "update.restarting": "Reiniciando...",
-  "update.title": "Nueva versión disponible (actual v{current}). Un clic para actualizar y reiniciar.",
+  "update.title": "Nueva versi\u00f3n disponible (actual v{current}). Un clic actualiza directamente a la \u00faltima versi\u00f3n y reinicia.",
   "update.updating": "Actualizando...",
 };
 

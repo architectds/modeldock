@@ -180,6 +180,69 @@ else
   echo "  node $NODE_BIN - OK"
 fi
 
+# The dashboard updater uses this mode to migrate the managed runtime without
+# touching the installed bundle. After the old bridge restarts on Node 24, the
+# updater performs its normal verified atomic deployment directly to latest.
+if [ "${MODELDOCK_RUNTIME_ONLY:-0}" = "1" ]; then
+  if [ "$SKIP_START" = "1" ]; then
+    echo "  Node runtime migration complete; gateway restart skipped."
+    [ -n "${MODELDOCK_INSTALLER_TEMP:-}" ] && rm -f "$MODELDOCK_INSTALLER_TEMP"
+    exit 0
+  fi
+  if [ "$(uname -s)" = "Darwin" ]; then
+    RUNTIME_PLIST_DIR="${MODELDOCK_AUTOSTART_PLIST_DIR:-$HOME/Library/LaunchAgents}"
+    RUNTIME_PLIST_FILE="$RUNTIME_PLIST_DIR/com.modeldock.gateway.plist"
+    if [ -f "$RUNTIME_PLIST_FILE" ]; then
+      RUNTIME_SERVER="$ROOT/dist/modeldock.mjs"
+      runtime_xml_escape() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+      RUNTIME_NODE_DIR="$(dirname "$NODE_BIN")"
+      RUNTIME_PLIST_PATH="$(runtime_xml_escape "$RUNTIME_NODE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")"
+      RUNTIME_PLIST_NODE="$(runtime_xml_escape "$NODE_BIN")"
+      RUNTIME_PLIST_SERVER="$(runtime_xml_escape "$RUNTIME_SERVER")"
+      RUNTIME_PLIST_ROOT="$(runtime_xml_escape "$ROOT")"
+      cat > "$RUNTIME_PLIST_FILE" <<RUNTIME_PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.modeldock.gateway</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$RUNTIME_PLIST_PATH</string>
+    <key>MODELDOCK_NODE_PATH</key><string>$RUNTIME_PLIST_NODE</string>
+  </dict>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$RUNTIME_PLIST_NODE</string>
+    <string>$RUNTIME_PLIST_SERVER</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>WorkingDirectory</key><string>$RUNTIME_PLIST_ROOT</string>
+  <key>StandardOutPath</key><string>$RUNTIME_PLIST_ROOT/modeldock.log</string>
+  <key>StandardErrorPath</key><string>$RUNTIME_PLIST_ROOT/modeldock.log</string>
+</dict>
+</plist>
+RUNTIME_PLIST
+      launchctl unload "$RUNTIME_PLIST_FILE" >/dev/null 2>&1 || true
+      if launchctl load -w "$RUNTIME_PLIST_FILE"; then
+        echo "  ModelDock restarted on the migrated Node runtime."
+        [ -n "${MODELDOCK_INSTALLER_TEMP:-}" ] && rm -f "$MODELDOCK_INSTALLER_TEMP"
+        exit 0
+      fi
+      echo "  WARNING: launchd reload failed; falling back to restart.sh" >&2
+    fi
+  fi
+  RUNTIME_RELAUNCHER="$ROOT/scripts/restart.sh"
+  [ -f "$RUNTIME_RELAUNCHER" ] || { echo "ERROR: restart.sh is missing from $ROOT" >&2; exit 1; }
+  echo "  restarting ModelDock on the migrated Node runtime..."
+  RUNTIME_EXIT=0
+  sh "$RUNTIME_RELAUNCHER" --force || RUNTIME_EXIT=$?
+  [ -n "${MODELDOCK_INSTALLER_TEMP:-}" ] && rm -f "$MODELDOCK_INSTALLER_TEMP"
+  exit "$RUNTIME_EXIT"
+fi
+
 # 2. Install layout
 mkdir -p "$ROOT/dist" "$ROOT/scripts"
 

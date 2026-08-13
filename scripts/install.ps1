@@ -169,6 +169,25 @@ if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe)) {
 if ($systemNodeVersion) { Write-Host "  node $systemNodeVersion - OK" }
 else { Write-Host "  node $nodeExe - OK" }
 
+# The dashboard updater uses this mode to migrate the managed runtime without
+# touching the installed bundle. After the old bridge restarts on Node 24, the
+# updater performs its normal verified atomic deployment directly to latest.
+if ($env:MODELDOCK_RUNTIME_ONLY -eq "1") {
+    if ($skipStart) {
+        Write-Host "  Node runtime migration complete; gateway restart skipped."
+    } else {
+        $runtimeRestart = Join-Path $root "scripts\restart.ps1"
+        if (-not (Test-Path -LiteralPath $runtimeRestart)) { throw "restart.ps1 is missing from $root" }
+        Write-Host "  restarting ModelDock on the migrated Node runtime..."
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $runtimeRestart -Force
+        if ($LASTEXITCODE -ne 0) { throw "ModelDock restart failed after the Node runtime migration" }
+    }
+    if ($env:MODELDOCK_INSTALLER_TEMP) {
+        Remove-Item -LiteralPath $env:MODELDOCK_INSTALLER_TEMP -Force -ErrorAction SilentlyContinue
+    }
+    exit 0
+}
+
 # 2. Install layout
 New-Item -ItemType Directory -Force (Join-Path $root "dist") | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $root "scripts") | Out-Null

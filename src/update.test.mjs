@@ -129,12 +129,40 @@ test("createUpdater.check records errors without throwing", async () => {
   assert.match(state.error, /503/);
 });
 
+test("createUpdater.apply never falls back to cached release assets when the latest recheck fails", async () => {
+  let calls = 0;
+  let migrations = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return releaseResponse("0.4.0", {
+        "modeldock.mjs": "cached bundle",
+        "mcp-standalone.mjs": "cached bridge",
+        "install.ps1": "cached installer",
+      }, "cached sums");
+    }
+    return { ok: false, status: 503 };
+  };
+  const updater = createUpdater({
+    fetchImpl,
+    nodeMajor: 22,
+    platform: "win32",
+    rootDir: path.join(os.tmpdir(), "modeldock-not-a-checkout"),
+    migrateImpl: async () => { migrations += 1; },
+  });
+  assert.equal((await updater.check()).available, true);
+  await assert.rejects(updater.apply(), /No update available/);
+  assert.equal(migrations, 0);
+  assert.equal(updater.state().available, false);
+  assert.match(updater.state().error, /503/);
+});
+
 test("createUpdater.apply refuses when no update is available", async () => {
   const updater = createUpdater({ fetchImpl: async () => ({ ok: false, status: 404 }) });
   await assert.rejects(() => updater.apply(), /No update available/);
 });
 
-test("createUpdater.apply blocks Node-24-only releases before downloading or replacing files", async (t) => {
+test("createUpdater.apply hands Node 22 directly to the verified latest installer", async (t) => {
   const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-node-gate-"));
   t.after(() => rmSync(rootDir, { recursive: true, force: true }));
   writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.3.3" }));
@@ -142,17 +170,139 @@ test("createUpdater.apply blocks Node-24-only releases before downloading or rep
   mkdirSync(path.join(rootDir, "scripts"));
   const oldBundle = "installed bridge bundle";
   writeFileSync(path.join(rootDir, "dist", "modeldock.mjs"), oldBundle);
-  let assetDownloads = 0;
-  const fetchImpl = async (url) => {
-    if (url.includes("api.github.com")) return releaseResponse("0.4.0", { "modeldock.mjs": "new" }, "sums");
-    assetDownloads += 1;
-    return responseBody("unreachable");
+  const installer = "Write-Output 'migrate to latest'";
+  const bridgeAssets = {
+    "modeldock.mjs": "new",
+    "mcp-standalone.mjs": "new bridge",
+    "install.ps1": installer,
+    "start-hidden.ps1": "new launcher",
+    "restart.ps1": "new restart",
+    "recover.ps1": "new recovery",
   };
-  const updater = createUpdater({ fetchImpl, rootDir, platform: "win32", nodeMajor: 22 });
+  const sums = Object.entries(bridgeAssets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  let migration;
+  let restartCalls = 0;
+  const downloads = [];
+  const fetchImpl = async (url) => {
+    downloads.push(url);
+    if (url.includes("api.github.com")) {
+      return releaseResponse("0.4.0", bridgeAssets, sums);
+    }
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    if (url.endsWith("/install.ps1")) return responseBody(installer);
+    return responseBody("unexpected");
+  };
+  const updater = createUpdater({
+    fetchImpl,
+    rootDir,
+    platform: "win32",
+    nodeMajor: 22,
+    restartImpl: () => { restartCalls += 1; },
+    migrateImpl: async (options) => { migration = options; },
+  });
   await updater.check();
-  await assert.rejects(() => updater.apply(), /Re-run the ModelDock installer/);
-  assert.equal(assetDownloads, 0);
+  const result = await updater.apply();
+  assert.equal(result.mode, "installer");
+  assert.equal(result.latestVersion, "0.4.0");
+  assert.equal(restartCalls, 0, "the bridge updater must not restart before runtime migration");
+  assert.equal(updater.state().updating, false, "a failed detached migration must remain retryable");
+  assert.equal(migration.installerName, "install.ps1");
+  assert.equal(migration.body.toString("utf8"), installer);
+  assert.ok(downloads.some((url) => url.endsWith("/releases/download/v0.3.3/install.ps1")));
+  assert.ok(!downloads.some((url) => url === "https://assets.example/0.4.0/install.ps1"));
   assert.equal(readFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "utf8"), oldBundle);
+});
+
+test("createUpdater.apply refuses a tampered migration installer without changing the old bundle", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-node-installer-hash-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.3.3" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  writeFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "old bridge bundle");
+  const bridgeAssets = {
+    "modeldock.mjs": "new",
+    "mcp-standalone.mjs": "new bridge",
+    "install.sh": "tampered installer",
+    "start-hidden.sh": "new launcher",
+    "restart.sh": "new restart",
+    "recover.sh": "new recovery",
+  };
+  const sums = Object.entries(bridgeAssets)
+    .map(([name, body]) => `${sha256(name === "install.sh" ? "expected installer" : body)}  ${name}`)
+    .join("\n");
+  let migrations = 0;
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) {
+      return releaseResponse("0.4.0", bridgeAssets, sums);
+    }
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody("tampered installer");
+  };
+  const updater = createUpdater({
+    fetchImpl,
+    rootDir,
+    platform: "darwin",
+    nodeMajor: 22,
+    migrateImpl: async () => { migrations += 1; },
+  });
+  await updater.check();
+  await assert.rejects(updater.apply(), /Checksum mismatch/);
+  assert.equal(migrations, 0);
+  assert.equal(readFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "utf8"), "old bridge bundle");
+});
+
+test("one update action migrates Node and then atomically lands on the newest release", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-one-action-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.3.3" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const oldBundle = "old bridge bundle";
+  const newestBundle = "newest gateway".repeat(20_000);
+  const assets = {
+    "modeldock.mjs": newestBundle,
+    "mcp-standalone.mjs": "newest bridge",
+    "install.ps1": "Write-Output 'runtime migration'",
+    "start-hidden.ps1": "newest launcher",
+    "restart.ps1": "newest restart",
+    "recover.ps1": "newest recovery",
+  };
+  const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  writeFileSync(path.join(rootDir, "dist", "modeldock.mjs"), oldBundle);
+  for (const relative of ["dist/mcp-standalone.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"]) {
+    writeFileSync(path.join(rootDir, relative), `old ${relative}`);
+  }
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.6.0", assets, sums);
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  let handedOff = false;
+  const bridgeUpdater = createUpdater({
+    fetchImpl,
+    rootDir,
+    platform: "win32",
+    nodeMajor: 22,
+    migrateImpl: async () => { handedOff = true; },
+  });
+  await bridgeUpdater.check();
+  assert.equal((await bridgeUpdater.apply()).mode, "installer");
+  assert.equal(handedOff, true);
+  assert.equal(readFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "utf8"), oldBundle);
+
+  let restarts = 0;
+  const migratedUpdater = createUpdater({
+    fetchImpl,
+    rootDir,
+    platform: "win32",
+    nodeMajor: 24,
+    restartImpl: () => { restarts += 1; },
+  });
+  const result = await migratedUpdater.apply();
+  assert.equal(result.latestVersion, "0.6.0");
+  assert.equal(restarts, 1);
+  assert.equal(readFileSync(path.join(rootDir, "dist", "modeldock.mjs"), "utf8"), newestBundle);
 });
 
 test("createUpdater.apply deploys the complete Windows install and rechecks at click time", async (t) => {

@@ -124,7 +124,8 @@ Español. Change it anytime under Settings -> Interface language.
 
 **Autostart & updates** - Model Dock starts hidden at every login by default;
 flip the Autostart toggle in Settings to change that. A green Update button
-appears when a new release is ready - one click downloads, restarts, and reloads.
+appears when a new release is ready - one click moves directly to the latest
+release, migrates the managed Node runtime when needed, restarts, and reloads.
 
 ---
 
