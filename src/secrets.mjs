@@ -1,6 +1,6 @@
 // Secret-at-rest handling for the user .env file.
 //
-// Token values (OPENCODE_GO_TOKEN, DEEPSEEK_API_KEY, EXA_API_KEY) are stored on disk
+// Token values (OPENCODE_GO_TOKEN, DEEPSEEK_API_KEY, EXA_API_KEY, MODELDOCK_CUSTOM_API_KEY) are stored on disk
 // as `dpapi:<base64>` using the Windows current-user Data Protection API, so a copied
 // .env is not readable on another machine or by another user. On non-Windows platforms
 // (CI, dev on macOS/Linux) values stay plaintext so nothing breaks; a `dpapi:` value on
@@ -17,6 +17,7 @@ export const SECRET_KEYS = new Set([
   "OPENCODE_GO_TOKEN",
   "DEEPSEEK_API_KEY",
   "EXA_API_KEY",
+  "MODELDOCK_CUSTOM_API_KEY",
 ]);
 export const PREFIX = "dpapi:";
 

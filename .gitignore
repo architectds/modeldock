@@ -3,10 +3,12 @@ node_modules/
 coverage/
 *.log
 .modeldock-media/
-
+.modeldock/
 # Generated shortcut (machine-local, absolute path)
 ModelDock.lnk
 
+# Stray empty file produced by a PowerShell redirection typo
+$null
 # Dashboard screenshots (generated, not source)
 test/dashboard*.png
 
