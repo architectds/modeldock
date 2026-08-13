@@ -527,6 +527,18 @@ function fillReasoningIds(input) {
   return changed ? out : input;
 }
 
+function fillProToolCallIds(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = input.map((item) => {
+    if (!isToolCallItem(item) || (typeof item.id === "string" && item.id.length > 0)) return item;
+    if (typeof item.call_id !== "string" || !item.call_id) return item;
+    changed = true;
+    return { ...item, id: item.call_id };
+  });
+  return changed ? out : input;
+}
+
 // opencode's responses-to-chat translator replays an assistant history message
 // as a chat-style `content` string. Codex replays `output_text` part arrays,
 // which the translator turns into an empty content and rejects on its
@@ -537,16 +549,73 @@ function fillReasoningIds(input) {
 function flattenAssistantContent(input) {
   if (!Array.isArray(input)) return input;
   let changed = false;
-  const out = input.map((item) => {
-    if (item?.type !== "message" || item?.role !== "assistant" || typeof item.content === "string") return item;
-    if (!Array.isArray(item.content)) return item;
+  const out = input.flatMap((item) => {
+    if (item?.type !== "message" || item?.role !== "assistant") return [item];
+    const hasToolCalls = Array.isArray(item.tool_calls) && item.tool_calls.length > 0;
+    if (typeof item.content === "string") {
+      if (item.content.trim() || hasToolCalls) return [item];
+      changed = true;
+      return [];
+    }
+    if (!Array.isArray(item.content)) return [item];
     const text = item.content
       .map((part) => (typeof part?.text === "string" ? part.text : ""))
       .join("");
     changed = true;
-    return { ...item, content: text };
+    // Codex places an empty assistant message immediately before top-level
+    // custom_tool_call history. Console Go translates it to a standalone chat
+    // assistant row and rejects the request before it reaches the paired call.
+    // It carries no user-visible content or tool identity, so omit only that
+    // empty placeholder. Assistant messages with chat-style tool_calls remain.
+    if (!text.trim() && !hasToolCalls) return [];
+    return [{ ...item, content: text }];
   });
   return changed ? out : input;
+}
+
+function interleaveToolOutputs(input) {
+  if (!Array.isArray(input)) return input;
+  const outputById = new Map();
+  for (const item of input) {
+    if (isToolOutputItem(item) && !outputById.has(item.call_id)) outputById.set(item.call_id, item);
+  }
+  let changed = false;
+  const out = [];
+  for (const item of input) {
+    if (isToolOutputItem(item)) continue;
+    out.push(item);
+    if (!isToolCallItem(item)) continue;
+    const output = outputById.get(item.call_id);
+    if (!output) continue;
+    out.push(output);
+    outputById.delete(item.call_id);
+    changed = true;
+  }
+  return changed ? out : input;
+}
+
+function appendProToolContinuation(input) {
+  if (!Array.isArray(input)) return input;
+  if (!isToolOutputItem(input.at(-1))) return input;
+  // A Responses tool output semantically asks the model to continue. Console
+  // Go translates the history to DeepSeek chat but omits that continuation
+  // boundary, so thinking mode rejects the assistant tool-call row for missing
+  // reasoning_content. An explicit internal user turn restores the boundary;
+  // the same exact Codex harness payload then continues and produces its final
+  // answer. This is strictly Pro+Go input normalization.
+  const identity = input
+    .filter(isToolOutputItem)
+    .map((item) => item.call_id)
+    .join("\n");
+  return [
+    ...input,
+    {
+      type: "message",
+      id: `msg_pro_continue_${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`,
+      role: "user",
+      content: [{ type: "input_text", text: "Continue from the tool results above and complete the current task." }],
+    },
+  ];
 }
 
 export function normalizeGatewayInput(input) {
@@ -571,7 +640,12 @@ export function normalizeGatewayInput(input) {
 // without them, and byte-stable flash traffic must stay untouched.
 export function normalizeOpenCodeProInput(input) {
   if (!Array.isArray(input)) return input;
-  return flattenAssistantContent(fillReasoningIds(normalizeGatewayInput(input)));
+  const normalized = normalizeGatewayInput(input);
+  const interleaved = interleaveToolOutputs(normalized);
+  const withToolCallIds = fillProToolCallIds(interleaved);
+  const withReasoningIds = fillReasoningIds(withToolCallIds);
+  const flattened = flattenAssistantContent(withReasoningIds);
+  return appendProToolContinuation(flattened);
 }
 
 // A message is "current" when it follows the last assistant turn. Only those
@@ -829,23 +903,63 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
 export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
-    return { bytes: 0, rewrote: false };
+    return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
   }
   let bytes = 0;
   let sseBuffer = "";
   let rewrote = false;
   let interrupted = false;
+  let sawTerminal = false;
+  let sawDeliverable = false;
+  let completedResponse;
+  let responseFailure = "";
   // Rewrite state. A full stream starts with response.created and is passed
   // through untouched; a thinking stream starts straight into a delta (bare) or
   // an output_item.added without the rest of the lifecycle (sparse), and is
   // re-framed. Detection is sticky - once a full sequence is seen we never
   // rewrite.
   let bare = null; // { respId, model, items: Map<partType, { itemId, text, index }> }
-  let track = null; // { respId, model, items: Map<index, { itemId, partType, text, name, callId, status }>, nextIndex }
+  let track = null; // { respId, model, items: Map<index, entry>, nextIndex, activeIndex }
   let sawFirstEvent = false;
   let normal = false;
+  const prelude = [];
+  let preludeResponse = null;
   const writeOut = (text) => res.write(text);
   const sseEvent = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
+  const flushPrelude = () => {
+    while (prelude.length) writeOut(prelude.shift());
+  };
+  const outputIsDeliverable = (output) => Array.isArray(output) && output.some((item) => {
+    if (item?.type === "function_call" || item?.type === "custom_tool_call") return true;
+    if (item?.type !== "message") return false;
+    return Array.isArray(item.content) && item.content.some((part) =>
+      part?.type === "output_text" && typeof part.text === "string" && part.text.length > 0);
+  });
+  const failedCompletion = (parsed, message) => ({
+    id: parsed?.id || parsed?.response?.id,
+    type: "response.failed",
+    response: {
+      ...(parsed?.response || {}),
+      status: "failed",
+      error: { code: "upstream_failed", message },
+    },
+  });
+  const finishEvent = (parsed) => {
+    if (parsed?.type === "response.failed") {
+      sawTerminal = true;
+      responseFailure = parsed.response?.error?.message || parsed.error?.message || "OpenCode Go response failed.";
+      return parsed;
+    }
+    if (parsed?.type !== "response.completed") return parsed;
+    sawTerminal = true;
+    if (outputIsDeliverable(parsed.response?.output)) sawDeliverable = true;
+    if (!sawDeliverable) {
+      responseFailure = "OpenCode Go completed without an assistant message or tool call.";
+      return failedCompletion(parsed, responseFailure);
+    }
+    completedResponse = parsed.response;
+    return parsed;
+  };
   const itemIdFor = (respId, partType, index) => `${respId}-${partType === "reasoning_text" ? "reasoning" : "message"}-${index}`;
   const partItem = (partType, itemId, index) => ({
     ...(partType === "reasoning_text"
@@ -853,13 +967,15 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       : { id: itemId, type: "message", role: "assistant", status: "in_progress", content: [] }),
     output_index: index,
   });
-  const openBareItem = (parsed) => {
-    const respId = parsed.id || parsed.response?.id || `resp_${Date.now()}`;
-    const model = parsed.response?.model || "";
+  const openBareItem = (parsed, emitPrelude = true) => {
+    const respId = parsed.id || parsed.response?.id || preludeResponse?.id || `resp_${Date.now()}`;
+    const model = parsed.response?.model || preludeResponse?.model || "";
     bare = { respId, model, items: new Map(), nextIndex: 0 };
     rewrote = true;
-    writeOut(sseEvent({ id: respId, type: "response.created", response: { id: respId, model } }));
-    writeOut(sseEvent({ id: respId, type: "response.in_progress", response: { id: respId, model } }));
+    if (emitPrelude) {
+      writeOut(sseEvent({ id: respId, type: "response.created", response: { id: respId, model } }));
+      writeOut(sseEvent({ id: respId, type: "response.in_progress", response: { id: respId, model } }));
+    }
   };
   const ensureBareItem = (parsed, partType) => {
     if (!bare || bare.items.has(partType)) return;
@@ -908,6 +1024,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       } else {
         doneItem.status = "completed";
         doneItem.content = [{ type: "output_text", text }];
+        if (text.length > 0) sawDeliverable = true;
       }
       writeOut(sseEvent({ id: bare.respId, type: "response.output_item.done", item: doneItem, response_id: bare.respId }));
     }
@@ -921,33 +1038,58 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       return item;
     });
     bare = null;
-    return { ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } };
+    return finishEvent({ ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } });
   };
   const openTrack = (parsed) => {
-    const respId = parsed.id || parsed.response?.id || `resp_${Date.now()}`;
-    const model = parsed.response?.model || "";
-    track = { respId, model, items: new Map(), nextIndex: 0 };
+    const respId = parsed.id || parsed.response?.id || preludeResponse?.id || `resp_${Date.now()}`;
+    const model = parsed.response?.model || preludeResponse?.model || "";
+    track = { respId, model, items: new Map(), nextIndex: 0, activeIndex: null };
     rewrote = true;
   };
   const trackItem = (parsed) => {
-    if (!track) return;
-    const index = Number.isInteger(parsed.output_index) ? parsed.output_index : track.nextIndex;
-    if (track.items.has(index)) return;
+    if (!track) return null;
     const item = parsed.item || {};
+    for (const [existingIndex, existing] of track.items) {
+      if (item.id && existing.itemId === item.id) {
+        track.activeIndex = existingIndex;
+        return { index: existingIndex, entry: existing };
+      }
+    }
+    // Console Go currently labels every function_call as output_index 0. The
+    // item boundary is authoritative; allocate a fresh downstream index for
+    // each added item and attach following id-less deltas to the most recently
+    // added item. Without this, parallel calls collapse into one item and their
+    // JSON argument strings are concatenated.
+    const index = track.nextIndex;
+    track.nextIndex += 1;
     const partType = item.type === "function_call" ? "function_call" : (item.type === "reasoning" ? "reasoning_text" : "output_text");
-    track.items.set(index, {
+    const entry = {
       itemId: item.id || itemIdFor(track.respId, partType, index),
       partType,
       text: "",
       name: item.name || "",
       callId: item.call_id || item.id || "",
       status: "in_progress",
-    });
-    if (track.nextIndex <= index) track.nextIndex = index + 1;
+    };
+    track.items.set(index, entry);
+    track.activeIndex = index;
+    return { index, entry };
   };
-  const trackDelta = (parsed, partType) => {
+  const trackDelta = (parsed) => {
     if (!track) return parsed;
-    const index = Number.isInteger(parsed.output_index) ? parsed.output_index : 0;
+    let index = null;
+    if (parsed.item_id) {
+      for (const [candidate, entry] of track.items) {
+        if (entry.itemId === parsed.item_id) {
+          index = candidate;
+          break;
+        }
+      }
+    }
+    if (index === null) index = track.activeIndex;
+    if (index === null && Number.isInteger(parsed.output_index) && track.items.has(parsed.output_index)) {
+      index = parsed.output_index;
+    }
     const entry = track.items.get(index);
     if (!entry) return parsed;
     entry.text += typeof parsed.delta === "string" ? parsed.delta : "";
@@ -963,6 +1105,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     if (!track) return parsed;
     for (const [index, entry] of track.items) {
       if (entry.partType === "function_call") {
+        sawDeliverable = true;
         writeOut(sseEvent({
           id: track.respId,
           type: "response.function_call_arguments.done",
@@ -982,6 +1125,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
           response_id: track.respId,
         }));
       } else {
+        if (entry.text.length > 0) sawDeliverable = true;
         writeOut(sseEvent({
           id: track.respId,
           type: "response.output_text.done",
@@ -1006,13 +1150,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
         ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
         : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] });
     track = null;
-    return { ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } };
+    return finishEvent({ ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } });
   };
   const processBlock = (block, delim) => {
-    if (normal) {
-      writeOut(block + delim);
-      return;
-    }
     for (const line of block.split(/\r?\n/)) {
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
@@ -1023,42 +1163,60 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       } catch {
         continue;
       }
+      if (normal) {
+        if (parsed?.type === "response.output_text.delta" && typeof parsed.delta === "string" && parsed.delta.length > 0) {
+          sawDeliverable = true;
+        }
+        if (parsed?.type === "response.output_item.added" && ["function_call", "custom_tool_call"].includes(parsed.item?.type)) {
+          sawDeliverable = true;
+        }
+        const finished = finishEvent(parsed);
+        writeOut(finished === parsed ? block + delim : sseEvent(finished));
+        return;
+      }
       if (!sawFirstEvent) {
-        sawFirstEvent = true;
         const kind = parsed?.type;
+        if (kind === "response.created" || kind === "response.in_progress") {
+          prelude.push(block + delim);
+          preludeResponse = { ...(preludeResponse || {}), ...(parsed.response || {}) };
+          return;
+        }
+        sawFirstEvent = true;
         if (kind === "response.output_text.delta" || kind === "response.reasoning_text.delta") {
-          openBareItem(parsed);
+          const hadPrelude = prelude.length > 0;
+          openBareItem(parsed, !hadPrelude);
+          flushPrelude();
           ensureBareItem(parsed, kind === "response.output_text.delta" ? "output_text" : "reasoning_text");
         } else if (kind === "response.output_item.added" && parsed.item?.type === "function_call") {
+          flushPrelude();
           openTrack(parsed);
-          trackItem(parsed);
-          writeOut(sseEvent(parsed));
+          const tracked = trackItem(parsed);
+          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         } else {
+          flushPrelude();
           normal = true;
-          writeOut(block + delim);
+          const finished = finishEvent(parsed);
+          writeOut(finished === parsed ? block + delim : sseEvent(finished));
           return;
         }
       }
       if (track) {
         if (parsed?.type === "response.output_item.added") {
-          trackItem(parsed);
-          writeOut(sseEvent(parsed));
+          const tracked = trackItem(parsed);
+          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         }
         if (parsed?.type === "response.function_call_arguments.delta") {
-          trackItem(parsed);
-          writeOut(sseEvent(trackDelta(parsed, "function_call")));
+          writeOut(sseEvent(trackDelta(parsed)));
           continue;
         }
         if (parsed?.type === "response.output_text.delta") {
-          trackItem(parsed);
-          writeOut(sseEvent(trackDelta(parsed, "output_text")));
+          writeOut(sseEvent(trackDelta(parsed)));
           continue;
         }
         if (parsed?.type === "response.reasoning_text.delta") {
-          trackItem(parsed);
-          writeOut(sseEvent(trackDelta(parsed, "reasoning_text")));
+          writeOut(sseEvent(trackDelta(parsed)));
           continue;
         }
         if (parsed?.type === "response.completed") {
@@ -1136,7 +1294,13 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     });
     stream.once("end", () => {
       tee?.end?.();
+      flushPrelude();
       if (sseBuffer) writeOut(sseBuffer);
+      if (!sawTerminal && !interrupted) {
+        responseFailure = "OpenCode Go stream ended before a terminal response event.";
+        writeOut(sseEvent(failedCompletion(null, responseFailure)));
+        sawTerminal = true;
+      }
       res.end();
       settle();
     });
@@ -1151,7 +1315,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       settle();
     });
   });
-  return { bytes, rewrote, interrupted };
+  return { bytes, rewrote, interrupted, terminal: sawTerminal, failure: responseFailure, completedResponse };
 }
 
 // Classify a 200 zen-free response body that silently failed. Returns
@@ -1964,12 +2128,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let bytesOut = 0;
   let completedResponse;
   let responseCompleted = false;
+  let responseFailure = "";
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
     if (event?.type === "response.completed") {
       responseCompleted = true;
       if (Array.isArray(event.response?.output)) completedResponse = event.response;
+    }
+    if (event?.type === "response.failed") {
+      responseFailure = event.response?.error?.message || event.error?.message || "OpenCode Go response failed.";
     }
   });
 
@@ -2088,6 +2256,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
+      if (piped.completedResponse) completedResponse = piped.completedResponse;
+      if (piped.failure) responseFailure = piped.failure;
       interrupted = piped.interrupted && !responseCompleted;
     }
     markFirstResponse();
@@ -2150,11 +2320,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
     // inputTokens/outputTokens ride on the trace record: the dashboard's
     // context-token waveform plots recent[].inputTokens per completed call.
+    const semanticFailed = Boolean(responseFailure);
     finish?.({
-      ok: !interrupted,
+      ok: !interrupted && !semanticFailed,
       httpStatus: interrupted ? 499 : upstream.status,
       upstream: target.provider,
-      error: interrupted ? "client disconnected" : undefined,
+      error: interrupted ? "client disconnected" : responseFailure || undefined,
       bytesOut,
       inputTokens: traceUsage?.input_tokens || 0,
       outputTokens: traceUsage?.output_tokens || 0,
@@ -2180,7 +2351,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       model: normalizedPayload.model,
       provider: target.provider,
       route: route.reason,
-      status: interrupted ? 499 : upstream.status,
+      status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
       durationMs: Date.now() - startedAt,
       inputTokens: traceUsage?.input_tokens,
       outputTokens: traceUsage?.output_tokens,
@@ -2191,9 +2362,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       threadId,
     });
     return {
-      ok: !interrupted,
+      ok: !interrupted && !semanticFailed,
       httpStatus: interrupted ? 499 : upstream.status,
       route,
+      error: responseFailure || undefined,
       usage: traceUsage,
       bytesOut,
       upstreamBytes,

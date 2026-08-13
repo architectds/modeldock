@@ -219,7 +219,7 @@ test("normalizeOpenCodeProInput flattens assistant content arrays into chat-styl
   assert.equal(normalized[2].content, "pong", "assistant content array flattens to a string");
 });
 
-test("normalizeOpenCodeProInput leaves string assistant content and tool turns untouched", () => {
+test("normalizeOpenCodeProInput leaves string assistant content and keeps completed tool turns", () => {
   const input = [
     { type: "message", role: "assistant", content: "already string" },
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "call" }] },
@@ -229,8 +229,92 @@ test("normalizeOpenCodeProInput leaves string assistant content and tool turns u
   const normalized = normalizeOpenCodeProInput(input);
   assert.equal(normalized[0].content, "already string");
   assert.equal(normalized[1].content, "call");
-  assert.equal(normalized[2].type, "function_call", "tool items stay as items");
+  assert.equal(normalized[2].type, "function_call");
   assert.equal(normalized[3].type, "function_call_output");
+  assert.equal(normalized[4].role, "user", "a trailing tool output gets an explicit continuation turn");
+});
+
+test("normalizeOpenCodeProInput drops empty assistant placeholders before custom tool history", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "use the result" }] },
+    { type: "message", role: "assistant", content: [] },
+    { type: "custom_tool_call", call_id: "call_1", name: "probe", input: "ALPHA" },
+    { type: "custom_tool_call_output", call_id: "call_1", output: "ok" },
+    { type: "message", role: "assistant", content: "" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.equal(normalized.length, 4);
+  assert.equal(normalized[0].role, "user");
+  assert.equal(normalized[1].type, "custom_tool_call");
+  assert.equal(normalized[2].type, "custom_tool_call_output");
+  assert.equal(normalized[3].role, "user", "the original user continuation stays in place");
+});
+
+test("normalizeOpenCodeProInput keeps empty chat assistants that carry tool calls", () => {
+  const input = [
+    {
+      type: "message",
+      role: "assistant",
+      content: [],
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "probe", arguments: "{}" } }],
+    },
+    { type: "message", role: "tool", tool_call_id: "call_1", content: "ok" },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.equal(normalized.length, 2);
+  assert.equal(normalized[0].content, "");
+  assert.equal(normalized[0].tool_calls[0].id, "call_1");
+});
+
+test("normalizeOpenCodeProInput interleaves parallel calls with their outputs", () => {
+  const input = [
+    { type: "function_call", call_id: "call_a", name: "probe_a", arguments: "{}" },
+    { type: "function_call", call_id: "call_b", name: "probe_b", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_a", output: "A" },
+    { type: "function_call_output", call_id: "call_b", output: "B" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const normalized = normalizeOpenCodeProInput(input);
+  assert.deepEqual(normalized.map((item) => item.call_id || item.type), [
+    "call_a", "call_a", "call_b", "call_b", "message",
+  ]);
+  assert.equal(normalized[0].id, "call_a", "a missing function-call id is copied from call_id");
+  assert.equal(normalized[2].id, "call_b", "every parallel call receives its own id");
+});
+
+test("normalizeOpenCodeProInput preserves an existing tool-call id", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "function_call", id: "fc_existing", call_id: "call_existing", name: "probe", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_existing", output: "ok" },
+  ]);
+  assert.equal(normalized[0].id, "fc_existing");
+});
+
+test("normalizeOpenCodeProInput appends a continuation when custom tool history is current", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "custom_tool_call", call_id: "call_custom", name: "apply_patch", input: "*** Begin Patch" },
+    { type: "custom_tool_call_output", call_id: "call_custom", output: "Done" },
+  ]);
+  assert.equal(normalized[0].type, "custom_tool_call");
+  assert.equal(normalized[1].type, "custom_tool_call_output");
+  assert.equal(normalized[2].role, "user");
+  assert.match(normalized[2].id, /^msg_pro_continue_[0-9a-f]{16}$/);
+  assert.match(normalized[2].content[0].text, /Continue from the tool results/);
+});
+
+test("normalizeOpenCodeProInput appends a continuation after dropping a trailing empty assistant", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "function_call", call_id: "call_shell", name: "shell_command", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_shell", output: "ok" },
+    { type: "message", role: "assistant", content: [] },
+  ]);
+  assert.deepEqual(normalized.map((item) => item.type), [
+    "function_call", "function_call_output", "message",
+  ]);
+  assert.equal(normalized[2].role, "user");
+  assert.match(normalized[2].id, /^msg_pro_continue_[0-9a-f]{16}$/);
+  assert.match(normalized[2].content[0].text, /Continue from the tool results/);
 });
 
 test("describeInputShape reports item counts and reasoning shapes for the trace", () => {
@@ -721,6 +805,61 @@ test("pipeNormalizedStream synthesizes the lifecycle for a bare-delta stream", a
   assert.equal(delta.content_index, 0);
 });
 
+test("pipeNormalizedStream recognizes bare deltas after a response prelude", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"response.created","response":{"id":"resp_prelude","model":"deepseek-v4-pro"}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.in_progress","response":{"id":"resp_prelude","model":"deepseek-v4-pro"}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.output_text.delta","delta":"PRELUDE_OK"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.completed","response":{"id":"resp_prelude","model":"deepseek-v4-pro"}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const events = Buffer.concat(sink.chunks).toString("utf8")
+    .split(/\r?\n\r?\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  assert.equal(result.rewrote, true);
+  assert.equal(result.failure, "");
+  assert.equal(events.filter((event) => event.type === "response.created").length, 1, "the upstream prelude is not duplicated");
+  assert.ok(events.some((event) => event.type === "response.output_item.added"), "missing item lifecycle is synthesized after the prelude");
+  assert.equal(events.find((event) => event.type === "response.output_text.delta").item_id, "resp_prelude-message-0");
+  assert.equal(events.find((event) => event.type === "response.completed").response.output[0].content[0].text, "PRELUDE_OK");
+});
+
+test("pipeNormalizedStream turns an empty Pro completion into an explicit failure", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"response.completed","response":{"id":"resp_empty","model":"deepseek-v4-pro","output":[]}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.match(result.failure, /without an assistant message or tool call/);
+  assert.match(forwarded, /"type":"response.failed"/);
+  assert.doesNotMatch(forwarded, /"type":"response.completed"/);
+});
+
+test("pipeNormalizedStream fails when the Pro stream ends without a terminal event", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"response.output_text.delta","delta":"partial"}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.match(result.failure, /before a terminal response event/);
+  assert.match(forwarded, /"type":"response.failed"/);
+});
+
 test("pipeNormalizedStream passes a full lifecycle stream through unchanged", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -768,6 +907,37 @@ test("pipeNormalizedStream frames a sparse function_call stream onto its item", 
   const completed = parsedEvents.find((event) => event.type === "response.completed");
   assert.equal(completed.response.output[0].type, "function_call", "completed carries the function_call output");
   assert.match(completed.response.output[0].arguments, /"command":"dir"/);
+});
+
+test("pipeNormalizedStream separates sparse parallel calls with repeated upstream indexes", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call_1","type":"function_call","name":"probe_a","call_id":"call_1","arguments":""}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"value\\":\\"ALPHA\\"}"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call_2","type":"function_call","name":"probe_b","call_id":"call_2","arguments":""}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"value\\":\\"BETA\\"}"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.completed","response":{"id":"resp_1","model":"deepseek-v4-pro"}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const events = Buffer.concat(sink.chunks).toString("utf8")
+    .split(/\r?\n\r?\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  assert.equal(result.rewrote, true);
+  const added = events.filter((event) => event.type === "response.output_item.added");
+  assert.deepEqual(added.map((event) => event.output_index), [0, 1]);
+  const deltas = events.filter((event) => event.type === "response.function_call_arguments.delta");
+  assert.deepEqual(deltas.map((event) => event.item_id), ["call_1", "call_2"]);
+  assert.deepEqual(deltas.map((event) => event.output_index), [0, 1]);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.deepEqual(completed.response.output.map((item) => item.name), ["probe_a", "probe_b"]);
+  assert.deepEqual(completed.response.output.map((item) => item.arguments), [
+    '{"value":"ALPHA"}',
+    '{"value":"BETA"}',
+  ]);
 });
 
 test("redactBearer masks upstream tokens in error bodies", () => {
@@ -1208,6 +1378,82 @@ test("relayNativeResponses records a streamed response.failed as an error", asyn
     assert.match(finishResults.at(-1).error, /could not be decrypted/);
     assert.match(Buffer.concat(sink.chunks).toString("utf8"), /response\.failed/,
       "the client still receives the native semantic failure event unchanged");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses registers Pro tool affinity from the rewritten completion", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const affinity = new RouteAffinity();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    [
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call_pro","type":"function_call","name":"probe","call_id":"call_pro","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_pro","model":"deepseek-v4-pro","usage":{"input_tokens":10,"output_tokens":2}}}\n\n',
+    ].join(""),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-pro@opencode-go",
+        stream: true,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "call probe" }] }],
+        tools: [{ type: "function", name: "probe", parameters: { type: "object", properties: {} } }],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: affinity,
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(affinity.snapshot().activeCallIds, 1, "the synthesized completed output registers its call id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses records a streamed Pro response.failed as an error", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const usageEvents = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    'data: {"type":"response.failed","response":{"id":"resp_fail","status":"failed","error":{"message":"thinking continuation rejected"}}}\n\n',
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
+      res,
+      {
+        recordUsage: (event) => usageEvents.push(event),
+        config,
+        metrics: { begin: () => (value) => finishResults.push(value), recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /thinking continuation rejected/);
+    assert.equal(finishResults.at(-1).ok, false);
+    assert.equal(usageEvents.at(-1).status, "error");
   } finally {
     globalThis.fetch = originalFetch;
   }
