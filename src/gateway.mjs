@@ -270,7 +270,10 @@ export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
 }
 
 function isOpaqueEncryptedContent(value) {
-  return typeof value === "string" && value.length > 0 && !/\s/.test(value);
+  // OpenAI encrypted content is a URL-safe Fernet token. Treating any
+  // whitespace-free string as encrypted lets malformed harness output reach
+  // the native backend, which then aborts the turn during decryption.
+  return typeof value === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(value);
 }
 
 // Remote compaction (v1/v2) is Codex's client-side protocol for context-full
@@ -331,6 +334,20 @@ function sanitizeReasoningForNative(item) {
   return rest;
 }
 
+function sanitizeMessageContentForNative(item) {
+  if (!Array.isArray(item?.content)) return item;
+  let changed = false;
+  const content = item.content.map((part) => {
+    if (part?.type !== "encrypted_content" || isOpaqueEncryptedContent(part.encrypted_content)) return part;
+    changed = true;
+    return {
+      type: "input_text",
+      text: typeof part?.encrypted_content === "string" ? part.encrypted_content : "",
+    };
+  });
+  return changed ? { ...item, content } : item;
+}
+
 function compactionSummaryText(item) {
   if (typeof item?.encrypted_content === "string" && item.encrypted_content.length) {
     // Ours: a kcr1: payload produced by this gateway's compact synthesis.
@@ -355,7 +372,7 @@ export function normalizeNativeInput(input) {
   if (!Array.isArray(input)) return input;
   return input.map((item) => {
     if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
-    if (item?.type !== "compaction") return item;
+    if (item?.type !== "compaction") return sanitizeMessageContentForNative(item);
     const summary = compactionSummaryText(item);
     if (summary === undefined) return item;
     return {
@@ -1317,10 +1334,14 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const startedAt = Date.now();
   let usage;
   let responseCompleted = false;
+  let responseFailure = "";
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
     if (event?.type === "response.completed") responseCompleted = true;
+    if (event?.type === "response.failed") {
+      responseFailure = event.response?.error?.message || event.error?.message || "Native response failed.";
+    }
   });
   try {
     const upstream = await fetch(target, {
@@ -1375,13 +1396,14 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     // event. The upstream socket can still be open for a trailing delimiter or
     // transport teardown, so a later close is not a failed request once
     // response.completed has already been observed.
-    const interrupted = piped.interrupted && !responseCompleted;
+    const interrupted = piped.interrupted && !responseCompleted && !responseFailure;
+    const semanticFailed = Boolean(responseFailure);
     markFirstResponse();
     finish?.({
-      ok: !interrupted,
+      ok: !interrupted && !semanticFailed,
       httpStatus: interrupted ? 499 : upstream.status,
       upstream: "openai",
-      error: interrupted ? "client disconnected" : undefined,
+      error: interrupted ? "client disconnected" : responseFailure || undefined,
       bytesOut,
       inputTokens: usage?.input_tokens || 0,
       outputTokens: usage?.output_tokens || 0,
@@ -1405,7 +1427,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       model: payload.model,
       provider: "openai",
       route: "native_passthrough",
-      status: interrupted ? 499 : upstream.status,
+      status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
       durationMs: Date.now() - startedAt,
       inputTokens: usage?.input_tokens,
       outputTokens: usage?.output_tokens,
@@ -1416,9 +1438,10 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       threadId,
     });
     return {
-      ok: !interrupted,
+      ok: !interrupted && !semanticFailed,
       httpStatus: interrupted ? 499 : upstream.status,
       route: { model: payload.model, reason: "native_passthrough" },
+      ...(responseFailure ? { error: responseFailure } : {}),
       usage,
       bytesOut,
       upstreamBytes,

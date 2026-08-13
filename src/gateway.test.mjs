@@ -1033,6 +1033,28 @@ test("normalizeNativeInput strips non-opaque reasoning and expands summaries", (
   assert.equal(out[4], input[4]);
 });
 
+test("normalizeNativeInput converts malformed encrypted agent messages to plain input", () => {
+  const malformed = {
+    type: "agent_message",
+    content: [
+      { type: "input_text", text: "Message Type: NEW_TASK" },
+      { type: "encrypted_content", encrypted_content: "Run the status command and report back." },
+    ],
+  };
+  const valid = {
+    type: "agent_message",
+    content: [
+      { type: "encrypted_content", encrypted_content: "gAAAAABvalid_native_cipher_token" },
+    ],
+  };
+  const out = normalizeNativeInput([malformed, valid]);
+  assert.deepEqual(out[0].content[1], {
+    type: "input_text",
+    text: "Run the status command and report back.",
+  });
+  assert.equal(out[1], valid, "a real native encrypted part passes through byte-for-byte");
+});
+
 test("normalizeNativeInput leaves orphaned tool items untouched (native leg has no pairing filter)", () => {
   const orphan = { type: "function_call", call_id: "call_00_orphan", name: "ls", arguments: "{}" };
   const out = normalizeNativeInput([orphan]);
@@ -1063,6 +1085,10 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
         input: [
           { type: "reasoning", encrypted_content: "local plaintext reasoning" },
           { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          {
+            type: "agent_message",
+            content: [{ type: "encrypted_content", encrypted_content: "Run the probe and report back." }],
+          },
         ],
         previous_response_id: "resp_old",
         tools: [{ type: "web_search" }],
@@ -1094,6 +1120,10 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
     assert.equal(calls[0].body.model, "gpt-5.6-sol");
     assert.equal(calls[0].body.input[0].encrypted_content, undefined, "non-opaque reasoning is stripped");
     assert.equal(calls[0].body.input[1].content[0].text, "hi");
+    assert.deepEqual(calls[0].body.input[2].content[0], {
+      type: "input_text",
+      text: "Run the probe and report back.",
+    }, "malformed encrypted agent content is repaired before the native fetch");
     assert.equal(result.usage.input_tokens, 9);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
@@ -1138,6 +1168,46 @@ test("relayNativeResponses treats a client close after response.completed as suc
     assert.equal(result.usage.output_tokens, 6);
     assert.equal(finishResults.at(-1).ok, true);
     assert.equal(finishResults.at(-1).error, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayNativeResponses records a streamed response.failed as an error", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(Buffer.from('event: response.failed\ndata: {"type":"response.failed","response":{"error":{"message":"Encrypted function output content could not be decrypted or decoded."}}}\n\n'));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const result = await relayNativeResponses(
+      { model: "gpt-5.6-luna", input: [] },
+      res,
+      {
+        recordUsage: () => {},
+        metrics: {
+          begin: () => (value) => finishResults.push(value),
+          recordResponseTransform: () => {},
+          recordResponseUsage: () => {},
+        },
+        incomingHeaders: { authorization: "Bearer chatgpt-token" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.error, /could not be decrypted/);
+    assert.equal(finishResults.at(-1).ok, false);
+    assert.match(finishResults.at(-1).error, /could not be decrypted/);
+    assert.match(Buffer.concat(sink.chunks).toString("utf8"), /response\.failed/,
+      "the client still receives the native semantic failure event unchanged");
   } finally {
     globalThis.fetch = originalFetch;
   }
