@@ -21,6 +21,7 @@ import {
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
+  normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
   pipeNormalizedStream,
@@ -224,6 +225,29 @@ test("normalizeOpenCodeProInput promotes a compacted reasoning summary to reason
     { type: "reasoning_text", text: "Recovered public reasoning summary." },
   ]);
   assert.equal(normalized[0].encrypted_content, undefined, "provider-private state is not sent to Console Go");
+});
+
+test("normalizeOpenCodeFlashInput repairs only summary-only reasoning", () => {
+  const assistant = { type: "message", role: "assistant", content: [{ type: "output_text", text: "kept as an array" }] };
+  const call = { type: "function_call", id: "fc_flash", call_id: "call_flash", name: "probe", arguments: "{}" };
+  const output = { type: "function_call_output", call_id: "call_flash", output: "done" };
+  const normalized = normalizeOpenCodeFlashInput([
+    {
+      type: "reasoning",
+      id: "rs_flash",
+      content: [],
+      summary: [{ type: "summary_text", text: "  Flash public reasoning summary.  " }],
+      encrypted_content: "opaque-native-provider-state",
+    },
+    assistant,
+    call,
+    output,
+  ]);
+  assert.deepEqual(normalized[0].content, [
+    { type: "reasoning_text", text: "Flash public reasoning summary." },
+  ]);
+  assert.equal(normalized[0].encrypted_content, undefined);
+  assert.deepEqual(normalized.slice(1), [assistant, call, output], "Pro-only assistant and tool rewrites stay disabled");
 });
 
 test("normalizeOpenCodeProInput drops opaque reasoning with no replayable text", () => {
@@ -1525,6 +1549,62 @@ test("relayResponses registers Pro tool affinity from the rewritten completion",
     );
     assert.equal(result.ok, true);
     assert.equal(affinity.snapshot().activeCallIds, 1, "the synthesized completed output registers its call id");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses sends summary-only Flash reasoning to Console Go as reasoning_text", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let upstreamBody;
+  globalThis.fetch = async (_url, options) => {
+    upstreamBody = JSON.parse(options.body);
+    return new Response(
+      'data: {"type":"response.completed","response":{"id":"resp_flash_compact","model":"deepseek-v4-flash","output":[]}}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-flash@opencode-go";
+    const call = { type: "function_call", id: "fc_flash", call_id: "call_flash", name: "probe", arguments: "{}" };
+    const output = { type: "function_call_output", call_id: "call_flash", output: "driver status" };
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash@opencode-go",
+        stream: true,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Check the driver." }] },
+          {
+            type: "reasoning",
+            id: "rs_flash_compacted",
+            content: [],
+            summary: [{ type: "summary_text", text: "Inspect the installed display driver." }],
+            encrypted_content: "opaque-native-provider-state",
+          },
+          call,
+          output,
+        ],
+        tools: [{ type: "function", name: "probe", parameters: { type: "object", properties: {} } }],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        knownModels: new Set(["deepseek-v4-flash@opencode-go"]),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(upstreamBody.input[1].content, [
+      { type: "reasoning_text", text: "Inspect the installed display driver." },
+    ]);
+    assert.equal(upstreamBody.input[1].encrypted_content, undefined);
+    assert.deepEqual(upstreamBody.input.slice(2), [call, output], "Flash tool history is otherwise unchanged");
   } finally {
     globalThis.fetch = originalFetch;
   }

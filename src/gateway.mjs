@@ -529,14 +529,14 @@ function fillReasoningIds(input) {
   return changed ? out : input;
 }
 
-// Codex can replay native/OpenAI reasoning after compaction as an opaque
+// Codex can replay reasoning after compaction or a tool turn as an opaque
 // encrypted_content item with only a public summary. Console Go cannot decrypt
-// that provider-private payload and its Pro thinking route requires a concrete
-// reasoning_text part. Promote the existing summary (never invented text) into
-// the replayable content shape. An opaque item with neither content nor summary
-// carries nothing this provider can consume, so omit it instead of sending an
-// invalid thinking message that rejects the entire long-running session.
-function normalizeProReasoningContent(input) {
+// that provider-private payload, and both paid DeepSeek thinking routes require
+// a concrete reasoning_text part. Promote the existing summary (never invented
+// text) into the replayable content shape. An opaque item with neither content
+// nor summary carries nothing this provider can consume, so omit it instead of
+// sending an invalid thinking message that rejects the whole session.
+function normalizeOpenCodeReasoningContent(input) {
   if (!Array.isArray(input)) return input;
   let changed = false;
   const out = input.flatMap((item) => {
@@ -705,18 +705,27 @@ export function normalizeGatewayInput(input) {
     });
 }
 
+// Flash otherwise stays on the generic byte-stable path. Its only required
+// OpenCode Go adaptation is making Codex's public reasoning summary replayable
+// after compaction or a tool result. Pro's broader chat/stream repairs below do
+// not apply to Flash.
+export function normalizeOpenCodeFlashInput(input) {
+  if (!Array.isArray(input)) return input;
+  return normalizeOpenCodeReasoningContent(normalizeGatewayInput(input));
+}
+
 // opencode's deepseek-v4-pro route deserializes replayed reasoning items as
 // chat messages (a stable id is required) and its responses-to-chat translator
-// needs assistant content as a plain string. These rewrites are strictly
-// pro+opencode-go: the generic routed path (flash, official, custom) works
-// without them, and byte-stable flash traffic must stay untouched.
+// needs assistant content as a plain string. These broader rewrites are
+// strictly pro+opencode-go; Flash receives only the reasoning-content repair
+// above, and official/custom routes keep the generic path.
 export function normalizeOpenCodeProInput(input) {
   if (!Array.isArray(input)) return input;
   const normalized = normalizeGatewayInput(input);
   const deduped = dedupeProToolCalls(normalized);
   const interleaved = interleaveToolOutputs(deduped);
   const withToolCallIds = fillProToolCallIds(interleaved);
-  const withReasoningContent = normalizeProReasoningContent(withToolCallIds);
+  const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);
   const flattened = flattenAssistantContent(withReasoningIds);
   const continued = appendProToolContinuation(flattened);
@@ -2228,15 +2237,24 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     knownModels,
   });
 
-  // opencode's pro route needs the reasoning-id and assistant-content rewrites;
-  // every other routed model (flash, official, custom) keeps the plain path so
-  // its byte-stable history is never touched.
+  // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
+  // Pro additionally needs the id, assistant-content, tool-history and stream
+  // repairs; official and custom routes keep the generic path.
+  const routedModel = bareModelId(route.model);
+  const routedProvider = providerForModel(config, route.model);
   const proOpenCodeGo =
-    bareModelId(route.model) === "deepseek-v4-pro" && providerForModel(config, route.model) === "opencode-go";
+    routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go";
+  const flashOpenCodeGo =
+    routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go";
+  const normalizedInput = proOpenCodeGo
+    ? normalizeOpenCodeProInput(payload.input)
+    : flashOpenCodeGo
+      ? normalizeOpenCodeFlashInput(payload.input)
+      : normalizeGatewayInput(payload.input);
   const normalizedPayload = {
     ...payload,
     input: rewriteHistoricalImages(
-      proOpenCodeGo ? normalizeOpenCodeProInput(payload.input) : normalizeGatewayInput(payload.input),
+      normalizedInput,
       mediaStore,
       { preserveCurrentImages: route.directVision },
     ),
