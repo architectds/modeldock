@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
+import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
@@ -684,6 +685,38 @@ export function normalizeGatewayInput(input) {
     });
 }
 
+// Codex emits its built-in tools as custom_tool_call / local_shell_call items
+// (with matching _output siblings). Upstreams that only speak the standard
+// Responses wire - Ollama's /v1/responses dialect in particular - reject those
+// as unknown input item types, so they are rewritten to the standard
+// function_call / function_call_output shape before forwarding. Codex carries
+// the call payload in `input`; the standard wire expects it in `arguments`.
+function normalizeStandardToolItem(item) {
+  if (!item || typeof item !== "object") return item;
+  const type = item.type;
+  if (type === "custom_tool_call" || type === "local_shell_call") {
+    const next = { ...item, type: "function_call" };
+    delete next.input;
+    if (item.input !== undefined) {
+      next.arguments = typeof item.input === "string" ? item.input : JSON.stringify(item.input);
+    }
+    return next;
+  }
+  if (type === "custom_tool_call_output" || type === "local_shell_call_output") {
+    return { ...item, type: "function_call_output" };
+  }
+  return item;
+}
+
+// Ollama's Responses dialect accepts only the standard item types. Run the
+// generic gateway normalization first (pairing, compaction, orphan removal on
+// the Codex-native shapes) and then rewrite the remaining Codex tool types to
+// the standard wire before they reach Ollama.
+export function normalizeOllamaInput(input) {
+  if (!Array.isArray(input)) return input;
+  return normalizeGatewayInput(input).map(normalizeStandardToolItem);
+}
+
 // Flash otherwise stays on the generic byte-stable path. Its only required
 // OpenCode Go adaptation is making Codex's public reasoning summary replayable
 // after compaction or a tool result. Pro's broader chat/stream repairs below do
@@ -829,6 +862,19 @@ export function upstreamTargetFor(config, model) {
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
     };
   }
+  if (provider === "ollama") {
+    // The published id is colon-free but Ollama only serves the original tag
+    // (qwen3.8-27b -> qwen3.8:27b), so the wire id comes from the profile entry.
+    const entry = modelEntryFor(config, model);
+    return {
+      provider,
+      model: entry?.upstreamId || upstreamModel,
+      url: `${normalizeOllamaBase(config.ollamaBaseUrl || "http://127.0.0.1:11434")}/v1/responses`,
+      token: "",
+      // Ollama needs no credential; the tokenless gate below must not 503 it.
+      tokenRequired: false,
+    };
+  }
   const entry = modelEntryFor(config, upstreamModel);
   const baseUrl = entry?.zen
     ? (config.zenBaseUrl || "https://opencode.ai/zen/v1")
@@ -844,8 +890,8 @@ export function upstreamTargetFor(config, model) {
   };
 }
 
-export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels }) {
-  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels });
+export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision }) {
+  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision });
 }
 
 export { RouteAffinity };
@@ -1865,6 +1911,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     visionModel,
     affinity: routeAffinity,
     knownModels,
+    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
   const summarizeBody = {
     ...payload,
@@ -1897,7 +1944,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const startedAt = Date.now();
   let usage;
   try {
-    if (!target.token) {
+    if (!target.token && target.tokenRequired !== false) {
       const body = JSON.stringify({
         error: {
           type: "configuration_error",
@@ -2126,6 +2173,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     visionModel,
     affinity: routeAffinity,
     knownModels,
+    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
@@ -2141,7 +2189,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     ? normalizeOpenCodeProInput(payload.input)
     : flashOpenCodeGo
       ? normalizeOpenCodeFlashInput(payload.input)
-      : normalizeGatewayInput(payload.input);
+      : routedProvider === "ollama"
+        ? normalizeOllamaInput(payload.input)
+        : normalizeGatewayInput(payload.input);
   const normalizedPayload = {
     ...payload,
     input: rewriteHistoricalImages(
@@ -2173,7 +2223,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (config.debug?.dumpAll && config.debug?.dumpDir) {
     dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
   }
-  if (!target.token) {
+  if (!target.token && target.tokenRequired !== false) {
     const error = {
       error: {
         type: "configuration_error",

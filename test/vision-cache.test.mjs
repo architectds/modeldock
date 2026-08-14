@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createVisionCache, visionCacheKey } from "./vision-cache.mjs";
+import { createVisionCache, visionCacheKey } from "../src/vision-cache.mjs";
 
 test("visionCacheKey is stable per content and distinct per content", () => {
   assert.equal(visionCacheKey({ images: ["a"], question: "q" }), visionCacheKey({ images: ["a"], question: "q" }));

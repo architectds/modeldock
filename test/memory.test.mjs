@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { MEMORY_SCHEMA, MemoryStore, migrateLegacyMemory, nodeDbPathFor, scopeNodeId } from "./memory.mjs";
+import { MEMORY_SCHEMA, MemoryStore, migrateLegacyMemory, nodeDbPathFor, scopeNodeId } from "../src/memory.mjs";
 
 function memoryDir() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-memory-test-"));

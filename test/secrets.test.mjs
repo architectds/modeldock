@@ -9,8 +9,8 @@ import {
   decryptSecret,
   dpapiSupported,
   PREFIX,
-} from "./secrets.mjs";
-import { loadConfig, migrateEnvSecrets, parseEnvFile } from "./config.mjs";
+} from "../src/secrets.mjs";
+import { loadConfig, migrateEnvSecrets, parseEnvFile } from "../src/config.mjs";
 
 test("recognizes only the token keys as secrets", () => {
   assert.equal(isSecretKey("OPENCODE_GO_TOKEN"), true);

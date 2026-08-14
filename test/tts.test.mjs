@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { ttsOutputPath } from "./tts.mjs";
+import { ttsOutputPath } from "../src/tts.mjs";
 
 test("ttsOutputPath preserves the documented absolute destination", () => {
   const output = path.resolve(tmpdir(), "modeldock-explicit", "speech.webm");

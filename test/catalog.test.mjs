@@ -3,9 +3,9 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "./catalog.mjs";
-import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
-import { isNativeModel } from "./gateway.mjs";
+import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
+import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { isNativeModel } from "../src/gateway.mjs";
 
 function configStub() {
   return {
@@ -20,11 +20,11 @@ function configStub() {
   };
 }
 
-test("catalogFor declares image input for the text-only main model (image escalation)", () => {
+test("catalogFor keeps a text-only main model text-only", () => {
   const catalog = catalogFor(configStub());
   const main = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
   assert.ok(main, "main model entry exists");
-  assert.deepEqual(main.input_modalities, ["text", "image"], "endpoint handles images by escalating to the vision model");
+  assert.deepEqual(main.input_modalities, ["text"], "a text-only model does not advertise image input");
   assert.equal(main.supports_search_tool, false, "search is the MCP tool, not a hosted schema");
   assert.equal(main.supports_parallel_tool_calls, false);
   assert.equal(main.reasoning_summary_format, "experimental");
@@ -43,7 +43,9 @@ test("catalogFor covers every available model", () => {
   const available = OPENCODE_GO_PROFILE.availableModels.filter((model) => model.status !== "unavailable").length;
   assert.ok(catalog.models.length >= available, `catalog lists at least the ${available} available models`);
   for (const entry of catalog.models) {
-    assert.deepEqual(entry.input_modalities, ["text", "image"], `${entry.slug} declares image input at the endpoint`);
+    const declared = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === entry.slug.replace(/@.*$/, ""));
+    const expected = declared?.supportsVision ? ["text", "image"] : ["text"];
+    assert.deepEqual(entry.input_modalities, expected, `${entry.slug} declares exactly its own capability`);
   }
 });
 
@@ -58,6 +60,11 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
     assert.match(instructions, /restart\.sh/);
     assert.match(instructions, /sh "/);
   }
+});
+
+test("baseInstructionsFor omits the TEXT-ONLY vision guidance for a vision-capable main model", () => {
+  const instructions = baseInstructionsFor({ ...configStub(), mainModel: "gpt-5.6-luna" });
+  assert.doesNotMatch(instructions, /TEXT-ONLY model and CANNOT see images/);
 });
 
 test("baseInstructionsFor includes the design-first workflow", () => {

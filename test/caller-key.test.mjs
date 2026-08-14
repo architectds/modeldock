@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { callerBasePath, callerKeyEqual, loadOrCreateCallerKey, validCallerKey } from "./caller-key.mjs";
+import { callerBasePath, callerKeyEqual, loadOrCreateCallerKey, validCallerKey } from "../src/caller-key.mjs";
 
 test("mints a persistent key on first load and reuses it after", (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-key-"));

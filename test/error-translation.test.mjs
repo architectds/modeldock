@@ -5,7 +5,7 @@ import {
   freeEmptyOutputError,
   parseUpstreamError,
   translateUpstreamError,
-} from "./error-translation.mjs";
+} from "../src/error-translation.mjs";
 
 test("parseUpstreamError reads the message from every known provider shape", () => {
   assert.equal(parseUpstreamError('{"error":{"message":"model not found","type":"invalid_request_error"}}').message, "model not found");

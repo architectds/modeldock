@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { loadConfig, hasChatGptLogin, tokenFromCodexToml } from "./config.mjs";
+import { loadConfig, hasChatGptLogin, tokenFromCodexToml } from "../src/config.mjs";
 
 test("reads an OpenCode bearer token only from a supported provider section", () => {
   const source = `

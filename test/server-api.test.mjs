@@ -7,9 +7,9 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "./server.mjs";
-import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "./profiles.mjs";
-import { dpapiSupported } from "./secrets.mjs";
+import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
+import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE } from "../src/profiles.mjs";
+import { dpapiSupported } from "../src/secrets.mjs";
 
 // Bare-path tests exercise the app wiring, not the caller-key guard. Enforcement
 // is ON by default since 0.1.10, so this file opts out explicitly; the default
@@ -152,6 +152,50 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" });
   const invalid = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "deepseek-v4-flash" }) });
   assert.equal(invalid.status, 400);
+});
+
+test("connecting Ollama publishes local models without changing the selected main model", async (t) => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-ollama-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const ollamaSnapshotFile = path.join(stateDir, "ollama-models.json");
+  const instance = await startApp({ ollamaSnapshotFile });
+  t.after(instance.stop);
+  t.after(() => { OLLAMA_PROFILE.availableModels = []; });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const href = String(url);
+    if (!href.includes("127.0.0.1:11434")) return originalFetch(url, options);
+    if (href.endsWith("/api/tags")) {
+      return new Response(JSON.stringify({
+        models: [
+          { name: "qwen3.8:27b", capabilities: ["completion"], details: { context_length: 262144 } },
+        ],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (href.endsWith("/v1/responses")) {
+      return new Response(JSON.stringify({ id: "probe-ok", object: "response" }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const before = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(before.selected.mainModel, "deepseek-v4-flash");
+
+  const connected = await fetch(`${instance.base}/api/ollama/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  assert.equal(connected.status, 200);
+  const body = await connected.json();
+  assert.equal(body.connected, true);
+  assert.equal(body.settings.ollama.models.length, 1);
+
+  const after = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(after.selected.mainModel, "deepseek-v4-flash", "connect never rewrites the selected main model");
+  const ollamaEntry = after.options.find((model) => model.provider === "ollama");
+  assert.equal(ollamaEntry.id, "qwen3.8-27b@ollama", "Ollama models publish as owner-qualified candidates");
 });
 
 test("subagent API exposes routed + native options and persists the agent file", async (t) => {

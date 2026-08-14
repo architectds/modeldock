@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { startMcpServer } from "./mcp-server.mjs";
+import { startMcpServer } from "../src/mcp-server.mjs";
 
 function configStub() {
   return {

@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically } from "./update.mjs";
+import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically } from "../src/update.mjs";
 
 function responseBody(body) {
   const bytes = Buffer.from(body);
@@ -477,7 +477,7 @@ test("deployFilesAtomically arms a complete rollback snapshot before the first r
   mkdirSync(path.join(rootDir, "scripts"));
   writeFileSync(path.join(rootDir, "dist/modeldock.mjs"), "old bundle");
   writeFileSync(path.join(rootDir, "scripts/restart.ps1"), "old restart");
-  const moduleUrl = new URL("./update.mjs", import.meta.url).href;
+  const moduleUrl = new URL("../src/update.mjs", import.meta.url).href;
   const childScript = `
     import path from "node:path";
     import { deployFilesAtomically } from ${JSON.stringify(moduleUrl)};

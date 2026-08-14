@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { duplicateKeys, assertConfigWriteSafe, appendConfigManifest } from "./toml-guard.mjs";
+import { duplicateKeys, assertConfigWriteSafe, appendConfigManifest } from "../src/toml-guard.mjs";
 
 const CLEAN = [
   'model = "gpt-5.6-sol"',

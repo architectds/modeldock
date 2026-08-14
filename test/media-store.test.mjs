@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { MediaStore } from "./media-store.mjs";
+import { MediaStore } from "../src/media-store.mjs";
 
 function makeStore(overrides = {}) {
   return new MediaStore({

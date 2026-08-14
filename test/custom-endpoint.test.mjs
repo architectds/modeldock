@@ -6,7 +6,7 @@ import {
   normalizeBaseUrl,
   probeCustomResponses,
   validateBaseUrl,
-} from "./custom-endpoint.mjs";
+} from "../src/custom-endpoint.mjs";
 
 test("normalizeBaseUrl lands on the v1 tree", () => {
   assert.equal(normalizeBaseUrl("https://host/v1"), "https://host/v1");

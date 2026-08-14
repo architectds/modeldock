@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { plistXml } from "./autostart.mjs";
+import { plistXml } from "../src/autostart.mjs";
 
 test("macOS plist runs the Node gateway directly with KeepAlive", () => {
   const xml = plistXml(

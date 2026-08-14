@@ -5,8 +5,8 @@ import { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createApp, createServices } from "./server.mjs";
-import { OPENCODE_GO_PROFILE } from "./profiles.mjs";
+import { createApp, createServices } from "../src/server.mjs";
+import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
 // Bare-path relay tests exercise the routed gateway, not the caller-key guard.
 // Enforcement is ON by default since 0.1.10, so these tests opt out explicitly;

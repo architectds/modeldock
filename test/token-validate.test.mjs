@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateProviderToken } from "./token-validate.mjs";
+import { validateProviderToken } from "../src/token-validate.mjs";
 
 test("deepseek keys must start with sk-", () => {
   assert.equal(validateProviderToken("deepseek-official", "sk-abc123").ok, true);

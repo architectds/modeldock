@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Metrics, extractResponseUsage, extractUsageFromSse } from "./metrics.mjs";
+import { Metrics, extractResponseUsage, extractUsageFromSse } from "../src/metrics.mjs";
 
 function makeMetrics() {
   return new Metrics({ recentLimit: 20 });

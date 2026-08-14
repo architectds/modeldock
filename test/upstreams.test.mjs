@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createUpstreams, parseMcpTextResult, extractOutputText } from "./upstreams.mjs";
+import { createUpstreams, parseMcpTextResult, extractOutputText } from "../src/upstreams.mjs";
 
 test("parseMcpTextResult parses a plain JSON tools/call result", () => {
   const body = JSON.stringify({
@@ -76,7 +76,7 @@ test("searchWeb passes through and parses Exa response", async () => {
       visionModel: "v",
       visionFallbackModel: "f",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: { get: () => undefined },
   });
   const originalFetch = globalThis.fetch;
@@ -114,7 +114,7 @@ test("searchWeb appends exaApiKey as query param when configured", async () => {
       visionModel: "v",
       visionFallbackModel: "f",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: { get: () => undefined },
   });
   const originalFetch = globalThis.fetch;
@@ -141,7 +141,7 @@ test("searchWeb surfaces upstream errors and redacts bearer tokens", async () =>
       visionModel: "v",
       visionFallbackModel: "f",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: { get: () => undefined },
   });
   const originalFetch = globalThis.fetch;
@@ -171,7 +171,7 @@ test("inspectVision reads a local path, registers it, and calls the vision model
     return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "It shows a red chart." } }] }), { status: 200 });
   };
 
-  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
   const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
   const upstreams = createUpstreams({
     config: {
@@ -183,11 +183,11 @@ test("inspectVision reads a local path, registers it, and calls the vision model
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: store,
     // A private cache instance: the module-level singleton would leak this
     // test's answer into the cache-hit test below (same image, same question).
-    visionCache: new (await import("./vision-cache.mjs")).createVisionCache(),
+    visionCache: new (await import("../src/vision-cache.mjs")).createVisionCache(),
   });
   try {
     const result = await upstreams.inspectVision({ path: pngPath, question: "What does it show?", mode: "chart" });
@@ -206,7 +206,7 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
   const { writeFileSync, mkdtempSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { tmpdir } = await import("node:os");
-  const { visionEvidenceCache } = await import("./vision-cache.mjs");
+  const { visionEvidenceCache } = await import("../src/vision-cache.mjs");
   const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-cache-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const pngPath = join(dir, "shot.png");
@@ -219,7 +219,7 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
     return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "## Summary\nA chart." } }] }), { status: 200 });
   };
 
-  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
   const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
   const upstreams = createUpstreams({
     config: {
@@ -231,7 +231,7 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: store,
   });
   try {
@@ -255,7 +255,7 @@ test("inspectVision rejects a missing path and a missing ref", async (t) => {
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
   const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
   const upstreams = createUpstreams({
     config: {
@@ -267,7 +267,7 @@ test("inspectVision rejects a missing path and a missing ref", async (t) => {
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: store,
   });
   await assert.rejects(() => upstreams.inspectVision({ path: join(dir, "nope.png"), question: "q" }), /Image path not found/);
@@ -291,7 +291,7 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
     return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "## Summary\nThe good chart." } }] }), { status: 200 });
   };
 
-  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
   const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
   const upstreams = createUpstreams({
     config: {
@@ -303,9 +303,9 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: store,
-    visionCache: new (await import("./vision-cache.mjs")).createVisionCache(),
+    visionCache: new (await import("../src/vision-cache.mjs")).createVisionCache(),
   });
   try {
     const result = await upstreams.inspectVision({
@@ -330,7 +330,7 @@ test("inspectVision reports a combined failure message when every image is bad",
   const { tmpdir } = await import("node:os");
   const dir = mkdtempSync(join(tmpdir(), "modeldock-vision-allbad-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const MediaStore = (await import("./media-store.mjs")).MediaStore;
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
   const store = new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
   const upstreams = createUpstreams({
     config: {
@@ -342,7 +342,7 @@ test("inspectVision reports a combined failure message when every image is bad",
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
     },
-    metrics: new (await import("./metrics.mjs")).Metrics({ recentLimit: 10 }),
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: store,
   });
   await assert.rejects(

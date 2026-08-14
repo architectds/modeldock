@@ -3,14 +3,16 @@ import assert from "node:assert/strict";
 import {
   OPENCODE_GO_PROFILE,
   DEEPSEEK_OFFICIAL_PROFILE,
+  OLLAMA_PROFILE,
   publishedSlugFor,
   profileById,
   profileOptions,
   applyCustomProfile,
+  applyOllamaProfile,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
-} from "./profiles.mjs";
+} from "../src/profiles.mjs";
 
 test("publishedSlugFor owner-qualifies every owned model", () => {
   const luna = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "gpt-5.6-luna");
@@ -29,13 +31,56 @@ test("publishedSlugFor owner-qualifies every owned model", () => {
 test("exposes every registered profile through the registry", () => {
   assert.equal(profileById("opencode-go"), OPENCODE_GO_PROFILE);
   assert.equal(profileById("deepseek-official"), DEEPSEEK_OFFICIAL_PROFILE);
+  assert.equal(profileById("ollama"), OLLAMA_PROFILE);
   assert.equal(profileById("unknown-profile"), OPENCODE_GO_PROFILE, "unknown ids fall back to opencode-go");
 });
 
 test("lists all profiles as selectable options", () => {
   const options = profileOptions();
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom"]);
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
+});
+
+test("ollama profile is empty until connected and fills from the snapshot", () => {
+  const empty = applyOllamaProfile({}, null);
+  assert.equal(empty.availableModels.length, 0);
+  const filled = applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [
+      { id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: false, contextWindow: 262144 },
+    ],
+  });
+  assert.equal(filled.id, "ollama");
+  assert.equal(filled.baseUrl, "http://127.0.0.1:11434");
+  assert.deepEqual(filled.availableModels, [
+    {
+      id: "qwen3.8-27b",
+      upstreamId: "qwen3.8:27b",
+      label: "qwen3.8:27b",
+      endpoint: "responses",
+      supportsVision: false,
+      contextWindow: 262144,
+      ownerQualified: true,
+      status: "available",
+    },
+  ]);
+  assert.equal(publishedSlugFor("ollama", "qwen3.8-27b"), "qwen3.8-27b@ollama", "a connected Ollama model is owner-qualified");
+  assert.equal(profileById("ollama"), OLLAMA_PROFILE, "the profile is registered for routing");
+});
+
+test("a text-only Ollama main model does not advertise image input", () => {
+  applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [
+      { id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: false, contextWindow: 262144 },
+      { id: "llava", upstreamId: "llava:latest", label: "llava:latest", supportsVision: true, contextWindow: 131072 },
+    ],
+  });
+  const catalog = OLLAMA_PROFILE.modelCatalog({ mainModel: "qwen3.8-27b@ollama", baseInstructions: "base" });
+  const main = catalog.models.find((entry) => entry.slug === "qwen3.8-27b@ollama");
+  const vision = catalog.models.find((entry) => entry.slug === "llava@ollama");
+  assert.deepEqual(main.input_modalities, ["text"], "a text-only Ollama main model stays text-only");
+  assert.deepEqual(vision.input_modalities, ["text", "image"], "a vision-capable Ollama model declares image input");
 });
 
 test("custom profile is empty until configured and fills from config", () => {

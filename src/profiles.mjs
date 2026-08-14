@@ -1,4 +1,6 @@
 
+import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
+
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
 // needle test, so those entries report their self-declared 1M instead of a
@@ -108,8 +110,19 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
     return `${profile.label} - ${modelLabel}`;
   };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
-  // catalog stores bare ids, so resolve through bareModelId before looking it up.
-  const contextWindowFor = (id) => availableModels.find((model) => model.id === bareModelId(id))?.contextWindow || CONTEXT_WINDOW;
+  // catalog stores bare ids, so resolve through bareModelId. A main model owned by
+  // another provider (custom endpoint or a connected Ollama) reads its window and
+  // vision capability from that provider's catalog entry instead of the active
+  // profile's list, so a text-only Ollama model never advertises image input.
+  const ownerEntryFor = (id) => {
+    const bare = bareModelId(id);
+    const at = String(id).lastIndexOf(PROVIDER_SEPARATOR);
+    const owner = at > 0 ? String(id).slice(at + 1) : profileId;
+    return profileById(owner).availableModels?.find((model) => model.id === bare)
+      || availableModels.find((model) => model.id === bare);
+  };
+  const mainEntry = ownerEntryFor(mainModel);
+  const mainModalities = mainEntry?.supportsVision ? ["text", "image"] : ["text"];
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
   // existing Codex configs keep resolving; another provider's copy of the same id is
@@ -132,7 +145,15 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
   }
   return {
     models: [
-      catalogEntry({ ...base, slug: qualifiedMain, displayName: ownerQualifiedDisplayName(qualifiedMain) || displayName, description, inputModalities, priority: 1, contextWindow: contextWindowFor(qualifiedMain) }),
+      catalogEntry({
+        ...base,
+        slug: qualifiedMain,
+        displayName: ownerQualifiedDisplayName(qualifiedMain) || displayName,
+        description,
+        inputModalities: mainModalities,
+        priority: 1,
+        contextWindow: ownerEntryFor(qualifiedMain)?.contextWindow || mainEntry?.contextWindow || CONTEXT_WINDOW,
+      }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
@@ -290,10 +311,38 @@ const CUSTOM_PROFILE = {
   },
 };
 
+// The local Ollama profile (dashboard "Ollama (local)" section). Needs no API
+// key; models are filled from the connection snapshot by applyOllamaProfile() at
+// config load, so catalog building and per-model routing see local models
+// without ever re-contacting Ollama between connects.
+const OLLAMA_PROFILE = {
+  id: "ollama",
+  label: "Ollama (local)",
+  baseUrl: OLLAMA_DEFAULT_BASE,
+  tokenEnvName: "",
+  blockedToolTypes: new Set([]),
+  hiddenToolNames: new Set([]),
+  availableModels: [],
+  modelCatalog({ mainModel, baseInstructions }) {
+    return modelCatalogDefaults({
+      profileId: OLLAMA_PROFILE.id,
+      mainModel,
+      displayName: "Ollama (local)",
+      description: "Local Ollama models through the ModelDock Responses gate.",
+      compHash: "modeldock-ollama-v1",
+      inputModalities: ["text", "image"],
+      supportsSearchTool: false,
+      baseInstructions,
+      availableModels: OLLAMA_PROFILE.availableModels,
+    });
+  },
+};
+
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
+  ollama: OLLAMA_PROFILE,
 };
 
 export function profileById(id) {
@@ -325,6 +374,31 @@ export function applyCustomProfile(config) {
       }]
     : [];
   return CUSTOM_PROFILE;
+}
+
+// Populate the ollama profile from the connection snapshot (written by the
+// dashboard connect flow, read back at config load). Every entry keeps its
+// upstreamId (the original tag with the colon) for the wire: the published id is
+// colon-free so the slug is safe for config.toml, but Ollama only serves the
+// original name. Empty snapshot clears the profile (disconnect).
+export function applyOllamaProfile(config, snapshot) {
+  const baseUrl = normalizeOllamaBase(snapshot?.baseUrl || config?.ollamaBaseUrl);
+  OLLAMA_PROFILE.baseUrl = baseUrl;
+  OLLAMA_PROFILE.availableModels = Array.isArray(snapshot?.models)
+    ? snapshot.models
+        .filter((model) => model?.id && model?.upstreamId)
+        .map((model) => ({
+          id: model.id,
+          upstreamId: model.upstreamId,
+          label: model.label || model.id,
+          endpoint: "responses",
+          supportsVision: Boolean(model.supportsVision),
+          contextWindow: Number(model.contextWindow) || undefined,
+          ownerQualified: true,
+          status: model.status || "available",
+        }))
+    : [];
+  return OLLAMA_PROFILE;
 }
 
 // Resolve which provider owns a model id. The currently active profile wins, then any
@@ -392,7 +466,12 @@ export function modelEntryFor(config, model) {
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
+  // Ollama needs no credential; a connected profile is always ready. The sentinel
+  // keeps healthz/readiness gates and the vision dev tooling honest.
+  if (provider === "ollama") {
+    return profileById("ollama").availableModels?.length ? "local" : "";
+  }
   return config?.tokens?.[provider] || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE };

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { writeEnvFile } from "./config.mjs";
-import { recordSettingsEvent } from "./settings-events.mjs";
+import { writeEnvFile } from "../src/config.mjs";
+import { recordSettingsEvent } from "../src/settings-events.mjs";
 
 function tempDir(prefix) {
   return mkdtempSync(path.join(os.tmpdir(), prefix));

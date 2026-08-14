@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RouteAffinity, routeResponsesRequest } from "./router.mjs";
+import { RouteAffinity, routeResponsesRequest } from "../src/router.mjs";
 
 const models = { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna" };
 
@@ -8,6 +8,13 @@ test("routes a current-turn image directly to Luna", () => {
   const route = routeResponsesRequest({
     input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
   }, models);
+  assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
+});
+
+test("a vision-capable main model reads the image itself instead of escalating to the vision model", () => {
+  const route = routeResponsesRequest({
+    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+  }, { mainModel: "gpt-5.6-luna", visionModel: "mimo-v2.5", mainModelSupportsVision: true });
   assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
 });
 

@@ -5,7 +5,7 @@ import { once } from "node:events";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 
-const STANDALONE = fileURLToPath(new URL("./mcp-standalone.mjs", import.meta.url));
+const STANDALONE = fileURLToPath(new URL("../src/mcp-standalone.mjs", import.meta.url));
 
 function startMockGateway() {
   const calls = [];

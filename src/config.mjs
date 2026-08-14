@@ -2,8 +2,9 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
+import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 
@@ -323,6 +324,10 @@ export function loadConfig() {
   const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
   const customMain = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_MAIN || "").toLowerCase());
   const customVision = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_VISION || "").toLowerCase());
+  // Ollama connection snapshot: the model list captured at connect time, restored
+  // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
+  const ollamaSnapshotFile = ollamaSnapshotPath();
+  const ollamaSnapshot = readOllamaSnapshot(ollamaSnapshotFile);
   const tokens = {
     "opencode-go": opencodeGoToken,
     "deepseek-official": deepseekToken,
@@ -398,6 +403,8 @@ export function loadConfig() {
     customModel,
     customMain,
     customVision,
+    ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),
+    ollamaSnapshotFile,
     mainModel,
     visionModel,
     visionFallbackModel,
@@ -454,6 +461,9 @@ export function loadConfig() {
   // Populate the custom provider profile so catalog building and per-model
   // routing see the configured endpoint/model (see profiles.mjs).
   applyCustomProfile(config);
+  // Populate the ollama profile from the connection snapshot so local models stay
+  // published across restarts without re-contacting Ollama.
+  applyOllamaProfile(config, ollamaSnapshot);
   return config;
 }
 

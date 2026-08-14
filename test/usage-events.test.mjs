@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordUsageEvent, usageFromRelayResult } from "./usage-events.mjs";
+import { recordUsageEvent, usageFromRelayResult } from "../src/usage-events.mjs";
 
 function tempFile() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-usage-"));

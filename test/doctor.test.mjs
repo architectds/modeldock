@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync, chmodSync, mkdirSync } from "node:fs";
-import { checkDoctor, doctorExitCode, DOCTOR_CHECKS } from "./doctor.mjs";
+import { checkDoctor, doctorExitCode, DOCTOR_CHECKS } from "../src/doctor.mjs";
 
 function healthyFetch() {
   return async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });

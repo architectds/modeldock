@@ -34,7 +34,7 @@ import {
   routeGatewayRequest,
   sessionIdsFrom,
   upstreamTargetFor,
-} from "./gateway.mjs";
+} from "../src/gateway.mjs";
 
 function configStub() {
   return {
@@ -1855,7 +1855,7 @@ test("relayNativeImage emits a valid JSON error when upstream fails before body 
 });
 
 test("legacy provider/model slugs route to us instead of the native backend", async () => {
-  const { normalizeLegacySlug } = await import("./gateway.mjs");
+  const { normalizeLegacySlug } = await import("../src/gateway.mjs");
   const known = new Set(["deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go", "deepseek-v4-flash@deepseek-official"]);
   // codex-router era merged-catalog ids persisted in old threads:
   assert.equal(normalizeLegacySlug("opencode-go/deepseek-v4-flash", known), "deepseek-v4-flash@opencode-go");
@@ -1868,7 +1868,7 @@ test("legacy provider/model slugs route to us instead of the native backend", as
 });
 
 test("unpaired tool calls and outputs are dropped before the upstream sees them", async () => {
-  const { dropUnpairedToolItems } = await import("./gateway.mjs");
+  const { dropUnpairedToolItems } = await import("../src/gateway.mjs");
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     { type: "function_call", call_id: "call_ok", name: "ls", arguments: "{}" },

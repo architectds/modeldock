@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { desktopCodexCandidates, nativeCatalogPath, nativeModelSlugs, readNativeCatalog } from "./native-catalog.mjs";
+import { desktopCodexCandidates, nativeCatalogPath, nativeModelSlugs, readNativeCatalog } from "../src/native-catalog.mjs";
 
 function writeCapture(file, models) {
   writeFileSync(file, JSON.stringify({ captured_with: "0.1.0", models }), "utf8");

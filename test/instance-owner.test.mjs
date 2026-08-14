@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clearOwnerFile, describeOwnerConflict, ownerFilePath, readOwnerFile, writeOwnerFile } from "./instance-owner.mjs";
+import { clearOwnerFile, describeOwnerConflict, ownerFilePath, readOwnerFile, writeOwnerFile } from "../src/instance-owner.mjs";
 
 function tempHome() {
   return mkdtempSync(path.join(os.tmpdir(), "modeldock-owner-"));

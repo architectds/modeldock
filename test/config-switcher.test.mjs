@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { access, appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { buildManagedCodexConfig, CodexConfigSwitcher } from "./config-switcher.mjs";
+import { buildManagedCodexConfig, CodexConfigSwitcher } from "../src/config-switcher.mjs";
 
 const originalConfig = `model = "gpt-5.6-sol"
 approval_policy = "on-request"
