@@ -191,16 +191,16 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 14px;
+  gap: 7px;
+  min-height: 36px;
+  padding: 0 12px;
   border: 1px solid var(--line, #2b2f3a);
   border-color: rgba(103,192,255,.3);
   border-radius: 10px;
   background: #142738;
   color: #d3e2ea;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
@@ -211,7 +211,7 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   content: "\2699\FE0E";
   color: #67c0ff;
   font-family: ui-sans-serif, system-ui, sans-serif;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1;
 }
 .settings-open:hover { border-color: #67c0ff; background: #193249; color: var(--text, #ecf4f8); box-shadow: 0 8px 20px rgba(80,183,255,.12); }
@@ -238,13 +238,13 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   appearance: none;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line, #2b2f3a);
   border-radius: 8px;
   background: transparent;
   color: var(--muted, #8b90a0);
-  font: 400 22px/1 ui-sans-serif, system-ui, sans-serif;
+  font: 400 20px/1 ui-sans-serif, system-ui, sans-serif;
   cursor: pointer;
   transition: color .15s, border-color .15s, background .15s, transform .1s, box-shadow .15s;
 }
@@ -266,7 +266,7 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
 .field-head a:hover { text-decoration: underline; }
 /* Endpoint combobox: the URL field is a two-in-one control - free typing plus a
    dropdown of common endpoint presets. The toggle merges into the input's right
-   edge (shared 44px height and border); the menu is an absolute listbox below. */
+   edge (shared 40px height and border); the menu is an absolute listbox below. */
 .endpoint-combo {
   position: relative;
   display: flex;
@@ -278,7 +278,7 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   flex: 1 1 auto;
   min-width: 0;
   width: auto;
-  border-radius: 10px 0 0 10px;
+  border-radius: 9px 0 0 9px;
   border-right: 0;
 }
 .endpoint-combo:focus-within input {
@@ -290,11 +290,11 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   appearance: none;
   -webkit-appearance: none;
   flex: 0 0 auto;
-  width: 40px;
-  height: 44px;
+  width: 36px;
+  height: 40px;
   border: 1px solid var(--line, #2b2f3a);
   border-left: 0;
-  border-radius: 0 10px 10px 0;
+  border-radius: 0 9px 9px 0;
   background: #14283a;
   color: #8bb3c9;
   font-family: inherit;
@@ -357,8 +357,8 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   -webkit-appearance: none;
   box-sizing: border-box;
   display: block;
-  height: 44px;
-  min-height: 44px;
+  height: 40px;
+  min-height: 40px;
   border: 1px solid var(--line, #2b2f3a);
   background: #14283a;
   color: var(--text, #ecf4f8);
@@ -366,8 +366,8 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   font-size: 14px;
   font-weight: 500;
   line-height: 1.2;
-  padding: 0 14px;
-  border-radius: 10px;
+  padding: 0 12px;
+  border-radius: 9px;
   outline: none;
   width: 100%;
   transition: border-color .15s, background .15s, box-shadow .15s;
@@ -415,18 +415,18 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   width: auto;
 }
 
-.settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: -2px; }
+.settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -2px; }
 .settings-actions #settings-save {
   appearance: none;
   border: 1px solid var(--blue, #4f8cff);
-  min-width: 94px;
-  height: 44px;
-  padding: 0 22px;
-  border-radius: 10px;
+  min-width: 82px;
+  height: 40px;
+  padding: 0 18px;
+  border-radius: 9px;
   background: linear-gradient(180deg, #63c1ff, #50b7ff);
   color: #0b0e16;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1.2;
   cursor: pointer;
@@ -447,15 +447,15 @@ dialog.settings-dialog .settings-wizard-link {
   flex: 0 0 auto;
   order: 1;
   width: auto;
-  height: 44px;
+  height: 38px;
   margin: 0;
   border: 1px solid rgba(137,160,175,.24);
-  border-radius: 9px;
-  padding: 0 13px;
+  border-radius: 8px;
+  padding: 0 11px;
   background: rgba(137,160,175,.04);
   color: var(--muted, #8b90a0);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
@@ -538,14 +538,14 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 44px;
-  padding: 0 12px;
+  height: 40px;
+  padding: 0 10px;
   border: 1px solid var(--line, #2b2f3a);
   border-radius: 10px;
   background: #14283a;
   color: var(--muted, #8b90a0);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
@@ -574,14 +574,14 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
   appearance: none;
   -webkit-appearance: none;
   flex: 0 0 auto;
-  height: 44px;
-  padding: 0 14px;
+  height: 40px;
+  padding: 0 12px;
   border: 1px solid rgba(137,160,175,.24);
-  border-radius: 10px;
+  border-radius: 9px;
   background: rgba(137,160,175,.04);
   color: var(--muted, #8b90a0);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.2;
   cursor: pointer;
@@ -594,6 +594,15 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
 .custom-action:disabled { opacity: .5; cursor: wait; }
 .custom-status { margin: 0; color: var(--green, #48d6a0); font-size: 12px; line-height: 1.4; }
 .custom-error { margin: 0; color: #ff7b7b; font-size: 12px; line-height: 1.4; }
+#ollama-section .custom-row { justify-content: space-between; flex-wrap: nowrap; }
+#ollama-section .custom-row .custom-status {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .custom-hint { margin: 6px 0 0; color: var(--muted, #8b90a0); font-size: 11px; line-height: 1.4; word-break: break-all; }
 .ollama-models { display: flex; flex-direction: column; gap: 8px; }
 .ollama-model-head,
