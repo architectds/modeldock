@@ -21,6 +21,7 @@ import {
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
+  normalizeOllamaInput,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
@@ -186,6 +187,35 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   ];
   const normalized = normalizeGatewayInput(input);
   assert.deepEqual(normalized, input);
+});
+
+test("normalizeOllamaInput rewrites Codex custom tool items to the standard wire", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "run" }] },
+    { type: "custom_tool_call", call_id: "call_1", name: "apply_patch", input: "*** Begin Patch" },
+    { type: "custom_tool_call_output", call_id: "call_1", output: "Done" },
+    { type: "local_shell_call", call_id: "call_2", name: "shell", input: "dir" },
+    { type: "local_shell_call_output", call_id: "call_2", output: "ok" },
+    { type: "function_call", call_id: "call_3", name: "x", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_3", output: "ok" },
+  ];
+  const normalized = normalizeOllamaInput(input);
+  assert.deepEqual(
+    normalized.map((item) => item.type),
+    [
+      "message",
+      "function_call",
+      "function_call_output",
+      "function_call",
+      "function_call_output",
+      "function_call",
+      "function_call_output",
+    ],
+  );
+  assert.equal(normalized[1].arguments, "*** Begin Patch", "custom_tool_call.input becomes arguments");
+  assert.equal(normalized[1].input, undefined, "the Codex-specific input key is dropped");
+  assert.equal(normalized[3].arguments, "dir", "local_shell_call.input becomes arguments");
+  assert.equal(normalized[5].arguments, "{}", "a standard function_call is untouched");
 });
 
 test("normalizeOpenCodeProInput fills reasoning ids missing from Codex's wire input", () => {

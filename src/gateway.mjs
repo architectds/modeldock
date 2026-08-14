@@ -705,6 +705,38 @@ export function normalizeGatewayInput(input) {
     });
 }
 
+// Codex emits its built-in tools as custom_tool_call / local_shell_call items
+// (with matching _output siblings). Upstreams that only speak the standard
+// Responses wire - Ollama's /v1/responses dialect in particular - reject those
+// as unknown input item types, so they are rewritten to the standard
+// function_call / function_call_output shape before forwarding. Codex carries
+// the call payload in `input`; the standard wire expects it in `arguments`.
+function normalizeStandardToolItem(item) {
+  if (!item || typeof item !== "object") return item;
+  const type = item.type;
+  if (type === "custom_tool_call" || type === "local_shell_call") {
+    const next = { ...item, type: "function_call" };
+    delete next.input;
+    if (item.input !== undefined) {
+      next.arguments = typeof item.input === "string" ? item.input : JSON.stringify(item.input);
+    }
+    return next;
+  }
+  if (type === "custom_tool_call_output" || type === "local_shell_call_output") {
+    return { ...item, type: "function_call_output" };
+  }
+  return item;
+}
+
+// Ollama's Responses dialect accepts only the standard item types. Run the
+// generic gateway normalization first (pairing, compaction, orphan removal on
+// the Codex-native shapes) and then rewrite the remaining Codex tool types to
+// the standard wire before they reach Ollama.
+export function normalizeOllamaInput(input) {
+  if (!Array.isArray(input)) return input;
+  return normalizeGatewayInput(input).map(normalizeStandardToolItem);
+}
+
 // Flash otherwise stays on the generic byte-stable path. Its only required
 // OpenCode Go adaptation is making Codex's public reasoning summary replayable
 // after compaction or a tool result. Pro's broader chat/stream repairs below do
@@ -2272,11 +2304,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go";
   const flashOpenCodeGo =
     routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go";
+  const ollama = routedProvider === "ollama";
   const normalizedInput = proOpenCodeGo
     ? normalizeOpenCodeProInput(payload.input)
     : flashOpenCodeGo
       ? normalizeOpenCodeFlashInput(payload.input)
-      : normalizeGatewayInput(payload.input);
+      : ollama
+        ? normalizeOllamaInput(payload.input)
+        : normalizeGatewayInput(payload.input);
   const normalizedPayload = {
     ...payload,
     input: rewriteHistoricalImages(
