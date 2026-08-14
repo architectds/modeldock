@@ -8,6 +8,8 @@ import {
   profileOptions,
   applyCustomProfile,
   CONTEXT_WINDOW,
+  DEEPSEEK_CONTEXT_WINDOW,
+  OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW,
   SELF_DECLARED_CONTEXT_WINDOWS,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
@@ -69,6 +71,15 @@ test("deepseek-official profile routes the main model on DeepSeek with harness o
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.availableModels.every((model) => model.endpoint === "responses"), true);
 });
 
+test("caps only OpenCode Go DeepSeek models at 600k", () => {
+  for (const id of ["deepseek-v4-flash", "deepseek-v4-pro"]) {
+    const goModel = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === id);
+    const officialModel = DEEPSEEK_OFFICIAL_PROFILE.availableModels.find((model) => model.id === id);
+    assert.equal(goModel.contextWindow, OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, `${id}@opencode-go is capped at 600k`);
+    assert.equal(officialModel.contextWindow, DEEPSEEK_CONTEXT_WINDOW, `${id}@deepseek-official stays at 1M`);
+  }
+});
+
 test("model catalog is generated per profile with distinct comp hashes", () => {
   const instructions = "base";
   const goCatalog = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: instructions });
@@ -96,9 +107,11 @@ test("every profile compacts at 80% of the model context window", () => {
   for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
     const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
     const model = catalog.models[0];
-    assert.equal(model.context_window, 1_000_000, `${profile.id} declares deepseek-v4-flash at its self-reported 1M`);
-    assert.equal(model.max_context_window, 1_000_000);
-    assert.equal(model.auto_compact_token_limit, Math.floor(1_000_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 1M window`);
+    const declared = SELF_DECLARED_CONTEXT_WINDOWS["deepseek-v4-flash"];
+    const expectedWindow = profile.id === "opencode-go" ? 600_000 : declared;
+    assert.equal(model.context_window, expectedWindow, `${profile.id} declares deepseek-v4-flash at its published window`);
+    assert.equal(model.max_context_window, expectedWindow);
+    assert.equal(model.auto_compact_token_limit, Math.floor(expectedWindow * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of its published window`);
   }
 });
 
@@ -111,9 +124,13 @@ test("every published model declares its own self-reported context window", () =
       const entry = catalog.models.find((candidate) => candidate.slug === slug);
       assert.ok(declared, `${model.id} has a self-reported context window`);
       assert.ok(entry, `${slug} is present in the published catalog`);
-      assert.equal(entry.context_window, declared, `${model.id} declares its self-reported window`);
-      assert.equal(entry.max_context_window, declared, `${model.id} max window matches its declared window`);
-      assert.equal(entry.auto_compact_token_limit, Math.floor(declared * AUTO_COMPACT_PERCENT), `${model.id} compacts at 80% of its declared window`);
+      // An explicit contextWindow on the profile entry wins over the shared
+      // self-declared table: OpenCode Go's paid DeepSeek pair declares a
+      // conservative 600k even though the upstream advertises 1M.
+      const expected = model.contextWindow ?? declared;
+      assert.equal(entry.context_window, expected, `${model.id} declares its published window`);
+      assert.equal(entry.max_context_window, expected, `${model.id} max window matches its published window`);
+      assert.equal(entry.auto_compact_token_limit, Math.floor(expected * AUTO_COMPACT_PERCENT), `${model.id} compacts at 80% of its published window`);
     }
   }
   // Spot-check the curated entries that used to be pinned to the 250k default.

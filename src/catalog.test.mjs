@@ -34,8 +34,8 @@ test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
   assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(catalog.models[0].comp_hash, "modeldock-opencode-go-v1");
-  assert.equal(catalog.models[0].context_window, 1_000_000, "deepseek-v4-flash declares its self-reported 1M window");
-  assert.equal(catalog.models[0].auto_compact_token_limit, 800_000);
+  assert.equal(catalog.models[0].context_window, 600_000, "OpenCode Go deepseek-v4-flash declares a conservative 600k window");
+  assert.equal(catalog.models[0].auto_compact_token_limit, 480_000);
 });
 
 test("catalogFor covers every available model", () => {

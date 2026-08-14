@@ -1,13 +1,13 @@
 
-// The context window we declare for each relayed model. Every published entry
-// reports the window its upstream self-declares in the OpenCode model registry
-// (opencode-go for the paid tier, opencode for the zen free tier) instead of a
-// shared gate-imposed cap; DeepSeek V4's 1M was additionally verified against a
-// live needle test (911k held). CONTEXT_WINDOW remains only the conservative
-// fallback for models with no self-declared figure (probe-merged new ids,
-// custom endpoints).
+// The context window ModelDock publishes for each relayed model. Most entries
+// use the upstream registry figure (opencode-go for the paid tier, opencode for
+// the zen free tier). The paid OpenCode Go DeepSeek pair is deliberately capped
+// at 600k for stability, while DeepSeek official keeps its verified 1M window.
+// CONTEXT_WINDOW remains only the fallback for models with no curated figure
+// (probe-merged new ids and custom endpoints).
 const CONTEXT_WINDOW = Number(process.env.MODELDOCK_CONTEXT_WINDOW || 250_000);
 const DEEPSEEK_CONTEXT_WINDOW = 1_000_000;
+const OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW = 600_000;
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
 
@@ -46,7 +46,7 @@ const SELF_DECLARED_CONTEXT_WINDOWS = {
   "qwen3.8-max": 1_000_000,
 };
 
-export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, SELF_DECLARED_CONTEXT_WINDOWS, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
+export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, SELF_DECLARED_CONTEXT_WINDOWS, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
 // The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
 // (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
@@ -194,7 +194,7 @@ const OPENCODE_GO_PROFILE = {
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.
@@ -202,7 +202,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, status: "available" },
@@ -333,10 +333,9 @@ const PROFILES = {
   custom: CUSTOM_PROFILE,
 };
 
-// Apply each published model's self-declared window so nothing in the published
-// catalog falls back to the gate-wide cap. Explicit values (the needle-verified
-// DeepSeek 1M entries) are left untouched; only models with no declared figure
-// keep the conservative CONTEXT_WINDOW fallback.
+// Apply each model's registry window unless its provider entry has an explicit
+// override. This preserves the OpenCode Go DeepSeek 600k stability cap and the
+// DeepSeek official 1M window while keeping all other curated values per model.
 for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
   for (const model of profile.availableModels || []) {
     const declared = SELF_DECLARED_CONTEXT_WINDOWS[model.id];
