@@ -1206,7 +1206,7 @@ function awaitRuntimeMigrationThenUpdate(expectedVersion) {
             button.disabled = false;
             button.textContent = t("button.update");
           }
-          window.alert("Node.js runtime migration did not complete. Check modeldock.log and try again.");
+          window.alert("Node.js runtime migration did not complete. Check modeldock-update.log and try again.");
         } else if (error.message === "runtime migration still in progress" || error.message === "not ready" || error instanceof TypeError) setTimeout(probe, 2_000);
         else {
           updateBusy = false;

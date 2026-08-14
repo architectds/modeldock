@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically } from "./update.mjs";
+import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically, scheduleRestart } from "./update.mjs";
 
 function responseBody(body) {
   const bytes = Buffer.from(body);
@@ -127,6 +127,37 @@ test("createUpdater.check records errors without throwing", async () => {
   const state = await updater.check();
   assert.equal(state.available, false);
   assert.match(state.error, /503/);
+});
+
+test("scheduleRestart delays listener shutdown until the update response can flush", () => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-restart-delay-"));
+  const calls = [];
+  const child = {
+    on() { return this; },
+    unref() { return this; },
+  };
+  const spawnImpl = (...args) => {
+    calls.push(args);
+    return child;
+  };
+  try {
+    // Model the running Windows gateway's exclusive stdout handle. A directory
+    // at this path makes any accidental open of modeldock.log fail everywhere.
+    mkdirSync(path.join(rootDir, "modeldock.log"));
+    scheduleRestart(rootDir, { spawnImpl, platform: "win32" });
+    scheduleRestart(rootDir, { spawnImpl, platform: "darwin" });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0][0], "powershell.exe");
+    assert.equal(calls[1][0], "sh");
+    for (const call of calls) {
+      assert.equal(call[2].env.MODELDOCK_RESTART_DELAY_SECONDS, "1");
+      assert.equal(call[2].env.MODELDOCK_NODE_PATH, process.execPath);
+      assert.equal(call[2].detached, true);
+    }
+    assert.ok(readdirSync(rootDir).includes("modeldock-update.log"));
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test("createUpdater.apply never falls back to cached release assets when the latest recheck fails", async () => {
