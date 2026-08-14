@@ -965,7 +965,7 @@ test("custom endpoint add rejects a failing probe with a classified error", asyn
   }
 });
 
-test("ollama flow: connect snapshots + publishes, select persists main/vision, disconnect clears", async (t) => {
+test("ollama flow: connect snapshots, publishes, auto-selects main/vision, disconnect clears", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-ollama-flow-"));
   const envFile = path.join(dir, ".env");
   const snapshotFile = path.join(dir, "ollama-models.json");
@@ -1012,6 +1012,8 @@ test("ollama flow: connect snapshots + publishes, select persists main/vision, d
     assert.equal(connect.connected, true);
     assert.deepEqual(connect.models.map((model) => model.id), ["qwen3.8-27b"], "embedding-only models stay out");
     assert.equal(connect.settings.ollama.connected, true);
+    assert.equal(connect.settings.ollama.mainModel, "qwen3.8-27b", "the first chat model becomes main automatically");
+    assert.equal(connect.settings.ollama.visionModel, "qwen3.8-27b", "the vision-capable model becomes vision automatically");
 
     const snapshot = JSON.parse(await readFile(snapshotFile, "utf8"));
     assert.equal(snapshot.baseUrl, "http://127.0.0.1:11434");
@@ -1022,15 +1024,6 @@ test("ollama flow: connect snapshots + publishes, select persists main/vision, d
     assert.ok(entry, "connected Ollama models are published in the catalog");
     assert.equal(entry.display_name, "Ollama (local) - qwen3.8:27b", "the label keeps the recognizable Ollama tag");
     assert.equal(entry.context_window, 262144, "the context window comes from Ollama");
-
-    const select = await (await fetch(`${instance.base}/api/ollama/select`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mainModel: "qwen3.8-27b", visionModel: "qwen3.8-27b" }),
-    })).json();
-    assert.equal(select.ok, true);
-    assert.equal(select.settings.ollama.mainModel, "qwen3.8-27b");
-    assert.equal(select.settings.ollama.visionModel, "qwen3.8-27b");
 
     const env = await readFile(envFile, "utf8");
     assert.match(env, /MODELDOCK_MAIN_MODEL=qwen3\.8-27b@ollama/);

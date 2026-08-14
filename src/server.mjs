@@ -1612,27 +1612,29 @@ export function createApp(services = createServices()) {
       writeOllamaSnapshot(services.ollamaSnapshotFile, snapshot);
       applyOllamaProfile(config, snapshot);
       config.ollamaBaseUrl = result.endpoint;
-      // If the previous selection named an Ollama model that is gone now, clear it
-      // so the persisted main/vision never dangles at a deleted model.
-      const updates = {};
-      for (const [envKey, model] of [["MODELDOCK_MAIN_MODEL", config.mainModel], ["MODELDOCK_VISION_MODEL", config.visionModel]]) {
-        if (providerForModel(config, model) !== "ollama") continue;
-        const bare = bareModelId(model);
-        if (!result.models.some((entry) => entry.id === bare)) {
-          updates[envKey] = "";
-          if (envKey === "MODELDOCK_MAIN_MODEL") {
-            config.mainModel = "deepseek-v4-flash@opencode-go";
-            services.modelSelection.mainModel = config.mainModel;
-            services.configSwitcher.model = config.mainModel;
-          } else {
-            config.visionModel = "";
-            services.modelSelection.visionModel = "";
-          }
-        }
+      // Auto-select: the first chat model becomes main, the first vision-capable
+      // model becomes vision. No per-model selection is required.
+      const main = result.models[0].id;
+      const vision = result.models.find((model) => model.supportsVision)?.id || "";
+      const updates = { MODELDOCK_MAIN_MODEL: `${main}${PROVIDER_SEPARATOR}ollama` };
+      if (vision) {
+        updates.MODELDOCK_VISION_MODEL = `${vision}${PROVIDER_SEPARATOR}ollama`;
+      } else if (providerForModel(config, config.visionModel) === "ollama") {
+        // The previous local vision model is gone; do not leave it dangling.
+        updates.MODELDOCK_VISION_MODEL = "";
+        config.visionModel = "";
+        services.modelSelection.visionModel = "";
       }
-      if (Object.keys(updates).length) writeEnvFile(updates, config.envFile);
+      writeEnvFile(updates, config.envFile);
+      config.mainModel = `${main}${PROVIDER_SEPARATOR}ollama`;
+      services.modelSelection.mainModel = config.mainModel;
+      services.configSwitcher.model = config.mainModel;
+      if (vision) {
+        config.visionModel = `${vision}${PROVIDER_SEPARATOR}ollama`;
+        services.modelSelection.visionModel = config.visionModel;
+      }
       services.writeCatalogFile?.();
-      recordConfigAction(metrics, "ollama_connect", { ok: true, models: result.models.length });
+      recordConfigAction(metrics, "ollama_connect", { ok: true, models: result.models.length, main, vision });
       return res.json({
         ok: true,
         connected: true,
@@ -1672,35 +1674,6 @@ export function createApp(services = createServices()) {
       return res.json({ ok: true, connected: false, settings: settingsPayload(services) });
     } catch (error) {
       recordConfigAction(metrics, "ollama_disconnect", { ok: false, error: error.message });
-      return res.status(400).json(customErrorPayload(error));
-    }
-  });
-
-  // Persist the main/vision selection among the connected Ollama models. Ids are
-  // the published (colon-free) ones; the provider is qualified on the wire.
-  app.post("/api/ollama/select", mutateConfig, async (req, res) => {
-    const { mainModel, visionModel } = req.body || {};
-    try {
-      const known = new Set((profileById("ollama").availableModels || []).map((model) => model.id));
-      const main = String(mainModel || "").trim();
-      const vision = String(visionModel || "").trim();
-      if (main && !known.has(main)) throw new OllamaError("model", `Unknown Ollama model: ${main}`);
-      if (vision && !known.has(vision)) throw new OllamaError("model", `Unknown Ollama model: ${vision}`);
-      const updates = {
-        MODELDOCK_MAIN_MODEL: main ? `${main}${PROVIDER_SEPARATOR}ollama` : "",
-        MODELDOCK_VISION_MODEL: vision ? `${vision}${PROVIDER_SEPARATOR}ollama` : "",
-      };
-      writeEnvFile(updates, config.envFile);
-      config.mainModel = main ? `${main}${PROVIDER_SEPARATOR}ollama` : "deepseek-v4-flash@opencode-go";
-      services.modelSelection.mainModel = config.mainModel;
-      services.configSwitcher.model = config.mainModel;
-      config.visionModel = vision ? `${vision}${PROVIDER_SEPARATOR}ollama` : "";
-      services.modelSelection.visionModel = config.visionModel;
-      services.writeCatalogFile?.();
-      recordConfigAction(metrics, "ollama_select", { ok: true, main: main || "", vision: vision || "" });
-      return res.json({ ok: true, settings: settingsPayload(services) });
-    } catch (error) {
-      recordConfigAction(metrics, "ollama_select", { ok: false, error: error.message });
       return res.status(400).json(customErrorPayload(error));
     }
   });

@@ -1373,12 +1373,7 @@ if (customAddBtn) {
 }
 
 // --- Ollama (local) connect section ---
-const ollamaBaseInput = $("ollama-base");
 const ollamaConnectBtn = $("ollama-connect");
-const ollamaDisconnectBtn = $("ollama-disconnect");
-const ollamaModelsBox = $("ollama-models");
-const ollamaModelList = $("ollama-model-list");
-const ollamaSaveBtn = $("ollama-save");
 const ollamaStatus = $("ollama-status");
 const ollamaError = $("ollama-error");
 
@@ -1402,91 +1397,14 @@ function ollamaErrorText(code, fallback) {
   return key ? t(key) : fallback;
 }
 
-function ollamaFormatContext(n) {
-  if (!n) return "—";
-  return n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.round(n / 1_000)}k`;
-}
-
 function renderOllamaSection(state) {
   ollamaState = state || { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
   const connected = Boolean(ollamaState.connected && ollamaState.models?.length);
-  if (ollamaBaseInput) {
-    ollamaBaseInput.value = ollamaState.baseUrl || "http://127.0.0.1:11434";
-    ollamaBaseInput.disabled = connected;
-  }
-  if (ollamaConnectBtn) ollamaConnectBtn.hidden = connected;
-  if (ollamaDisconnectBtn) ollamaDisconnectBtn.hidden = !connected;
-  if (ollamaModelsBox) ollamaModelsBox.hidden = !connected;
-  renderOllamaModelList();
-  ollamaShow("", false);
-}
-
-function renderOllamaModelList() {
-  if (!ollamaModelList) return;
-  ollamaModelList.replaceChildren();
-  for (const model of ollamaState.models || []) {
-    const row = document.createElement("div");
-    row.className = "ollama-model-row";
-
-    const name = document.createElement("span");
-    name.className = "ollama-model-name";
-    name.textContent = model.label || model.id;
-    name.title = model.id;
-
-    const context = document.createElement("span");
-    context.className = "ollama-model-context";
-    context.textContent = ollamaFormatContext(model.contextWindow);
-
-    const roles = document.createElement("span");
-    roles.className = "ollama-model-roles";
-    const main = document.createElement("label");
-    main.className = "chip-toggle";
-    const mainInput = document.createElement("input");
-    mainInput.type = "radio";
-    mainInput.name = "ollama-main";
-    mainInput.value = model.id;
-    mainInput.checked = ollamaState.mainModel === model.id;
-    const mainSpan = document.createElement("span");
-    mainSpan.textContent = t("ollama.main");
-    main.append(mainInput, mainSpan);
-
-    const vision = document.createElement("label");
-    vision.className = "chip-toggle";
-    const visionInput = document.createElement("input");
-    visionInput.type = "checkbox";
-    visionInput.name = "ollama-vision";
-    visionInput.value = model.id;
-    visionInput.checked = ollamaState.visionModel === model.id;
-    visionInput.disabled = !model.supportsVision;
-    const visionSpan = document.createElement("span");
-    visionSpan.textContent = t("ollama.vision");
-    vision.append(visionInput, visionSpan);
-    if (!model.supportsVision) vision.title = t("ollama.noVision");
-
-    roles.append(main, vision);
-    row.append(name, context, roles);
-    ollamaModelList.append(row);
-  }
-  // A single vision checkbox at a time, mirroring the single main radio.
-  ollamaModelList.querySelectorAll('input[name="ollama-vision"]').forEach((box) => {
-    box.addEventListener("change", () => {
-      if (!box.checked) return;
-      ollamaModelList.querySelectorAll('input[name="ollama-vision"]').forEach((other) => {
-        if (other !== box) other.checked = false;
-      });
-    });
-  });
-}
-
-function ollamaSelection() {
-  const main = ollamaModelList?.querySelector('input[name="ollama-main"]:checked');
-  const vision = ollamaModelList?.querySelector('input[name="ollama-vision"]:checked');
-  return { mainModel: main?.value || "", visionModel: vision?.value || "" };
+  ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
 }
 
 if (ollamaConnectBtn) {
   ollamaConnectBtn.addEventListener("click", async () => {
-    const baseUrl = ollamaBaseInput.value.trim();
     ollamaConnectBtn.disabled = true;
     ollamaConnectBtn.textContent = t("ollama.connecting");
     ollamaShow("", false);
@@ -1494,14 +1412,13 @@ if (ollamaConnectBtn) {
       const response = await fetch("/api/ollama/connect", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ baseUrl }),
+        body: JSON.stringify({}),
       });
       const body = await response.json();
       if (!response.ok) {
         throw Object.assign(new Error(body.error?.message || "Connect failed"), { code: body.error?.type });
       }
       renderOllamaSection(body.settings?.ollama);
-      ollamaShow(t("ollama.connected", { n: (body.models || []).length }), false);
       poll().catch(() => {});
       pollConfig().catch(() => {});
     } catch (error) {
@@ -1509,54 +1426,6 @@ if (ollamaConnectBtn) {
     } finally {
       ollamaConnectBtn.disabled = false;
       ollamaConnectBtn.textContent = t("ollama.connect");
-    }
-  });
-}
-
-if (ollamaDisconnectBtn) {
-  ollamaDisconnectBtn.addEventListener("click", async () => {
-    ollamaDisconnectBtn.disabled = true;
-    try {
-      const response = await fetch("/api/ollama/disconnect", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message || "Disconnect failed");
-      renderOllamaSection(body.settings?.ollama);
-      ollamaShow(t("ollama.disconnected"), false);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-    } catch (error) {
-      ollamaShow(error.message, true);
-    } finally {
-      ollamaDisconnectBtn.disabled = false;
-    }
-  });
-}
-
-if (ollamaSaveBtn) {
-  ollamaSaveBtn.addEventListener("click", async () => {
-    ollamaSaveBtn.disabled = true;
-    try {
-      const response = await fetch("/api/ollama/select", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(ollamaSelection()),
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        throw Object.assign(new Error(body.error?.message || "Save failed"), { code: body.error?.type });
-      }
-      renderOllamaSection(body.settings?.ollama);
-      ollamaShow(t("ollama.saved"), false);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-    } catch (error) {
-      ollamaShow(ollamaErrorText(error.code) || error.message, true);
-    } finally {
-      ollamaSaveBtn.disabled = false;
     }
   });
 }
