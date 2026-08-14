@@ -1,15 +1,15 @@
 
-// What we tell Codex each relayed model can hold. This is a working figure for the
-// upstreams we relay, not the headline number a vendor advertises for its own API:
-// declaring 1M meant Codex never reached its own auto-compaction threshold and left
-// the entire context problem to the gate. At 250k it manages the session itself and
-// md_memory becomes a safety net rather than the only mechanism.
-// Configurable so the figure can be corrected without a release.
+// The context window we declare for relayed models. DeepSeek V4 (flash and pro)
+// advertise a 1M window natively and the OpenCode endpoint held 911k in a live
+// needle test, so those entries report their self-declared 1M instead of a
+// gate-imposed cap. CONTEXT_WINDOW remains the conservative fallback for the rest
+// of the catalog whose real window we have not measured.
 const CONTEXT_WINDOW = Number(process.env.MODELDOCK_CONTEXT_WINDOW || 250_000);
+const DEEPSEEK_CONTEXT_WINDOW = 1_000_000;
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
 
-export { CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
+export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
 // The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
 // (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
@@ -157,7 +157,7 @@ const OPENCODE_GO_PROFILE = {
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.
@@ -165,7 +165,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, status: "available" },
@@ -239,8 +239,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: 400_000, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
   ],
 
   modelCatalog({ mainModel, baseInstructions }) {
