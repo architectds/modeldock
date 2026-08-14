@@ -8,6 +8,7 @@ import {
   profileOptions,
   applyCustomProfile,
   CONTEXT_WINDOW,
+  SELF_DECLARED_CONTEXT_WINDOWS,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
 } from "./profiles.mjs";
@@ -99,5 +100,33 @@ test("every profile compacts at 80% of the model context window", () => {
     assert.equal(model.max_context_window, 1_000_000);
     assert.equal(model.auto_compact_token_limit, Math.floor(1_000_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 1M window`);
   }
+});
+
+test("every published model declares its own self-reported context window", () => {
+  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
+    const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
+    for (const model of profile.availableModels.filter((entry) => entry.status !== "unavailable")) {
+      const declared = SELF_DECLARED_CONTEXT_WINDOWS[model.id];
+      const slug = publishedSlugFor(profile.id, model);
+      const entry = catalog.models.find((candidate) => candidate.slug === slug);
+      assert.ok(declared, `${model.id} has a self-reported context window`);
+      assert.ok(entry, `${slug} is present in the published catalog`);
+      assert.equal(entry.context_window, declared, `${model.id} declares its self-reported window`);
+      assert.equal(entry.max_context_window, declared, `${model.id} max window matches its declared window`);
+      assert.equal(entry.auto_compact_token_limit, Math.floor(declared * AUTO_COMPACT_PERCENT), `${model.id} compacts at 80% of its declared window`);
+    }
+  }
+  // Spot-check the curated entries that used to be pinned to the 250k default.
+  const byId = (id) => OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === id);
+  assert.equal(byId("glm-5.2").contextWindow, 1_000_000, "GLM-5.2 self-declares 1M");
+  assert.equal(byId("glm-5").contextWindow, 202_752, "GLM-5 self-declares 202752");
+  assert.equal(byId("kimi-k2.7-code").contextWindow, 262_144, "Kimi K2.7 Code self-declares 262144");
+  assert.equal(byId("kimi-k3").contextWindow, 1_048_576, "Kimi K3 self-declares 1048576");
+  assert.equal(byId("grok-4.5").contextWindow, 500_000, "Grok 4.5 self-declares 500k");
+  assert.equal(byId("minimax-m2.7").contextWindow, 204_800, "MiniMax M2.7 self-declares 204800");
+  assert.equal(byId("gpt-5.6-luna").contextWindow, 1_050_000, "GPT-5.6 Luna self-declares 1.05M");
+  assert.equal(byId("deepseek-v4-flash-free").contextWindow, 200_000, "zen free DeepSeek self-declares 200k");
+  assert.equal(byId("mimo-v2.5-free").contextWindow, 200_000, "zen free MiMo self-declares 200k");
+  assert.equal(byId("nemotron-3-ultra-free").contextWindow, 1_000_000, "zen free Nemotron self-declares 1M");
 });
 

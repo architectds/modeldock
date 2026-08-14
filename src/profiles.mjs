@@ -1,15 +1,52 @@
 
-// The context window we declare for relayed models. DeepSeek V4 (flash and pro)
-// advertise a 1M window natively and the OpenCode endpoint held 911k in a live
-// needle test, so those entries report their self-declared 1M instead of a
-// gate-imposed cap. CONTEXT_WINDOW remains the conservative fallback for the rest
-// of the catalog whose real window we have not measured.
+// The context window we declare for each relayed model. Every published entry
+// reports the window its upstream self-declares in the OpenCode model registry
+// (opencode-go for the paid tier, opencode for the zen free tier) instead of a
+// shared gate-imposed cap; DeepSeek V4's 1M was additionally verified against a
+// live needle test (911k held). CONTEXT_WINDOW remains only the conservative
+// fallback for models with no self-declared figure (probe-merged new ids,
+// custom endpoints).
 const CONTEXT_WINDOW = Number(process.env.MODELDOCK_CONTEXT_WINDOW || 250_000);
 const DEEPSEEK_CONTEXT_WINDOW = 1_000_000;
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
 
-export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
+// Self-declared context windows from the upstream OpenCode model registry,
+// keyed by the bare model id. Zen free-tier entries (-free) take the zen
+// (opencode) registry figure; the rest take the opencode-go paid figure.
+const SELF_DECLARED_CONTEXT_WINDOWS = {
+  "deepseek-v4-flash": DEEPSEEK_CONTEXT_WINDOW,
+  "deepseek-v4-flash-free": 200_000,
+  "deepseek-v4-pro": DEEPSEEK_CONTEXT_WINDOW,
+  "nemotron-3-ultra-free": 1_000_000,
+  "laguna-s-2.1-free": 256_000,
+  "longcat-2.0-free": 1_000_000,
+  "glm-5": 202_752,
+  "glm-5.1": 202_752,
+  "glm-5.2": 1_000_000,
+  "gpt-5.6-luna": 1_050_000,
+  "grok-4.5": 500_000,
+  "hy3": 256_000,
+  "kimi-k2.5": 262_144,
+  "kimi-k2.6": 262_144,
+  "kimi-k2.7-code": 262_144,
+  "kimi-k3": 1_048_576,
+  "mimo-v2-omni": 262_144,
+  "mimo-v2-pro": 1_048_576,
+  "mimo-v2.5": 1_000_000,
+  "mimo-v2.5-free": 200_000,
+  "mimo-v2.5-pro": 1_048_576,
+  "minimax-m2.5": 204_800,
+  "minimax-m2.7": 204_800,
+  "minimax-m3": 1_000_000,
+  "qwen3.5-plus": 262_144,
+  "qwen3.6-plus": 1_000_000,
+  "qwen3.7-max": 1_000_000,
+  "qwen3.7-plus": 1_000_000,
+  "qwen3.8-max": 1_000_000,
+};
+
+export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, SELF_DECLARED_CONTEXT_WINDOWS, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
 // The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
 // (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
@@ -295,6 +332,17 @@ const PROFILES = {
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
 };
+
+// Apply each published model's self-declared window so nothing in the published
+// catalog falls back to the gate-wide cap. Explicit values (the needle-verified
+// DeepSeek 1M entries) are left untouched; only models with no declared figure
+// keep the conservative CONTEXT_WINDOW fallback.
+for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
+  for (const model of profile.availableModels || []) {
+    const declared = SELF_DECLARED_CONTEXT_WINDOWS[model.id];
+    if (declared && model.contextWindow === undefined) model.contextWindow = declared;
+  }
+}
 
 export function profileById(id) {
   return PROFILES[id] || OPENCODE_GO_PROFILE;

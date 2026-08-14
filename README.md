@@ -31,8 +31,8 @@ native GPT passthrough and live token, latency, and trace observability.
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
 the OpenCode Go Responses endpoint it runs through has no hosted search (the
-DeepSeek official endpoint does). Model Dock For Codex adds these as tools,
-without rewriting the conversation history:
+DeepSeek official endpoint does). Model Dock For Codex adds a consistent tool
+layer:
 
 - **See** - paste an image into Codex and the request is routed to the vision
   model you chose in Settings, or let the model call `vision_inspect` on a
@@ -44,6 +44,8 @@ without rewriting the conversation history:
   cross-session memory, so decisions and baselines survive between sessions. It
   is on by default; set `MODELDOCK_MEMORY=0` in `~/.modeldock/.env` and restart
   to disable it.
+- **Learn** - the `learn` tool ingests files or folders into project, global,
+  or expert memory.
 - **Make** - the `content-to-video` skill lets the model produce finished MP4
   videos end-to-end: classify content, storyboard per-shot tech stacks, narrate
   with measured durations, build three.js / HTML or HyperFrames scenes, assemble
@@ -52,9 +54,10 @@ without rewriting the conversation history:
   [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
   (sparse-checkout `assets/audio`) when a project needs sound.
 
-The bridge is a thin local gateway: the Responses stream passes through
-untouched, and multi-turn tool loops, streaming, and long-session compaction
-keep working the way they do on the native channel.
+Codex remains in charge of multi-turn tool loops, streaming, and compaction.
+ModelDock forwards standard Responses traffic and applies narrow compatibility
+repairs when an upstream omits or rejects lifecycle or history fields Codex
+needs.
 
 ## Install
 
@@ -99,13 +102,14 @@ does not change your Codex model.
 used for pasted images and for `vision_inspect` calls. Providers without a
 vision-capable model show `None` instead of advertising an unusable route.
 
-**Upstreams** - OpenCode Go and DeepSeek official are both supported. The
-owner suffix in the model id (for example `deepseek-v4-flash@deepseek-official`)
-selects the upstream; plain ids resolve to OpenCode Go. Native GPT
-models stay in the Codex model picker when you are signed in to Codex
-(Trial mode skips the native merge). Codex's own authenticated requests
-are passed through unchanged to OpenAI. ModelDock never accesses, stores,
-copies, or replays OpenAI credentials.
+**Upstreams** - OpenCode Go and DeepSeek official are both supported. Every
+model in the picker is listed as "Provider - Model" (for example "OpenCode Go -
+DeepSeek V4 Flash"). The model id carries its provider as a suffix
+(`model@provider`, for example `deepseek-v4-flash@deepseek-official`), and that
+suffix selects the upstream. Native GPT models stay in the Codex model picker
+when you are signed in to Codex (Trial mode skips the native merge). Codex's
+own authenticated requests are passed through unchanged to OpenAI. ModelDock
+never accesses, stores, copies, or replays OpenAI credentials.
 
 The setup guide accepts any configured provider token for ON mode. On a
 DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
@@ -114,11 +118,11 @@ main model and `None` for vision, and persists that route across restarts.
 **Speech** - open the TTS / STT tile on the dashboard and toggle TTS or STT on.
 The `speak` and `hear` tools become available to the model.
 
-**MCP tools** - web search, vision, and speech reach Codex as tools that
-survive gateway restarts. If a session's tool connection is stale, call them
-directly instead of restarting Codex:
-`node scripts/mcp-call.mjs search "..."` or
-`node scripts/mcp-call.mjs vision <path> <question>`.
+**MCP tools** - ModelDock can expose `web_search_exa`, `vision_inspect`,
+`speak`, `hear`, `recall_memory`, `store_memory`, and `learn`; availability
+follows Settings and configured keys. The stdio bridge survives gateway
+restarts. If a session's tool connection is stale, run
+`node scripts/mcp-call.mjs list_mcp_tools` for direct-call commands.
 
 **Language** - the dashboard speaks English, 简体中文, 日本語, Français,
 Español. Change it anytime under Settings -> Interface language.
@@ -249,10 +253,12 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 **视觉模型** - 在仪表盘选择视觉模型，用于粘贴的图片和 `vision_inspect`
 调用。
 
-**上游** - 同时支持 OpenCode Go 和 DeepSeek 官方。模型 id 中的 owner 后缀
-（例如 `deepseek-v4-flash@deepseek-official`）选择上游；不带后缀的 id 走
-OpenCode Go。登录 Codex 时，原生 GPT 模型保留在模型选单中（Trial 模式不合并）。Codex 自身已认证的请
-求会原样透传给 OpenAI。ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
+**上游** - 同时支持 OpenCode Go 和 DeepSeek 官方。选单中的每个模型都以
+"Provider - Model" 形式显示（例如 "OpenCode Go - DeepSeek V4 Flash"）。模型 id
+带 provider 后缀（`model@provider`，例如 `deepseek-v4-flash@deepseek-official`），
+后缀即选择上游。登录 Codex 时，原生 GPT 模型保留在模型选单中（Trial 模式不合并）。
+Codex 自身已认证的请求会原样透传给 OpenAI。ModelDock 从不访问、存储、复制或
+回放 OpenAI 凭证。
 
 **语音** - 打开仪表盘的 TTS / STT 磁贴并启用 TTS 或 STT，`speak` 和 `hear`
 工具即可供模型使用。
@@ -374,12 +380,13 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 **ビジョンモデル** - ダッシュボードでビジョンモデルを選択します。貼り付け
 た画像と `vision_inspect` 呼び出しに使われます。
 
-**上流** - OpenCode Go と DeepSeek 公式の両方をサポートします。モデル ID の
-owner サフィックス（例 `deepseek-v4-flash@deepseek-official`）で上流を選択。
-サフィックスなしは OpenCode Go になります。ネイティブ GPT モデルは Codex の
-モデルピッカーに残ります。Codex 自身の認証済みリクエストは変更されずに
-OpenAI へ転送されます。ModelDock は OpenAI の認証情報にアクセスせず、保存・
-コピー・再生もしません。
+**上流** - OpenCode Go と DeepSeek 公式の両方をサポートします。ピッカーの
+各モデルは "Provider - Model" 形式（例 "OpenCode Go - DeepSeek V4 Flash"）で
+表示されます。モデル ID は provider サフィックス（`model@provider`、例
+`deepseek-v4-flash@deepseek-official`）を持ち、そのサフィックスが上流を
+指定します。ネイティブ GPT モデルは Codex のモデルピッカーに残ります。
+Codex 自身の認証済みリクエストは変更されずに OpenAI へ転送されます。
+ModelDock は OpenAI の認証情報にアクセスせず、保存・コピー・再生もしません。
 
 **音声** - ダッシュボードの TTS / STT タイルで有効にすると、`speak` と
 `hear` ツールがモデルから使えます。
@@ -507,10 +514,12 @@ lecture seule sur le tableau de bord.
 **Modèle de vision** - choisissez le modèle de vision sur le tableau de bord. Il
 est utilisé pour les images collées et les appels `vision_inspect`.
 
-**Amonts** - OpenCode Go et DeepSeek officiel sont pris en charge. Le suffixe
-owner dans l'id du modèle (par exemple
-`deepseek-v4-flash@deepseek-official`) sélectionne l'amont ; les ids simples
-passent par OpenCode Go. Si vous êtes connecté à Codex, les modèles GPT natifs restent dans le sélecteur de
+**Amonts** - OpenCode Go et DeepSeek officiel sont pris en charge. Chaque
+modèle du sélecteur est listé sous la forme « Fournisseur - Modèle » (par
+exemple « OpenCode Go - DeepSeek V4 Flash »). L'id du modèle porte son
+fournisseur en suffixe (`model@provider`, par exemple
+`deepseek-v4-flash@deepseek-official`), et ce suffixe sélectionne l'amont.
+Si vous êtes connecté à Codex, les modèles GPT natifs restent dans le sélecteur de
 modèles de Codex (le mode Trial ne les fusionne pas). Les requêtes authentifiées de Codex sont transmises telles
 quelles à OpenAI. ModelDock n'accède jamais aux identifiants OpenAI, ne les
 stocke pas, ne les copie pas et ne les rejoue pas.
@@ -645,9 +654,11 @@ solo lectura en el panel.
 **Modelo de visión** - elige el modelo de visión en el panel. Se usa para
 imágenes pegadas y llamadas `vision_inspect`.
 
-**Upstreams** - se admiten OpenCode Go y DeepSeek oficial. El sufijo owner en el
-id del modelo (por ejemplo `deepseek-v4-flash@deepseek-official`) selecciona el
-upstream; los ids simples usan OpenCode Go. Si has iniciado sesión, los modelos GPT nativos permanecen
+**Upstreams** - se admiten OpenCode Go y DeepSeek oficial. Cada modelo del
+selector se muestra como « Proveedor - Modelo » (por ejemplo « OpenCode Go -
+DeepSeek V4 Flash »). El id del modelo lleva su proveedor como sufijo
+(`model@provider`, por ejemplo `deepseek-v4-flash@deepseek-official`), y ese
+sufijo selecciona el upstream. Si has iniciado sesión, los modelos GPT nativos permanecen
 en el selector de modelos de Codex (el modo Trial no los fusiona). Las solicitudes autenticadas de Codex se
 reenvían sin cambios a OpenAI. ModelDock nunca accede, almacena, copia ni
 reproduce las credenciales de OpenAI.
