@@ -87,7 +87,7 @@ soon as Codex restarts.
 2. Flip the "Use other APIs in Codex" switch on the page.
 3. Fully quit and restart Codex, then confirm on the "I restarted Codex" banner.
 4. Pick a Model Dock model in Codex's model picker (the default is already
-   selected; native GPT models are listed too).
+   selected; if you are signed in to Codex, the native GPT models are listed too).
 
 ## Daily use
 
@@ -102,7 +102,8 @@ vision-capable model show `None` instead of advertising an unusable route.
 **Upstreams** - OpenCode Go and DeepSeek official are both supported. The
 owner suffix in the model id (for example `deepseek-v4-flash@deepseek-official`)
 selects the upstream; plain ids resolve to OpenCode Go. Native GPT
-models stay in the Codex model picker. Codex's own authenticated requests
+models stay in the Codex model picker when you are signed in to Codex
+(Trial mode skips the native merge). Codex's own authenticated requests
 are passed through unchanged to OpenAI. ModelDock never accesses, stores,
 copies, or replays OpenAI credentials.
 
@@ -237,7 +238,7 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
    让你粘贴 token）；如果没有，请在浏览器中打开。
 2. 打开页面上的「在 Codex 中使用其他 API」开关。
 3. 完全退出并重启 Codex，然后在「我已重启 Codex」横幅上确认。
-4. 在 Codex 的模型菜单里选择 Model Dock 模型（默认模型已选中；原生 GPT 模型
+4. 在 Codex 的模型菜单里选择 Model Dock 模型（默认模型已选中；登录 Codex 时，原生 GPT 模型
    也会列出）。
 
 ### 日常使用
@@ -250,7 +251,7 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 **上游** - 同时支持 OpenCode Go 和 DeepSeek 官方。模型 id 中的 owner 后缀
 （例如 `deepseek-v4-flash@deepseek-official`）选择上游；不带后缀的 id 走
-OpenCode Go。原生 GPT 模型保留在 Codex 的模型选单中。Codex 自身已认证的请
+OpenCode Go。登录 Codex 时，原生 GPT 模型保留在模型选单中（Trial 模式不合并）。Codex 自身已认证的请
 求会原样透传给 OpenAI。ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
 
 **语音** - 打开仪表盘的 TTS / STT 磁贴并启用 TTS 或 STT，`speak` 和 `hear`
@@ -361,7 +362,7 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 2. ページの「Codex で他の API を使う」スイッチをオンにします。
 3. Codex を完全に終了して再起動し、ページの「Codex を再起動しました」バナー
    で確認します。
-4. Codex のモデル選択で Model Dock モデルを選びます（既定モデルは選択済み。
+4. Codex のモデル選択で Model Dock モデルを選びます（既定モデルは選択済み。Codex にサインインしている場合、
    ネイティブ GPT モデルも表示されます）。
 
 ### 日常使い
@@ -495,7 +496,7 @@ votre jeton [opencode.ai](https://opencode.ai/auth) dans la boîte de dialogue.
 3. Quittez et redémarrez complètement Codex, puis confirmez sur la bannière
    « J'ai redémarré Codex ».
 4. Choisissez un modèle Model Dock dans le sélecteur de Codex (le modèle par
-   défaut est déjà sélectionné ; les modèles GPT natifs sont aussi listés).
+   défaut est déjà sélectionné ; si vous êtes connecté à Codex, les modèles GPT natifs sont aussi listés).
 
 ### Usage quotidien
 
@@ -509,8 +510,8 @@ est utilisé pour les images collées et les appels `vision_inspect`.
 **Amonts** - OpenCode Go et DeepSeek officiel sont pris en charge. Le suffixe
 owner dans l'id du modèle (par exemple
 `deepseek-v4-flash@deepseek-official`) sélectionne l'amont ; les ids simples
-passent par OpenCode Go. Les modèles GPT natifs restent dans le sélecteur de
-modèles de Codex. Les requêtes authentifiées de Codex sont transmises telles
+passent par OpenCode Go. Si vous êtes connecté à Codex, les modèles GPT natifs restent dans le sélecteur de
+modèles de Codex (le mode Trial ne les fusionne pas). Les requêtes authentifiées de Codex sont transmises telles
 quelles à OpenAI. ModelDock n'accède jamais aux identifiants OpenAI, ne les
 stocke pas, ne les copie pas et ne les rejoue pas.
 
@@ -633,7 +634,7 @@ El instalador verifica Node.js >= 24, descarga Model Dock For Codex en
 3. Cierra y reinicia Codex por completo y confirma en el aviso
    «He reiniciado Codex».
 4. Elige un modelo Model Dock en el selector de Codex (el modelo predeterminado
-   ya está seleccionado; los modelos GPT nativos también aparecen).
+   ya está seleccionado; si has iniciado sesión en Codex, los modelos GPT nativos también aparecen).
 
 ### Uso diario
 
@@ -646,8 +647,8 @@ imágenes pegadas y llamadas `vision_inspect`.
 
 **Upstreams** - se admiten OpenCode Go y DeepSeek oficial. El sufijo owner en el
 id del modelo (por ejemplo `deepseek-v4-flash@deepseek-official`) selecciona el
-upstream; los ids simples usan OpenCode Go. Los modelos GPT nativos permanecen
-en el selector de modelos de Codex. Las solicitudes autenticadas de Codex se
+upstream; los ids simples usan OpenCode Go. Si has iniciado sesión, los modelos GPT nativos permanecen
+en el selector de modelos de Codex (el modo Trial no los fusiona). Las solicitudes autenticadas de Codex se
 reenvían sin cambios a OpenAI. ModelDock nunca accede, almacena, copia ni
 reproduce las credenciales de OpenAI.
 
