@@ -79,6 +79,18 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     }
   }
 
+  async function learnMemory(args) {
+    const finish = metrics.begin("memory", { operation: "learn", path: String(args.path || "").slice(0, 160) });
+    try {
+      const result = memoryStore.learn({ path: args.path, scopeDir: args.scope_dir });
+      finish({ ok: true, ingested: result.ingested, skipped: result.skipped, units: result.units });
+      return result;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
   async function searchWeb(args) {
     const finish = metrics.begin("web", { operation: "web_search_exa", query: args.query.slice(0, 160) });
     const endpoint = new URL(config.exaMcpUrl);
@@ -272,5 +284,5 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     throw new Error(message);
   }
 
-  return { searchWeb, inspectVision, ...(memoryStore ? { recallMemory, storeMemory } : {}) };
+  return { searchWeb, inspectVision, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
 }

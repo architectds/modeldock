@@ -580,3 +580,39 @@ test("legacy single database migrates into global and scoped node files", () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("learn ingests a directory into scoped memory and supersedes on re-learn", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  const kb = path.join(dir, "kb");
+  mkdirSync(kb, { recursive: true });
+  writeFileSync(path.join(kb, "a.md"), "# Entry\n\nQuality >= 280.\n", "utf8");
+  writeFileSync(path.join(kb, "b.md"), "# Exit\n\nSell on close.\n", "utf8");
+  const scope = path.join(dir, "trading");
+  try {
+    const first = store.learn({ path: kb, scopeDir: scope });
+    assert.equal(first.ingested, 2);
+    assert.equal(first.skipped, 0);
+    assert.equal(first.units, 2);
+    assert.equal(first.provenance, "file");
+
+    const hit = store.search({ query: "Quality", scopeDir: scope });
+    assert.match(hit.text, /280/);
+
+    const again = store.learn({ path: kb, scopeDir: scope });
+    assert.equal(again.ingested, 0);
+    assert.equal(again.skipped, 2);
+
+    writeFileSync(path.join(kb, "a.md"), "# Entry\n\nQuality >= 300.\n", "utf8");
+    const changed = store.learn({ path: kb, scopeDir: scope });
+    assert.equal(changed.ingested, 1);
+    assert.equal(changed.skipped, 1);
+
+    const refreshed = store.search({ query: "Quality", scopeDir: scope });
+    assert.match(refreshed.text, /300/);
+    assert.doesNotMatch(refreshed.text, /280/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

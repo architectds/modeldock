@@ -182,6 +182,29 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
         );
       }
 
+      if (typeof upstreams.learnMemory === "function") {
+        server.registerTool(
+          "learn",
+          {
+            title: "Learn Knowledge",
+            description:
+              "Ingest a local knowledge file or every markdown/text file directly under a directory into this project's persistent memory, chunked by `#` heading. Call this to bulk-load a knowledge base, frozen baseline, or reference material before reasoning from it. Unchanged files are skipped and changed files supersede their previous revision, so the newest version wins recall. This tool reads text only: for pdf/docx/pptx/xlsx, first extract the text with the bundled Python from load_workspace_dependencies (pdfplumber / python-docx / python-pptx / openpyxl), then pass the extracted text file here; for scanned pages, use vision_inspect with mode=ocr instead.",
+            inputSchema: z.object({
+              path: z.string().min(1).describe("Absolute path to a file or directory of markdown/text/json files to ingest"),
+              scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to use the session working directory"),
+            }),
+            annotations: { readOnlyHint: false, openWorldHint: false },
+          },
+          async (args) => {
+            try {
+              return textResult(await upstreams.learnMemory(args));
+            } catch (error) {
+              return errorResult(error);
+            }
+          },
+        );
+      }
+
   return server;
 }
 

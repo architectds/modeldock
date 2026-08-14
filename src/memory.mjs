@@ -534,6 +534,49 @@ export class MemoryStore {
     return result;
   }
 
+  // Bulk knowledge ingestion: read one file or every text file directly under a
+  // directory and capture each into the scope's node. Sections are chunked by
+  // `#` heading; unchanged files are skipped and a changed file supersedes its
+  // previous revision, so the newest version always wins recall. Provenance is
+  // "file" (the local knowledge base), distinct from "internet" and "session"
+  // which arrive through other paths.
+  learn({ path: inputPath, scopeDir = null }) {
+    const abs = path.resolve(inputPath);
+    const st = statSync(abs);
+    const files = [];
+    if (st.isDirectory()) {
+      for (const name of readdirSync(abs)) {
+        const full = path.join(abs, name);
+        if (statSync(full).isFile() && /\.(md|txt|json)$/i.test(name)) files.push(full);
+      }
+    } else {
+      files.push(abs);
+    }
+    if (!files.length) return { ok: true, provenance: "file", ingested: 0, skipped: 0, units: 0, files: [] };
+    const sourceDir = scopeDir || (st.isDirectory() ? abs : path.dirname(abs));
+    const nodeId = scopeNodeId(scopeDir);
+    const results = [];
+    let units = 0;
+    for (const file of files) {
+      const captured = this.captureText({
+        text: readFileSync(file, "utf8"),
+        sourceDir,
+        fileName: path.basename(file),
+        filePath: file,
+        adapter: "learn",
+        trustClass: "external_content",
+        itemKey: file,
+        nodeId,
+      });
+      units += captured.units || 0;
+      results.push({ file: path.basename(file), ...captured });
+    }
+    const ingested = results.filter((r) => !r.skipped).length;
+    const skipped = results.length - ingested;
+    this.#recordEvent("learn", scopeDir || "global", { ingested, skipped, units, files: results.length });
+    return { ok: true, provenance: "file", ingested, skipped, units, files: results };
+  }
+
   // Cross-node reference: a link in the source node's own db pointing at a
   // target node. Recall resolves links one level so global memory can fuse
   // specific project experience without copying its text.
