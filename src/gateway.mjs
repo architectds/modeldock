@@ -714,12 +714,7 @@ export function normalizeOpenCodeFlashInput(input) {
   return normalizeOpenCodeReasoningContent(normalizeGatewayInput(input));
 }
 
-// opencode's deepseek-v4-pro route deserializes replayed reasoning items as
-// chat messages (a stable id is required) and its responses-to-chat translator
-// needs assistant content as a plain string. These broader rewrites are
-// strictly pro+opencode-go; Flash receives only the reasoning-content repair
-// above, and official/custom routes keep the generic path.
-export function normalizeOpenCodeProInput(input) {
+function normalizeOpenCodeProHistory(input) {
   if (!Array.isArray(input)) return input;
   const normalized = normalizeGatewayInput(input);
   const deduped = dedupeProToolCalls(normalized);
@@ -727,8 +722,17 @@ export function normalizeOpenCodeProInput(input) {
   const withToolCallIds = fillProToolCallIds(interleaved);
   const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);
-  const flattened = flattenAssistantContent(withReasoningIds);
-  const continued = appendProToolContinuation(flattened);
+  return flattenAssistantContent(withReasoningIds);
+}
+
+// opencode's deepseek-v4-pro route deserializes replayed reasoning items as
+// chat messages (a stable id is required) and its responses-to-chat translator
+// needs assistant content as a plain string. These broader rewrites are
+// strictly pro+opencode-go; Flash receives only the reasoning-content repair
+// above, and official/custom routes keep the generic path.
+export function normalizeOpenCodeProInput(input) {
+  if (!Array.isArray(input)) return input;
+  const continued = appendProToolContinuation(normalizeOpenCodeProHistory(input));
   return attachProExecutionGuidance(continued);
 }
 
@@ -866,8 +870,8 @@ export function upstreamTargetFor(config, model) {
   };
 }
 
-export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels }) {
-  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels });
+export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision }) {
+  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision });
 }
 
 export { RouteAffinity };
@@ -1974,7 +1978,15 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     visionModel,
     affinity: routeAffinity,
     knownModels,
+    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  const compactModel = bareModelId(route.model);
+  const compactProvider = providerForModel(config, route.model);
+  const compactInput = compactProvider === "opencode-go" && compactModel === "deepseek-v4-pro"
+    ? normalizeOpenCodeProHistory(payload.input)
+    : compactProvider === "opencode-go" && compactModel === "deepseek-v4-flash"
+      ? normalizeOpenCodeFlashInput(payload.input)
+      : normalizeGatewayInput(payload.input);
   const summarizeBody = {
     ...payload,
     model: route.model,
@@ -1982,7 +1994,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     tools: [],
     tool_choice: "none",
     input: [
-      ...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore, {
+      ...rewriteHistoricalImages(compactInput, mediaStore, {
         preserveCurrentImages: route.directVision,
       }),
       messageItem(COMPACT_PROMPT),
@@ -2235,6 +2247,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     visionModel,
     affinity: routeAffinity,
     knownModels,
+    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.

@@ -79,7 +79,7 @@ export class RouteAffinity {
   }
 }
 
-export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels }) {
+export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision = false }) {
   const current = currentTurnItems(source?.input);
   const requested = source?.model;
   const pinned = affinity?.consumeFrom(current);
@@ -91,12 +91,20 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   // multi-step tool loop stays coherent.
   const clientOverridesPin = pinned && requested && requested !== pinned.model && knownModels?.has(requested);
   if (pinned && !clientOverridesPin) {
-    return { model: pinned.model, reason: "tool_continuation", directVision: pinned.model === visionModel, pinnedCallId: pinned.callId };
+    // A continuation carries no new image, so directVision here only matters when a
+    // vision-capable main model is itself the pinned model (its own multi-step loop
+    // still hands it the image bytes rather than a rewritten ref).
+    const directVision = pinned.model === visionModel
+      || (mainModelSupportsVision && pinned.model === mainModel);
+    return { model: pinned.model, reason: "tool_continuation", directVision, pinnedCallId: pinned.callId };
   }
   if (source?.model === visionModel && source?.model !== mainModel) {
     return { model: visionModel, reason: "vision_model_requested", directVision: true };
   }
   if (hasImage(current)) {
+    if (mainModelSupportsVision) {
+      return { model: mainModel, reason: "current_turn_image", directVision: true };
+    }
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
   // Codex's own model picker is populated from the catalog this gate publishes, so a

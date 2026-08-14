@@ -68,6 +68,11 @@ test("baseInstructionsFor includes the design-first workflow", () => {
   assert.match(instructions, /implement by translating structure, palette, and hierarchy/);
 });
 
+test("baseInstructionsFor omits the TEXT-ONLY vision guidance for a vision-capable main model", () => {
+  const instructions = baseInstructionsFor({ ...configStub(), mainModel: "gpt-5.6-luna" });
+  assert.doesNotMatch(instructions, /TEXT-ONLY model and CANNOT see images/);
+});
+
 test("baseInstructionsFor includes the memory lookup guidance", () => {
   const instructions = baseInstructionsFor(configStub());
   assert.match(instructions, /MEMORY\.md/);

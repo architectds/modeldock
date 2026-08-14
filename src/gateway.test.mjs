@@ -2143,6 +2143,61 @@ test("relayCompaction streams a v2 compaction item over SSE when stream is not f
   }
 });
 
+test("relayCompaction normalizes Pro reasoning history before summarization", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let upstreamBody;
+  globalThis.fetch = async (_url, options) => {
+    upstreamBody = JSON.parse(options.body);
+    return summaryResponse("pro compact summary");
+  };
+  try {
+    const services = compactServices();
+    services.config.mainModel = "deepseek-v4-pro@opencode-go";
+    services.mainModel = "deepseek-v4-pro@opencode-go";
+    services.knownModels = new Set(["deepseek-v4-pro@opencode-go"]);
+    const call = { type: "function_call", id: "fc_pro_compact", call_id: "call_pro_compact", name: "probe", arguments: "{}" };
+    const output = { type: "function_call_output", call_id: "call_pro_compact", output: "done" };
+    const result = await relayCompaction(
+      {
+        model: "deepseek-v4-pro@opencode-go",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Finish and compact." }] },
+          {
+            type: "reasoning",
+            id: "rs_pro_compact",
+            content: [],
+            summary: [{ type: "summary_text", text: "Public Pro reasoning summary." }],
+            encrypted_content: "opaque-provider-state",
+          },
+          call,
+          output,
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Final answer." }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      services,
+      {},
+      true,
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(upstreamBody.input[1].content, [
+      { type: "reasoning_text", text: "Public Pro reasoning summary." },
+    ]);
+    assert.equal(upstreamBody.input[1].encrypted_content, undefined);
+    assert.deepEqual(upstreamBody.input.slice(2, 4), [call, output]);
+    assert.equal(upstreamBody.input[4].content, "Final answer.", "Pro assistant history is flattened for Console Go");
+    assert.match(upstreamBody.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
+    assert.equal(upstreamBody.input.some((item) => JSON.stringify(item).includes("ModelDock execution protocol")), false,
+      "execution guidance must not pollute the compaction summary");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayResponses synthesizes v1 replacement history on the compact path", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
