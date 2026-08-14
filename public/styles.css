@@ -158,6 +158,8 @@ h2 { margin: 0; font-size: 17px; }
 }
 .wave-tooltip b { color: var(--amber); font-size: 12px; }
 .wave-tooltip small { display: block; color: var(--muted); margin-top: 1px; }
+#cache-wave-tooltip { border-color: rgba(80,183,255,.5); background: rgba(8,21,32,.94); box-shadow: 0 4px 14px rgba(80,183,255,.16); }
+#cache-wave-tooltip b { color: var(--blue); }
 
 .lower-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(330px, .65fr); gap: 14px; margin-top: 14px; }
 .panel { min-height: 310px; padding: 20px; }

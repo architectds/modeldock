@@ -321,7 +321,7 @@ function formatWaveTime(timestamp) {
 // prefix-cache collapse means something started rewriting conversation history.
 const cacheHistory = [];
 const cacheHoverState = { hover: -1 };
-let cacheWavePoints = [];
+const cacheWavePoints = [];
 
 function renderCacheWave(recent) {
   const canvas = $("cache-wave");
@@ -365,7 +365,7 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
   const plotW = width - pad * 2;
   const plotH = height - pad * 2;
   const n = history.length;
-  cacheWavePoints = [];
+  cacheWavePoints.length = 0;
   const xFor = (index) => pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
   const yFor = (value) => pad + plotH - Math.min(1, Math.max(0, value)) * plotH;
 
