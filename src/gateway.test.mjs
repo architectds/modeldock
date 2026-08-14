@@ -21,7 +21,6 @@ import {
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
-  normalizeOllamaInput,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
@@ -36,7 +35,6 @@ import {
   sessionIdsFrom,
   upstreamTargetFor,
 } from "./gateway.mjs";
-import { applyOllamaProfile } from "./profiles.mjs";
 
 function configStub() {
   return {
@@ -189,35 +187,6 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   assert.deepEqual(normalized, input);
 });
 
-test("normalizeOllamaInput rewrites Codex custom tool items to the standard wire", () => {
-  const input = [
-    { type: "message", role: "user", content: [{ type: "input_text", text: "run" }] },
-    { type: "custom_tool_call", call_id: "call_1", name: "apply_patch", input: "*** Begin Patch" },
-    { type: "custom_tool_call_output", call_id: "call_1", output: "Done" },
-    { type: "local_shell_call", call_id: "call_2", name: "shell", input: "dir" },
-    { type: "local_shell_call_output", call_id: "call_2", output: "ok" },
-    { type: "function_call", call_id: "call_3", name: "x", arguments: "{}" },
-    { type: "function_call_output", call_id: "call_3", output: "ok" },
-  ];
-  const normalized = normalizeOllamaInput(input);
-  assert.deepEqual(
-    normalized.map((item) => item.type),
-    [
-      "message",
-      "function_call",
-      "function_call_output",
-      "function_call",
-      "function_call_output",
-      "function_call",
-      "function_call_output",
-    ],
-  );
-  assert.equal(normalized[1].arguments, "*** Begin Patch", "custom_tool_call.input becomes arguments");
-  assert.equal(normalized[1].input, undefined, "the Codex-specific input key is dropped");
-  assert.equal(normalized[3].arguments, "dir", "local_shell_call.input becomes arguments");
-  assert.equal(normalized[5].arguments, "{}", "a standard function_call is untouched");
-});
-
 test("normalizeOpenCodeProInput fills reasoning ids missing from Codex's wire input", () => {
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
@@ -288,19 +257,6 @@ test("normalizeOpenCodeProInput drops opaque reasoning with no replayable text",
   ]);
   assert.equal(normalized.some((item) => item.id === "rs_opaque"), false);
   assert.equal(normalized[0].role, "user");
-});
-
-test("normalizeOpenCodeProInput repairs duplicate tool calls persisted from a hybrid Pro stream", () => {
-  const normalized = normalizeOpenCodeProInput([
-    { type: "function_call", id: "fc_duplicate", call_id: "call_duplicate", name: "probe", arguments: "{}" },
-    { type: "function_call", id: "fc_duplicate", call_id: "call_duplicate", name: "probe", arguments: "{}" },
-    { type: "function_call_output", call_id: "call_duplicate", output: "first" },
-    { type: "function_call_output", call_id: "call_duplicate", output: "duplicate" },
-  ]);
-  assert.equal(normalized.filter((item) => item.type === "function_call").length, 1);
-  assert.equal(normalized.filter((item) => item.type === "function_call_output").length, 1);
-  assert.deepEqual(normalized.slice(0, 2).map((item) => item.call_id), ["call_duplicate", "call_duplicate"]);
-  assert.equal(normalized[1].output, "first");
 });
 
 test("normalizeOpenCodeProInput flattens assistant content arrays into chat-style strings", () => {
@@ -748,19 +704,6 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
   assert.equal(paid.free, false, "paid models keep the generic error hints");
 });
 
-test("upstreamTargetFor routes Ollama models without a token and restores the upstream tag", () => {
-  applyOllamaProfile({}, {
-    baseUrl: "http://127.0.0.1:11434",
-    models: [{ id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: true, contextWindow: 262144 }],
-  });
-  const target = upstreamTargetFor(configStub(), "qwen3.8-27b@ollama");
-  assert.equal(target.provider, "ollama");
-  assert.equal(target.model, "qwen3.8:27b", "the wire id is the original Ollama tag, colon intact");
-  assert.equal(target.url, "http://127.0.0.1:11434/v1/responses");
-  assert.equal(target.token, "");
-  assert.equal(target.tokenRequired, false, "Ollama must not trip the tokenless 503 gate");
-});
-
 test("freeResponseFailure classifies silent zen free 200 bodies", () => {
   assert.equal(freeResponseFailure({ id: "r", output: [], stop_reason: "max_output_tokens" }), "empty_output");
   assert.equal(
@@ -1054,33 +997,6 @@ test("pipeNormalizedStream frames a sparse function_call stream onto its item", 
   const completed = parsedEvents.find((event) => event.type === "response.completed");
   assert.equal(completed.response.output[0].type, "function_call", "completed carries the function_call output");
   assert.match(completed.response.output[0].arguments, /"command":"dir"/);
-});
-
-test("pipeNormalizedStream does not duplicate lifecycle events from a hybrid sparse Pro stream", async () => {
-  const sink = collectStream();
-  const res = responseStub(sink);
-  const body = new ReadableStream({
-    start(controller) {
-      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.output_item.added","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":""}}\n\n'));
-      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.output_item.added","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":""}}\n\n'));
-      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"dir\\"}"}\n\n'));
-      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.done","item_id":"fc_hybrid","output_index":0,"arguments":"{\\"command\\":\\"dir\\"}"}\n\n'));
-      controller.enqueue(Buffer.from('data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":"{\\"command\\":\\"dir\\"}"}}\n\n'));
-      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.completed","response":{"id":"resp_hybrid","model":"deepseek-v4-pro","output":[{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":"{\\"command\\":\\"dir\\"}"}]}}\n\n'));
-      controller.close();
-    },
-  });
-  const result = await pipeNormalizedStream(body, res, null, () => {});
-  const events = Buffer.concat(sink.chunks).toString("utf8")
-    .split(/\r?\n\r?\n/)
-    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
-  assert.equal(result.rewrote, true);
-  assert.equal(events.filter((event) => event.type === "response.output_item.added").length, 1);
-  assert.equal(events.filter((event) => event.type === "response.function_call_arguments.done").length, 1);
-  assert.equal(events.filter((event) => event.type === "response.output_item.done").length, 1);
-  const completed = events.find((event) => event.type === "response.completed");
-  assert.equal(completed.response.output.length, 1);
-  assert.equal(completed.response.output[0].call_id, "call_hybrid");
 });
 
 test("pipeNormalizedStream separates sparse parallel calls with repeated upstream indexes", async () => {
@@ -1654,123 +1570,6 @@ test("relayResponses sends summary-only Flash reasoning to Console Go as reasoni
   }
 });
 
-test("relayResponses recovers a byte-empty 200 Pro stream with one transparent retry", async () => {
-  const sink = collectStream();
-  const res = responseStub(sink);
-  const finishResults = [];
-  const requestBodies = [];
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async (_url, options) => {
-    calls += 1;
-    requestBodies.push(options.body);
-    if (calls === 1) return new Response(null, { status: 200, headers: { "content-type": "text/event-stream" } });
-    return new Response(
-      'data: {"type":"response.output_text.delta","delta":"retry-ok","response":{"id":"resp_retry","model":"deepseek-v4-pro"}}\n\n'
-      + 'data: {"type":"response.completed","response":{"id":"resp_retry","model":"deepseek-v4-pro","usage":{"input_tokens":10,"output_tokens":2}}}\n\n',
-      { status: 200, headers: { "content-type": "text/event-stream" } },
-    );
-  };
-  try {
-    const config = configStub();
-    config.mainModel = "deepseek-v4-pro@opencode-go";
-    const result = await relayResponses(
-      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
-      res,
-      {
-        recordUsage: () => {},
-        config,
-        metrics: { begin: () => (value) => finishResults.push(value), recordResponseTransform: () => {}, recordResponseUsage: () => {} },
-        routeAffinity: new RouteAffinity(),
-        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
-        mainModel: "deepseek-v4-pro@opencode-go",
-        visionModel: "none",
-      },
-    );
-    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
-    assert.equal(calls, 2, "a byte-empty first attempt is retried exactly once");
-    assert.equal(requestBodies[1], requestBodies[0], "the retry replays the exact normalized Pro request");
-    assert.equal(result.ok, true);
-    assert.equal(result.upstreamRetries, 1);
-    assert.equal(finishResults.at(-1).upstreamRetries, 1);
-    assert.match(forwarded, /retry-ok/);
-    assert.doesNotMatch(forwarded, /response\.failed/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("relayResponses never retries a Pro stream after any upstream byte", async () => {
-  const sink = collectStream();
-  const res = responseStub(sink);
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return new Response(
-      'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
-      { status: 200, headers: { "content-type": "text/event-stream" } },
-    );
-  };
-  try {
-    const config = configStub();
-    config.mainModel = "deepseek-v4-pro@opencode-go";
-    const result = await relayResponses(
-      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
-      res,
-      {
-        recordUsage: () => {},
-        config,
-        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
-        routeAffinity: new RouteAffinity(),
-        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
-        mainModel: "deepseek-v4-pro@opencode-go",
-        visionModel: "none",
-      },
-    );
-    assert.equal(calls, 1, "partial output must never be replayed");
-    assert.equal(result.ok, false);
-    assert.equal(result.upstreamRetries, 0);
-    assert.match(result.error, /before a terminal response event/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("relayResponses bounds an all-empty Pro retry to two attempts", async () => {
-  const sink = collectStream();
-  const res = responseStub(sink);
-  const originalFetch = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls += 1;
-    return new Response(null, { status: 200, headers: { "content-type": "text/event-stream" } });
-  };
-  try {
-    const config = configStub();
-    config.mainModel = "deepseek-v4-pro@opencode-go";
-    const result = await relayResponses(
-      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
-      res,
-      {
-        recordUsage: () => {},
-        config,
-        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
-        routeAffinity: new RouteAffinity(),
-        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
-        mainModel: "deepseek-v4-pro@opencode-go",
-        visionModel: "none",
-      },
-    );
-    assert.equal(calls, 2, "the empty retry cannot loop");
-    assert.equal(result.ok, false);
-    assert.equal(result.upstreamRetries, 1);
-    assert.match(result.error, /before a terminal response event/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("relayResponses sends compacted Pro reasoning to Console Go as reasoning_text", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -2182,61 +1981,6 @@ test("relayCompaction streams a v2 compaction item over SSE when stream is not f
     assert.match(forwarded, /"type":"compaction"/);
     assert.match(forwarded, /kcr1:/);
     assert.match(forwarded, /data: \[DONE\]/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("relayCompaction normalizes Pro reasoning history before summarization", async () => {
-  const sink = collectStream();
-  const res = responseStub(sink);
-  const originalFetch = globalThis.fetch;
-  let upstreamBody;
-  globalThis.fetch = async (_url, options) => {
-    upstreamBody = JSON.parse(options.body);
-    return summaryResponse("pro compact summary");
-  };
-  try {
-    const services = compactServices();
-    services.config.mainModel = "deepseek-v4-pro@opencode-go";
-    services.mainModel = "deepseek-v4-pro@opencode-go";
-    services.knownModels = new Set(["deepseek-v4-pro@opencode-go"]);
-    const call = { type: "function_call", id: "fc_pro_compact", call_id: "call_pro_compact", name: "probe", arguments: "{}" };
-    const output = { type: "function_call_output", call_id: "call_pro_compact", output: "done" };
-    const result = await relayCompaction(
-      {
-        model: "deepseek-v4-pro@opencode-go",
-        stream: false,
-        input: [
-          { type: "message", role: "user", content: [{ type: "input_text", text: "Finish and compact." }] },
-          {
-            type: "reasoning",
-            id: "rs_pro_compact",
-            content: [],
-            summary: [{ type: "summary_text", text: "Public Pro reasoning summary." }],
-            encrypted_content: "opaque-provider-state",
-          },
-          call,
-          output,
-          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Final answer." }] },
-          { type: "compaction_trigger" },
-        ],
-      },
-      res,
-      services,
-      {},
-      true,
-    );
-    assert.equal(result.ok, true);
-    assert.deepEqual(upstreamBody.input[1].content, [
-      { type: "reasoning_text", text: "Public Pro reasoning summary." },
-    ]);
-    assert.equal(upstreamBody.input[1].encrypted_content, undefined);
-    assert.deepEqual(upstreamBody.input.slice(2, 4), [call, output]);
-    assert.equal(upstreamBody.input[4].content, "Final answer.", "Pro assistant history is flattened for Console Go");
-    assert.match(upstreamBody.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
-    assert.equal(upstreamBody.input.some((item) => JSON.stringify(item).includes("ModelDock execution protocol")), false,
-      "execution guidance must not pollute the compaction summary");
   } finally {
     globalThis.fetch = originalFetch;
   }

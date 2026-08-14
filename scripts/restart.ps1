@@ -11,17 +11,6 @@
 
 $ErrorActionPreference = "Stop"
 
-# A self-update launches this script before its HTTP handler returns. Give that
-# loopback response a bounded window to flush before stopping the old gateway.
-$restartDelaySeconds = 0
-if ($env:MODELDOCK_RESTART_DELAY_SECONDS) {
-  $parsedDelay = 0
-  if ([int]::TryParse($env:MODELDOCK_RESTART_DELAY_SECONDS, [ref]$parsedDelay) -and $parsedDelay -ge 1 -and $parsedDelay -le 10) {
-    $restartDelaySeconds = $parsedDelay
-  }
-}
-if ($restartDelaySeconds -gt 0) { Start-Sleep -Seconds $restartDelaySeconds }
-
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
 

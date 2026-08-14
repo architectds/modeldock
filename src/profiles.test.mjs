@@ -7,12 +7,7 @@ import {
   profileById,
   profileOptions,
   applyCustomProfile,
-  applyOllamaProfile,
-  OLLAMA_PROFILE,
   CONTEXT_WINDOW,
-  DEEPSEEK_CONTEXT_WINDOW,
-  OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW,
-  SELF_DECLARED_CONTEXT_WINDOWS,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
 } from "./profiles.mjs";
@@ -39,35 +34,8 @@ test("exposes every registered profile through the registry", () => {
 
 test("lists all profiles as selectable options", () => {
   const options = profileOptions();
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama"]);
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
-});
-
-test("ollama profile is empty until connected and fills from the snapshot", () => {
-  const empty = applyOllamaProfile({}, null);
-  assert.equal(empty.availableModels.length, 0);
-  const filled = applyOllamaProfile({}, {
-    baseUrl: "http://127.0.0.1:11434",
-    models: [
-      { id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: true, contextWindow: 262144 },
-    ],
-  });
-  assert.equal(filled.id, "ollama");
-  assert.equal(filled.baseUrl, "http://127.0.0.1:11434");
-  assert.deepEqual(filled.availableModels, [
-    {
-      id: "qwen3.8-27b",
-      upstreamId: "qwen3.8:27b",
-      label: "qwen3.8:27b",
-      endpoint: "responses",
-      supportsVision: true,
-      contextWindow: 262144,
-      ownerQualified: true,
-      status: "available",
-    },
-  ]);
-  assert.equal(publishedSlugFor("ollama", "qwen3.8-27b"), "qwen3.8-27b@ollama", "a connected Ollama model is owner-qualified");
-  assert.equal(profileById("ollama"), OLLAMA_PROFILE, "the profile is registered for routing");
 });
 
 test("custom profile is empty until configured and fills from config", () => {
@@ -100,15 +68,6 @@ test("deepseek-official profile routes the main model on DeepSeek with harness o
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.availableModels.every((model) => model.endpoint === "responses"), true);
 });
 
-test("caps only OpenCode Go DeepSeek models at 600k", () => {
-  for (const id of ["deepseek-v4-flash", "deepseek-v4-pro"]) {
-    const goModel = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === id);
-    const officialModel = DEEPSEEK_OFFICIAL_PROFILE.availableModels.find((model) => model.id === id);
-    assert.equal(goModel.contextWindow, OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, `${id}@opencode-go is capped at 600k`);
-    assert.equal(officialModel.contextWindow, DEEPSEEK_CONTEXT_WINDOW, `${id}@deepseek-official stays at 1M`);
-  }
-});
-
 test("model catalog is generated per profile with distinct comp hashes", () => {
   const instructions = "base";
   const goCatalog = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: instructions });
@@ -136,43 +95,9 @@ test("every profile compacts at 80% of the model context window", () => {
   for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
     const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
     const model = catalog.models[0];
-    const declared = SELF_DECLARED_CONTEXT_WINDOWS["deepseek-v4-flash"];
-    const expectedWindow = profile.id === "opencode-go" ? 600_000 : declared;
-    assert.equal(model.context_window, expectedWindow, `${profile.id} declares deepseek-v4-flash at its published window`);
-    assert.equal(model.max_context_window, expectedWindow);
-    assert.equal(model.auto_compact_token_limit, Math.floor(expectedWindow * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of its published window`);
+    assert.equal(model.context_window, 1_000_000, `${profile.id} declares deepseek-v4-flash at its self-reported 1M`);
+    assert.equal(model.max_context_window, 1_000_000);
+    assert.equal(model.auto_compact_token_limit, Math.floor(1_000_000 * AUTO_COMPACT_PERCENT), `${profile.id} must auto-compact at 80% of the 1M window`);
   }
-});
-
-test("every published model declares its own self-reported context window", () => {
-  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
-    const catalog = profile.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
-    for (const model of profile.availableModels.filter((entry) => entry.status !== "unavailable")) {
-      const declared = SELF_DECLARED_CONTEXT_WINDOWS[model.id];
-      const slug = publishedSlugFor(profile.id, model);
-      const entry = catalog.models.find((candidate) => candidate.slug === slug);
-      assert.ok(declared, `${model.id} has a self-reported context window`);
-      assert.ok(entry, `${slug} is present in the published catalog`);
-      // An explicit contextWindow on the profile entry wins over the shared
-      // self-declared table: OpenCode Go's paid DeepSeek pair declares a
-      // conservative 600k even though the upstream advertises 1M.
-      const expected = model.contextWindow ?? declared;
-      assert.equal(entry.context_window, expected, `${model.id} declares its published window`);
-      assert.equal(entry.max_context_window, expected, `${model.id} max window matches its published window`);
-      assert.equal(entry.auto_compact_token_limit, Math.floor(expected * AUTO_COMPACT_PERCENT), `${model.id} compacts at 80% of its published window`);
-    }
-  }
-  // Spot-check the curated entries that used to be pinned to the 250k default.
-  const byId = (id) => OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === id);
-  assert.equal(byId("glm-5.2").contextWindow, 1_000_000, "GLM-5.2 self-declares 1M");
-  assert.equal(byId("glm-5").contextWindow, 202_752, "GLM-5 self-declares 202752");
-  assert.equal(byId("kimi-k2.7-code").contextWindow, 262_144, "Kimi K2.7 Code self-declares 262144");
-  assert.equal(byId("kimi-k3").contextWindow, 1_048_576, "Kimi K3 self-declares 1048576");
-  assert.equal(byId("grok-4.5").contextWindow, 500_000, "Grok 4.5 self-declares 500k");
-  assert.equal(byId("minimax-m2.7").contextWindow, 204_800, "MiniMax M2.7 self-declares 204800");
-  assert.equal(byId("gpt-5.6-luna").contextWindow, 1_050_000, "GPT-5.6 Luna self-declares 1.05M");
-  assert.equal(byId("deepseek-v4-flash-free").contextWindow, 200_000, "zen free DeepSeek self-declares 200k");
-  assert.equal(byId("mimo-v2.5-free").contextWindow, 200_000, "zen free MiMo self-declares 200k");
-  assert.equal(byId("nemotron-3-ultra-free").contextWindow, 1_000_000, "zen free Nemotron self-declares 1M");
 });
 

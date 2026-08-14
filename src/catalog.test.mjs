@@ -34,8 +34,8 @@ test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
   assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(catalog.models[0].comp_hash, "modeldock-opencode-go-v1");
-  assert.equal(catalog.models[0].context_window, 600_000, "OpenCode Go deepseek-v4-flash declares a conservative 600k window");
-  assert.equal(catalog.models[0].auto_compact_token_limit, 480_000);
+  assert.equal(catalog.models[0].context_window, 1_000_000, "deepseek-v4-flash declares its self-reported 1M window");
+  assert.equal(catalog.models[0].auto_compact_token_limit, 800_000);
 });
 
 test("catalogFor covers every available model", () => {
@@ -66,11 +66,6 @@ test("baseInstructionsFor includes the design-first workflow", () => {
   assert.match(instructions, /run image_gen first/);
   assert.match(instructions, /read the output with vision_inspect/);
   assert.match(instructions, /implement by translating structure, palette, and hierarchy/);
-});
-
-test("baseInstructionsFor omits the TEXT-ONLY vision guidance for a vision-capable main model", () => {
-  const instructions = baseInstructionsFor({ ...configStub(), mainModel: "gpt-5.6-luna" });
-  assert.doesNotMatch(instructions, /TEXT-ONLY model and CANNOT see images/);
 });
 
 test("baseInstructionsFor includes the memory lookup guidance", () => {

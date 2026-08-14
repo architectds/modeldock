@@ -321,7 +321,7 @@ function formatWaveTime(timestamp) {
 // prefix-cache collapse means something started rewriting conversation history.
 const cacheHistory = [];
 const cacheHoverState = { hover: -1 };
-const cacheWavePoints = [];
+let cacheWavePoints = [];
 
 function renderCacheWave(recent) {
   const canvas = $("cache-wave");
@@ -365,7 +365,7 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
   const plotW = width - pad * 2;
   const plotH = height - pad * 2;
   const n = history.length;
-  cacheWavePoints.length = 0;
+  cacheWavePoints = [];
   const xFor = (index) => pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
   const yFor = (value) => pad + plotH - Math.min(1, Math.max(0, value)) * plotH;
 
@@ -1084,7 +1084,6 @@ async function openSettings() {
     $("settings-status").textContent = "";
     renderAutostart(data);
     renderCustomSection(data.custom);
-    renderOllamaSection(data.ollama);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   } catch (error) {
@@ -1206,7 +1205,7 @@ function awaitRuntimeMigrationThenUpdate(expectedVersion) {
             button.disabled = false;
             button.textContent = t("button.update");
           }
-          window.alert("Node.js runtime migration did not complete. Check modeldock-update.log and try again.");
+          window.alert("Node.js runtime migration did not complete. Check modeldock.log and try again.");
         } else if (error.message === "runtime migration still in progress" || error.message === "not ready" || error instanceof TypeError) setTimeout(probe, 2_000);
         else {
           updateBusy = false;
@@ -1228,6 +1227,7 @@ function awaitRuntimeMigrationThenUpdate(expectedVersion) {
 const ENDPOINT_PRESETS = [
   { label: "OpenRouter", url: "https://openrouter.ai/api/v1", autoList: true },
   { label: "OpenAI", url: "https://api.openai.com/v1", autoList: false },
+  { label: "Ollama (local)", url: "http://127.0.0.1:11434/v1", autoList: false },
 ];
 const customEndpointPresetsBtn = $("custom-endpoint-presets");
 const customEndpointMenu = $("custom-endpoint-menu");
@@ -1368,64 +1368,6 @@ if (customAddBtn) {
     } finally {
       customAddBtn.disabled = false;
       customAddBtn.textContent = t("custom.add");
-    }
-  });
-}
-
-// --- Ollama (local) connect section ---
-const ollamaConnectBtn = $("ollama-connect");
-const ollamaStatus = $("ollama-status");
-const ollamaError = $("ollama-error");
-
-let ollamaState = { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
-
-function ollamaShow(text, error) {
-  if (ollamaStatus) ollamaStatus.hidden = !text || Boolean(error);
-  if (ollamaError) ollamaError.hidden = !(text && error);
-  if (ollamaStatus) ollamaStatus.textContent = error ? "" : text || "";
-  if (ollamaError) ollamaError.textContent = error ? text : "";
-}
-
-function ollamaErrorText(code, fallback) {
-  const key = {
-    connect: "ollama.errConnect",
-    protocol: "ollama.errProtocol",
-    models: "ollama.errModels",
-    model: "ollama.errModel",
-    upstream: "ollama.errUpstream",
-  }[code];
-  return key ? t(key) : fallback;
-}
-
-function renderOllamaSection(state) {
-  ollamaState = state || { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
-  const connected = Boolean(ollamaState.connected && ollamaState.models?.length);
-  ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
-}
-
-if (ollamaConnectBtn) {
-  ollamaConnectBtn.addEventListener("click", async () => {
-    ollamaConnectBtn.disabled = true;
-    ollamaConnectBtn.textContent = t("ollama.connecting");
-    ollamaShow("", false);
-    try {
-      const response = await fetch("/api/ollama/connect", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        throw Object.assign(new Error(body.error?.message || "Connect failed"), { code: body.error?.type });
-      }
-      renderOllamaSection(body.settings?.ollama);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-    } catch (error) {
-      ollamaShow(ollamaErrorText(error.code) || error.message, true);
-    } finally {
-      ollamaConnectBtn.disabled = false;
-      ollamaConnectBtn.textContent = t("ollama.connect");
     }
   });
 }

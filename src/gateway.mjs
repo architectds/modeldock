@@ -570,27 +570,6 @@ function fillProToolCallIds(input) {
   return changed ? out : input;
 }
 
-// A hybrid sparse/full Console Go stream can make Codex persist the same tool
-// call more than once. Replaying that poisoned history fails before the model
-// runs because call_id is globally unique within a Responses request. Keep the
-// first occurrence; normalizeGatewayInput has already retained and relocated
-// only the first matching output, restoring one valid call/output pair.
-function dedupeProToolCalls(input) {
-  if (!Array.isArray(input)) return input;
-  const seen = new Set();
-  let changed = false;
-  const out = input.filter((item) => {
-    if (!isToolCallItem(item) || typeof item.call_id !== "string" || !item.call_id) return true;
-    if (!seen.has(item.call_id)) {
-      seen.add(item.call_id);
-      return true;
-    }
-    changed = true;
-    return false;
-  });
-  return changed ? out : input;
-}
-
 // opencode's responses-to-chat translator replays an assistant history message
 // as a chat-style `content` string. Codex replays `output_text` part arrays,
 // which the translator turns into an empty content and rejects on its
@@ -705,38 +684,6 @@ export function normalizeGatewayInput(input) {
     });
 }
 
-// Codex emits its built-in tools as custom_tool_call / local_shell_call items
-// (with matching _output siblings). Upstreams that only speak the standard
-// Responses wire - Ollama's /v1/responses dialect in particular - reject those
-// as unknown input item types, so they are rewritten to the standard
-// function_call / function_call_output shape before forwarding. Codex carries
-// the call payload in `input`; the standard wire expects it in `arguments`.
-function normalizeStandardToolItem(item) {
-  if (!item || typeof item !== "object") return item;
-  const type = item.type;
-  if (type === "custom_tool_call" || type === "local_shell_call") {
-    const next = { ...item, type: "function_call" };
-    delete next.input;
-    if (item.input !== undefined) {
-      next.arguments = typeof item.input === "string" ? item.input : JSON.stringify(item.input);
-    }
-    return next;
-  }
-  if (type === "custom_tool_call_output" || type === "local_shell_call_output") {
-    return { ...item, type: "function_call_output" };
-  }
-  return item;
-}
-
-// Ollama's Responses dialect accepts only the standard item types. Run the
-// generic gateway normalization first (pairing, compaction, orphan removal on
-// the Codex-native shapes) and then rewrite the remaining Codex tool types to
-// the standard wire before they reach Ollama.
-export function normalizeOllamaInput(input) {
-  if (!Array.isArray(input)) return input;
-  return normalizeGatewayInput(input).map(normalizeStandardToolItem);
-}
-
 // Flash otherwise stays on the generic byte-stable path. Its only required
 // OpenCode Go adaptation is making Codex's public reasoning summary replayable
 // after compaction or a tool result. Pro's broader chat/stream repairs below do
@@ -746,25 +693,20 @@ export function normalizeOpenCodeFlashInput(input) {
   return normalizeOpenCodeReasoningContent(normalizeGatewayInput(input));
 }
 
-function normalizeOpenCodeProHistory(input) {
+// opencode's deepseek-v4-pro route deserializes replayed reasoning items as
+// chat messages (a stable id is required) and its responses-to-chat translator
+// needs assistant content as a plain string. These rewrites are strictly
+// pro+opencode-go: the generic routed path (flash, official, custom) works
+// without them, and byte-stable flash traffic must stay untouched.
+export function normalizeOpenCodeProInput(input) {
   if (!Array.isArray(input)) return input;
   const normalized = normalizeGatewayInput(input);
-  const deduped = dedupeProToolCalls(normalized);
-  const interleaved = interleaveToolOutputs(deduped);
+  const interleaved = interleaveToolOutputs(normalized);
   const withToolCallIds = fillProToolCallIds(interleaved);
   const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);
-  return flattenAssistantContent(withReasoningIds);
-}
-
-// opencode's deepseek-v4-pro route deserializes replayed reasoning items as
-// chat messages (a stable id is required) and its responses-to-chat translator
-// needs assistant content as a plain string. These broader rewrites are
-// strictly pro+opencode-go; Flash receives only the reasoning-content repair
-// above, and official/custom routes keep the generic path.
-export function normalizeOpenCodeProInput(input) {
-  if (!Array.isArray(input)) return input;
-  const continued = appendProToolContinuation(normalizeOpenCodeProHistory(input));
+  const flattened = flattenAssistantContent(withReasoningIds);
+  const continued = appendProToolContinuation(flattened);
   return attachProExecutionGuidance(continued);
 }
 
@@ -887,19 +829,6 @@ export function upstreamTargetFor(config, model) {
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
     };
   }
-  if (provider === "ollama") {
-    // The published id is colon-free but Ollama only serves the original tag
-    // (qwen3.8-27b -> qwen3.8:27b), so the wire id comes from the profile entry.
-    const entry = modelEntryFor(config, model);
-    return {
-      provider,
-      model: entry?.upstreamId || upstreamModel,
-      url: `${(config.ollamaBaseUrl || "http://127.0.0.1:11434").replace(/\/+$/, "")}/v1/responses`,
-      token: "",
-      // Ollama needs no credential; the tokenless gate below must not 503 it.
-      tokenRequired: false,
-    };
-  }
   const entry = modelEntryFor(config, upstreamModel);
   const baseUrl = entry?.zen
     ? (config.zenBaseUrl || "https://opencode.ai/zen/v1")
@@ -915,8 +844,8 @@ export function upstreamTargetFor(config, model) {
   };
 }
 
-export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision }) {
-  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision });
+export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels }) {
+  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels });
 }
 
 export { RouteAffinity };
@@ -1188,9 +1117,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     if (!track) return null;
     const item = parsed.item || {};
     for (const [existingIndex, existing] of track.items) {
-      if ((item.id && existing.itemId === item.id) || (item.call_id && existing.callId === item.call_id)) {
+      if (item.id && existing.itemId === item.id) {
         track.activeIndex = existingIndex;
-        return { index: existingIndex, entry: existing, created: false };
+        return { index: existingIndex, entry: existing };
       }
     }
     // Console Go currently labels every function_call as output_index 0. The
@@ -1208,38 +1137,10 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       name: item.name || "",
       callId: item.call_id || item.id || "",
       status: "in_progress",
-      argumentsDone: false,
-      itemDone: false,
     };
     track.items.set(index, entry);
     track.activeIndex = index;
-    return { index, entry, created: true };
-  };
-  const trackLifecycleDone = (parsed, field) => {
-    if (!track) return parsed;
-    let index = null;
-    const itemId = parsed.item_id || parsed.item?.id;
-    const callId = parsed.item?.call_id;
-    for (const [candidate, entry] of track.items) {
-      if ((itemId && entry.itemId === itemId) || (callId && entry.callId === callId)) {
-        index = candidate;
-        break;
-      }
-    }
-    if (index === null) index = track.activeIndex;
-    const entry = track.items.get(index);
-    if (!entry) return parsed;
-    entry[field] = true;
-    const completeArguments = parsed.arguments ?? parsed.item?.arguments;
-    if (entry.partType === "function_call" && typeof completeArguments === "string") {
-      entry.text = completeArguments;
-    }
-    return {
-      ...parsed,
-      item_id: entry.itemId,
-      output_index: index,
-      response_id: track.respId,
-    };
+    return { index, entry };
   };
   const trackDelta = (parsed) => {
     if (!track) return parsed;
@@ -1272,16 +1173,14 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     for (const [index, entry] of track.items) {
       if (entry.partType === "function_call") {
         sawDeliverable = true;
-        if (!entry.argumentsDone) {
-          writeOut(sseEvent({
-            id: track.respId,
-            type: "response.function_call_arguments.done",
-            item_id: entry.itemId,
-            output_index: index,
-            arguments: entry.text,
-            response_id: track.respId,
-          }));
-        }
+        writeOut(sseEvent({
+          id: track.respId,
+          type: "response.function_call_arguments.done",
+          item_id: entry.itemId,
+          output_index: index,
+          arguments: entry.text,
+          response_id: track.respId,
+        }));
       } else if (entry.partType === "reasoning_text") {
         writeOut(sseEvent({
           id: track.respId,
@@ -1309,9 +1208,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
         : entry.partType === "reasoning_text"
           ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
           : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] };
-      if (!entry.itemDone) {
-        writeOut(sseEvent({ id: track.respId, type: "response.output_item.done", item: doneItem, response_id: track.respId }));
-      }
+      writeOut(sseEvent({ id: track.respId, type: "response.output_item.done", item: doneItem, response_id: track.respId }));
     }
     const response = parsed?.response || {};
     const output = Array.from(track.items.values()).map((entry, index) => entry.partType === "function_call"
@@ -1319,11 +1216,8 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       : entry.partType === "reasoning_text"
         ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
         : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] });
-    const existingOutput = Array.isArray(response.output) ? response.output : [];
-    const missingOutput = output.filter((item) => !existingOutput.some((existing) =>
-      (item.id && existing?.id === item.id) || (item.call_id && existing?.call_id === item.call_id)));
     track = null;
-    return finishEvent({ ...parsed, response: { ...response, output: [...existingOutput, ...missingOutput] } });
+    return finishEvent({ ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } });
   };
   const processBlock = (block, delim) => {
     for (const line of block.split(/\r?\n/)) {
@@ -1364,7 +1258,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
           flushPrelude();
           openTrack(parsed);
           const tracked = trackItem(parsed);
-          if (!tracked || tracked.created) writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
+          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         } else {
           flushPrelude();
@@ -1377,19 +1271,11 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       if (track) {
         if (parsed?.type === "response.output_item.added") {
           const tracked = trackItem(parsed);
-          if (!tracked || tracked.created) writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
+          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         }
         if (parsed?.type === "response.function_call_arguments.delta") {
           writeOut(sseEvent(trackDelta(parsed)));
-          continue;
-        }
-        if (parsed?.type === "response.function_call_arguments.done") {
-          writeOut(sseEvent(trackLifecycleDone(parsed, "argumentsDone")));
-          continue;
-        }
-        if (parsed?.type === "response.output_item.done") {
-          writeOut(sseEvent(trackLifecycleDone(parsed, "itemDone")));
           continue;
         }
         if (parsed?.type === "response.output_text.delta") {
@@ -1497,50 +1383,6 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     });
   });
   return { bytes, rewrote, interrupted, terminal: sawTerminal, failure: responseFailure, completedResponse };
-}
-
-// Console Go occasionally closes a Pro request with HTTP 200 and a literally
-// empty body after holding it open. Nothing has reached Codex in that case, so
-// one replay cannot duplicate a client-visible message or local tool action and
-// avoids forcing the user to type "continue".
-// Once even one byte has arrived, never replay: a partial stream can already
-// contain visible text or a tool call, and replaying it could duplicate work.
-function retryEmptyProStream(initialBody, retry) {
-  const emptyStream = () => new ReadableStream({ start(controller) { controller.close(); } });
-  let reader = (initialBody || emptyStream()).getReader();
-  let bytes = 0;
-  let retried = false;
-  let cancelled = false;
-  return new ReadableStream({
-    async pull(controller) {
-      while (!cancelled) {
-        const { done, value } = await reader.read();
-        if (!done) {
-          const size = value?.byteLength ?? Buffer.byteLength(value || "");
-          if (size === 0) continue;
-          bytes += size;
-          controller.enqueue(value);
-          return;
-        }
-        if (bytes === 0 && !retried) {
-          retried = true;
-          const nextBody = await retry();
-          reader = (nextBody || emptyStream()).getReader();
-          continue;
-        }
-        controller.close();
-        return;
-      }
-    },
-    async cancel(reason) {
-      cancelled = true;
-      try {
-        await reader.cancel(reason);
-      } catch {
-        // The upstream may already have closed while cancellation propagates.
-      }
-    },
-  });
 }
 
 // Classify a 200 zen-free response body that silently failed. Returns
@@ -2023,15 +1865,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     visionModel,
     affinity: routeAffinity,
     knownModels,
-    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
-  const compactModel = bareModelId(route.model);
-  const compactProvider = providerForModel(config, route.model);
-  const compactInput = compactProvider === "opencode-go" && compactModel === "deepseek-v4-pro"
-    ? normalizeOpenCodeProHistory(payload.input)
-    : compactProvider === "opencode-go" && compactModel === "deepseek-v4-flash"
-      ? normalizeOpenCodeFlashInput(payload.input)
-      : normalizeGatewayInput(payload.input);
   const summarizeBody = {
     ...payload,
     model: route.model,
@@ -2039,7 +1873,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     tools: [],
     tool_choice: "none",
     input: [
-      ...rewriteHistoricalImages(compactInput, mediaStore, {
+      ...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore, {
         preserveCurrentImages: route.directVision,
       }),
       messageItem(COMPACT_PROMPT),
@@ -2063,7 +1897,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const startedAt = Date.now();
   let usage;
   try {
-    if (!target.token && target.tokenRequired !== false) {
+    if (!target.token) {
       const body = JSON.stringify({
         error: {
           type: "configuration_error",
@@ -2292,7 +2126,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     visionModel,
     affinity: routeAffinity,
     knownModels,
-    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
@@ -2304,14 +2137,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go";
   const flashOpenCodeGo =
     routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go";
-  const ollama = routedProvider === "ollama";
   const normalizedInput = proOpenCodeGo
     ? normalizeOpenCodeProInput(payload.input)
     : flashOpenCodeGo
       ? normalizeOpenCodeFlashInput(payload.input)
-      : ollama
-        ? normalizeOllamaInput(payload.input)
-        : normalizeGatewayInput(payload.input);
+      : normalizeGatewayInput(payload.input);
   const normalizedPayload = {
     ...payload,
     input: rewriteHistoricalImages(
@@ -2343,7 +2173,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (config.debug?.dumpAll && config.debug?.dumpDir) {
     dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
   }
-  if (!target.token && target.tokenRequired !== false) {
+  if (!target.token) {
     const error = {
       error: {
         type: "configuration_error",
@@ -2381,7 +2211,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let completedResponse;
   let responseCompleted = false;
   let responseFailure = "";
-  let upstreamRetries = 0;
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
@@ -2395,14 +2224,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
 
   try {
-    const upstreamRequestBody = JSON.stringify({ ...normalizedPayload, model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
-      body: upstreamRequestBody,
+      body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
       signal,
     });
-    let upstreamBytes = Buffer.byteLength(upstreamRequestBody);
+    const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
       markFirstResponse();
       if (config.debug?.dumpDir) {
@@ -2491,33 +2319,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
     }
 
-    const proOpenCodeGoStream = normalizedPayload.stream === true
-      && bareModelId(route.model) === "deepseek-v4-pro"
-      && target.provider === "opencode-go";
-    if (proOpenCodeGoStream) {
-      upstreamBody = retryEmptyProStream(upstreamBody, async () => {
-        upstreamRetries += 1;
-        upstreamBytes += Buffer.byteLength(upstreamRequestBody);
-        const retried = await fetch(target.url, {
-          method: "POST",
-          headers: upstreamHeaders(target),
-          body: upstreamRequestBody,
-          signal,
-        });
-        if (!retried.ok) {
-          const raw = await retried.text();
-          const translated = translateUpstreamError({
-            provider: target.provider,
-            status: retried.status,
-            bodyText: redactBearer(raw),
-            free: target.free,
-          });
-          throw new Error(translated.body.error.message);
-        }
-        return retried.body;
-      });
-    }
-
     if (!res.headersSent) {
       res.statusCode = upstream.status;
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
@@ -2530,9 +2331,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
+      const bareId = bareModelId(route.model);
       // opencode's pro translation emits a bare-delta stream; the official
       // DeepSeek route is a standard Responses implementation and stays native.
-      const piped = proOpenCodeGoStream
+      const piped = normalizedPayload.stream === true && bareId === "deepseek-v4-pro" && target.provider === "opencode-go"
         ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
@@ -2614,7 +2416,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // the dashboard's cache-rate wave reads these off the trace records.
       cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
       reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
-      upstreamRetries,
     });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
@@ -2652,10 +2453,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamBytes,
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
-      upstreamRetries,
     };
   } catch (error) {
-    finish?.({ ok: false, error: error.message, upstreamRetries });
+    finish?.({ ok: false, error: error.message });
     if (!res.headersSent) {
       res.statusCode = 502;
       res.setHeader("Content-Type", "application/json");
@@ -2668,7 +2468,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 }
 
 function upstreamHeaders(target) {
-  const headers = { "Content-Type": "application/json", "User-Agent": "modeldock-gateway/0.1" };
-  if (target.token) headers.Authorization = `Bearer ${target.token}`;
+  const headers = {
+    Authorization: `Bearer ${target.token}`,
+    "Content-Type": "application/json",
+    "User-Agent": "modeldock-gateway/0.1",
+  };
   return headers;
 }

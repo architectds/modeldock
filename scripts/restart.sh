@@ -12,12 +12,6 @@
 
 set -eu
 
-# A self-update launches this script before its HTTP handler returns. Give that
-# loopback response a bounded window to flush before stopping the old gateway.
-case "${MODELDOCK_RESTART_DELAY_SECONDS:-}" in
-  1|2|3|4|5|6|7|8|9|10) sleep "$MODELDOCK_RESTART_DELAY_SECONDS" ;;
-esac
-
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
 FORCE=0

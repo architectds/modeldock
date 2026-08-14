@@ -11,22 +11,6 @@ test("routes a current-turn image directly to Luna", () => {
   assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
 });
 
-test("a vision-capable main model reads the image itself instead of escalating", () => {
-  const route = routeResponsesRequest({
-    model: "gpt-5.6-luna",
-    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
-  }, { mainModel: "gpt-5.6-luna", visionModel: "gpt-5.6-luna", mainModelSupportsVision: true });
-  assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
-});
-
-test("a text-only main model still escalates the image to the vision model", () => {
-  const route = routeResponsesRequest({
-    model: "deepseek-v4-flash",
-    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
-  }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", mainModelSupportsVision: false });
-  assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
-});
-
 test("text-only requests never route to Luna, even with visual wording", () => {
   for (const input of ["Inspect this screenshot carefully", "看一下这个按钮为什么被遮挡", "这张截图里显示什么", "用浏览器截图看前端"]) {
     const route = routeResponsesRequest({ input }, models);

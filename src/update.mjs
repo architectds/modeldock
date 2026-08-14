@@ -332,47 +332,28 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 // /healthz, and prints every step. The updater is the gateway itself, so the
 // script is spawned detached with -Force (deliberate takeover of our own port;
 // the owner guard's CIM command-line probe can come back empty for elevated
-// processes). Output is appended to modeldock-update.log - never discarded - so an
+// processes). Output is appended to modeldock.log - never discarded - so an
 // upgrade restart is traceable. No process.exit() here: the restart script
 // stops the old process, and if spawning it fails the current gateway keeps
 // serving instead of leaving the port dead.
-export function scheduleRestart(rootDir, {
-  spawnImpl = spawn,
-  platform = process.platform,
-  delaySeconds = 1,
-} = {}) {
-  // The running gateway owns modeldock.log as stdout/stderr. Windows cmd.exe
-  // opens that redirection without append sharing, so trying to open the same
-  // path here fails with EBUSY before the restart process can even be spawned.
-  // Keep updater/supervisor output on a dedicated path; the new gateway resumes
-  // modeldock.log after the old process releases it.
-  const logPath = path.join(rootDir, "modeldock-update.log");
+function scheduleRestart(rootDir) {
+  const logPath = path.join(rootDir, "modeldock.log");
   const logFd = openSync(logPath, "a");
-  // The update API still needs to flush its success response before the restart
-  // script stops this gateway. The scripts consume this value before inspecting
-  // or terminating the listener; one second is ample for a loopback JSON reply.
-  const env = {
-    ...process.env,
-    MODELDOCK_NODE_PATH: process.execPath,
-    MODELDOCK_RESTART_DELAY_SECONDS: String(delaySeconds),
-  };
   const onSpawnError = (error) => {
     try { appendFileSync(logPath, `[update] restart spawn failed: ${error.message}\n`); } catch { /* no recovery */ }
   };
   try {
-  if (platform === "win32") {
+  if (process.platform === "win32") {
     const script = path.join(rootDir, "scripts", "restart.ps1");
-    spawnImpl("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Force"], {
+    spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Force"], {
       detached: true,
-      env,
       stdio: ["ignore", logFd, logFd],
       windowsHide: true,
     }).on("error", onSpawnError).unref();
   } else {
     const script = path.join(rootDir, "scripts", "restart.sh");
-    spawnImpl("sh", [script, "-Force"], {
+    spawn("sh", [script, "-Force"], {
       detached: true,
-      env,
       stdio: ["ignore", logFd, logFd],
     }).on("error", onSpawnError).unref();
   }
@@ -389,9 +370,7 @@ function scheduleInstallerMigration({ body, installerName, rootDir, repo }) {
   const extension = installerName.endsWith(".ps1") ? "ps1" : "sh";
   const installerPath = path.join(os.tmpdir(), `modeldock-update-${process.pid}-${Date.now()}.${extension}`);
   writeFileSync(installerPath, body, { mode: extension === "sh" ? 0o700 : 0o600 });
-  // modeldock.log is held by the gateway on Windows; use the same dedicated
-  // updater log as the ordinary restart path so migration can always spawn.
-  const logPath = path.join(rootDir, "modeldock-update.log");
+  const logPath = path.join(rootDir, "modeldock.log");
   const logFd = openSync(logPath, "a");
   const env = {
     ...process.env,

@@ -1,54 +1,15 @@
 
-import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
-
-// The context window ModelDock publishes for each relayed model. Most entries
-// use the upstream registry figure (opencode-go for the paid tier, opencode for
-// the zen free tier). The paid OpenCode Go DeepSeek pair is deliberately capped
-// at 600k for stability, while DeepSeek official keeps its verified 1M window.
-// CONTEXT_WINDOW remains only the fallback for models with no curated figure
-// (probe-merged new ids and custom endpoints).
+// The context window we declare for relayed models. DeepSeek V4 (flash and pro)
+// advertise a 1M window natively and the OpenCode endpoint held 911k in a live
+// needle test, so those entries report their self-declared 1M instead of a
+// gate-imposed cap. CONTEXT_WINDOW remains the conservative fallback for the rest
+// of the catalog whose real window we have not measured.
 const CONTEXT_WINDOW = Number(process.env.MODELDOCK_CONTEXT_WINDOW || 250_000);
 const DEEPSEEK_CONTEXT_WINDOW = 1_000_000;
-const OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW = 600_000;
 const AUTO_COMPACT_PERCENT = 0.8;
 const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCENT);
 
-// Self-declared context windows from the upstream OpenCode model registry,
-// keyed by the bare model id. Zen free-tier entries (-free) take the zen
-// (opencode) registry figure; the rest take the opencode-go paid figure.
-const SELF_DECLARED_CONTEXT_WINDOWS = {
-  "deepseek-v4-flash": DEEPSEEK_CONTEXT_WINDOW,
-  "deepseek-v4-flash-free": 200_000,
-  "deepseek-v4-pro": DEEPSEEK_CONTEXT_WINDOW,
-  "nemotron-3-ultra-free": 1_000_000,
-  "laguna-s-2.1-free": 256_000,
-  "longcat-2.0-free": 1_000_000,
-  "glm-5": 202_752,
-  "glm-5.1": 202_752,
-  "glm-5.2": 1_000_000,
-  "gpt-5.6-luna": 1_050_000,
-  "grok-4.5": 500_000,
-  "hy3": 256_000,
-  "kimi-k2.5": 262_144,
-  "kimi-k2.6": 262_144,
-  "kimi-k2.7-code": 262_144,
-  "kimi-k3": 1_048_576,
-  "mimo-v2-omni": 262_144,
-  "mimo-v2-pro": 1_048_576,
-  "mimo-v2.5": 1_000_000,
-  "mimo-v2.5-free": 200_000,
-  "mimo-v2.5-pro": 1_048_576,
-  "minimax-m2.5": 204_800,
-  "minimax-m2.7": 204_800,
-  "minimax-m3": 1_000_000,
-  "qwen3.5-plus": 262_144,
-  "qwen3.6-plus": 1_000_000,
-  "qwen3.7-max": 1_000_000,
-  "qwen3.7-plus": 1_000_000,
-  "qwen3.8-max": 1_000_000,
-};
-
-export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, SELF_DECLARED_CONTEXT_WINDOWS, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
+export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
 // The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
 // (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
@@ -147,17 +108,8 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
     return `${profile.label} - ${modelLabel}`;
   };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
-  // catalog stores bare ids, so resolve through bareModelId. A main model owned by
-  // another provider (custom endpoint or a connected Ollama) reads its window from
-  // that provider's catalog entry instead of the active profile's list.
-  const contextWindowFor = (id) => {
-    const bare = bareModelId(id);
-    const at = String(id).lastIndexOf(PROVIDER_SEPARATOR);
-    const owner = at > 0 ? String(id).slice(at + 1) : profileId;
-    return profileById(owner).availableModels?.find((model) => model.id === bare)?.contextWindow
-      || availableModels.find((model) => model.id === bare)?.contextWindow
-      || CONTEXT_WINDOW;
-  };
+  // catalog stores bare ids, so resolve through bareModelId before looking it up.
+  const contextWindowFor = (id) => availableModels.find((model) => model.id === bareModelId(id))?.contextWindow || CONTEXT_WINDOW;
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
   // existing Codex configs keep resolving; another provider's copy of the same id is
@@ -205,7 +157,7 @@ const OPENCODE_GO_PROFILE = {
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.
@@ -213,7 +165,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW, status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, status: "available" },
@@ -338,49 +290,11 @@ const CUSTOM_PROFILE = {
   },
 };
 
-// The local Ollama profile (dashboard "Ollama (local)" section). Needs no API
-// key; models are filled from the connection snapshot by applyOllamaProfile() at
-// config load, so catalog building and per-model routing see local models
-// without ever re-contacting Ollama between connects.
-const OLLAMA_PROFILE = {
-  id: "ollama",
-  label: "Ollama (local)",
-  baseUrl: OLLAMA_DEFAULT_BASE,
-  tokenEnvName: "",
-  blockedToolTypes: new Set([]),
-  hiddenToolNames: new Set([]),
-  availableModels: [],
-  modelCatalog({ mainModel, baseInstructions }) {
-    return modelCatalogDefaults({
-      profileId: OLLAMA_PROFILE.id,
-      mainModel,
-      displayName: "Ollama (local)",
-      description: "Local Ollama models through the ModelDock Responses gate.",
-      compHash: "modeldock-ollama-v1",
-      inputModalities: ["text", "image"],
-      supportsSearchTool: false,
-      baseInstructions,
-      availableModels: OLLAMA_PROFILE.availableModels,
-    });
-  },
-};
-
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
-  ollama: OLLAMA_PROFILE,
 };
-
-// Apply each model's registry window unless its provider entry has an explicit
-// override. This preserves the OpenCode Go DeepSeek 600k stability cap and the
-// DeepSeek official 1M window while keeping all other curated values per model.
-for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
-  for (const model of profile.availableModels || []) {
-    const declared = SELF_DECLARED_CONTEXT_WINDOWS[model.id];
-    if (declared && model.contextWindow === undefined) model.contextWindow = declared;
-  }
-}
 
 export function profileById(id) {
   return PROFILES[id] || OPENCODE_GO_PROFILE;
@@ -411,31 +325,6 @@ export function applyCustomProfile(config) {
       }]
     : [];
   return CUSTOM_PROFILE;
-}
-
-// Populate the ollama profile from the connection snapshot (written by the
-// dashboard connect flow, read back at config load). Every entry keeps its
-// upstreamId (the original tag with the colon) for the wire: the published id is
-// colon-free so the slug is safe for config.toml, but Ollama only serves the
-// original name. Empty snapshot clears the profile (disconnect).
-export function applyOllamaProfile(config, snapshot) {
-  const baseUrl = normalizeOllamaBase(snapshot?.baseUrl || config?.ollamaBaseUrl);
-  OLLAMA_PROFILE.baseUrl = baseUrl;
-  OLLAMA_PROFILE.availableModels = Array.isArray(snapshot?.models)
-    ? snapshot.models
-        .filter((model) => model?.id && model?.upstreamId)
-        .map((model) => ({
-          id: model.id,
-          upstreamId: model.upstreamId,
-          label: model.label || model.id,
-          endpoint: "responses",
-          supportsVision: Boolean(model.supportsVision),
-          contextWindow: Number(model.contextWindow) || undefined,
-          ownerQualified: true,
-          status: model.status || "available",
-        }))
-    : [];
-  return OLLAMA_PROFILE;
 }
 
 // Resolve which provider owns a model id. The currently active profile wins, then any
@@ -503,12 +392,7 @@ export function modelEntryFor(config, model) {
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
-  // Ollama needs no credential; a connected profile is always ready. The sentinel
-  // keeps healthz/readiness gates and the vision dev tooling honest.
-  if (provider === "ollama") {
-    return profileById("ollama").availableModels?.length ? "local" : "";
-  }
   return config?.tokens?.[provider] || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE };
