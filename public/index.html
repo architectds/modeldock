@@ -217,6 +217,30 @@
             <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
           </div>
         </details>
+        <details id="ollama-add" class="custom-add">
+          <summary class="custom-add-summary" data-i18n="settings.ollamaTitle">Ollama (local)</summary>
+          <div class="custom-add-body">
+            <label class="field">
+              <div class="field-head"><span data-i18n="ollama.baseUrl">Ollama base URL</span></div>
+              <div class="custom-row">
+                <input id="ollama-base" type="url" placeholder="http://127.0.0.1:11434" autocomplete="off" spellcheck="false" aria-label="Ollama base URL" />
+                <button id="ollama-connect" type="button" class="custom-action primary" data-i18n="ollama.connect">Connect</button>
+                <button id="ollama-disconnect" type="button" class="custom-action" data-i18n="ollama.disconnect" hidden>Disconnect</button>
+              </div>
+            </label>
+            <div id="ollama-models" class="ollama-models" hidden>
+              <div class="ollama-model-head">
+                <span data-i18n="ollama.model">Model</span>
+                <span data-i18n="ollama.context">Context</span>
+                <span data-i18n="ollama.roles">Roles</span>
+              </div>
+              <div id="ollama-model-list" class="ollama-model-list"></div>
+              <button id="ollama-save" type="button" class="custom-action primary" data-i18n="ollama.save">Save selection</button>
+            </div>
+            <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
+            <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
+          </div>
+        </details>
         <label class="field">
           <div class="field-head">
             <span data-i18n="settings.language">Interface language</span>

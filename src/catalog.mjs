@@ -140,6 +140,7 @@ const PROVIDER_LABELS = {
   "opencode-go": "OpenCode Go",
   "deepseek-official": "DeepSeek Official",
   custom: "Custom",
+  ollama: "Ollama (local)",
   openai: "OpenAI",
 };
 
@@ -171,6 +172,9 @@ export function enabledProvidersFor(config) {
   for (const [provider, token] of Object.entries(tokens)) {
     if (token) ids.add(provider);
   }
+  // Ollama needs no credential; its models are publishable as soon as a
+  // connection snapshot exists.
+  if (profileById("ollama").availableModels?.length) ids.add("ollama");
   return ids;
 }
 

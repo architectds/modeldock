@@ -61,10 +61,11 @@ async function startApp(configOverrides = {}) {
   }
   // Isolate the catalog file and native capture: tests must never read or write
   // the real ~/.modeldock state (a test run was polluting the live gate's files).
-  if (!config.codexCatalogFile || !config.nativeCatalogFile) {
+  if (!config.codexCatalogFile || !config.nativeCatalogFile || !config.ollamaSnapshotFile) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-catalog-test-"));
     config.codexCatalogFile = config.codexCatalogFile || path.join(dir, "codex-model-catalog.json");
     config.nativeCatalogFile = config.nativeCatalogFile || path.join(dir, "native-catalog.json");
+    config.ollamaSnapshotFile = config.ollamaSnapshotFile || path.join(dir, "ollama-models.json");
   }
   const services = createServices(config);
   const { app } = createApp(services);
@@ -959,6 +960,122 @@ test("custom endpoint add rejects a failing probe with a classified error", asyn
     const body = await response.json();
     assert.equal(body.error.type, "key");
     assert.ok(body.error.message.includes("401"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ollama flow: connect snapshots + publishes, select persists main/vision, disconnect clears", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-ollama-flow-"));
+  const envFile = path.join(dir, ".env");
+  const snapshotFile = path.join(dir, "ollama-models.json");
+  const instance = await startApp({
+    envFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    ollamaSnapshotFile: snapshotFile,
+  });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      const value = String(url);
+      if (value.startsWith("http://127.0.0.1:11434/") && value.endsWith("/api/tags")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              { name: "qwen3.8:27b", details: { context_length: 262144 }, capabilities: ["completion", "tools", "thinking", "vision"] },
+              { name: "embed-only", details: { context_length: 8192 }, capabilities: ["embedding"] },
+            ],
+          }),
+        };
+      }
+      if (value.startsWith("http://127.0.0.1:11434/") && value.endsWith("/v1/responses")) {
+        const body = JSON.parse(options.body);
+        assert.equal(body.model, "qwen3.8:27b", "the probe sends the original upstream tag");
+        return { ok: true, status: 200, json: async () => ({ id: "resp_1", usage: { input_tokens: 5, output_tokens: 1 } }) };
+      }
+      return originalFetch(url, options);
+    };
+
+    const connect = await (await fetch(`${instance.base}/api/ollama/connect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    })).json();
+    assert.equal(connect.ok, true);
+    assert.equal(connect.connected, true);
+    assert.deepEqual(connect.models.map((model) => model.id), ["qwen3.8-27b"], "embedding-only models stay out");
+    assert.equal(connect.settings.ollama.connected, true);
+
+    const snapshot = JSON.parse(await readFile(snapshotFile, "utf8"));
+    assert.equal(snapshot.baseUrl, "http://127.0.0.1:11434");
+    assert.equal(snapshot.models[0].upstreamId, "qwen3.8:27b");
+
+    const catalog = await (await fetch(`${instance.base}/v1/models`)).json();
+    const entry = catalog.models.find((model) => model.slug === "qwen3.8-27b@ollama");
+    assert.ok(entry, "connected Ollama models are published in the catalog");
+    assert.equal(entry.display_name, "Ollama (local) - qwen3.8:27b", "the label keeps the recognizable Ollama tag");
+    assert.equal(entry.context_window, 262144, "the context window comes from Ollama");
+
+    const select = await (await fetch(`${instance.base}/api/ollama/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mainModel: "qwen3.8-27b", visionModel: "qwen3.8-27b" }),
+    })).json();
+    assert.equal(select.ok, true);
+    assert.equal(select.settings.ollama.mainModel, "qwen3.8-27b");
+    assert.equal(select.settings.ollama.visionModel, "qwen3.8-27b");
+
+    const env = await readFile(envFile, "utf8");
+    assert.match(env, /MODELDOCK_MAIN_MODEL=qwen3\.8-27b@ollama/);
+    assert.match(env, /MODELDOCK_VISION_MODEL=qwen3\.8-27b@ollama/);
+    assert.equal((await fetch(`${instance.base}/healthz`)).status, 200, "an Ollama main model needs no token for readiness");
+
+    const disconnect = await (await fetch(`${instance.base}/api/ollama/disconnect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    })).json();
+    assert.equal(disconnect.ok, true);
+    assert.equal(disconnect.settings.ollama.connected, false);
+    assert.equal(disconnect.settings.ollama.models.length, 0);
+    const envAfter = await readFile(envFile, "utf8");
+    assert.doesNotMatch(envAfter, /MODELDOCK_MAIN_MODEL=qwen3/);
+    assert.doesNotMatch(envAfter, /MODELDOCK_VISION_MODEL=qwen3/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ollama connect reports a classified error when Ollama is unreachable", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-ollama-fail-"));
+  const instance = await startApp({ envFile: path.join(dir, ".env"), ollamaSnapshotFile: path.join(dir, "ollama-models.json") });
+  t.after(async () => {
+    await instance.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, options) => {
+      if (String(url).startsWith("http://127.0.0.1:11434/")) throw new TypeError("fetch failed: connection refused");
+      return originalFetch(url, options);
+    };
+    const response = await fetch(`${instance.base}/api/ollama/connect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 400);
+    assert.equal(body.error.type, "connect");
+    assert.match(body.error.message, /Cannot connect to Ollama/);
   } finally {
     globalThis.fetch = originalFetch;
   }

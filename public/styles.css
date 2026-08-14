@@ -595,6 +595,32 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
 .custom-status { margin: 0; color: var(--green, #48d6a0); font-size: 12px; line-height: 1.4; }
 .custom-error { margin: 0; color: #ff7b7b; font-size: 12px; line-height: 1.4; }
 .custom-hint { margin: 6px 0 0; color: var(--muted, #8b90a0); font-size: 11px; line-height: 1.4; word-break: break-all; }
+.ollama-models { display: flex; flex-direction: column; gap: 8px; }
+.ollama-model-head,
+.ollama-model-row {
+  display: grid;
+  grid-template-columns: 1fr 64px auto;
+  gap: 10px;
+  align-items: center;
+}
+.ollama-model-head {
+  color: var(--muted, #8b90a0);
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding: 0 2px;
+}
+.ollama-model-row {
+  padding: 8px 10px;
+  border: 1px solid rgba(137,160,175,.16);
+  border-radius: 8px;
+  background: rgba(137,160,175,.05);
+}
+.ollama-model-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ollama-model-context { color: var(--muted, #8b90a0); font-size: 12px; text-align: right; }
+.ollama-model-roles { display: flex; gap: 6px; }
+.ollama-models .chip-toggle { padding: 4px 8px; font-size: 11px; }
+.ollama-models .custom-action { align-self: flex-end; }
 
 /* --- Update button (small, but gently glowing so it gets noticed) --- */
 .topbar-buttons { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 8px; }

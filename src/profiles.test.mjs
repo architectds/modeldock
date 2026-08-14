@@ -7,6 +7,8 @@ import {
   profileById,
   profileOptions,
   applyCustomProfile,
+  applyOllamaProfile,
+  OLLAMA_PROFILE,
   CONTEXT_WINDOW,
   DEEPSEEK_CONTEXT_WINDOW,
   OPENCODE_GO_DEEPSEEK_CONTEXT_WINDOW,
@@ -37,8 +39,35 @@ test("exposes every registered profile through the registry", () => {
 
 test("lists all profiles as selectable options", () => {
   const options = profileOptions();
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom"]);
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
+});
+
+test("ollama profile is empty until connected and fills from the snapshot", () => {
+  const empty = applyOllamaProfile({}, null);
+  assert.equal(empty.availableModels.length, 0);
+  const filled = applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [
+      { id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: true, contextWindow: 262144 },
+    ],
+  });
+  assert.equal(filled.id, "ollama");
+  assert.equal(filled.baseUrl, "http://127.0.0.1:11434");
+  assert.deepEqual(filled.availableModels, [
+    {
+      id: "qwen3.8-27b",
+      upstreamId: "qwen3.8:27b",
+      label: "qwen3.8:27b",
+      endpoint: "responses",
+      supportsVision: true,
+      contextWindow: 262144,
+      ownerQualified: true,
+      status: "available",
+    },
+  ]);
+  assert.equal(publishedSlugFor("ollama", "qwen3.8-27b"), "qwen3.8-27b@ollama", "a connected Ollama model is owner-qualified");
+  assert.equal(profileById("ollama"), OLLAMA_PROFILE, "the profile is registered for routing");
 });
 
 test("custom profile is empty until configured and fills from config", () => {

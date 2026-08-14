@@ -855,6 +855,19 @@ export function upstreamTargetFor(config, model) {
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
     };
   }
+  if (provider === "ollama") {
+    // The published id is colon-free but Ollama only serves the original tag
+    // (qwen3.8-27b -> qwen3.8:27b), so the wire id comes from the profile entry.
+    const entry = modelEntryFor(config, model);
+    return {
+      provider,
+      model: entry?.upstreamId || upstreamModel,
+      url: `${(config.ollamaBaseUrl || "http://127.0.0.1:11434").replace(/\/+$/, "")}/v1/responses`,
+      token: "",
+      // Ollama needs no credential; the tokenless gate below must not 503 it.
+      tokenRequired: false,
+    };
+  }
   const entry = modelEntryFor(config, upstreamModel);
   const baseUrl = entry?.zen
     ? (config.zenBaseUrl || "https://opencode.ai/zen/v1")
@@ -2018,7 +2031,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const startedAt = Date.now();
   let usage;
   try {
-    if (!target.token) {
+    if (!target.token && target.tokenRequired !== false) {
       const body = JSON.stringify({
         error: {
           type: "configuration_error",
@@ -2295,7 +2308,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (config.debug?.dumpAll && config.debug?.dumpDir) {
     dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
   }
-  if (!target.token) {
+  if (!target.token && target.tokenRequired !== false) {
     const error = {
       error: {
         type: "configuration_error",
@@ -2620,10 +2633,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 }
 
 function upstreamHeaders(target) {
-  const headers = {
-    Authorization: `Bearer ${target.token}`,
-    "Content-Type": "application/json",
-    "User-Agent": "modeldock-gateway/0.1",
-  };
+  const headers = { "Content-Type": "application/json", "User-Agent": "modeldock-gateway/0.1" };
+  if (target.token) headers.Authorization = `Bearer ${target.token}`;
   return headers;
 }

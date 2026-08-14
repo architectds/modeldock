@@ -23,8 +23,9 @@ import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instanc
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
+import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import staticFiles from "./static-inline.mjs";
 
@@ -178,6 +179,8 @@ function enabledProviders(config) {
   const active = config.profileId || "opencode-go";
   return all.filter((entry) => {
     if (entry.id === active) return true;
+    // Ollama needs no credential; a connected profile is publishable.
+    if (entry.id === "ollama") return Boolean(profileById("ollama").availableModels?.length);
     const token = config.tokens?.[entry.id];
     return Boolean(token);
   });
@@ -401,6 +404,14 @@ function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
   const mainToken = config.tokens?.["opencode-go"] || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
+  const ollamaProfile = profileById("ollama");
+  const ollamaConnected = Boolean(ollamaProfile.availableModels?.length);
+  const ollamaMain = modelSelection.mainModel && providerForModel(config, modelSelection.mainModel) === "ollama"
+    ? bareModelId(modelSelection.mainModel)
+    : "";
+  const ollamaVision = modelSelection.visionModel && providerForModel(config, modelSelection.visionModel) === "ollama"
+    ? bareModelId(modelSelection.visionModel)
+    : "";
   return {
     tokenConfigured: anyProviderTokenConfigured(config),
     providers: [
@@ -413,6 +424,19 @@ function settingsPayload(services) {
       apiKeyConfigured: Boolean(config.tokens?.["custom"]),
       asMain: Boolean(config.customMain),
       asVision: Boolean(config.customVision),
+    },
+    ollama: {
+      baseUrl: config.ollamaBaseUrl || OLLAMA_DEFAULT_BASE,
+      connected: ollamaConnected,
+      models: (ollamaProfile.availableModels || []).map((model) => ({
+        id: model.id,
+        upstreamId: model.upstreamId,
+        label: model.label || model.id,
+        supportsVision: Boolean(model.supportsVision),
+        contextWindow: model.contextWindow || null,
+      })),
+      mainModel: ollamaMain,
+      visionModel: ollamaVision,
     },
     models: {
       mainModel: modelSelection?.mainModel || config.mainModel,
@@ -500,6 +524,7 @@ function upstreamBaseForModel(config, model) {
   const provider = providerForModel(config, model);
   if (provider === "custom") return (config.customBaseUrl || "").replace(/\/$/, "");
   if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
+  if (provider === "ollama") return (config.ollamaBaseUrl || profileById("ollama").baseUrl).replace(/\/$/, "");
   const upstream = bareModelId(model);
   if (upstream && (upstream.endsWith("-free") || upstream === "big-pickle")) return ZEN_FREE_BASE;
   return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
@@ -851,6 +876,15 @@ export function createServices(config = loadConfig()) {
     || (process.env.MODELDOCK_STATE_DIR
       ? path.join(path.resolve(process.env.MODELDOCK_STATE_DIR), "codex-model-catalog.json")
       : path.join(os.homedir(), ".modeldock", "codex-model-catalog.json"));
+  // The Ollama connection snapshot follows the same state-dir redirect. Real
+  // configs restore it during loadConfig; this re-apply covers hand-built test
+  // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
+  // profile in sync with whatever the connect/disconnect routes write.
+  const ollamaSnapshotFile = mutableConfig.ollamaSnapshotFile || ollamaSnapshotPath();
+  if (mutableConfig.ollamaSnapshotFile) {
+    const snapshot = readOllamaSnapshot(mutableConfig.ollamaSnapshotFile);
+    if (snapshot) applyOllamaProfile(mutableConfig, snapshot);
+  }
   // The capability key rides in the base URL Codex reads from config.toml, so a
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
@@ -940,7 +974,7 @@ export function createServices(config = loadConfig()) {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, modelRefreshTimer,
+    refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
   });
 }
 
@@ -1494,7 +1528,7 @@ export function createApp(services = createServices()) {
   });
 
   function customErrorPayload(error) {
-    const code = error instanceof CustomEndpointError ? error.code : "upstream";
+    const code = error instanceof CustomEndpointError || error instanceof OllamaError ? error.code : "upstream";
     return { error: { type: code, message: error.message } };
   }
 
@@ -1557,6 +1591,116 @@ export function createApp(services = createServices()) {
       });
     } catch (error) {
       recordConfigAction(metrics, "custom_add", { ok: false, error: error.message });
+      return res.status(400).json(customErrorPayload(error));
+    }
+  });
+
+  // Dashboard "Ollama (local)" flow: one click lists every chat-capable local
+  // model (/api/tags), probes the Responses protocol, snapshots the list to disk
+  // and publishes the models. Reconnect refreshes; restart restores the snapshot.
+  app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
+    const { baseUrl } = req.body || {};
+    try {
+      const result = await listOllamaModels({ baseUrl });
+      if (!result.models.length) {
+        throw new OllamaError("models", "Ollama returned no chat-capable models. Pull one first (ollama pull <model>).");
+      }
+      // Prove the Responses dialect before persisting so an old Ollama (< 0.13.3)
+      // fails the connect with readable guidance instead of a silent 404 later.
+      await probeOllamaResponses({ baseUrl: result.endpoint, modelId: result.models[0].upstreamId });
+      const snapshot = { baseUrl: result.endpoint, connectedAt: new Date().toISOString(), models: result.models };
+      writeOllamaSnapshot(services.ollamaSnapshotFile, snapshot);
+      applyOllamaProfile(config, snapshot);
+      config.ollamaBaseUrl = result.endpoint;
+      // If the previous selection named an Ollama model that is gone now, clear it
+      // so the persisted main/vision never dangles at a deleted model.
+      const updates = {};
+      for (const [envKey, model] of [["MODELDOCK_MAIN_MODEL", config.mainModel], ["MODELDOCK_VISION_MODEL", config.visionModel]]) {
+        if (providerForModel(config, model) !== "ollama") continue;
+        const bare = bareModelId(model);
+        if (!result.models.some((entry) => entry.id === bare)) {
+          updates[envKey] = "";
+          if (envKey === "MODELDOCK_MAIN_MODEL") {
+            config.mainModel = "deepseek-v4-flash@opencode-go";
+            services.modelSelection.mainModel = config.mainModel;
+            services.configSwitcher.model = config.mainModel;
+          } else {
+            config.visionModel = "";
+            services.modelSelection.visionModel = "";
+          }
+        }
+      }
+      if (Object.keys(updates).length) writeEnvFile(updates, config.envFile);
+      services.writeCatalogFile?.();
+      recordConfigAction(metrics, "ollama_connect", { ok: true, models: result.models.length });
+      return res.json({
+        ok: true,
+        connected: true,
+        baseUrl: result.endpoint,
+        models: result.models,
+        responsesUrl: result.responsesUrl,
+        settings: settingsPayload(services),
+      });
+    } catch (error) {
+      recordConfigAction(metrics, "ollama_connect", { ok: false, error: error.message });
+      return res.status(400).json(customErrorPayload(error));
+    }
+  });
+
+  app.post("/api/ollama/disconnect", mutateConfig, async (req, res) => {
+    try {
+      clearOllamaSnapshot(services.ollamaSnapshotFile);
+      applyOllamaProfile(config, null);
+      config.ollamaBaseUrl = OLLAMA_DEFAULT_BASE;
+      // A disconnected provider cannot serve its models: clear main/vision when
+      // they pointed at an Ollama model.
+      const updates = {};
+      if (providerForModel(config, config.mainModel) === "ollama") {
+        updates.MODELDOCK_MAIN_MODEL = "";
+        config.mainModel = "deepseek-v4-flash@opencode-go";
+        services.modelSelection.mainModel = config.mainModel;
+        services.configSwitcher.model = config.mainModel;
+      }
+      if (providerForModel(config, config.visionModel) === "ollama") {
+        updates.MODELDOCK_VISION_MODEL = "";
+        config.visionModel = "";
+        services.modelSelection.visionModel = "";
+      }
+      if (Object.keys(updates).length) writeEnvFile(updates, config.envFile);
+      services.writeCatalogFile?.();
+      recordConfigAction(metrics, "ollama_disconnect", { ok: true });
+      return res.json({ ok: true, connected: false, settings: settingsPayload(services) });
+    } catch (error) {
+      recordConfigAction(metrics, "ollama_disconnect", { ok: false, error: error.message });
+      return res.status(400).json(customErrorPayload(error));
+    }
+  });
+
+  // Persist the main/vision selection among the connected Ollama models. Ids are
+  // the published (colon-free) ones; the provider is qualified on the wire.
+  app.post("/api/ollama/select", mutateConfig, async (req, res) => {
+    const { mainModel, visionModel } = req.body || {};
+    try {
+      const known = new Set((profileById("ollama").availableModels || []).map((model) => model.id));
+      const main = String(mainModel || "").trim();
+      const vision = String(visionModel || "").trim();
+      if (main && !known.has(main)) throw new OllamaError("model", `Unknown Ollama model: ${main}`);
+      if (vision && !known.has(vision)) throw new OllamaError("model", `Unknown Ollama model: ${vision}`);
+      const updates = {
+        MODELDOCK_MAIN_MODEL: main ? `${main}${PROVIDER_SEPARATOR}ollama` : "",
+        MODELDOCK_VISION_MODEL: vision ? `${vision}${PROVIDER_SEPARATOR}ollama` : "",
+      };
+      writeEnvFile(updates, config.envFile);
+      config.mainModel = main ? `${main}${PROVIDER_SEPARATOR}ollama` : "deepseek-v4-flash@opencode-go";
+      services.modelSelection.mainModel = config.mainModel;
+      services.configSwitcher.model = config.mainModel;
+      config.visionModel = vision ? `${vision}${PROVIDER_SEPARATOR}ollama` : "";
+      services.modelSelection.visionModel = config.visionModel;
+      services.writeCatalogFile?.();
+      recordConfigAction(metrics, "ollama_select", { ok: true, main: main || "", vision: vision || "" });
+      return res.json({ ok: true, settings: settingsPayload(services) });
+    } catch (error) {
+      recordConfigAction(metrics, "ollama_select", { ok: false, error: error.message });
       return res.status(400).json(customErrorPayload(error));
     }
   });

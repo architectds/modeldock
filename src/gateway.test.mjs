@@ -35,6 +35,7 @@ import {
   sessionIdsFrom,
   upstreamTargetFor,
 } from "./gateway.mjs";
+import { applyOllamaProfile } from "./profiles.mjs";
 
 function configStub() {
   return {
@@ -715,6 +716,19 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
 
   const paid = upstreamTargetFor(config, "deepseek-v4-flash");
   assert.equal(paid.free, false, "paid models keep the generic error hints");
+});
+
+test("upstreamTargetFor routes Ollama models without a token and restores the upstream tag", () => {
+  applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [{ id: "qwen3.8-27b", upstreamId: "qwen3.8:27b", label: "qwen3.8:27b", supportsVision: true, contextWindow: 262144 }],
+  });
+  const target = upstreamTargetFor(configStub(), "qwen3.8-27b@ollama");
+  assert.equal(target.provider, "ollama");
+  assert.equal(target.model, "qwen3.8:27b", "the wire id is the original Ollama tag, colon intact");
+  assert.equal(target.url, "http://127.0.0.1:11434/v1/responses");
+  assert.equal(target.token, "");
+  assert.equal(target.tokenRequired, false, "Ollama must not trip the tokenless 503 gate");
 });
 
 test("freeResponseFailure classifies silent zen free 200 bodies", () => {
