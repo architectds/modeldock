@@ -1441,6 +1441,50 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   return { bytes, rewrote, interrupted, terminal: sawTerminal, failure: responseFailure, completedResponse };
 }
 
+// Console Go occasionally closes a Pro request with HTTP 200 and a literally
+// empty body after holding it open. Nothing has reached Codex in that case, so
+// one replay cannot duplicate a client-visible message or local tool action and
+// avoids forcing the user to type "continue".
+// Once even one byte has arrived, never replay: a partial stream can already
+// contain visible text or a tool call, and replaying it could duplicate work.
+function retryEmptyProStream(initialBody, retry) {
+  const emptyStream = () => new ReadableStream({ start(controller) { controller.close(); } });
+  let reader = (initialBody || emptyStream()).getReader();
+  let bytes = 0;
+  let retried = false;
+  let cancelled = false;
+  return new ReadableStream({
+    async pull(controller) {
+      while (!cancelled) {
+        const { done, value } = await reader.read();
+        if (!done) {
+          const size = value?.byteLength ?? Buffer.byteLength(value || "");
+          if (size === 0) continue;
+          bytes += size;
+          controller.enqueue(value);
+          return;
+        }
+        if (bytes === 0 && !retried) {
+          retried = true;
+          const nextBody = await retry();
+          reader = (nextBody || emptyStream()).getReader();
+          continue;
+        }
+        controller.close();
+        return;
+      }
+    },
+    async cancel(reason) {
+      cancelled = true;
+      try {
+        await reader.cancel(reason);
+      } catch {
+        // The upstream may already have closed while cancellation propagates.
+      }
+    },
+  });
+}
+
 // Classify a 200 zen-free response body that silently failed. Returns
 // "empty_output" when the output array is empty (the whole output budget was
 // spent on reasoning), "upstream_error" when the body carries an error object
@@ -2258,6 +2302,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let completedResponse;
   let responseCompleted = false;
   let responseFailure = "";
+  let upstreamRetries = 0;
   const tee = createUsageTee((event) => {
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
@@ -2271,13 +2316,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
 
   try {
+    const upstreamRequestBody = JSON.stringify({ ...normalizedPayload, model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
-      body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
+      body: upstreamRequestBody,
       signal,
     });
-    const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
+    let upstreamBytes = Buffer.byteLength(upstreamRequestBody);
     if (!upstream.ok) {
       markFirstResponse();
       if (config.debug?.dumpDir) {
@@ -2366,6 +2412,33 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
     }
 
+    const proOpenCodeGoStream = normalizedPayload.stream === true
+      && bareModelId(route.model) === "deepseek-v4-pro"
+      && target.provider === "opencode-go";
+    if (proOpenCodeGoStream) {
+      upstreamBody = retryEmptyProStream(upstreamBody, async () => {
+        upstreamRetries += 1;
+        upstreamBytes += Buffer.byteLength(upstreamRequestBody);
+        const retried = await fetch(target.url, {
+          method: "POST",
+          headers: upstreamHeaders(target),
+          body: upstreamRequestBody,
+          signal,
+        });
+        if (!retried.ok) {
+          const raw = await retried.text();
+          const translated = translateUpstreamError({
+            provider: target.provider,
+            status: retried.status,
+            bodyText: redactBearer(raw),
+            free: target.free,
+          });
+          throw new Error(translated.body.error.message);
+        }
+        return retried.body;
+      });
+    }
+
     if (!res.headersSent) {
       res.statusCode = upstream.status;
       res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
@@ -2378,10 +2451,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
-      const bareId = bareModelId(route.model);
       // opencode's pro translation emits a bare-delta stream; the official
       // DeepSeek route is a standard Responses implementation and stays native.
-      const piped = normalizedPayload.stream === true && bareId === "deepseek-v4-pro" && target.provider === "opencode-go"
+      const piped = proOpenCodeGoStream
         ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
@@ -2463,6 +2535,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // the dashboard's cache-rate wave reads these off the trace records.
       cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
       reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
+      upstreamRetries,
     });
     metrics?.recordResponseTransform?.({
       blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
@@ -2500,9 +2573,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamBytes,
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
+      upstreamRetries,
     };
   } catch (error) {
-    finish?.({ ok: false, error: error.message });
+    finish?.({ ok: false, error: error.message, upstreamRetries });
     if (!res.headersSent) {
       res.statusCode = 502;
       res.setHeader("Content-Type", "application/json");

@@ -1530,6 +1530,123 @@ test("relayResponses registers Pro tool affinity from the rewritten completion",
   }
 });
 
+test("relayResponses recovers a byte-empty 200 Pro stream with one transparent retry", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const finishResults = [];
+  const requestBodies = [];
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    requestBodies.push(options.body);
+    if (calls === 1) return new Response(null, { status: 200, headers: { "content-type": "text/event-stream" } });
+    return new Response(
+      'data: {"type":"response.output_text.delta","delta":"retry-ok","response":{"id":"resp_retry","model":"deepseek-v4-pro"}}\n\n'
+      + 'data: {"type":"response.completed","response":{"id":"resp_retry","model":"deepseek-v4-pro","usage":{"input_tokens":10,"output_tokens":2}}}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => (value) => finishResults.push(value), recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+    assert.equal(calls, 2, "a byte-empty first attempt is retried exactly once");
+    assert.equal(requestBodies[1], requestBodies[0], "the retry replays the exact normalized Pro request");
+    assert.equal(result.ok, true);
+    assert.equal(result.upstreamRetries, 1);
+    assert.equal(finishResults.at(-1).upstreamRetries, 1);
+    assert.match(forwarded, /retry-ok/);
+    assert.doesNotMatch(forwarded, /response\.failed/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses never retries a Pro stream after any upstream byte", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(
+      'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(calls, 1, "partial output must never be replayed");
+    assert.equal(result.ok, false);
+    assert.equal(result.upstreamRetries, 0);
+    assert.match(result.error, /before a terminal response event/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses bounds an all-empty Pro retry to two attempts", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(null, { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    const config = configStub();
+    config.mainModel = "deepseek-v4-pro@opencode-go";
+    const result = await relayResponses(
+      { model: "deepseek-v4-pro@opencode-go", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }] },
+      res,
+      {
+        recordUsage: () => {},
+        config,
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+      },
+    );
+    assert.equal(calls, 2, "the empty retry cannot loop");
+    assert.equal(result.ok, false);
+    assert.equal(result.upstreamRetries, 1);
+    assert.match(result.error, /before a terminal response event/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayResponses sends compacted Pro reasoning to Console Go as reasoning_text", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
