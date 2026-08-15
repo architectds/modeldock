@@ -2134,6 +2134,52 @@ test("relayResponses intercepts a v2 compact request and synthesizes a compactio
   }
 });
 
+test("relayCompaction applies the Pro duplicate-call repair before summarizing", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const input = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "long task" }] },
+      { type: "function_call", id: "fc_compact_duplicate", call_id: "call_compact_duplicate", name: "probe", arguments: "{}" },
+      { type: "function_call", id: "fc_compact_duplicate", call_id: "call_compact_duplicate", name: "probe", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_compact_duplicate", output: "first" },
+      { type: "function_call_output", call_id: "call_compact_duplicate", output: "duplicate" },
+      { type: "compaction_trigger" },
+    ];
+    const config = { ...configStub(), mainModel: "deepseek-v4-pro@opencode-go" };
+    const result = await relayResponses(
+      { model: "deepseek-v4-pro@opencode-go", stream: false, input },
+      res,
+      {
+        ...compactServices(),
+        config,
+        mainModel: "deepseek-v4-pro@opencode-go",
+        visionModel: "none",
+        knownModels: new Set(["deepseek-v4-pro@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    const sent = calls[0].body.input;
+    assert.equal(sent.filter((item) => item.type === "function_call").length, 1);
+    assert.equal(sent.filter((item) => item.type === "function_call_output").length, 1);
+    assert.deepEqual(
+      sent.filter((item) => item.call_id === "call_compact_duplicate").map((item) => item.type),
+      ["function_call", "function_call_output"],
+    );
+    assert.ok(!sent.some((item) => item.type === "compaction_trigger"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("pipeNormalizedStream does not duplicate lifecycle events from a hybrid sparse Pro stream", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

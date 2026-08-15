@@ -919,6 +919,22 @@ export function normalizeOpenCodeProInput(input) {
   return attachProExecutionGuidance(continued);
 }
 
+// Keep every routed entry point on the same provider/model-specific input
+// contract. Both ordinary responses and remote compaction replay Codex history;
+// letting either path fall back to generic normalization reintroduces the same
+// strict-upstream failures only when a long task crosses that boundary.
+function normalizeInputForRoute(config, model, input, localPayload = null) {
+  const routedModel = bareModelId(model);
+  const routedProvider = providerForModel(config, model);
+  if (routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go") {
+    return normalizeOpenCodeProInput(input);
+  }
+  if (routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go") {
+    return normalizeOpenCodeFlashInput(input);
+  }
+  return localPayload ? localPayload.input : normalizeGatewayInput(input);
+}
+
 // A message is "current" when it follows the last assistant turn. In the
 // Responses wire an assistant turn is not always a role:"assistant" message: an
 // agentic turn is frequently a bare function_call / reasoning item. This mirrors
@@ -2158,6 +2174,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // must be at the beginning" whenever the compacted history carried a
   // mid-history system item.
   const localPayload = isLocalSmallContextBackend(config, route.model) ? normalizeLocalPayload(payload) : null;
+  const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -2166,7 +2183,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     tool_choice: "none",
     input: [
       ...rewriteHistoricalImages(
-        localPayload ? localPayload.input : normalizeGatewayInput(payload.input),
+        normalizedInput,
         mediaStore,
         { preserveCurrentImages: route.directVision },
       ),
@@ -2370,21 +2387,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
   // Pro additionally needs the id, assistant-content, tool-history and stream
   // repairs; official and custom routes keep the generic path.
-  const routedModel = bareModelId(route.model);
   const routedProvider = providerForModel(config, route.model);
-  const proOpenCodeGo =
-    routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go";
-  const flashOpenCodeGo =
-    routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go";
   const localPayload =
     routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
-  const normalizedInput = proOpenCodeGo
-    ? normalizeOpenCodeProInput(payload.input)
-    : flashOpenCodeGo
-      ? normalizeOpenCodeFlashInput(payload.input)
-      : localPayload
-        ? localPayload.input
-        : normalizeGatewayInput(payload.input);
+  const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
   let normalizedPayload = {
     ...(localPayload || payload),
     input: rewriteHistoricalImages(
