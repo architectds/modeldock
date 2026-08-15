@@ -988,6 +988,62 @@ test("relayResponses keeps hyperframes for a 128K custom model", async () => {
   }
 });
 
+test("relayResponses keeps codex_apps office tools for small-context custom models", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("ok");
+  };
+  try {
+    const services = {
+      ...compactServices(),
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const tools = [
+      { type: "function", name: "exec_command" },
+      { type: "function", name: "mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa" },
+      { type: "function", name: "mcp__codex_apps__codex_document_control___get_docum_83c7f0565c0f" },
+      { type: "function", name: "mcp__codex_apps__codex_document_control___list_document_sessions" },
+      { type: "function", name: "mcp__codex_apps__github___create_issue" },
+    ];
+    const result = await relayResponses(
+      {
+        model: "qwen3.8:27b@custom",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        tools,
+      },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    const names = (calls[0].body.tools || []).map((tool) => tool.name);
+    assert.ok(
+      names.includes("mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa"),
+      "office execute tool survives the whitelist",
+    );
+    assert.ok(names.includes("mcp__codex_apps__codex_document_control___list_document_sessions"), "office list survives");
+    assert.ok(names.includes("exec_command"), "core tools still survive");
+    assert.ok(!names.some((n) => n.includes("github___create_issue")), "github tools stay stripped");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("normalizeOpenCodeProInput repairs duplicate tool calls persisted from a hybrid Pro stream", () => {
   const normalized = normalizeOpenCodeProInput([
     { type: "function_call", id: "fc_duplicate", call_id: "call_duplicate", name: "probe", arguments: "{}" },

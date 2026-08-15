@@ -49,6 +49,12 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__modeldock__store_memory",
   "mcp__modeldock__web_search_exa",
   "mcp__modeldock__vision_inspect",
+  // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
+  // only office tools a 27B local model can usefully drive. Names carry the
+  // plugin's truncated+hashed suffixes; update them if the plugin renames.
+  "mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa",
+  "mcp__codex_apps__codex_document_control___get_docum_83c7f0565c0f",
+  "mcp__codex_apps__codex_document_control___list_document_sessions",
 ]);
 
 // Backends whose advertised context cannot spare Codex's ~61K fixed overhead
