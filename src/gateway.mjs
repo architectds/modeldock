@@ -25,6 +25,28 @@ const HOSTED_TOOL_TYPES = new Set([
 // The vision path is vision_inspect or direct image escalation, not view_image.
 const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
 
+// Local backends (llama.cpp / Ollama) run on ~32K context; Codex sends 150+
+// tool schemas (mostly MCP) that alone cost ~39K tokens and blow the window.
+// Whitelist the core tools so the fixed overhead fits and the model can act.
+const LOCAL_TOOL_ALLOWLIST = new Set([
+  "exec_command",
+  "apply_patch",
+  "web_search",
+  "write_stdin",
+  "update_plan",
+  "read_file",
+  "write_file",
+  "glob",
+  "grep",
+  "task",
+]);
+
+// Only backends whose advertised context is too small for Codex's ~61K fixed
+// overhead (system prompt + 150 tool schemas) get the tool whitelist. Custom
+// endpoints may be OpenAI/OpenRouter with 128K+ contexts - those must keep the
+// full toolset. 0 (unknown) also means no trimming, to never hurt a big model.
+const LOCAL_TOOL_TRIM_MAX_CONTEXT = 40_000;
+
 function redactBearer(value) {
   return String(value || "")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
@@ -698,7 +720,7 @@ function normalizeStandardToolItem(item) {
     const next = { ...item, type: "function_call" };
     delete next.input;
     if (item.input !== undefined) {
-      next.arguments = typeof item.input === "string" ? item.input : JSON.stringify(item.input);
+      next.arguments = standardToolArguments(item.input);
     }
     return next;
   }
@@ -706,6 +728,24 @@ function normalizeStandardToolItem(item) {
     return { ...item, type: "function_call_output" };
   }
   return item;
+}
+
+// llama.cpp's /v1/responses parses function_call.arguments with a strict JSON
+// parser. Codex's custom_tool_call.input is often a double-encoded string
+// (e.g. apply_patch content starting with a quote) that is not a JSON object.
+// Normalize to a well-formed object string: parse-and-reserialize when the
+// value is itself valid JSON, otherwise wrap it under { input } so the strict
+// parser always accepts it.
+function standardToolArguments(value) {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return typeof parsed === "string" ? JSON.stringify({ input: parsed }) : JSON.stringify(parsed);
+    } catch {
+      return JSON.stringify({ input: value });
+    }
+  }
+  return JSON.stringify(value);
 }
 
 // Local Responses backends (Ollama, llama.cpp behind a custom endpoint) implement
@@ -728,7 +768,9 @@ export function hoistLocalSystem(input) {
   const texts = [];
   const rest = [];
   for (const item of input) {
-    if (item?.role === "system") {
+    // Codex sends its system guidance as role "developer"; llama.cpp's qwen3.8
+    // template treats both developer and system as leading system messages.
+    if (item?.role === "system" || item?.role === "developer") {
       const text = Array.isArray(item.content)
         ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
         : "";
@@ -760,12 +802,18 @@ export function normalizeLocalInput(input) {
 // hoist system to the front as before. Both paths keep the standard-tool rewrite.
 export function normalizeLocalPayload(payload) {
   if (!payload || !Array.isArray(payload.input)) return payload;
-  const instructions = typeof payload.instructions === "string" ? payload.instructions : "";
+  // Codex sends `instructions` as an array of input_text parts, not a string.
+  // Normalize either shape to text so the merge below always sees a string.
+  const instructions = typeof payload.instructions === "string"
+    ? payload.instructions
+    : Array.isArray(payload.instructions)
+      ? payload.instructions.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
+      : "";
   if (instructions) {
     const texts = [];
     const rest = [];
     for (const item of payload.input) {
-      if (item?.role === "system") {
+      if (item?.role === "system" || item?.role === "developer") {
         const text = Array.isArray(item.content)
           ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
           : "";
@@ -775,9 +823,11 @@ export function normalizeLocalPayload(payload) {
       rest.push(item);
     }
     const input = normalizeOllamaInput(rest);
-    return texts.length
-      ? { ...payload, instructions: [instructions, ...texts].filter(Boolean).join("\n"), input }
-      : { ...payload, input };
+    return {
+      ...payload,
+      instructions: texts.length ? [instructions, ...texts].filter(Boolean).join("\n") : instructions,
+      input,
+    };
   }
   return { ...payload, input: normalizeLocalInput(payload.input) };
 }
@@ -885,11 +935,13 @@ export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImag
 // Tool policy: keep standard function/custom tools, flatten MCP namespaces so
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
-export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS } = {}) {
+export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS, allowToolNames } = {}) {
   if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 } };
   const hidden = new Set(hiddenToolNames || []);
-  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 };
+  const allow = allowToolNames ? new Set(allowToolNames) : null;
+  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0 };
   const out = [];
+  const allowed = (name) => !allow || allow.has(name);
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
     if (
@@ -902,6 +954,10 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
         if (!child?.name) continue;
         if (hidden.has(child.name)) {
           stripped.hidden += 1;
+          continue;
+        }
+        if (!allowed(child.name)) {
+          stripped.allowlist += 1;
           continue;
         }
         stripped.namespaceChildren += 1;
@@ -917,6 +973,10 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
     }
     if (typeof tool.name === "string" && hidden.has(tool.name)) {
       stripped.hidden += 1;
+      continue;
+    }
+    if (typeof tool.name === "string" && !allowed(tool.name)) {
+      stripped.allowlist += 1;
       continue;
     }
     out.push(structuredClone(tool));
@@ -2308,7 +2368,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // gate. Re-serializing the parsed payload is the honest post-decode size.
   const bytesIn = Buffer.byteLength(JSON.stringify(payload));
 
-  const { tools, stripped } = applyToolPolicy(normalizedPayload.tools);
+  // Trim tools only for small-context local backends (llama.cpp @32K etc.).
+  // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
+  const routeModelContext = modelEntryFor(config, route.model)?.contextWindow || 0;
+  const trimLocalTools =
+    (routedProvider === "custom" || routedProvider === "ollama") &&
+    routeModelContext > 0 &&
+    routeModelContext <= LOCAL_TOOL_TRIM_MAX_CONTEXT;
+  const { tools, stripped } = applyToolPolicy(normalizedPayload.tools, {
+    allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
+  });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
 
   const target = upstreamTargetFor(config, normalizedPayload.model);

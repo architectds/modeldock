@@ -25,6 +25,7 @@ import {
   normalizeLocalInput,
   normalizeLocalPayload,
   normalizeLocalReasoning,
+  normalizeOllamaInput,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
@@ -300,6 +301,41 @@ test("normalizeLocalPayload merges system items into instructions when present",
   );
 });
 
+test("normalizeLocalPayload flattens array instructions before merging system", () => {
+  const out = normalizeLocalPayload({
+    instructions: [{ type: "input_text", text: "Base system prompt" }],
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { role: "system", content: [{ type: "input_text", text: "Checkpoint A" }] },
+      { role: "user", content: [{ type: "input_text", text: "bye" }] },
+    ],
+  });
+  assert.equal(out.instructions, "Base system prompt\nCheckpoint A", "array instructions flatten and merge");
+  assert.deepEqual(
+    out.input.map((i) => i.role),
+    ["user", "user"],
+    "system dropped from input when instructions exist",
+  );
+});
+
+test("normalizeLocalPayload treats developer role like system (Codex sends developer)", () => {
+  const out = normalizeLocalPayload({
+    instructions: "Base system prompt",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { role: "developer", content: [{ type: "input_text", text: "Dev guidance" }] },
+      { role: "system", content: [{ type: "input_text", text: "Sys guidance" }] },
+      { role: "user", content: [{ type: "input_text", text: "bye" }] },
+    ],
+  });
+  assert.equal(out.instructions, "Base system prompt\nDev guidance\nSys guidance", "developer+system merge into instructions in order");
+  assert.deepEqual(
+    out.input.map((i) => i.role),
+    ["user", "user"],
+    "both developer and system dropped from input",
+  );
+});
+
 test("normalizeLocalPayload hoists system to the front without instructions", () => {
   const out = normalizeLocalPayload({
     input: [
@@ -341,6 +377,24 @@ test("normalizeLocalReasoning maps high to xhigh and drops unsupported efforts",
   // Unknown efforts are dropped entirely.
   const dropped = normalizeLocalReasoning({ model: "m", reasoning: { effort: "ultra" } });
   assert.equal("reasoning" in dropped, false, "unsupported effort is removed");
+});
+
+test("normalizeOllamaInput wraps double-encoded custom tool input as valid arguments", () => {
+  // Each call needs its output: normalizeGatewayInput runs the pairing pass
+  // first, and an unpaired call is dropped before the rewrite ever sees it.
+  const out = normalizeOllamaInput([
+    { type: "custom_tool_call", call_id: "c1", name: "apply_patch", input: '"*** Begin Patch\\n+hello"' },
+    { type: "custom_tool_call_output", call_id: "c1", output: "applied" },
+    { type: "local_shell_call", call_id: "c2", name: "exec_command", input: { cmd: "npm test" } },
+    { type: "local_shell_call_output", call_id: "c2", output: "ok" },
+  ]);
+  const patch = out.find((i) => i.call_id === "c1");
+  assert.equal(patch.type, "function_call");
+  assert.doesNotThrow(() => JSON.parse(patch.arguments), "arguments must parse as JSON");
+  const parsed = JSON.parse(patch.arguments);
+  assert.equal(typeof parsed, "object", "arguments normalize to an object");
+  const shell = out.find((i) => i.call_id === "c2");
+  assert.deepEqual(JSON.parse(shell.arguments), { cmd: "npm test" }, "object input reserializes cleanly");
 });
 
 test("normalizeOpenCodeProInput drops opaque reasoning with no replayable text", () => {
@@ -757,6 +811,21 @@ test("applyToolPolicy flattens MCP namespaces into qualified functions", () => {
   assert.equal(kept[0].name, "namespace:mcp__test__hello");
   assert.equal(stripped.namespaceChildren, 1);
   assert.equal(stripped.hidden, 1);
+});
+
+test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () => {
+  const tools = [
+    { type: "function", name: "exec_command" },
+    { type: "function", name: "apply_patch" },
+    { type: "function", name: "mcp__github__create_issue" },
+    { type: "function", name: "mcp__node_repl__js" },
+    { type: "namespace", name: "mcp__sites", tools: [{ name: "deploy" }, { name: "create_site" }] },
+  ];
+  const { tools: kept, stripped } = applyToolPolicy(tools, {
+    allowToolNames: new Set(["exec_command", "apply_patch", "deploy"]),
+  });
+  assert.deepEqual(kept.map((t) => t.name), ["exec_command", "apply_patch", "mcp__sites__deploy"], "only whitelisted survive");
+  assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
 });
 
 test("upstreamTargetFor routes by owning provider", () => {

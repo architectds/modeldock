@@ -17,6 +17,11 @@ test/dashboard*.png
 _*.py
 probe-*.png
 *.webm
+
+# Full-traffic request dumps (MODELDOCK_DUMP_DIR) contain real user conversation
+# content - never tracked, never shared.
+modeldock-dumps/
+request-*.json
 # Browser-automation (CDP) temp user-data profiles left in the repo root
 _cdp_*/
 
