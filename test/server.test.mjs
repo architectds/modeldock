@@ -32,7 +32,7 @@ test("publishes a complete Codex model catalog schema", () => {
 
 test("serves both local MCP tools over Streamable HTTP", async (t) => {
   // Keep the tool surface hermetic: the memory vault is opt-in, so the default
-  // list is exactly the four media/web tools regardless of the local .env.
+  // list is exactly the media/web/image tools regardless of the local .env.
   const config = { ...loadConfig(), goToken: "test-token", memoryEnabled: false };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");
@@ -54,7 +54,7 @@ test("serves both local MCP tools over Streamable HTTP", async (t) => {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/c/${instance.services.callerKey}/mcp`)));
   t.after(() => client.close());
   const result = await client.listTools();
-  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
 });
 
 test("serves the memory view when the vault is enabled", async (t) => {

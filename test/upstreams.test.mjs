@@ -1,6 +1,78 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createUpstreams, parseMcpTextResult, extractOutputText } from "../src/upstreams.mjs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+test("generateImage posts to the native backend and saves the PNG", async () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-upstreams-auth-"));
+  writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify({ tokens: { access_token: "test-token", account_id: "acct-1" } }),
+    "utf8",
+  );
+  const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const upstreams = createUpstreams({
+    config: { codexHome },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ data: [{ b64_json: pngBytes.toString("base64") }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const output = await upstreams.generateImage({ prompt: "a red square" });
+    assert.match(output, /^Generated image saved to .+\.png$/);
+    const file = output.replace("Generated image saved to ", "");
+    assert.ok(existsSync(file), "the PNG file exists on disk");
+    assert.equal(readFileSync(file)[0], 0x89, "the file starts with the PNG magic byte");
+    rmSync(file, { force: true });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://chatgpt.com/backend-api/codex/images/generations");
+    assert.equal(calls[0].init.headers.Authorization, "Bearer test-token");
+    assert.equal(calls[0].init.headers["chatgpt-account-id"], "acct-1");
+    const body = JSON.parse(calls[0].init.body);
+    assert.equal(body.model, "gpt-image-1");
+    assert.equal(body.prompt, "a red square");
+    assert.equal(body.size, "1024x1024");
+    assert.equal(body.n, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("generateImage fails with a readable error when there is no session token", async () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-upstreams-auth-"));
+  writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify({ tokens: {} }), "utf8");
+  const upstreams = createUpstreams({
+    config: { codexHome },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new Error("must not be called without a token");
+  };
+  try {
+    await assert.rejects(
+      () => upstreams.generateImage({ prompt: "x" }),
+      /No ChatGPT session token/,
+      "missing sign-in surfaces a readable error instead of a fetch attempt",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
 
 test("parseMcpTextResult parses a plain JSON tools/call result", () => {
   const body = JSON.stringify({

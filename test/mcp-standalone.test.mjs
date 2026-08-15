@@ -97,7 +97,7 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
     notify(bridge, "notifications/initialized", {});
     const listed = await rpc(bridge, 2, "tools/list", {});
     const names = listed.result.tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["hear", "speak", "vision_inspect", "web_search_exa"]);
+    assert.deepEqual(names.sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
   } finally {
     await stopBridge(bridge);

@@ -49,6 +49,7 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__modeldock__store_memory",
   "mcp__modeldock__web_search_exa",
   "mcp__modeldock__vision_inspect",
+  "mcp__modeldock__image_gen",
   // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
   // only office tools a 27B local model can usefully drive. Names carry the
   // plugin's truncated+hashed suffixes; update them if the plugin renames.
@@ -929,24 +930,16 @@ export function stripLocalSkills(instructions) {
   return stripSkillsBlock(instructions);
 }
 
-// Small-context local backends have no image_gen (Codex does not send hosted
-// tools to routed models). Teach them the two working paths: a native
-// modeldock_subagent that carries image_gen, or a direct POST to the gateway's
-// native image relay - the same endpoint the built-in tool uses. The token
-// is read at runtime from ~/.codex/auth.json, never baked into the prompt.
-const IMAGE_GENERATION_GUIDANCE = (imageUrl) =>
-  [
-    "Image generation: you have no image_gen tool. To create an image, ask a modeldock_subagent",
-    '(agent_type="modeldock_subagent", fork_turns="none") to generate it with its native image_gen tool.',
-    imageUrl
-      ? `Or POST directly to ${imageUrl} with headers { "Content-Type": "application/json", "Authorization": "Bearer <access_token from ~/.codex/auth.json tokens.access_token>" } and body { "model": "gpt-image-1", "prompt": "<describe the image>", "size": "1024x1024", "n": 1 }. The response is JSON with the PNG as base64 in data[0].b64_json; decode it to a .png file and show it.`
-      : "",
-  ].filter(Boolean).join(" ");
+// Small-context local backends have no hosted image_gen tool (Codex does not
+// send it to routed models), so point them at the ModelDock image_gen harness
+// tool instead - it carries the native subscription path internally.
+const IMAGE_GENERATION_GUIDANCE =
+  "Image generation: to create an image, call the mcp__modeldock__image_gen tool; it returns a local PNG path.";
 
 // Append the image-generation guidance to the payload instructions, preserving
 // the string-vs-array shape Codex sent so the upstream prefix cache stays stable.
-export function appendImageGuidance(instructions, imageUrl) {
-  const text = IMAGE_GENERATION_GUIDANCE(imageUrl);
+export function appendImageGuidance(instructions, _imageUrl = null) {
+  const text = IMAGE_GENERATION_GUIDANCE;
   if (Array.isArray(instructions)) {
     if (!instructions.length) return [{ type: "input_text", text }];
     const last = instructions.at(-1);
@@ -2533,10 +2526,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (trimLocalTools) {
     normalizedPayload.instructions = stripLocalSkills(normalizedPayload.instructions);
     if (normalizedPayload.instructions != null) {
-      const imageUrl = services.callerKey
-        ? `http://${config.host || "127.0.0.1"}:${config.port || 4097}/c/${services.callerKey}/v1/images/generations`
-        : null;
-      normalizedPayload.instructions = appendImageGuidance(normalizedPayload.instructions, imageUrl);
+      normalizedPayload.instructions = appendImageGuidance(normalizedPayload.instructions);
     }
   }
 

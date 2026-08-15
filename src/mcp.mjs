@@ -76,6 +76,28 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
       );
 
       server.registerTool(
+        "image_gen",
+        {
+          title: "Image Generation",
+          description:
+            "Generate an image through the native ChatGPT backend (uses the signed-in Codex subscription). Returns the absolute path to the saved PNG so it can be surfaced in the conversation.",
+          inputSchema: z.object({
+            prompt: z.string().min(1).describe("Describe the image to generate"),
+            size: z.enum(["1024x1024", "1536x1024", "1024x1536"]).optional().describe("Output size; defaults to 1024x1024"),
+            model: z.string().optional().describe("Native image model; defaults to gpt-image-1"),
+          }),
+          annotations: { readOnlyHint: false, openWorldHint: false },
+        },
+        async (args) => {
+          try {
+            return textResult(await upstreams.generateImage(args));
+          } catch (error) {
+            return errorResult(error);
+          }
+        },
+      );
+
+      server.registerTool(
         "speak",
         {
           title: "Text To Speech",

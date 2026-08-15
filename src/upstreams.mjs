@@ -1,6 +1,10 @@
 import { bareModelId, providerForModel, tokenFor, profileById } from "./profiles.mjs";
 import { VISION_EVIDENCE_INSTRUCTIONS, VISION_EVIDENCE_MAX_CHARS } from "./vision-evidence.mjs";
 import { visionCacheKey, visionEvidenceCache } from "./vision-cache.mjs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 function upstreamUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
 }
@@ -44,7 +48,63 @@ export function parseMcpTextResult(body) {
   return "";
 }
 
+// Native image generation for every model, not just the ones Codex hands the
+// hosted image_gen tool to. Reads the signed-in ChatGPT token from the Codex
+// auth file and posts to the same native images endpoint the built-in tool
+// uses; the returned PNG is saved to a local file and its path returned so the
+// model can surface it in the conversation.
+const NATIVE_IMAGE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+
 export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache }) {
+  async function generateImage(args) {
+    const model = String(args.model || "gpt-image-1");
+    const size = String(args.size || "1024x1024");
+    const finish = metrics.begin("vision", { operation: "image_gen", model });
+    try {
+      const authFile = path.join(config.codexHome || path.join(os.homedir(), ".codex"), "auth.json");
+      let token = "";
+      let accountId = "";
+      try {
+        const parsed = JSON.parse(readFileSync(authFile, "utf8"));
+        token = parsed?.tokens?.access_token || "";
+        accountId = parsed?.tokens?.account_id || "";
+      } catch {
+        // Fall through to the readable error below.
+      }
+      if (!token) {
+        throw new Error(
+          `No ChatGPT session token in ${authFile}; sign in to the Codex app so native image generation can use your subscription.`,
+        );
+      }
+      const response = await fetch(`${NATIVE_IMAGE_BASE}/images/generations`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          ...(accountId ? { "chatgpt-account-id": accountId } : {}),
+        },
+        body: JSON.stringify({ model, prompt: args.prompt, size, n: 1 }),
+        signal: AbortSignal.timeout(180_000),
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        throw new Error(`Native image API returned ${response.status}: ${safeErrorBody(text)}`);
+      }
+      const parsed = JSON.parse(text);
+      const b64 = parsed?.data?.[0]?.b64_json;
+      if (!b64) throw new Error("Native image API returned no b64_json payload.");
+      const dir = path.join(os.tmpdir(), "modeldock-generated");
+      mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `img-${Date.now()}-${randomUUID().slice(0, 8)}.png`);
+      writeFileSync(file, Buffer.from(b64, "base64"));
+      finish({ ok: true, httpStatus: response.status, outputBytes: b64.length });
+      return `Generated image saved to ${file}`;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
   async function recallMemory(args) {
     const finish = metrics.begin("memory", { operation: "recall_memory", query: String(args.query || "").slice(0, 160) });
     try {
@@ -284,5 +344,5 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     throw new Error(message);
   }
 
-  return { searchWeb, inspectVision, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
+  return { searchWeb, inspectVision, generateImage, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
 }
