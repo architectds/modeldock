@@ -160,6 +160,24 @@ test("scheduleRestart delays listener shutdown until the update response can flu
   }
 });
 
+test("scheduleRestart still restarts when its log cannot be opened", () => {
+  // The open used to sit outside the try, so anything it threw aborted the
+  // restart before spawn ran and the gateway silently never came back. A
+  // directory in the log's place makes the open fail the way a full disk or a
+  // permission change would.
+  const rootDir = path.join(os.tmpdir(), `modeldock-restart-nolog-${process.pid}`, "missing-parent", "root");
+  const calls = [];
+  const child = { on() { return this; }, unref() { return this; } };
+  try {
+    // rootDir does not exist, so opening a log inside it fails with ENOENT.
+    scheduleRestart(rootDir, { spawnImpl: (...args) => { calls.push(args); return child; }, platform: "win32" });
+    assert.equal(calls.length, 1, "the restart is spawned even with no log to write to");
+    assert.deepEqual(calls[0][2].stdio, ["ignore", "ignore", "ignore"], "output is discarded rather than lost");
+  } finally {
+    rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 test("createUpdater.apply never falls back to cached release assets when the latest recheck fails", async () => {
   let calls = 0;
   let migrations = 0;

@@ -347,7 +347,17 @@ export function scheduleRestart(rootDir, {
   // Keep updater/supervisor output on a dedicated path; the new gateway resumes
   // modeldock.log after the old process releases it.
   const logPath = path.join(rootDir, "modeldock-update.log");
-  const logFd = openSync(logPath, "a");
+  // Losing the log must not cost the restart. This open used to sit outside the
+  // try below, so anything it threw (a full disk, a permission change) aborted
+  // scheduleRestart before spawn ran and the gateway silently never came back.
+  // A null fd falls back to "ignore", which spawns without capturing output.
+  let logFd = null;
+  try {
+    logFd = openSync(logPath, "a");
+  } catch {
+    // Fall through: an unlogged restart still beats no restart.
+  }
+  const output = logFd === null ? "ignore" : logFd;
   // The update API still needs to flush its success response before the restart
   // script stops this gateway. The scripts consume this value before inspecting
   // or terminating the listener; one second is ample for a loopback JSON reply.
@@ -365,7 +375,7 @@ export function scheduleRestart(rootDir, {
     spawnImpl("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Force"], {
       detached: true,
       env,
-      stdio: ["ignore", logFd, logFd],
+      stdio: ["ignore", output, output],
       windowsHide: true,
     }).on("error", onSpawnError).unref();
   } else {
@@ -373,11 +383,11 @@ export function scheduleRestart(rootDir, {
     spawnImpl("sh", [script, "-Force"], {
       detached: true,
       env,
-      stdio: ["ignore", logFd, logFd],
+      stdio: ["ignore", output, output],
     }).on("error", onSpawnError).unref();
   }
   } finally {
-    closeSync(logFd);
+    if (logFd !== null) closeSync(logFd);
   }
 }
 
