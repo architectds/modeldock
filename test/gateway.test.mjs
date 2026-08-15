@@ -2146,6 +2146,7 @@ test("relayCompaction applies local normalization on the custom route (mid-histo
         mainModel: "qwen3.8:27b@custom",
         customBaseUrl: "http://127.0.0.1:11435/v1",
         customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 26214 }] },
         tokens: { ...configStub().tokens, custom: "local-key" },
       },
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
@@ -2168,6 +2169,56 @@ test("relayCompaction applies local normalization on the custom route (mid-histo
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
     assert.equal(body.output[0].type, "compaction");
     assert.equal(decodeCompactionSummary(body.output[0].encrypted_content), "compact summary");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayCompaction skips local normalization on a large-context custom model", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const input = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "first user turn" }] },
+      { type: "message", role: "system", content: [{ type: "input_text", text: "mid-history system guidance" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "later user turn" }] },
+      { type: "compaction_trigger" },
+    ];
+    const services = {
+      ...compactServices(),
+      mainModel: "big-model@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "big-model@custom",
+        customBaseUrl: "https://api.example.com/v1",
+        customModel: "big-model",
+        profile: { availableModels: [{ id: "big-model", contextWindow: 128000 }] },
+        tokens: { ...configStub().tokens, custom: "big-key" },
+      },
+      knownModels: new Set(["big-model@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const result = await relayResponses(
+      { model: "big-model@custom", stream: false, input },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1, "the compact request is synthesized, not forwarded raw");
+    const sent = calls[0].body;
+    // A large-context custom endpoint keeps the generic path: the mid-history
+    // system item is NOT hoisted (its upstream is not a strict llama.cpp template).
+    const roles = sent.input.map((item) => item.role);
+    assert.equal(roles[0], "user", "large-context custom model keeps the generic compact input");
+    assert.ok(!sent.input.some((item) => item.type === "compaction_trigger"), "the trigger never reaches the upstream");
+    assert.match(sent.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
   } finally {
     globalThis.fetch = originalFetch;
   }
