@@ -330,7 +330,7 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 // Relaunch through the platform restart script, which is the supervisor for an
 // upgrade: it stops the old listener, starts the new gateway, waits for
 // /healthz, and prints every step. The updater is the gateway itself, so the
-// script is spawned detached with -Force (deliberate takeover of our own port;
+// script is spawned unref'd with -Force (deliberate takeover of our own port;
 // the owner guard's CIM command-line probe can come back empty for elevated
 // processes). Output is appended to modeldock-update.log - never discarded - so an
 // upgrade restart is traceable. No process.exit() here: the restart script
@@ -369,25 +369,46 @@ export function scheduleRestart(rootDir, {
   const onSpawnError = (error) => {
     try { appendFileSync(logPath, `[update] restart spawn failed: ${error.message}\n`); } catch { /* no recovery */ }
   };
+  const closeLog = () => {
+    if (logFd === null) return;
+    try { closeSync(logFd); } catch { /* already gone */ }
+    logFd = null;
+  };
   try {
-  if (platform === "win32") {
-    const script = path.join(rootDir, "scripts", "restart.ps1");
-    spawnImpl("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Force"], {
-      detached: true,
+    const [command, args] = platform === "win32"
+      ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(rootDir, "scripts", "restart.ps1"), "-Force"]]
+      : ["sh", [path.join(rootDir, "scripts", "restart.sh"), "-Force"]];
+    // detached only on POSIX. On Windows it is actively harmful: measured on Windows
+    // 11, a detached powershell.exe is created (spawn fires, a pid is allocated) and
+    // then never executes the script - no output, no error, nothing. That is the
+    // whole restart failure. It reproduced with stdio to a raw fd and with cmd.exe
+    // redirection, with and without windowsHide, inside and outside a sandbox; the
+    // same spawn without `detached` runs and logs normally every time. Windows does
+    // not kill children when a parent exits, so unref() alone survives the restart
+    // script stopping this gateway - which is all detached was ever there to buy.
+    const child = spawnImpl(command, args, {
       env,
       stdio: ["ignore", output, output],
-      windowsHide: true,
-    }).on("error", onSpawnError).unref();
-  } else {
-    const script = path.join(rootDir, "scripts", "restart.sh");
-    spawnImpl("sh", [script, "-Force"], {
-      detached: true,
-      env,
-      stdio: ["ignore", output, output],
-    }).on("error", onSpawnError).unref();
-  }
-  } finally {
-    if (logFd !== null) closeSync(logFd);
+      ...(platform === "win32" ? { windowsHide: true } : { detached: true }),
+    });
+    // Hold the log fd until the child actually exists. spawn() returns before libuv
+    // has created the process, and this used to close the fd immediately in a
+    // finally - pulling the handle out from under stdio inheritance, so the detached
+    // restart came up with no usable stdout/stderr and, on Windows, did not come up
+    // at all. The symptom was a restart that never ran and never said why: the log
+    // file created, zero bytes in it, no spawn error, the old process still serving.
+    // Waiting for "spawn" costs nothing and removes the race.
+    if (typeof child?.on === "function") {
+      child.on("spawn", closeLog);
+      child.on("error", (error) => { closeLog(); onSpawnError(error); });
+      child.unref?.();
+    } else {
+      // A test stub that is not an EventEmitter: nothing to wait for.
+      closeLog();
+    }
+  } catch (error) {
+    closeLog();
+    onSpawnError(error);
   }
 }
 

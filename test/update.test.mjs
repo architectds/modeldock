@@ -152,8 +152,15 @@ test("scheduleRestart delays listener shutdown until the update response can flu
     for (const call of calls) {
       assert.equal(call[2].env.MODELDOCK_RESTART_DELAY_SECONDS, "1");
       assert.equal(call[2].env.MODELDOCK_NODE_PATH, process.execPath);
-      assert.equal(call[2].detached, true);
     }
+    // detached is POSIX-only. On Windows 11 a detached powershell.exe is created -
+    // spawn fires, a pid is allocated - and then never executes the script: no
+    // output, no error, no restart. Measured with stdio to a raw fd and with cmd.exe
+    // redirection, with and without windowsHide; the same spawn without `detached`
+    // runs every time. Windows does not kill children when a parent exits, so unref()
+    // alone gives the restart script the survival detached was there to provide.
+    assert.equal(calls[0][2].detached, undefined, "win32 must not spawn the restart detached");
+    assert.equal(calls[1][2].detached, true, "POSIX still detaches so the restart outlives this process");
     assert.ok(readdirSync(rootDir).includes("modeldock-update.log"));
   } finally {
     rmSync(rootDir, { recursive: true, force: true });

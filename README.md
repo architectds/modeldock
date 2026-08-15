@@ -127,6 +127,13 @@ flip the Autostart toggle in Settings to change that. A green Update button
 appears when a new release is ready - one click moves directly to the latest
 release, migrates the managed Node runtime when needed, restarts, and reloads.
 
+If the version in the header does not change after an update, the download
+succeeded and only the restart did not: the new files are already installed and
+just are not running yet. Run `scripts/restart.ps1` (Windows) or
+`scripts/restart.sh` (macOS/Linux) once from your install directory. Versions up
+to 0.3.6 relaunch using their own code, so this can happen on the first upgrade
+away from them; later upgrades restart on their own.
+
 ---
 
 ## Manual recovery
