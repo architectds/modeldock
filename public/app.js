@@ -609,6 +609,35 @@ async function renderSpeech(data) {
   }
 }
 
+// Every picker on this page follows the same contract: rebuild the options from
+// the data, show a placeholder when there is nothing to offer, and fall back to
+// the first entry when the requested value is no longer in the list. Writing it
+// out per picker is how the vision list ended up filtering the stale DOM instead
+// of re-rendering, so it silently kept the previous provider's model. Returns the
+// value the select ended up on.
+function fillSelect(select, items, { value = "", label, data, placeholder = true, disabled = false } = {}) {
+  if (!select) return "";
+  select.replaceChildren();
+  for (const item of items) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = label ? label(item) : (item.label || item.id);
+    if (data) {
+      for (const [key, entry] of Object.entries(data(item))) option.dataset[key] = entry || "";
+    }
+    select.append(option);
+  }
+  if (!items.length && placeholder) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = t("models.none");
+    select.append(option);
+  }
+  select.value = items.some((item) => item.id === value) ? value : (items[0]?.id || "");
+  select.disabled = disabled;
+  return select.value;
+}
+
 let lastModelSignature = "";
 
 function modelSignature(models) {
@@ -657,55 +686,27 @@ function renderModelOptions(data) {
   if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
   const visionProviderSelect = $("vision-provider-select");
   if (visionProviderSelect) {
-    visionProviderSelect.replaceChildren();
-    if (visionProviders.length) {
-      for (const provider of visionProviders) {
-        const option = document.createElement("option");
-        option.value = provider.id;
-        option.textContent = provider.label;
-        visionProviderSelect.append(option);
-      }
-    } else {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = t("models.none");
-      visionProviderSelect.append(option);
-    }
     // Honour a provider the user just picked (visionProviderOverride) over the
     // one the payload reports, so re-rendering after a change does not snap the
     // dropdown back to the previously selected provider.
     const wanted = visionProviderOverride && visionProviders.some((provider) => provider.id === visionProviderOverride)
       ? visionProviderOverride
       : selectedVisionProvider;
-    visionProviderSelect.value = wanted;
-    visionProviderSelect.disabled = !visionProviders.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
+    fillSelect(visionProviderSelect, visionProviders, {
+      value: wanted,
+      disabled: !visionProviders.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial),
+    });
   }
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
-  for (const [id, filter, value, sortBy] of [["vision-model-select", visionFilter, selected.visionModel, "balanceScore"]]) {
-    const select = $(id);
-    if (!select) continue;
-    const previous = select.value;
-    select.replaceChildren();
-    const filtered = models.options.filter(filter);
-    if (sortBy) filtered.sort((a, b) => (b[sortBy] ?? -1) - (a[sortBy] ?? -1) || a.id.localeCompare(b.id));
-    if (filtered.length) {
-      for (const model of filtered) {
-        const option = document.createElement("option");
-        option.value = model.id;
-        option.textContent = model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label;
-        option.dataset.provider = model.provider || "";
-        option.dataset.tier = model.visionTier || "";
-        select.append(option);
-      }
-    } else {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = t("models.none");
-      select.append(option);
-    }
-    select.value = filtered.some((model) => model.id === value) ? value : (filtered[0]?.id || "");
-    select.disabled = !filtered.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
-  }
+  const visionModels = models.options
+    .filter(visionFilter)
+    .sort((a, b) => (b.balanceScore ?? -1) - (a.balanceScore ?? -1) || a.id.localeCompare(b.id));
+  fillSelect($("vision-model-select"), visionModels, {
+    value: selected.visionModel,
+    label: (model) => (model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label),
+    data: (model) => ({ provider: model.provider, tier: model.visionTier }),
+    disabled: !visionModels.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial),
+  });
 }
 
 // Sub Agent mirrors the vision provider/model pair but with no capability
@@ -722,17 +723,12 @@ function renderSubagent(payload, options = {}) {
   const providers = payload.providers || [];
   const entries = payload.options || [];
   const disabled = !entries.length || modelBusy || currentMode === "trial" || Boolean(options.trial);
-  providerSelect.replaceChildren();
-  for (const provider of providers) {
-    const option = document.createElement("option");
-    option.value = provider.id;
-    option.textContent = provider.label;
-    providerSelect.append(option);
-  }
-  const selectedProvider = payload.selectedProvider || providers[0]?.id || "";
-  providerSelect.value = providers.some((provider) => provider.id === selectedProvider) ? selectedProvider : (providers[0]?.id || "");
-  providerSelect.disabled = disabled;
-  renderSubagentModels(payload, providerSelect.value, disabled);
+  const provider = fillSelect(providerSelect, providers, {
+    value: payload.selectedProvider || providers[0]?.id || "",
+    placeholder: false,
+    disabled,
+  });
+  renderSubagentModels(payload, provider, disabled);
 }
 
 // Provider and model selects stay bound: switching the provider re-renders the
@@ -740,26 +736,12 @@ function renderSubagent(payload, options = {}) {
 function renderSubagentModels(payload, provider, disabled) {
   const modelSelect = $("subagent-model-select");
   if (!modelSelect) return;
-  const entries = payload.options || [];
-  const filtered = entries.filter((model) => model.provider === provider);
-  const selected = payload.selected || "";
-  modelSelect.replaceChildren();
-  if (filtered.length) {
-    for (const model of filtered) {
-      const option = document.createElement("option");
-      option.value = model.id;
-      option.textContent = model.label;
-      option.dataset.provider = model.provider || "";
-      modelSelect.append(option);
-    }
-  } else {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = t("models.none");
-    modelSelect.append(option);
-  }
-  modelSelect.value = filtered.some((model) => model.id === selected) ? selected : (filtered[0]?.id || "");
-  modelSelect.disabled = disabled;
+  const filtered = (payload.options || []).filter((model) => model.provider === provider);
+  fillSelect(modelSelect, filtered, {
+    value: payload.selected || "",
+    data: (model) => ({ provider: model.provider }),
+    disabled,
+  });
 }
 
 let autostartBusy = false;
@@ -1166,14 +1148,11 @@ function renderCustomSection(custom) {
   customEndpointInput.value = state.baseUrl || "";
   customShowHint(customResponsesUrlPreview(state.baseUrl));
   if (customModelSelect) {
-    customModelSelect.replaceChildren();
-    if (state.model) {
-      const option = document.createElement("option");
-      option.value = state.model;
-      option.textContent = state.model;
-      customModelSelect.append(option);
-    }
-    customModelSelect.disabled = !state.model;
+    fillSelect(customModelSelect, state.model ? [{ id: state.model, label: state.model }] : [], {
+      value: state.model || "",
+      placeholder: false,
+      disabled: !state.model,
+    });
   }
   if (customAsMain) customAsMain.checked = Boolean(state.asMain);
   if (customAsVision) customAsVision.checked = Boolean(state.asVision);
@@ -1319,14 +1298,10 @@ if (customListModelsBtn) {
       if (!response.ok) {
         throw Object.assign(new Error(body.error?.message || "List models failed"), { code: body.error?.type });
       }
-      customModelSelect.replaceChildren();
-      for (const model of body.models || []) {
-        const option = document.createElement("option");
-        option.value = model.id;
-        option.textContent = model.label || model.id;
-        customModelSelect.append(option);
-      }
-      customModelSelect.disabled = !(body.models || []).length;
+      fillSelect(customModelSelect, body.models || [], {
+        placeholder: false,
+        disabled: !(body.models || []).length,
+      });
       // Surface the exact URL the Add probe will hit (server-normalized).
       customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
       customShow(
