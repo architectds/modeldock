@@ -55,6 +55,10 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa",
   "mcp__codex_apps__codex_document_control___get_docum_83c7f0565c0f",
   "mcp__codex_apps__codex_document_control___list_document_sessions",
+  // Goal tracking: cheap, flat, and useful for a long-running local session.
+  "get_goal",
+  "create_goal",
+  "update_goal",
 ]);
 
 // Backends whose advertised context cannot spare Codex's ~61K fixed overhead
