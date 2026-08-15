@@ -817,14 +817,20 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
   const tools = [
     { type: "function", name: "exec_command" },
     { type: "function", name: "apply_patch" },
+    { type: "function", name: "mcp__modeldock__recall_memory" },
+    { type: "function", name: "mcp__modeldock__web_search_exa" },
     { type: "function", name: "mcp__github__create_issue" },
     { type: "function", name: "mcp__node_repl__js" },
     { type: "namespace", name: "mcp__sites", tools: [{ name: "deploy" }, { name: "create_site" }] },
   ];
   const { tools: kept, stripped } = applyToolPolicy(tools, {
-    allowToolNames: new Set(["exec_command", "apply_patch", "deploy"]),
+    allowToolNames: new Set(["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "deploy"]),
   });
-  assert.deepEqual(kept.map((t) => t.name), ["exec_command", "apply_patch", "mcp__sites__deploy"], "only whitelisted survive");
+  assert.deepEqual(
+    kept.map((t) => t.name),
+    ["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "mcp__sites__deploy"],
+    "only whitelisted survive",
+  );
   assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
 });
 
@@ -2110,6 +2116,58 @@ test("relayResponses intercepts a v2 compact request and synthesizes a compactio
     assert.equal(decodeCompactionSummary(body.output[0].encrypted_content), "compact summary");
     assert.equal(body.model, "deepseek-v4-flash");
     assert.equal(body.usage.input_tokens, 10, "the summarize call's usage rides on the snapshot");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayCompaction applies local normalization on the custom route (mid-history system hoisted)", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const input = [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "first user turn" }] },
+      { type: "message", role: "system", content: [{ type: "input_text", text: "mid-history system guidance" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "later user turn" }] },
+      { type: "compaction_trigger" },
+    ];
+    const services = {
+      ...compactServices(),
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const result = await relayResponses(
+      { model: "qwen3.8:27b@custom", stream: false, input },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1, "the compact request is synthesized, not forwarded raw");
+    const sent = calls[0].body;
+    assert.equal(sent.model, "qwen3.8:27b");
+    const roles = sent.input.map((item) => item.role);
+    assert.equal(roles[0], "system", "system is hoisted to the very first position for llama.cpp");
+    assert.equal(roles.filter((r) => r === "system").length, 1, "exactly one system item reaches the upstream");
+    assert.ok(!sent.input.some((item) => item.type === "compaction_trigger"), "the trigger never reaches the upstream");
+    assert.match(sent.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
+    const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(body.output[0].type, "compaction");
+    assert.equal(decodeCompactionSummary(body.output[0].encrypted_content), "compact summary");
   } finally {
     globalThis.fetch = originalFetch;
   }

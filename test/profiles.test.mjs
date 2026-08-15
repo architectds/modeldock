@@ -102,6 +102,13 @@ test("custom profile is empty until configured and fills from config", () => {
   );
 });
 
+test("custom profile scales small-context windows by 0.8 for Codex tokenizer mismatch", () => {
+  const small = applyCustomProfile({ customModel: "qwen", customBaseUrl: "http://127.0.0.1:11435/v1", customContextWindow: 32768 });
+  assert.equal(small.availableModels[0].contextWindow, 26214, "32K local model advertises 26214 so compaction fires early");
+  const big = applyCustomProfile({ customModel: "gpt-x", customBaseUrl: "https://api.example/v1", customContextWindow: 131072 });
+  assert.equal(big.availableModels[0].contextWindow, 131072, "big custom endpoints keep their real window");
+});
+
 test("opencode-go profile keeps the Go-specific hardening flags", () => {
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("tool_search"), true);
   assert.equal(OPENCODE_GO_PROFILE.blockedToolTypes.has("web_search"), true);

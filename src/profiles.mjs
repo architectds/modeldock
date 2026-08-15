@@ -38,6 +38,19 @@ const LOCAL_REASONING_LEVELS = [
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
 ];
 
+// Codex estimates the session history with its own (GPT) tokenizer, which runs
+// ~25-30% under what qwen's tokenizer actually produces. For small local
+// backends (<= LOCAL_CONTEXT_MAX) the advertised window is scaled by
+// LOCAL_CONTEXT_COMPENSATION so Codex's auto-compact fires BEFORE the real
+// model hits its hard limit. Bigger backends (OpenAI/OpenRouter custom) keep
+// their real window - their headroom makes the estimate mismatch harmless.
+const LOCAL_CONTEXT_MAX = 40_000;
+const LOCAL_CONTEXT_COMPENSATION = 0.8;
+function localContextWindow(actual) {
+  if (!(actual > 0)) return actual;
+  return actual <= LOCAL_CONTEXT_MAX ? Math.floor(actual * LOCAL_CONTEXT_COMPENSATION) : actual;
+}
+
 // Feature flags Codex reads from the model catalog to decide which client-side plugin
 // machinery to expose (verified in the Codex binary's ModelInfo vocabulary):
 // `artifact` = artifact-tool plugins (presentations / spreadsheets / documents / pdf),
@@ -376,6 +389,7 @@ export function applyCustomProfile(config) {
   const model = String(config.customModel || "").trim();
   const baseUrl = String(config.customBaseUrl || "").trim().replace(/\/+$/, "");
   const contextWindow = Number(config.customContextWindow) > 0 ? Number(config.customContextWindow) : undefined;
+  const advertisedContextWindow = localContextWindow(contextWindow);
   CUSTOM_PROFILE.baseUrl = baseUrl;
   CUSTOM_PROFILE.availableModels = model && baseUrl
     ? [{
@@ -383,7 +397,7 @@ export function applyCustomProfile(config) {
         label: model,
         endpoint: "responses",
         supportsVision: Boolean(config.customVision),
-        ...(contextWindow ? { contextWindow } : {}),
+        ...(advertisedContextWindow ? { contextWindow: advertisedContextWindow } : {}),
         supportedReasoningLevels: LOCAL_REASONING_LEVELS,
         defaultReasoningLevel: "xhigh",
         // Always owner-qualified so the published slug carries @custom: the
@@ -413,7 +427,7 @@ export function applyOllamaProfile(config, snapshot) {
           label: model.label || model.id,
           endpoint: "responses",
           supportsVision: Boolean(model.supportsVision),
-          contextWindow: Number(model.contextWindow) || undefined,
+          contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
           ownerQualified: true,
           status: model.status || "available",
         }))

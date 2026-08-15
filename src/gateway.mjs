@@ -2063,19 +2063,34 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  // Local backends (llama.cpp / Ollama) must see the same adapted shape on the
+  // compact path as on the main relay path: Codex's mid-history system/developer
+  // items hoisted into a single leading system (or merged into instructions),
+  // the standard tool-item rewrite, and a reasoning effort the qwen3.8 jinja
+  // template accepts. Skipping this made compact_v2 fail with "System message
+  // must be at the beginning" whenever the compacted history carried a
+  // mid-history system item.
+  const routedProvider = providerForModel(config, route.model);
+  const localPayload =
+    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
   const summarizeBody = {
-    ...payload,
+    ...(localPayload || payload),
     model: route.model,
     stream: false,
     tools: [],
     tool_choice: "none",
     input: [
-      ...rewriteHistoricalImages(normalizeGatewayInput(payload.input), mediaStore, {
-        preserveCurrentImages: route.directVision,
-      }),
+      ...rewriteHistoricalImages(
+        localPayload ? localPayload.input : normalizeGatewayInput(payload.input),
+        mediaStore,
+        { preserveCurrentImages: route.directVision },
+      ),
       messageItem(COMPACT_PROMPT),
     ],
   };
+  if (localPayload) {
+    summarizeBody.reasoning = normalizeLocalReasoning(summarizeBody).reasoning;
+  }
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
   const bytesIn = Buffer.byteLength(JSON.stringify(payload));
