@@ -531,7 +531,15 @@ $recover = Join-Path $root "scripts\recover.ps1"
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+# Seed from the environment before consulting .env, matching recover.sh and
+# restart.ps1. Reading only .env meant a gateway told to use another port by
+# environment was recovered against 4097 instead - acting on whatever unrelated
+# process happened to hold the default port.
 $port = 4097
+$envPort = 0
+if ($env:MODELDOCK_PORT -and [int]::TryParse($env:MODELDOCK_PORT, [ref]$envPort) -and $envPort -gt 0) {
+  $port = $envPort
+}
 $envFile = Join-Path $root ".env"
 if (Test-Path -LiteralPath $envFile) {
   $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
