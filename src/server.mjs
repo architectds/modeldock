@@ -352,7 +352,13 @@ function statusPayload(services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater } = services;
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel));
-  const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
+  // Which provider owns the selected main model is a display fact, and the picker
+  // already answers it from the published catalog. Deriving it a second way here
+  // (providerForModel, which resolves the routing question and always returns an
+  // answer) let the route card and the picker disagree about the same model.
+  // Routing itself still uses providerForModel - see upstreamBaseForModel.
+  const models = modelsPayload(services);
+  const mainProvider = models.selectedProvider;
   const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
   // The route card shows the most recent actual request first, falling back to
   // the dashboard selection. Native passthrough (reason "native_passthrough")
@@ -388,7 +394,7 @@ function statusPayload(services) {
     // provider from the selected model while /api/status still reported
     // config.profileId, so the same state produced two different answers and the
     // dashboard showed a provider that did not own the model beside it.
-    models: modelsPayload(services),
+    models,
     subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
