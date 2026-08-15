@@ -753,6 +753,35 @@ export function normalizeLocalInput(input) {
   return hoistLocalSystem(normalizeOllamaInput(input));
 }
 
+// llama.cpp's /v1/responses renders `instructions` as the system message, so a
+// role=system item anywhere in input then sits mid-history and trips the qwen3.8
+// template ("System message must be at the beginning"). When instructions exist,
+// merge every system item's text into them and drop the items; when they do not,
+// hoist system to the front as before. Both paths keep the standard-tool rewrite.
+export function normalizeLocalPayload(payload) {
+  if (!payload || !Array.isArray(payload.input)) return payload;
+  const instructions = typeof payload.instructions === "string" ? payload.instructions : "";
+  if (instructions) {
+    const texts = [];
+    const rest = [];
+    for (const item of payload.input) {
+      if (item?.role === "system") {
+        const text = Array.isArray(item.content)
+          ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
+          : "";
+        if (text) texts.push(text);
+        continue;
+      }
+      rest.push(item);
+    }
+    const input = normalizeOllamaInput(rest);
+    return texts.length
+      ? { ...payload, instructions: [instructions, ...texts].filter(Boolean).join("\n"), input }
+      : { ...payload, input };
+  }
+  return { ...payload, input: normalizeLocalInput(payload.input) };
+}
+
 // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
 // and drop anything else so local custom/Ollama routes never trip the template
@@ -2240,15 +2269,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go";
   const flashOpenCodeGo =
     routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go";
+  const localPayload =
+    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
   const normalizedInput = proOpenCodeGo
     ? normalizeOpenCodeProInput(payload.input)
     : flashOpenCodeGo
       ? normalizeOpenCodeFlashInput(payload.input)
-      : routedProvider === "ollama" || routedProvider === "custom"
-        ? normalizeLocalInput(payload.input)
+      : localPayload
+        ? localPayload.input
         : normalizeGatewayInput(payload.input);
   let normalizedPayload = {
-    ...payload,
+    ...(localPayload || payload),
     input: rewriteHistoricalImages(
       normalizedInput,
       mediaStore,

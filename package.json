@@ -14,8 +14,9 @@
     "test": "node --import ./test/preload-env.mjs --test test/*.test.mjs",
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
-    "probe:live": "node scripts/live-probe.mjs",
-    "build": "node scripts/build.mjs",
+  "probe:live": "node scripts/live-probe.mjs",
+  "test:local-llm": "node scripts/lifecycle-local.mjs",
+  "build": "node scripts/build.mjs",
     "shot": "node scripts/shot.mjs"
   },
   "dependencies": {

@@ -23,6 +23,7 @@ import {
   normalizeNativeInput,
   normalizeGatewayInput,
   normalizeLocalInput,
+  normalizeLocalPayload,
   normalizeLocalReasoning,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
@@ -280,6 +281,34 @@ test("normalizeLocalInput hoists system after generic gateway normalization", ()
   const out = normalizeLocalInput(input);
   assert.equal(out[0].role, "system", "system first for llama.cpp");
   assert.equal(out[1].role, "user");
+});
+
+test("normalizeLocalPayload merges system items into instructions when present", () => {
+  const out = normalizeLocalPayload({
+    instructions: "Base system prompt",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { role: "system", content: [{ type: "input_text", text: "Checkpoint A" }] },
+      { role: "user", content: [{ type: "input_text", text: "bye" }] },
+    ],
+  });
+  assert.equal(out.instructions, "Base system prompt\nCheckpoint A", "system text merges into instructions");
+  assert.deepEqual(
+    out.input.map((i) => i.role),
+    ["user", "user"],
+    "system items are dropped from input when instructions exist",
+  );
+});
+
+test("normalizeLocalPayload hoists system to the front without instructions", () => {
+  const out = normalizeLocalPayload({
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { role: "system", content: [{ type: "input_text", text: "rules" }] },
+    ],
+  });
+  assert.equal(out.input[0].role, "system", "no instructions -> hoist to front");
+  assert.equal(out.instructions, undefined, "no instructions field is added");
 });
 
 test("normalizeLocalInput rewrites Codex tool items to the standard wire for llama.cpp", () => {
