@@ -6,8 +6,9 @@
 # What it does:
 #   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
 #   2. Stops the process listening on that port (if any).
-#   3. Starts a fresh detached `node src/server.mjs` from the project root.
-#   4. Waits for /healthz and reports the result.
+#   3. Rebuilds the bundle when a source checkout has drifted ahead of it.
+#   4. Starts a fresh detached gateway from the built bundle (dist/modeldock.mjs).
+#   5. Waits for /healthz and reports the result.
 
 $ErrorActionPreference = "Stop"
 
@@ -169,6 +170,21 @@ if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue)
 if (-not $nodeExe) {
   Write-Status "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
+}
+
+# A source checkout must never serve a stale bundle - and never silently serve
+# the src/ entry users do not have. Rebuild dist when source is newer than the
+# bundle, so the gateway runs the same artifact users install. Installed layouts
+# have no src/ at all (the self-updater owns dist there), and an applied update
+# makes dist newer than src, so this is a no-op for real installs and never
+# clobbers an update. A failed rebuild is loud but not fatal: the gateway still
+# starts on the best bundle available and the log records exactly what ran.
+$buildIfStale = Join-Path $root "scripts\build-if-stale.mjs"
+if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path -LiteralPath $buildIfStale)) {
+  & $nodeExe $buildIfStale
+  if ($LASTEXITCODE -ne 0) {
+    Write-Status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+  }
 }
 
 # Prefer the built bundle, falling back to the source entry in a git checkout.

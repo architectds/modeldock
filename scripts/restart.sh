@@ -91,6 +91,18 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   exit 1
 fi
 
+# A source checkout must never serve a stale bundle - and never silently serve the
+# src/ entry users do not have. Rebuild dist when source is newer than the bundle, so
+# the gateway runs the same artifact users install. Installed layouts have no src/ at
+# all (the self-updater owns dist there), and an applied update makes dist newer than
+# src, so this is a no-op for real installs and never clobbers an update. A failed
+# rebuild is loud but not fatal: the gateway still starts on the best bundle available.
+if [ -f "$ROOT/src/server.mjs" ] && [ -f "$ROOT/scripts/build-if-stale.mjs" ]; then
+  if ! "$NODE_BIN" "$ROOT/scripts/build-if-stale.mjs"; then
+    status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+  fi
+fi
+
 # Prefer the built bundle, falling back to the source entry in a git checkout.
 # Must match start-hidden.sh: the two used to disagree, so a checkout served one
 # version on restart and another at login. dist wins because the self-updater

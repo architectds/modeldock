@@ -336,6 +336,21 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   echo "ERROR: node not found; install Node 24+ or re-run the ModelDock installer" >&2
   exit 1
 fi
+# A source checkout must never serve a stale bundle - and never silently serve the
+# src/ entry users do not have. Rebuild dist when source is newer than the bundle, so
+# the gateway runs the same artifact users install. Installed layouts have no src/ at
+# all (the self-updater owns dist there), and an applied update makes dist newer than
+# src, so this is a no-op for real installs and never clobbers an update. A failed
+# rebuild is loud but not fatal: the gateway still starts on the best bundle available.
+if [ -f "$ROOT/src/server.mjs" ] && [ -f "$ROOT/scripts/build-if-stale.mjs" ]; then
+  if ! "$NODE_BIN" "$ROOT/scripts/build-if-stale.mjs"; then
+    echo "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)." >&2
+  fi
+fi
+# Re-pick after the potential rebuild so a freshly built bundle wins over src.
+if [ -f "$ROOT/dist/modeldock.mjs" ]; then
+  SERVER="$ROOT/dist/modeldock.mjs"
+fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
@@ -363,8 +378,9 @@ cat > "$RESTART" <<'EOF'
 # What it does:
 #   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
 #   2. Stops the process listening on that port (if any).
-#   3. Starts a fresh detached `node src/server.mjs` from the project root.
-#   4. Waits for /healthz and reports the result.
+#   3. Rebuilds the bundle when a source checkout has drifted ahead of it.
+#   4. Starts a fresh detached gateway from the built bundle (dist/modeldock.mjs).
+#   5. Waits for /healthz and reports the result.
 
 $ErrorActionPreference = "Stop"
 
@@ -528,6 +544,21 @@ if (-not $nodeExe) {
   exit 1
 }
 
+# A source checkout must never serve a stale bundle - and never silently serve
+# the src/ entry users do not have. Rebuild dist when source is newer than the
+# bundle, so the gateway runs the same artifact users install. Installed layouts
+# have no src/ at all (the self-updater owns dist there), and an applied update
+# makes dist newer than src, so this is a no-op for real installs and never
+# clobbers an update. A failed rebuild is loud but not fatal: the gateway still
+# starts on the best bundle available and the log records exactly what ran.
+$buildIfStale = Join-Path $root "scripts\build-if-stale.mjs"
+if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path -LiteralPath $buildIfStale)) {
+  & $nodeExe $buildIfStale
+  if ($LASTEXITCODE -ne 0) {
+    Write-Status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+  }
+}
+
 # Prefer the built bundle, falling back to the source entry in a git checkout.
 # This must match start-hidden.ps1 exactly: the two used to disagree (this script
 # preferred src while the launcher preferred dist), so a checkout served one
@@ -670,6 +701,18 @@ NODE_BIN="$(resolve_node)"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   status "ERROR: node not found; install Node 24+ or re-run the ModelDock installer"
   exit 1
+fi
+
+# A source checkout must never serve a stale bundle - and never silently serve the
+# src/ entry users do not have. Rebuild dist when source is newer than the bundle, so
+# the gateway runs the same artifact users install. Installed layouts have no src/ at
+# all (the self-updater owns dist there), and an applied update makes dist newer than
+# src, so this is a no-op for real installs and never clobbers an update. A failed
+# rebuild is loud but not fatal: the gateway still starts on the best bundle available.
+if [ -f "$ROOT/src/server.mjs" ] && [ -f "$ROOT/scripts/build-if-stale.mjs" ]; then
+  if ! "$NODE_BIN" "$ROOT/scripts/build-if-stale.mjs"; then
+    status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+  fi
 fi
 
 # Prefer the built bundle, falling back to the source entry in a git checkout.

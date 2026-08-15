@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "start": "node src/server.mjs",
+    "start": "node scripts/build-if-stale.mjs && node dist/modeldock.mjs",
     "dev": "node --watch src/server.mjs",
     "pretest": "node scripts/cleanup-sandbox.mjs && node scripts/sync-installer-helpers.mjs --check && node scripts/build.mjs",
     "test": "node --import ./test/preload-env.mjs --test test/*.test.mjs",
