@@ -66,7 +66,7 @@ function renderRecent(items) {
   if (!items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = 6;
     cell.className = "empty";
     cell.textContent = t("recent.empty");
     row.append(cell);
@@ -94,7 +94,13 @@ function renderRecent(items) {
           : item.imageRefs?.length
             ? t("detail.imageRef", { n: item.imageRefs.length })
             : "—");
-    const values = [item.kind, target, item.status, duration(item.latencyMs), detail];
+    // Context size per request: the input tokens actually sent upstream. Active
+    // requests and non-token kinds have no record yet, so they render an em dash.
+    const contextTokens =
+      Number.isFinite(Number(item.inputTokens)) && Number(item.inputTokens) > 0
+        ? number(item.inputTokens)
+        : "—";
+    const values = [item.kind, target, item.status, duration(item.latencyMs), contextTokens, detail];
     values.forEach((value, index) => {
       const cell = document.createElement("td");
       if (index === 2) {
