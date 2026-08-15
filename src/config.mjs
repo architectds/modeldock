@@ -324,6 +324,10 @@ export function loadConfig() {
   const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
   const customMain = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_MAIN || "").toLowerCase());
   const customVision = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_VISION || "").toLowerCase());
+  // Advertised context window of the custom endpoint model (e.g. 32768 for a
+  // local 32K llama.cpp serve). Written by the Add flow from /v1/models
+  // meta.n_ctx so compaction thresholds match the real backend, not the 250K fallback.
+  const customContextWindow = Number(process.env.MODELDOCK_CUSTOM_CONTEXT_WINDOW) || 0;
   // Ollama connection snapshot: the model list captured at connect time, restored
   // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
   const ollamaSnapshotFile = ollamaSnapshotPath();
@@ -403,6 +407,7 @@ export function loadConfig() {
     customModel,
     customMain,
     customVision,
+    customContextWindow,
     ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),
     ollamaSnapshotFile,
     mainModel,

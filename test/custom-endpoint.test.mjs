@@ -70,6 +70,38 @@ test("listEndpointModels returns ids and classifies failures", async () => {
   }
 });
 
+test("listEndpointModels reads the advertised context from meta.n_ctx", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url) => {
+      const value = String(url);
+      if (value === "https://local/v1/models") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              { id: "local/qwen", meta: { n_ctx: 32768 } },
+              { id: "local/nocx", meta: {} },
+              { id: "local/nometa" },
+            ],
+          }),
+        };
+      }
+      throw new Error("ECONNREFUSED");
+    };
+    const { models } = await listEndpointModels({ baseUrl: "https://local/v1", apiKey: "k" });
+    const qwen = models.find((model) => model.id === "local/qwen");
+    assert.equal(qwen.contextWindow, 32768, "llama.cpp meta.n_ctx becomes the context window");
+    const noCtx = models.find((model) => model.id === "local/nocx");
+    assert.equal("contextWindow" in noCtx, false, "no meta.n_ctx means no advertised window");
+    const noMeta = models.find((model) => model.id === "local/nometa");
+    assert.equal("contextWindow" in noMeta, false, "missing meta is tolerated");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("probeCustomResponses verifies the Responses dialect and classifies failures", async () => {
   const original = globalThis.fetch;
   try {

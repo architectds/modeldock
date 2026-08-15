@@ -91,9 +91,20 @@ export async function listEndpointModels({ baseUrl, apiKey }) {
   const body = await response.json().catch(() => ({}));
   const models = Array.isArray(body?.data)
     ? body.data
-        .map((entry) => String(entry?.id || "").trim())
+        .map((entry) => {
+          const id = String(entry?.id || "").trim();
+          if (!id) return null;
+          const nCtx = Number(entry?.meta?.n_ctx);
+          // llama.cpp advertises its real context in /v1/models meta.n_ctx
+          // (e.g. 32768 for a 32K serve). Without it the gate would fall back
+          // to CONTEXT_WINDOW (250K) and never auto-compact a 32K model.
+          return {
+            id,
+            label: id,
+            ...(Number.isFinite(nCtx) && nCtx > 0 ? { contextWindow: nCtx } : {}),
+          };
+        })
         .filter(Boolean)
-        .map((id) => ({ id, label: id }))
     : [];
   return { models, endpoint, modelsUrl: url, responsesUrl: `${normalizeBaseUrl(endpoint)}/responses` };
 }

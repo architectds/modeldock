@@ -28,6 +28,16 @@ const DEEPSEEK_REASONING_LEVELS = [
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
 ];
 
+// llama.cpp qwen3.8 chat template accepts exactly these reasoning efforts
+// (verified in the GGUF template: 'xhigh', 'medium', 'low'; "high" raises).
+// Advertised for custom/Ollama local backends so the Codex picker only offers
+// values the template accepts.
+const LOCAL_REASONING_LEVELS = [
+  { effort: "low", description: "Fast responses with lighter reasoning" },
+  { effort: "medium", description: "Balanced reasoning for typical work" },
+  { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
+];
+
 // Feature flags Codex reads from the model catalog to decide which client-side plugin
 // machinery to expose (verified in the Codex binary's ModelInfo vocabulary):
 // `artifact` = artifact-tool plugins (presentations / spreadsheets / documents / pdf),
@@ -152,6 +162,10 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         description,
         inputModalities: mainModalities,
         priority: 1,
+        supportedReasoningLevels:
+          ownerEntryFor(qualifiedMain)?.supportedReasoningLevels || mainEntry?.supportedReasoningLevels || base.supportedReasoningLevels,
+        defaultReasoningLevel:
+          ownerEntryFor(qualifiedMain)?.defaultReasoningLevel || mainEntry?.defaultReasoningLevel || base.defaultReasoningLevel,
         contextWindow: ownerEntryFor(qualifiedMain)?.contextWindow || mainEntry?.contextWindow || CONTEXT_WINDOW,
       }),
       ...rest.map((model, index) => catalogEntry({
@@ -162,6 +176,8 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         // Codex sends images only to models that declare the modality; the gate still
         // reroutes visual turns to the vision model for the text-only ones.
         inputModalities: model.supportsVision ? ["text", "image"] : ["text"],
+        supportedReasoningLevels: model.supportedReasoningLevels || base.supportedReasoningLevels,
+        defaultReasoningLevel: model.defaultReasoningLevel || base.defaultReasoningLevel,
         contextWindow: model.contextWindow,
         // 1 is the selected main model; the rest follow in provider order.
         priority: index + 2,
@@ -359,6 +375,7 @@ export function profileOptions() {
 export function applyCustomProfile(config) {
   const model = String(config.customModel || "").trim();
   const baseUrl = String(config.customBaseUrl || "").trim().replace(/\/+$/, "");
+  const contextWindow = Number(config.customContextWindow) > 0 ? Number(config.customContextWindow) : undefined;
   CUSTOM_PROFILE.baseUrl = baseUrl;
   CUSTOM_PROFILE.availableModels = model && baseUrl
     ? [{
@@ -366,6 +383,9 @@ export function applyCustomProfile(config) {
         label: model,
         endpoint: "responses",
         supportsVision: Boolean(config.customVision),
+        ...(contextWindow ? { contextWindow } : {}),
+        supportedReasoningLevels: LOCAL_REASONING_LEVELS,
+        defaultReasoningLevel: "xhigh",
         // Always owner-qualified so the published slug carries @custom: the
         // picker groups it under "Custom" and routing never mistakes it for an
         // opencode-go model with the same bare id.

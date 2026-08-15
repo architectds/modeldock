@@ -89,9 +89,17 @@ test("custom profile is empty until configured and fills from config", () => {
   const filled = applyCustomProfile({ customModel: "vendor/model-x", customBaseUrl: "https://vendor.example/v1", customVision: true });
   assert.equal(filled.id, "custom");
   assert.equal(filled.label, "Custom");
-  assert.deepEqual(filled.availableModels, [
-    { id: "vendor/model-x", label: "vendor/model-x", endpoint: "responses", supportsVision: true, ownerQualified: true, status: "available" },
-  ]);
+  const model = filled.availableModels[0];
+  assert.equal(model.id, "vendor/model-x");
+  assert.equal(model.endpoint, "responses");
+  assert.equal(model.supportsVision, true);
+  assert.equal(model.ownerQualified, true);
+  assert.equal(model.defaultReasoningLevel, "xhigh", "local default matches llama.cpp");
+  assert.deepEqual(
+    model.supportedReasoningLevels.map((level) => level.effort),
+    ["low", "medium", "xhigh"],
+    "llama.cpp qwen3.8 accepts exactly low/medium/xhigh",
+  );
 });
 
 test("opencode-go profile keeps the Go-specific hardening flags", () => {
