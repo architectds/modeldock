@@ -930,30 +930,6 @@ export function stripLocalSkills(instructions) {
   return stripSkillsBlock(instructions);
 }
 
-// Small-context local backends have no hosted image_gen tool (Codex does not
-// send it to routed models), so point them at the ModelDock image_gen harness
-// tool instead - it carries the native subscription path internally.
-const IMAGE_GENERATION_GUIDANCE =
-  "Image generation: to create an image, call the mcp__modeldock__image_gen tool; it returns a local PNG path.";
-
-// Append the image-generation guidance to the payload instructions, preserving
-// the string-vs-array shape Codex sent so the upstream prefix cache stays stable.
-export function appendImageGuidance(instructions, _imageUrl = null) {
-  const text = IMAGE_GENERATION_GUIDANCE;
-  if (Array.isArray(instructions)) {
-    if (!instructions.length) return [{ type: "input_text", text }];
-    const last = instructions.at(-1);
-    if (last && typeof last.text === "string") {
-      return [...instructions.slice(0, -1), { ...last, text: `${last.text}\n\n${text}` }];
-    }
-    return [...instructions, { type: "input_text", text }];
-  }
-  if (typeof instructions === "string") {
-    return instructions ? `${instructions}\n\n${text}` : text;
-  }
-  return instructions;
-}
-
 // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
 // and drop anything else so local custom/Ollama routes never trip the template
@@ -2525,9 +2501,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // tokens the model no longer pays to read on each turn.
   if (trimLocalTools) {
     normalizedPayload.instructions = stripLocalSkills(normalizedPayload.instructions);
-    if (normalizedPayload.instructions != null) {
-      normalizedPayload.instructions = appendImageGuidance(normalizedPayload.instructions);
-    }
   }
 
   const target = upstreamTargetFor(config, normalizedPayload.model);
