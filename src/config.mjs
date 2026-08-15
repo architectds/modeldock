@@ -55,6 +55,25 @@ export function serializeEnvFile(entries) {
     .join("\n") + "\n";
 }
 
+// One spelling of "on" and one of "off" for every boolean env var. These were
+// written out per flag and drifted: MODELDOCK_CUSTOM_MAIN accepted "true" while
+// MODELDOCK_TRIAL only accepted "1", and MODELDOCK_MEMORY honoured "no" while
+// MODELDOCK_MD_MEMORY did not - so the same word switched one feature and was
+// silently ignored by the next.
+const TRUE_WORDS = new Set(["1", "true", "on", "yes"]);
+const FALSE_WORDS = new Set(["0", "false", "off", "no"]);
+
+// Opt-in flag: off unless the value says otherwise.
+export function envOn(name) {
+  return TRUE_WORDS.has(String(process.env[name] || "").trim().toLowerCase());
+}
+
+// Opt-out flag: on unless the value says otherwise (an unset or unrecognised
+// value keeps the default).
+export function envOff(name) {
+  return FALSE_WORDS.has(String(process.env[name] || "").trim().toLowerCase());
+}
+
 // A value that can never be a real credential: missing, too short, or a
 // placeholder/masked shape. Rejected before it reaches the disk or the relay so
 // a bad settings save can never silently take the gateway down (the 401
@@ -322,8 +341,8 @@ export function loadConfig() {
   const customBaseUrl = normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
   const customApiKey = process.env.MODELDOCK_CUSTOM_API_KEY || "";
   const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
-  const customMain = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_MAIN || "").toLowerCase());
-  const customVision = ["1", "true", "on", "yes"].includes(String(process.env.MODELDOCK_CUSTOM_VISION || "").toLowerCase());
+  const customMain = envOn("MODELDOCK_CUSTOM_MAIN");
+  const customVision = envOn("MODELDOCK_CUSTOM_VISION");
   // Advertised context window of the custom endpoint model (e.g. 32768 for a
   // local 32K llama.cpp serve). Written by the Add flow from /v1/models
   // meta.n_ctx so compaction thresholds match the real backend, not the 250K fallback.
@@ -353,7 +372,7 @@ export function loadConfig() {
   // bare response.completed). Trial is the fixed free pair and OFF has no native
   // GPT to fall back on, so both keep the free vision model unless explicitly
   // overridden via MODELDOCK_VISION_MODEL.
-  const trialMode = process.env.MODELDOCK_TRIAL === "1";
+  const trialMode = envOn("MODELDOCK_TRIAL");
   // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
   // subscription so the picker never advertises models that 401 on request.
   // Defaults to the signed-in state when the env key is unset: a detected
@@ -375,10 +394,10 @@ export function loadConfig() {
   const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
 
   const debug = {
-    enabled: process.env.MODELDOCK_DEBUG === "1" || process.env.MODELDOCK_DEBUG === "true",
-    noReasoning: process.env.MODELDOCK_NO_REASONING === "1",
+    enabled: envOn("MODELDOCK_DEBUG"),
+    noReasoning: envOn("MODELDOCK_NO_REASONING"),
     dumpDir: process.env.MODELDOCK_DUMP_DIR || "",
-    dumpAll: process.env.MODELDOCK_DUMP_ALL === "1",
+    dumpAll: envOn("MODELDOCK_DUMP_ALL"),
   };
   // How the managed [mcp_servers.modeldock] entry connects: "stdio" (default) spawns
   // src/mcp-standalone.mjs as a Codex-owned child that survives gateway restarts;
@@ -431,7 +450,7 @@ export function loadConfig() {
       : path.join(os.homedir(), ".modeldock", "media"),
     // Persistent memory vault (recall_memory tool). Always on; MODELDOCK_MEMORY=0
     // opts out for the rare install that wants to stay thin.
-    memoryEnabled: !["0", "false", "off", "no"].includes(String(process.env.MODELDOCK_MEMORY || "").toLowerCase()),
+    memoryEnabled: !envOff("MODELDOCK_MEMORY"),
     memoryDir: process.env.MODELDOCK_MEMORY_DIR
       ? path.resolve(process.env.MODELDOCK_MEMORY_DIR)
       : path.join(os.homedir(), ".modeldock", "memory"),
@@ -444,22 +463,20 @@ export function loadConfig() {
     // sliding window, reasoning clipping, anti-breakpoint revival) behind one switch.
     // Set MODELDOCK_MD_MEMORY=0 to hand context management back to the client and
     // compare the two - the code stays in place either way.
-    mdMemory: !["0", "false", "off"].includes(String(process.env.MODELDOCK_MD_MEMORY || "").toLowerCase()),
+    mdMemory: !envOff("MODELDOCK_MD_MEMORY"),
     // Model catalog refresh. Off by default: the shipped curated catalog in catalog.mjs
     // is the primary source and is published with the release. When enabled it only does a
     // light GET /models merge (new ids appended, vision metadata untouched). The heavier
     // vision probe/evaluation code in server.mjs is dev-only test tooling and is never
     // triggered here or at startup.
-    modelProbeEnabled: process.env.MODELDOCK_MODEL_PROBE_ENABLED === "1",
+    modelProbeEnabled: envOn("MODELDOCK_MODEL_PROBE_ENABLED"),
     // Native GPT models captured from the Codex desktop CLI, merged into the
     // published catalog so they stay selectable in the App picker. The cache
     // lives at ~/.modeldock/native-catalog.json by default.
     nativeCatalogFile: process.env.MODELDOCK_NATIVE_CATALOG_FILE
       ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
       : "",
-    refreshNativeCatalog: !["0", "false", "off"].includes(
-      String(process.env.MODELDOCK_REFRESH_NATIVE_CATALOG || "").toLowerCase(),
-    ),
+    refreshNativeCatalog: !envOff("MODELDOCK_REFRESH_NATIVE_CATALOG"),
     codexHome,
     envFile: envFileFor(),
   });
