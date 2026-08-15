@@ -613,6 +613,27 @@ function fillProToolCallIds(input) {
   return changed ? out : input;
 }
 
+// A hybrid sparse/full Console Go stream can make Codex persist the same tool
+// call more than once. Replaying that poisoned history fails before the model
+// runs because call_id is globally unique within a Responses request. Keep the
+// first occurrence; normalizeGatewayInput has already retained and relocated
+// only the first matching output, restoring one valid call/output pair.
+function dedupeProToolCalls(input) {
+  if (!Array.isArray(input)) return input;
+  const seen = new Set();
+  let changed = false;
+  const out = input.filter((item) => {
+    if (!isToolCallItem(item) || typeof item.call_id !== "string" || !item.call_id) return true;
+    if (!seen.has(item.call_id)) {
+      seen.add(item.call_id);
+      return true;
+    }
+    changed = true;
+    return false;
+  });
+  return changed ? out : input;
+}
+
 // opencode's responses-to-chat translator replays an assistant history message
 // as a chat-style `content` string. Codex replays `output_text` part arrays,
 // which the translator turns into an empty content and rejects on its
@@ -888,7 +909,8 @@ export function normalizeOpenCodeFlashInput(input) {
 export function normalizeOpenCodeProInput(input) {
   if (!Array.isArray(input)) return input;
   const normalized = normalizeGatewayInput(input);
-  const interleaved = interleaveToolOutputs(normalized);
+  const deduped = dedupeProToolCalls(normalized);
+  const interleaved = interleaveToolOutputs(deduped);
   const withToolCallIds = fillProToolCallIds(interleaved);
   const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);
@@ -1327,9 +1349,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     if (!track) return null;
     const item = parsed.item || {};
     for (const [existingIndex, existing] of track.items) {
-      if (item.id && existing.itemId === item.id) {
+      if ((item.id && existing.itemId === item.id) || (item.call_id && existing.callId === item.call_id)) {
         track.activeIndex = existingIndex;
-        return { index: existingIndex, entry: existing };
+        return { index: existingIndex, entry: existing, created: false };
       }
     }
     // Console Go currently labels every function_call as output_index 0. The
@@ -1347,10 +1369,38 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       name: item.name || "",
       callId: item.call_id || item.id || "",
       status: "in_progress",
+      argumentsDone: false,
+      itemDone: false,
     };
     track.items.set(index, entry);
     track.activeIndex = index;
-    return { index, entry };
+    return { index, entry, created: true };
+  };
+  const trackLifecycleDone = (parsed, field) => {
+    if (!track) return parsed;
+    let index = null;
+    const itemId = parsed.item_id || parsed.item?.id;
+    const callId = parsed.item?.call_id;
+    for (const [candidate, entry] of track.items) {
+      if ((itemId && entry.itemId === itemId) || (callId && entry.callId === callId)) {
+        index = candidate;
+        break;
+      }
+    }
+    if (index === null) index = track.activeIndex;
+    const entry = track.items.get(index);
+    if (!entry) return parsed;
+    entry[field] = true;
+    const completeArguments = parsed.arguments ?? parsed.item?.arguments;
+    if (entry.partType === "function_call" && typeof completeArguments === "string") {
+      entry.text = completeArguments;
+    }
+    return {
+      ...parsed,
+      item_id: entry.itemId,
+      output_index: index,
+      response_id: track.respId,
+    };
   };
   const trackDelta = (parsed) => {
     if (!track) return parsed;
@@ -1383,14 +1433,16 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     for (const [index, entry] of track.items) {
       if (entry.partType === "function_call") {
         sawDeliverable = true;
-        writeOut(sseEvent({
-          id: track.respId,
-          type: "response.function_call_arguments.done",
-          item_id: entry.itemId,
-          output_index: index,
-          arguments: entry.text,
-          response_id: track.respId,
-        }));
+        if (!entry.argumentsDone) {
+          writeOut(sseEvent({
+            id: track.respId,
+            type: "response.function_call_arguments.done",
+            item_id: entry.itemId,
+            output_index: index,
+            arguments: entry.text,
+            response_id: track.respId,
+          }));
+        }
       } else if (entry.partType === "reasoning_text") {
         writeOut(sseEvent({
           id: track.respId,
@@ -1418,7 +1470,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
         : entry.partType === "reasoning_text"
           ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
           : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] };
-      writeOut(sseEvent({ id: track.respId, type: "response.output_item.done", item: doneItem, response_id: track.respId }));
+      if (!entry.itemDone) {
+        writeOut(sseEvent({ id: track.respId, type: "response.output_item.done", item: doneItem, response_id: track.respId }));
+      }
     }
     const response = parsed?.response || {};
     const output = Array.from(track.items.values()).map((entry, index) => entry.partType === "function_call"
@@ -1426,8 +1480,11 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       : entry.partType === "reasoning_text"
         ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
         : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] });
+    const existingOutput = Array.isArray(response.output) ? response.output : [];
+    const missingOutput = output.filter((item) => !existingOutput.some((existing) =>
+      (item.id && existing?.id === item.id) || (item.call_id && existing?.call_id === item.call_id)));
     track = null;
-    return finishEvent({ ...parsed, response: { ...response, output: [...(Array.isArray(response.output) ? response.output : []), ...output] } });
+    return finishEvent({ ...parsed, response: { ...response, output: [...existingOutput, ...missingOutput] } });
   };
   const processBlock = (block, delim) => {
     for (const line of block.split(/\r?\n/)) {
@@ -1468,7 +1525,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
           flushPrelude();
           openTrack(parsed);
           const tracked = trackItem(parsed);
-          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
+          if (!tracked || tracked.created) writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         } else {
           flushPrelude();
@@ -1481,11 +1538,19 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       if (track) {
         if (parsed?.type === "response.output_item.added") {
           const tracked = trackItem(parsed);
-          writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
+          if (!tracked || tracked.created) writeOut(sseEvent(tracked ? { ...parsed, output_index: tracked.index } : parsed));
           continue;
         }
         if (parsed?.type === "response.function_call_arguments.delta") {
           writeOut(sseEvent(trackDelta(parsed)));
+          continue;
+        }
+        if (parsed?.type === "response.function_call_arguments.done") {
+          writeOut(sseEvent(trackLifecycleDone(parsed, "argumentsDone")));
+          continue;
+        }
+        if (parsed?.type === "response.output_item.done") {
+          writeOut(sseEvent(trackLifecycleDone(parsed, "itemDone")));
           continue;
         }
         if (parsed?.type === "response.output_text.delta") {

@@ -834,6 +834,19 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
   assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
 });
 
+test("normalizeOpenCodeProInput repairs duplicate tool calls persisted from a hybrid Pro stream", () => {
+  const normalized = normalizeOpenCodeProInput([
+    { type: "function_call", id: "fc_duplicate", call_id: "call_duplicate", name: "probe", arguments: "{}" },
+    { type: "function_call", id: "fc_duplicate", call_id: "call_duplicate", name: "probe", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_duplicate", output: "first" },
+    { type: "function_call_output", call_id: "call_duplicate", output: "duplicate" },
+  ]);
+  assert.equal(normalized.filter((item) => item.type === "function_call").length, 1);
+  assert.equal(normalized.filter((item) => item.type === "function_call_output").length, 1);
+  assert.deepEqual(normalized.slice(0, 2).map((item) => item.call_id), ["call_duplicate", "call_duplicate"]);
+  assert.equal(normalized[1].output, "first");
+});
+
 test("upstreamTargetFor routes by owning provider", () => {
   const config = configStub();
   const go = upstreamTargetFor(config, "deepseek-v4-flash");
@@ -2119,6 +2132,33 @@ test("relayResponses intercepts a v2 compact request and synthesizes a compactio
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("pipeNormalizedStream does not duplicate lifecycle events from a hybrid sparse Pro stream", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.output_item.added","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":""}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.output_item.added","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":""}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"command\\":\\"dir\\"}"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.function_call_arguments.done","item_id":"fc_hybrid","output_index":0,"arguments":"{\\"command\\":\\"dir\\"}"}\n\n'));
+      controller.enqueue(Buffer.from('data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":"{\\"command\\":\\"dir\\"}"}}\n\n'));
+      controller.enqueue(Buffer.from('data: {"id":"resp_hybrid","type":"response.completed","response":{"id":"resp_hybrid","model":"deepseek-v4-pro","output":[{"id":"fc_hybrid","type":"function_call","name":"shell_command","call_id":"call_hybrid","arguments":"{\\"command\\":\\"dir\\"}"}]}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const events = Buffer.concat(sink.chunks).toString("utf8")
+    .split(/\r?\n\r?\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  assert.equal(result.rewrote, true);
+  assert.equal(events.filter((event) => event.type === "response.output_item.added").length, 1);
+  assert.equal(events.filter((event) => event.type === "response.function_call_arguments.done").length, 1);
+  assert.equal(events.filter((event) => event.type === "response.output_item.done").length, 1);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output.length, 1);
+  assert.equal(completed.response.output[0].call_id, "call_hybrid");
 });
 
 test("relayCompaction applies local normalization on the custom route (mid-history system hoisted)", async () => {
