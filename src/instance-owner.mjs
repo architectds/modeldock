@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { stateFile } from "./state-dir.mjs";
 
 // One port is owned by exactly one gateway process from one checkout. We have
 // been bitten twice by lookalike instances: a second server on a neighbouring
@@ -16,13 +16,7 @@ import path from "node:path";
 // An explicit `home` still wins, so the unit tests below stay hermetic even
 // when the variable is set in the surrounding environment.
 export function ownerFilePath(port, home) {
-  const base =
-    home !== undefined
-      ? path.join(home, ".modeldock")
-      : process.env.MODELDOCK_STATE_DIR
-        ? path.resolve(process.env.MODELDOCK_STATE_DIR)
-        : path.join(os.homedir(), ".modeldock");
-  return path.join(base, `owner-${port}.json`);
+  return stateFile(`owner-${port}.json`, { home });
 }
 
 export function writeOwnerFile(port, { root = process.cwd(), pid = process.pid, home } = {}) {

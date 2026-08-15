@@ -5,9 +5,9 @@
 // probe lives under /v1/responses. Model tags may contain a colon (qwen3.8:27b)
 // which the published slug cannot carry, so each entry keeps both the published
 // id (colon -> dash) and the original upstream id for the wire.
-import os from "node:os";
 import path from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { stateFile } from "./state-dir.mjs";
 
 export const OLLAMA_DEFAULT_BASE = "http://127.0.0.1:11434";
 
@@ -134,9 +134,7 @@ export async function probeOllamaResponses({ baseUrl = OLLAMA_DEFAULT_BASE, mode
 // restart never has to re-contact Ollama. Same MODELDOCK_STATE_DIR redirect as
 // the catalog file so throwaway installs (mock-install tests) stay isolated.
 export function ollamaSnapshotPath() {
-  return process.env.MODELDOCK_STATE_DIR
-    ? path.join(path.resolve(process.env.MODELDOCK_STATE_DIR), "ollama-models.json")
-    : path.join(os.homedir(), ".modeldock", "ollama-models.json");
+  return stateFile("ollama-models.json");
 }
 
 export function readOllamaSnapshot(file = ollamaSnapshotPath()) {

@@ -27,6 +27,7 @@ import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
+import { stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -885,9 +886,7 @@ export function createServices(config = loadConfig()) {
   // (mock-install tests) writes its own catalog instead of rewriting the real
   // ~/.modeldock file with paths baked from the temp root.
   const catalogFile = mutableConfig.codexCatalogFile
-    || (process.env.MODELDOCK_STATE_DIR
-      ? path.join(path.resolve(process.env.MODELDOCK_STATE_DIR), "codex-model-catalog.json")
-      : path.join(os.homedir(), ".modeldock", "codex-model-catalog.json"));
+    || stateFile("codex-model-catalog.json");
   // The Ollama connection snapshot follows the same state-dir redirect. Real
   // configs restore it during loadConfig; this re-apply covers hand-built test
   // configs (which opt in by setting ollamaSnapshotFile) and keeps the running

@@ -1,8 +1,8 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { stateFile } from "./state-dir.mjs";
 
 // Loopback binding does not stop a malicious web page in a local browser from
 // POSTing to http://127.0.0.1:<port>/v1/responses (fetch with mode:"no-cors"
@@ -18,10 +18,7 @@ const KEY_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
 // redirect it to a throwaway root) and defaults to ~/.modeldock/caller-key,
 // which is where every real install already looks.
 function keyFilePath() {
-  const base = process.env.MODELDOCK_STATE_DIR
-    ? path.resolve(process.env.MODELDOCK_STATE_DIR)
-    : path.join(os.homedir(), ".modeldock");
-  return path.join(base, "caller-key");
+  return stateFile("caller-key");
 }
 
 // The persisted key is a bearer capability: restrict the file to the current

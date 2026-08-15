@@ -8,12 +8,13 @@ import path from "node:path";
 import { existsSync, readFileSync, statSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { envFileFor, parseEnvFile, tokenFromCodexToml, hasChatGptLogin } from "./config.mjs";
 import { SECRET_KEYS, PREFIX as SECRET_PREFIX } from "./secrets.mjs";
+import { stateDir as resolveStateDir } from "./state-dir.mjs";
 
 export const DOCTOR_CHECKS = 10;
 
 export async function checkDoctor({
   port = Number(process.env.MODELDOCK_PORT || 4097),
-  stateDir = process.env.MODELDOCK_STATE_DIR || path.join(os.homedir(), ".modeldock"),
+  stateDir = resolveStateDir(),
   codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex")),
   envFile = process.env.MODELDOCK_ENV_FILE || envFileFor(),
   rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),

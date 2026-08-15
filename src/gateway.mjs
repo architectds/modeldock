@@ -9,6 +9,7 @@ import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
+import { stateDir } from "./state-dir.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -31,7 +32,6 @@ const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
 const LOCAL_TOOL_ALLOWLIST = new Set([
   "exec_command",
   "apply_patch",
-  "web_search",
   "write_stdin",
   "update_plan",
   "read_file",
@@ -39,6 +39,14 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "glob",
   "grep",
   "task",
+  // ModelDock harness tools that do NOT require the local model to be smart:
+  // memory (external, mitigates the 32K window), web search (Exa), vision
+  // (rerouted to the cloud vision model). The bare hosted "web_search" is a
+  // different tool and is intentionally not whitelisted.
+  "mcp__modeldock__recall_memory",
+  "mcp__modeldock__store_memory",
+  "mcp__modeldock__web_search_exa",
+  "mcp__modeldock__vision_inspect",
 ]);
 
 // Only backends whose advertised context is too small for Codex's ~61K fixed
@@ -135,9 +143,7 @@ export function compactFailureReport(body, { status, upstreamError } = {}) {
 
 function writeCompactFailureReport(report) {
   try {
-    const dir = process.env.MODELDOCK_STATE_DIR
-      ? path.resolve(process.env.MODELDOCK_STATE_DIR)
-      : path.join(homedir(), ".modeldock");
+    const dir = stateDir();
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "compact-failures.jsonl"), `${JSON.stringify(report)}\n`, { encoding: "utf8", flag: "a" });
   } catch {
