@@ -2166,14 +2166,19 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
-  // Local backends (llama.cpp / Ollama) must see the same adapted shape on the
-  // compact path as on the main relay path: Codex's mid-history system/developer
-  // items hoisted into a single leading system (or merged into instructions),
-  // the standard tool-item rewrite, and a reasoning effort the qwen3.8 jinja
-  // template accepts. Skipping this made compact_v2 fail with "System message
-  // must be at the beginning" whenever the compacted history carried a
-  // mid-history system item.
-  const localPayload = isLocalSmallContextBackend(config, route.model) ? normalizeLocalPayload(payload) : null;
+  // Custom/ollama backends must see the same adapted shape on the compact path
+  // as on the main relay path: Codex's mid-history system/developer items
+  // hoisted into a single leading system (or merged into instructions), the
+  // standard tool-item rewrite, and a reasoning effort the qwen3.8 jinja
+  // template accepts. Context size is not the right gate here - a qwen3.8
+  // server can advertise 128K and still reject a mid-history system item, so
+  // this must match relayResponses unconditionally for the provider, not only
+  // for isLocalSmallContextBackend. Skipping the adaptation made compact_v2
+  // fail with "System message must be at the beginning" whenever the compacted
+  // history carried a mid-history system item.
+  const routedProvider = providerForModel(config, route.model);
+  const localPayload =
+    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
   const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
   const summarizeBody = {
     ...(localPayload || payload),

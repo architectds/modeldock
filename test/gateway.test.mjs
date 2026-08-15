@@ -2260,7 +2260,7 @@ test("relayCompaction applies local normalization on the custom route (mid-histo
   }
 });
 
-test("relayCompaction skips local normalization on a large-context custom model", async () => {
+test("relayCompaction applies local normalization on a large-context custom model too (matches the main relay path)", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -2299,10 +2299,13 @@ test("relayCompaction skips local normalization on a large-context custom model"
     assert.equal(result.ok, true);
     assert.equal(calls.length, 1, "the compact request is synthesized, not forwarded raw");
     const sent = calls[0].body;
-    // A large-context custom endpoint keeps the generic path: the mid-history
-    // system item is NOT hoisted (its upstream is not a strict llama.cpp template).
+    // Context size must not disable the adaptation: a qwen3.8 server can
+    // advertise 128K and still reject a mid-history system item, so the compact
+    // path behaves like the main relay path and hoists system first regardless
+    // of the advertised window.
     const roles = sent.input.map((item) => item.role);
-    assert.equal(roles[0], "user", "large-context custom model keeps the generic compact input");
+    assert.equal(roles[0], "system", "system is hoisted to the very first position for a large-context custom model");
+    assert.equal(roles.filter((r) => r === "system").length, 1, "exactly one system item reaches the upstream");
     assert.ok(!sent.input.some((item) => item.type === "compaction_trigger"), "the trigger never reaches the upstream");
     assert.match(sent.input.at(-1).content[0].text, /CONTEXT CHECKPOINT COMPACTION/);
   } finally {
