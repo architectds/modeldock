@@ -232,18 +232,33 @@ export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = 
 }
 
 export class CodexConfigSwitcher {
+  // Either a fixed model id or a function returning the caller's current
+  // selection. Passing the function makes `model` a view of that selection
+  // rather than a third copy of it: the snapshot form went stale whenever the
+  // model changed elsewhere (Codex's own picker moved it without telling the
+  // switcher), and a later enable then wrote the outdated id into config.toml.
+  #model;
+
   constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
-    this.model = model;
+    this.#model = model;
     this.catalogFile = catalogFile;
     this.mcpUrl = mcpUrl;
     this.mcpCommand = mcpCommand;
     this.mcpArgs = mcpArgs;
     this.mcpEnv = mcpEnv;
+  }
+
+  get model() {
+    return typeof this.#model === "function" ? this.#model() : this.#model;
+  }
+
+  set model(value) {
+    this.#model = value;
   }
 
   async #readState() {

@@ -32,6 +32,28 @@ async function fixture(t) {
   };
 }
 
+test("a function model follows the caller's live selection instead of a snapshot", async (t) => {
+  // Codex's own picker moves the selection without going through the switcher.
+  // When the model was stored as a copy, a later enable wrote the stale id into
+  // config.toml; reading through the function keeps them in step.
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-live-model-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const selection = { mainModel: "deepseek-v4-flash" };
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: () => selection.mainModel,
+  });
+  assert.equal(switcher.model, "deepseek-v4-flash");
+
+  selection.mainModel = "glm-5.2@opencode-go";
+  assert.equal(switcher.model, "glm-5.2@opencode-go", "the switcher sees the new selection");
+
+  await switcher.enable();
+  const written = await readFile(path.join(codexHome, "config.toml"), "utf8");
+  assert.match(written, /^model = "glm-5\.2@opencode-go"$/m, "config.toml carries the live model");
+});
+
 test("managed config keeps the built-in provider and redirects its base URL", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",

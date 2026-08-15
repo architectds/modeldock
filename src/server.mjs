@@ -7,7 +7,7 @@ import express from "express";
 import zlib from "node:zlib";
 import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken } from "./config.mjs";
+import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
@@ -910,7 +910,10 @@ export function createServices(config = loadConfig()) {
     mcpCommand: mutableConfig.mcpTransport === "stdio" ? process.execPath : "",
     mcpArgs: mutableConfig.mcpTransport === "stdio" ? [path.join(dirname, "mcp-standalone.mjs")] : [],
     mcpEnv: mutableConfig.mcpTransport === "stdio" ? { MODELDOCK_GATEWAY_URL: mcpUrl.replace(/\/mcp$/, "") } : {},
-    model: mutableConfig.mainModel,
+    // A view of the live selection, not a snapshot: Codex's own picker changes
+    // modelSelection without going through this switcher, and a stored copy then
+    // wrote the stale model into config.toml on the next enable.
+    model: () => modelSelection.mainModel,
     catalogFile,
   });
   const autostart = createAutostart();
@@ -997,8 +1000,7 @@ export function createServices(config = loadConfig()) {
 // itself and hands the parsed JSON through. gzip/deflate/br stay with
 // body-parser, which supports them natively.
 function isCallerKeyEnforced() {
-  const raw = String(process.env.MODELDOCK_REQUIRE_CALLER_KEY || "").toLowerCase();
-  return raw === "" || !["0", "false", "off"].includes(raw);
+  return !envOff("MODELDOCK_REQUIRE_CALLER_KEY");
 }
 
 function protectedRelayPath(pathname) {
@@ -1269,7 +1271,6 @@ export function createApp(services = createServices()) {
               visionModel: config.visionModel,
               selectedMainModel: services.modelSelection.mainModel,
               selectedVisionModel: services.modelSelection.visionModel,
-              switcherModel: services.configSwitcher.model,
             };
             config.profile = onSelection.profile;
             config.profileId = onSelection.providerId;
@@ -1277,7 +1278,6 @@ export function createApp(services = createServices()) {
             config.visionModel = onSelection.visionModel;
             services.modelSelection.mainModel = onSelection.mainModel;
             services.modelSelection.visionModel = onSelection.visionModel;
-            services.configSwitcher.model = onSelection.mainModel;
           }
           try {
             result = await configSwitcher.enable();
@@ -1289,7 +1289,6 @@ export function createApp(services = createServices()) {
               config.visionModel = previousSelection.visionModel;
               services.modelSelection.mainModel = previousSelection.selectedMainModel;
               services.modelSelection.visionModel = previousSelection.selectedVisionModel;
-              services.configSwitcher.model = previousSelection.switcherModel;
             }
             throw error;
           }
@@ -1303,7 +1302,6 @@ export function createApp(services = createServices()) {
             const trialVision = publishedSlugFor(config.profileId, TRIAL_VISION_MODEL);
             services.modelSelection.mainModel = trialMain;
             services.modelSelection.visionModel = trialVision;
-            services.configSwitcher.model = trialMain;
             const trialEnv = {
               MODELDOCK_TRIAL: "1",
               MODELDOCK_MAIN_MODEL: trialMain,
@@ -1409,7 +1407,6 @@ export function createApp(services = createServices()) {
     services.modelSelection.visionModel = nextVision;
     config.mainModel = nextMain;
     config.visionModel = nextVision;
-    services.configSwitcher.model = nextMain;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
   });
@@ -1669,7 +1666,6 @@ export function createApp(services = createServices()) {
         updates.MODELDOCK_MAIN_MODEL = "";
         config.mainModel = "deepseek-v4-flash@opencode-go";
         services.modelSelection.mainModel = config.mainModel;
-        services.configSwitcher.model = config.mainModel;
       }
       if (providerForModel(config, config.visionModel) === "ollama") {
         updates.MODELDOCK_VISION_MODEL = "";
