@@ -624,9 +624,15 @@ function modelSignature(models) {
   ].join("\u0001");
 }
 
+let lastModelData = null;
+// The vision provider the user picked in the dropdown, when it differs from the
+// one the server reports. Cleared once the saved selection catches up.
+let visionProviderOverride = "";
+
 function renderModelOptions(data) {
   const models = data.models;
   if (!models?.options) return;
+  lastModelData = data;
   const signature = modelSignature(models);
   if (signature === lastModelSignature) {
     // Models did not change since the last SSE event; keep the current DOM.
@@ -665,7 +671,13 @@ function renderModelOptions(data) {
       option.textContent = t("models.none");
       visionProviderSelect.append(option);
     }
-    visionProviderSelect.value = selectedVisionProvider;
+    // Honour a provider the user just picked (visionProviderOverride) over the
+    // one the payload reports, so re-rendering after a change does not snap the
+    // dropdown back to the previously selected provider.
+    const wanted = visionProviderOverride && visionProviders.some((provider) => provider.id === visionProviderOverride)
+      ? visionProviderOverride
+      : selectedVisionProvider;
+    visionProviderSelect.value = wanted;
     visionProviderSelect.disabled = !visionProviders.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial);
   }
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
@@ -762,6 +774,8 @@ async function setModels() {
     const response = await fetch("/api/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: $("vision-model-select").value }) });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
+    // The saved selection now carries the provider; stop overriding the dropdown.
+    visionProviderOverride = "";
   } catch (error) {
     window.alert(error.message);
   } finally {
@@ -1004,10 +1018,15 @@ $("settings-autostart-toggle").addEventListener("change", (event) => {
 
 $("vision-model-select").addEventListener("change", setModels);
 $("vision-provider-select").addEventListener("change", () => {
-  const provider = $("vision-provider-select").value;
-  const modelSelect = $("vision-model-select");
-  const options = Array.from(modelSelect.options).filter((option) => option.dataset.provider === provider);
-  if (options.length) modelSelect.value = options[0].value;
+  // Re-render the whole vision list for the newly picked provider instead of
+  // filtering the options already in the DOM: those were built for the previous
+  // provider, so switching (e.g. custom -> opencode-go) found no match and left
+  // the old provider's model selected. renderModelOptions reads the select's
+  // current value in its filter, so a forced re-render lists the right models.
+  if (!lastModelData) return;
+  visionProviderOverride = $("vision-provider-select").value;
+  lastModelSignature = "";
+  renderModelOptions(lastModelData);
 });
 
 $("subagent-model-select").addEventListener("change", saveSubagent);
