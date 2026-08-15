@@ -55,6 +55,20 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
 // full toolset. 0 (unknown) also means no trimming, to never hurt a big model.
 const LOCAL_TOOL_TRIM_MAX_CONTEXT = 40_000;
 
+// A custom/ollama backend whose advertised context is too small to survive
+// Codex's fixed overhead. This is the single criterion for both the tool
+// whitelist and the compact-path local adaptation (system hoisting, standard
+// tool rewrite, reasoning mapping): all small-context local backends face the
+// same llama.cpp template constraints, while bigger custom endpoints (e.g.
+// OpenAI/OpenRouter at 128K+) keep the generic path. 0 (unknown) also means
+// generic, to never hurt a large model.
+export function isLocalSmallContextBackend(config, model) {
+  const provider = providerForModel(config, model);
+  if (provider !== "custom" && provider !== "ollama") return false;
+  const ctx = modelEntryFor(config, model)?.contextWindow || 0;
+  return ctx > 0 && ctx <= LOCAL_TOOL_TRIM_MAX_CONTEXT;
+}
+
 function redactBearer(value) {
   return String(value || "")
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
@@ -1735,6 +1749,30 @@ export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFi
   return { bytes, empty: holding && !sawOutput, usage };
 }
 
+// Every relay records the same envelope on every outcome - which session, how
+// long it took, and through which dispatcher - and differs only in the result.
+// Binding the envelope once per relay keeps the nine call sites down to what is
+// actually specific to them: the status, and the token counts when the upstream
+// reported any.
+function usageRecorder(services, { startedAt, sessionId, threadId }) {
+  const record = services.recordUsage || recordUsageEvent;
+  return (fields) => record({ durationMs: Date.now() - startedAt, sessionId, threadId, ...fields });
+}
+
+// The upstream's usage object in the field names the meter stores. Written out
+// per call site, this was five near-identical lines each time, and the two paths
+// that only wanted three of them were easy to mistake for a bug.
+function usageTokens(usage) {
+  if (!usage) return {};
+  return {
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    totalTokens: usage.total_tokens,
+    cachedTokens: usage.input_tokens_details?.cached_tokens,
+    reasoningTokens: usage.output_tokens_details?.reasoning_tokens,
+  };
+}
+
 // Native passthrough for a Responses request. Unlike the routed path there is no
 // tool policy, no historical-image rewrite, and no image escalation: the native
 // backend owns hosted tools, history images, and its own vision. Only the input
@@ -1759,6 +1797,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   });
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
+  const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
+  const nativeRoute = { model: payload.model, provider: "openai", route: "native_passthrough" };
   let usage;
   let responseCompleted = false;
   let responseFailure = "";
@@ -1799,15 +1839,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
         nativeToolOutputs: 0,
         fallbackToolResults: 0,
       }, { streaming: false, routeReason: "native_passthrough", bytesIn });
-      (services.recordUsage || recordUsageEvent)({
-        model: payload.model,
-        provider: "openai",
-        route: "native_passthrough",
-        status: upstream.status,
-        durationMs: Date.now() - startedAt,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...nativeRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
     }
 
@@ -1850,19 +1882,10 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       nativeToolOutputs: 0,
       fallbackToolResults: 0,
     }, { streaming: payload.stream !== false, routeReason: "native_passthrough", bytesIn });
-    (services.recordUsage || recordUsageEvent)({
-      model: payload.model,
-      provider: "openai",
-      route: "native_passthrough",
+    recordUsage({
+      ...nativeRoute,
       status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
-      durationMs: Date.now() - startedAt,
-      inputTokens: usage?.input_tokens,
-      outputTokens: usage?.output_tokens,
-      totalTokens: usage?.total_tokens,
-      cachedTokens: usage?.input_tokens_details?.cached_tokens,
-      reasoningTokens: usage?.output_tokens_details?.reasoning_tokens,
-      sessionId,
-      threadId,
+      ...usageTokens(usage),
     });
     return {
       ok: !interrupted && !semanticFailed,
@@ -2070,9 +2093,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // template accepts. Skipping this made compact_v2 fail with "System message
   // must be at the beginning" whenever the compacted history carried a
   // mid-history system item.
-  const routedProvider = providerForModel(config, route.model);
-  const localPayload =
-    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
+  const localPayload = isLocalSmallContextBackend(config, route.model) ? normalizeLocalPayload(payload) : null;
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -2107,6 +2128,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     threadId,
   });
   const startedAt = Date.now();
+  const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
+  const compactRoute = { model: route.model, provider: target.provider, route: operation };
   let usage;
   try {
     if (!target.token && target.tokenRequired !== false) {
@@ -2120,15 +2143,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       res.setHeader("Content-Type", "application/json");
       res.end(body);
       finish?.({ ok: false, httpStatus: 503, error: `No API token configured for provider ${target.provider}.` });
-      (services.recordUsage || recordUsageEvent)({
-        model: route.model,
-        provider: target.provider,
-        route: operation,
-        status: 503,
-        durationMs: Date.now() - startedAt,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...compactRoute, status: 503 });
       return { ok: false, httpStatus: 503, route, error: body };
     }
     if (config.debug?.dumpAll && config.debug?.dumpDir) {
@@ -2149,15 +2164,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         res.end(body);
       }
       finish?.({ ok: false, httpStatus: 502, error: "Compact response is too large." });
-      (services.recordUsage || recordUsageEvent)({
-        model: route.model,
-        provider: target.provider,
-        route: operation,
-        status: 502,
-        durationMs: Date.now() - startedAt,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...compactRoute, status: 502 });
       return { ok: false, httpStatus: 502, route, error: "Compact response is too large." };
     }
     if (!upstream.ok) {
@@ -2194,15 +2201,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         nativeToolOutputs: 0,
         fallbackToolResults: 0,
       }, { streaming: false, routeReason: operation, bytesIn });
-      (services.recordUsage || recordUsageEvent)({
-        model: route.model,
-        provider: target.provider,
-        route: operation,
-        status: upstream.status,
-        durationMs: Date.now() - startedAt,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...compactRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
 
@@ -2219,15 +2218,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         res.end(JSON.stringify(translated.body));
       }
       finish?.({ ok: false, httpStatus: 502, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
-      (services.recordUsage || recordUsageEvent)({
-        model: route.model,
-        provider: target.provider,
-        route: operation,
-        status: 502,
-        durationMs: Date.now() - startedAt,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...compactRoute, status: 502 });
       return { ok: false, httpStatus: 502, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
     usage = extractResponseUsage(parsed);
@@ -2264,18 +2255,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       nativeToolOutputs: 0,
       fallbackToolResults: 0,
     }, { streaming: payload.stream !== false, routeReason: operation, bytesIn });
-    (services.recordUsage || recordUsageEvent)({
-      model: route.model,
-      provider: target.provider,
-      route: operation,
-      status: 200,
-      durationMs: Date.now() - startedAt,
-      inputTokens: usage?.input_tokens,
-      outputTokens: usage?.output_tokens,
-      totalTokens: usage?.total_tokens,
-      sessionId,
-      threadId,
-    });
+    recordUsage({ ...compactRoute, status: 200, ...usageTokens(usage) });
     return {
       ok: true,
       httpStatus: 200,
@@ -2391,11 +2371,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 
   // Trim tools only for small-context local backends (llama.cpp @32K etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
-  const routeModelContext = modelEntryFor(config, route.model)?.contextWindow || 0;
-  const trimLocalTools =
-    (routedProvider === "custom" || routedProvider === "ollama") &&
-    routeModelContext > 0 &&
-    routeModelContext <= LOCAL_TOOL_TRIM_MAX_CONTEXT;
+  const trimLocalTools = isLocalSmallContextBackend(config, route.model);
   const { tools, stripped } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
   });
@@ -2442,6 +2418,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
+  const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
+  const relayRoute = { model: normalizedPayload.model, provider: target.provider, route: route.reason };
   let usage;
   let bytesOut = 0;
   let completedResponse;
@@ -2620,20 +2598,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         fallbackToolResults: 0,
       }, { streaming: true, routeReason: route.reason, bytesIn });
       metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
-      (services.recordUsage || recordUsageEvent)({
-        model: normalizedPayload.model,
-        provider: target.provider,
-        route: route.reason,
-        status: 429,
-        durationMs: Date.now() - startedAt,
-        inputTokens: traceUsage?.input_tokens,
-        outputTokens: traceUsage?.output_tokens,
-        totalTokens: traceUsage?.total_tokens,
-        cachedTokens: traceUsage?.input_tokens_details?.cached_tokens,
-        reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens,
-        sessionId,
-        threadId,
-      });
+      recordUsage({ ...relayRoute, status: 429, ...usageTokens(traceUsage) });
       return { ok: false, httpStatus: 429, route, error: errorMessage.slice(0, 400), usage: traceUsage, bytesOut, upstreamBytes, latencyMs: Date.now() - startedAt, upstream: target.provider };
     }
     // inputTokens/outputTokens ride on the trace record: the dashboard's
@@ -2665,19 +2630,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }, { streaming: true, routeReason: route.reason, bytesIn });
     metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
     // Injectable so unit tests do not append to the real ~/.modeldock file.
-    (services.recordUsage || recordUsageEvent)({
-      model: normalizedPayload.model,
-      provider: target.provider,
-      route: route.reason,
+    recordUsage({
+      ...relayRoute,
       status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
-      durationMs: Date.now() - startedAt,
-      inputTokens: traceUsage?.input_tokens,
-      outputTokens: traceUsage?.output_tokens,
-      totalTokens: traceUsage?.total_tokens,
-      cachedTokens: traceUsage?.input_tokens_details?.cached_tokens,
-      reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens,
-      sessionId,
-      threadId,
+      ...usageTokens(traceUsage),
     });
     return {
       ok: !interrupted && !semanticFailed,
