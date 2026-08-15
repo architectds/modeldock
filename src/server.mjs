@@ -350,8 +350,6 @@ function subagentPayload(services) {
 function statusPayload(services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater } = services;
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
-  const options = visibleModelOptions(config, modelOptions(config));
-  const visionOptions = options.filter((entry) => entry.supportsVision);
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel));
   const mainProvider = providerForModel(config, selected.mainModel) || config.profileId;
   const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
@@ -384,14 +382,12 @@ function statusPayload(services) {
       mainWire: "responses",
       visionUpstreamUrl: selected.visionModel ? upstreamBaseForModel(config, selected.visionModel) : "",
     },
-    models: {
-      selected,
-      options,
-      providers: providerOptions(config),
-      selectedProvider: config.profileId || "opencode-go",
-      visionProviders: providerOptions(config).filter((provider) => visionOptions.some((model) => model.provider === provider.id)),
-      selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || config.profileId : "",
-    },
+    // One source of truth for the model block. This used to be a hand-copied
+    // duplicate of modelsPayload, and the copies drifted: /api/models derived the
+    // provider from the selected model while /api/status still reported
+    // config.profileId, so the same state produced two different answers and the
+    // dashboard showed a provider that did not own the model beside it.
+    models: modelsPayload(services),
     subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
