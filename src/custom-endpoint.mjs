@@ -5,6 +5,7 @@
 // a single non-streamed turn capped at 16 output tokens. Error codes are
 // classified so the dashboard can render localized copy (connect / key / model /
 // upstream) instead of a raw fetch message.
+import { isLoopbackHost } from "./loopback.mjs";
 
 export class CustomEndpointError extends Error {
   constructor(code, message) {
@@ -33,7 +34,7 @@ export function validateBaseUrl(raw) {
   } catch {
     throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
   }
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+  const loopback = isLoopbackHost(parsed.hostname);
   if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
     throw new CustomEndpointError("connect", "Only https and loopback http endpoints are allowed.");
   }
@@ -55,7 +56,7 @@ function validateEndpointBase(raw) {
   } catch {
     throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
   }
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+  const loopback = isLoopbackHost(parsed.hostname);
   if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
     throw new CustomEndpointError("connect", "Only https and loopback http endpoints are allowed.");
   }

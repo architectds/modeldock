@@ -1,0 +1,19 @@
+// Which hosts count as this machine.
+//
+// Two rules lean on that answer, in opposite directions: plaintext http is allowed
+// only to loopback (the gateway's own bind address, an Ollama base URL, a custom
+// endpoint), and remote image fetches are allowed only *away* from loopback. The
+// membership test behind both was written out five times - config.mjs, ollama.mjs,
+// custom-endpoint.mjs twice, media-store.mjs - and the copies had already drifted:
+// media-store stripped the brackets URL.hostname puts around an IPv6 literal, the
+// others did not, so `http://[::1]:11434` failed the check and was refused as a
+// remote plaintext endpoint. A security rule kept in five places is a rule that
+// gets changed in one.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+
+export function isLoopbackHost(value) {
+  // Accept both spellings of an IPv6 literal: URL.hostname yields "[::1]", while a
+  // host read straight from an env var or a config field has no brackets.
+  const host = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return LOOPBACK_HOSTS.has(host);
+}

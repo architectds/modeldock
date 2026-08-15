@@ -7,6 +7,7 @@ import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
+import { isLoopbackHost } from "./loopback.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
@@ -298,7 +299,7 @@ export function hasChatGptLogin(codexHome) {
 export function loadConfig() {
   applyEnvFile(envFileFor());
   const host = process.env.MODELDOCK_HOST || "127.0.0.1";
-  if (!["127.0.0.1", "localhost", "::1"].includes(host)) {
+  if (!isLoopbackHost(host)) {
     throw new Error("MODELDOCK_HOST must be a loopback address for this MVP");
   }
 

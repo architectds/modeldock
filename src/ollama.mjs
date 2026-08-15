@@ -8,6 +8,7 @@
 import path from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { stateFile } from "./state-dir.mjs";
+import { isLoopbackHost } from "./loopback.mjs";
 
 export const OLLAMA_DEFAULT_BASE = "http://127.0.0.1:11434";
 
@@ -43,7 +44,7 @@ export function validateOllamaBase(raw) {
   } catch {
     throw new OllamaError("connect", "Ollama base URL must be an http(s) URL.");
   }
-  const loopback = ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname);
+  const loopback = isLoopbackHost(parsed.hostname);
   if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
     throw new OllamaError("connect", "Only loopback http (or https) Ollama endpoints are allowed.");
   }

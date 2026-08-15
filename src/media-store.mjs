@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
+import { isLoopbackHost } from "./loopback.mjs";
 
 const DATA_URL = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i;
 
@@ -35,8 +36,7 @@ export class MediaStore {
     } else {
       const url = new URL(imageUrl);
       if (url.protocol !== "https:") throw new Error("Only image data URLs and public HTTPS URLs are supported");
-      const hostname = url.hostname.replace(/^\[|\]$/g, "");
-      if (["localhost", "127.0.0.1", "::1"].includes(hostname)) {
+      if (isLoopbackHost(url.hostname)) {
         throw new Error("Local image URLs are not accepted");
       }
       size = Buffer.byteLength(imageUrl);
