@@ -94,12 +94,15 @@ function renderRecent(items) {
           : item.imageRefs?.length
             ? t("detail.imageRef", { n: item.imageRefs.length })
             : "—");
-    // Context size per request: the input tokens actually sent upstream. Active
-    // requests and non-token kinds have no record yet, so they render an em dash.
+    // Context size per request: the input tokens actually sent upstream. The
+    // upstream only reports usage when the request completes, so an in-flight
+    // row shows a pending ellipsis and non-token kinds render an em dash.
     const contextTokens =
-      Number.isFinite(Number(item.inputTokens)) && Number(item.inputTokens) > 0
-        ? number(item.inputTokens)
-        : "—";
+      item.status === "active"
+        ? "…"
+        : Number.isFinite(Number(item.inputTokens)) && Number(item.inputTokens) > 0
+          ? number(item.inputTokens)
+          : "—";
     const values = [item.kind, target, item.status, duration(item.latencyMs), contextTokens, detail];
     values.forEach((value, index) => {
       const cell = document.createElement("td");
