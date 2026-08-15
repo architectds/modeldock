@@ -708,13 +708,68 @@ function normalizeStandardToolItem(item) {
   return item;
 }
 
-// Ollama's Responses dialect accepts only the standard item types. Run the
-// generic gateway normalization first (pairing, compaction, orphan removal on
-// the Codex-native shapes) and then rewrite the remaining Codex tool types to
-// the standard wire before they reach Ollama.
+// Local Responses backends (Ollama, llama.cpp behind a custom endpoint) implement
+// the standard Responses subset and reject Codex's own item types. Run the generic
+// gateway normalization first (pairing, compaction, orphan removal on the
+// Codex-native shapes) and then rewrite the remaining Codex tool types to the
+// standard wire.
 export function normalizeOllamaInput(input) {
   if (!Array.isArray(input)) return input;
   return normalizeGatewayInput(input).map(normalizeStandardToolItem);
+}
+
+// llama.cpp's qwen3.8 jinja template requires the system message to be first
+// ("System message must be at the beginning") and rejects a mid-history system
+// item - Codex can emit one after compaction or a tool turn. Merge every
+// system item's text into a single leading system message and drop the
+// originals, so local backends (llama.cpp / Ollama) always see system first.
+export function hoistLocalSystem(input) {
+  if (!Array.isArray(input)) return input;
+  const texts = [];
+  const rest = [];
+  for (const item of input) {
+    if (item?.role === "system") {
+      const text = Array.isArray(item.content)
+        ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
+        : "";
+      if (text) texts.push(text);
+      continue;
+    }
+    rest.push(item);
+  }
+  if (!texts.length) return input;
+  return [{ role: "system", content: [{ type: "input_text", text: texts.join("\n") }] }, ...rest];
+}
+
+// Local backend input, used by the custom route (typically llama.cpp). It needs
+// both local adaptations, not just one: system hoisting so Codex's mid-history
+// system items never trip llama.cpp's template validator, AND the standard-item
+// rewrite, because llama.cpp implements the same Responses subset as Ollama and
+// rejects Codex's custom_tool_call / local_shell_call types. Missing the rewrite
+// meant a custom llama.cpp endpoint failed on the first tool call - which is
+// nearly every turn in an agentic session.
+export function normalizeLocalInput(input) {
+  if (!Array.isArray(input)) return input;
+  return hoistLocalSystem(normalizeOllamaInput(input));
+}
+
+// llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
+// on "high" (Codex's default effort). Map "high" to the closest accepted value
+// and drop anything else so local custom/Ollama routes never trip the template
+// validator. Valid efforts pass through so the picker's selection is honored.
+export function normalizeLocalReasoning(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const reasoning = payload.reasoning;
+  if (!reasoning || typeof reasoning !== "object") return payload;
+  const effort = reasoning.effort;
+  if (effort === "high") {
+    return { ...payload, reasoning: { ...reasoning, effort: "xhigh" } };
+  }
+  if (effort !== "xhigh" && effort !== "medium" && effort !== "low") {
+    const { reasoning: _dropped, ...rest } = payload;
+    return rest;
+  }
+  return payload;
 }
 
 // Flash otherwise stays on the generic byte-stable path. Its only required
@@ -2189,10 +2244,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     ? normalizeOpenCodeProInput(payload.input)
     : flashOpenCodeGo
       ? normalizeOpenCodeFlashInput(payload.input)
-      : routedProvider === "ollama"
-        ? normalizeOllamaInput(payload.input)
+      : routedProvider === "ollama" || routedProvider === "custom"
+        ? normalizeLocalInput(payload.input)
         : normalizeGatewayInput(payload.input);
-  const normalizedPayload = {
+  let normalizedPayload = {
     ...payload,
     input: rewriteHistoricalImages(
       normalizedInput,
@@ -2201,6 +2256,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     ),
     model: route.model,
   };
+  // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and
+  // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
+  // closest accepted value, and drop anything else so local routes never trip
+  // the template validator.
+  if (routedProvider === "custom" || routedProvider === "ollama") {
+    normalizedPayload = {
+      ...normalizedPayload,
+      reasoning: normalizeLocalReasoning(normalizedPayload).reasoning,
+    };
+  }
   delete normalizedPayload.client_metadata;
   // The input array is the authoritative history here. A previous_response_id
   // would make the upstream resolve continuation state server-side - state

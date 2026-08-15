@@ -15,12 +15,15 @@ import {
   dropUnpairedToolItems,
   encodeCompactionSummary,
   freeResponseFailure,
+  hoistLocalSystem,
   isCompactV1Request,
   isCompactV2Request,
   isNativeModel,
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
+  normalizeLocalInput,
+  normalizeLocalReasoning,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
@@ -248,6 +251,67 @@ test("normalizeOpenCodeFlashInput repairs only summary-only reasoning", () => {
   ]);
   assert.equal(normalized[0].encrypted_content, undefined);
   assert.deepEqual(normalized.slice(1), [assistant, call, output], "Pro-only assistant and tool rewrites stay disabled");
+});
+
+test("hoistLocalSystem merges mid-history system items into one leading system", () => {
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "hi" }] },
+    { role: "system", content: [{ type: "input_text", text: "mid note" }] },
+    { role: "assistant", content: [{ type: "output_text", text: "hello" }] },
+    { role: "system", content: [{ type: "input_text", text: "second note" }] },
+  ];
+  const out = hoistLocalSystem(input);
+  assert.equal(out[0].role, "system", "system is hoisted to the front");
+  assert.equal(out[0].content[0].text, "mid note\nsecond note", "system texts merge in order");
+  assert.deepEqual(
+    out.slice(1).map((i) => i.role),
+    ["user", "assistant"],
+    "mid-history system items are dropped, order preserved",
+  );
+  const passthrough = hoistLocalSystem([{ role: "user", content: [{ type: "input_text", text: "only" }] }]);
+  assert.deepEqual(passthrough, [{ role: "user", content: [{ type: "input_text", text: "only" }] }], "no system -> passthrough");
+});
+
+test("normalizeLocalInput hoists system after generic gateway normalization", () => {
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "go" }] },
+    { role: "system", content: [{ type: "input_text", text: "rules" }] },
+  ];
+  const out = normalizeLocalInput(input);
+  assert.equal(out[0].role, "system", "system first for llama.cpp");
+  assert.equal(out[1].role, "user");
+});
+
+test("normalizeLocalInput rewrites Codex tool items to the standard wire for llama.cpp", () => {
+  // llama.cpp implements the same Responses subset as Ollama and rejects Codex's
+  // own item types. An agentic turn is almost always a tool call, so a custom
+  // llama.cpp endpoint failed immediately without this rewrite.
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "run it" }] },
+    { type: "local_shell_call", call_id: "c1", input: { command: ["ls"] } },
+    { type: "local_shell_call_output", call_id: "c1", output: "ok" },
+  ];
+  const out = normalizeLocalInput(input);
+  const call = out.find((item) => item.call_id === "c1" && item.type?.endsWith("_call"));
+  const result = out.find((item) => item.call_id === "c1" && item.type?.endsWith("_call_output"));
+  assert.equal(call?.type, "function_call", "local_shell_call becomes function_call");
+  assert.equal(call?.arguments, JSON.stringify({ command: ["ls"] }), "input is serialized into arguments");
+  assert.equal(call?.input, undefined, "the non-standard input field is dropped");
+  assert.equal(result?.type, "function_call_output", "the output item is rewritten too");
+});
+
+test("normalizeLocalReasoning maps high to xhigh and drops unsupported efforts", () => {
+  // Codex default "high" is rejected by llama.cpp qwen3.8 -> map to xhigh.
+  const mapped = normalizeLocalReasoning({ model: "m", reasoning: { effort: "high" } });
+  assert.equal(mapped.reasoning.effort, "xhigh", "high maps to the closest accepted value");
+  // Valid llama.cpp efforts pass through.
+  for (const effort of ["xhigh", "medium", "low"]) {
+    const kept = normalizeLocalReasoning({ model: "m", reasoning: { effort } });
+    assert.equal(kept.reasoning.effort, effort, `${effort} is preserved`);
+  }
+  // Unknown efforts are dropped entirely.
+  const dropped = normalizeLocalReasoning({ model: "m", reasoning: { effort: "ultra" } });
+  assert.equal("reasoning" in dropped, false, "unsupported effort is removed");
 });
 
 test("normalizeOpenCodeProInput drops opaque reasoning with no replayable text", () => {
