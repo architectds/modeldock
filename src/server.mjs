@@ -515,6 +515,20 @@ function crossOriginGuard(config) {
   };
 }
 
+// A route whose only failure mode is "it threw". Eight handlers each wrapped
+// their body in the same try/catch that turned any error into a 500 carrying a
+// fixed type, which buried the two lines that actually did the work. The handler
+// returns its JSON body and this adds the envelope.
+function jsonRoute(errorType, handler) {
+  return async (req, res) => {
+    try {
+      return res.json(await handler(req, res));
+    } catch (error) {
+      return res.status(500).json({ error: { type: errorType, message: error.message } });
+    }
+  };
+}
+
 function recordConfigAction(metrics, operation, result) {
   const now = Date.now();
   metrics.recent.unshift({
@@ -1188,32 +1202,20 @@ export function createApp(services = createServices()) {
       events: services.memoryStore.recentEvents(50),
     });
   });
-  app.get("/api/speech", async (req, res) => {
-    try {
-      const { ttsStatus } = await import("./tts.mjs");
-      const { sttStatus } = await import("./stt.mjs");
-      const [tts, stt] = await Promise.all([ttsStatus(), sttStatus()]);
-      return res.json({ tts, stt });
-    } catch (error) {
-      return res.status(500).json({ error: { type: "speech_status_error", message: error.message } });
-    }
-  });
-  app.post("/api/speech/install", async (req, res) => {
-    try {
-      const { ttsInstall } = await import("./tts.mjs");
-      const installed = await ttsInstall();
-      return res.json({ installed });
-    } catch (error) {
-      return res.status(500).json({ error: { type: "tts_install_error", message: error.message } });
-    }
-  });
-  app.get("/api/config", async (req, res) => {
-    try {
-      return res.json({ ...(await configSwitcher.status()), trial: Boolean(config.trialMode) });
-    } catch (error) {
-      return res.status(500).json({ error: { type: "config_status_error", message: error.message } });
-    }
-  });
+  app.get("/api/speech", jsonRoute("speech_status_error", async () => {
+    const { ttsStatus } = await import("./tts.mjs");
+    const { sttStatus } = await import("./stt.mjs");
+    const [tts, stt] = await Promise.all([ttsStatus(), sttStatus()]);
+    return { tts, stt };
+  }));
+  app.post("/api/speech/install", jsonRoute("tts_install_error", async () => {
+    const { ttsInstall } = await import("./tts.mjs");
+    return { installed: await ttsInstall() };
+  }));
+  app.get("/api/config", jsonRoute("config_status_error", async () => ({
+    ...(await configSwitcher.status()),
+    trial: Boolean(config.trialMode),
+  })));
 
   const mutateConfig = configMutationGuard(config);
   let configMutationQueue = Promise.resolve();
@@ -1342,28 +1344,23 @@ export function createApp(services = createServices()) {
   // First-run onboarding: what the wizard pre-fills (token presence, autostart)
   // and where it writes its done marker. Mode application reuses /api/config/mode;
   // only the onboarding flag lives here.
-  app.get("/api/onboarding", async (req, res) => {
-    try {
-      const status = await configSwitcher.status();
-      const settings = settingsPayload(services);
-      return res.json({
-        onboarded: Boolean(status.onboarded),
-        onboardedAt: status.onboardedAt || null,
-        nativeMerge: config.nativeMerge !== false,
-        mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
-        tokenConfigured: {
-          "opencode-go": Boolean(config.tokens?.["opencode-go"]),
-          "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
-        },
-        // Any provider token unlocks the ON mode (the wizard's Apply gate); the
-        // trial pair still requires the OpenCode token specifically.
-        anyTokenConfigured: anyProviderTokenConfigured(config),
-        autostart: settings.autostart,
-      });
-    } catch (error) {
-      return res.status(500).json({ error: { type: "onboarding_status_error", message: error.message } });
-    }
-  });
+  app.get("/api/onboarding", jsonRoute("onboarding_status_error", async () => {
+    const status = await configSwitcher.status();
+    return {
+      onboarded: Boolean(status.onboarded),
+      onboardedAt: status.onboardedAt || null,
+      nativeMerge: config.nativeMerge !== false,
+      mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
+      tokenConfigured: {
+        "opencode-go": Boolean(config.tokens?.["opencode-go"]),
+        "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
+      },
+      // Any provider token unlocks the ON mode (the wizard's Apply gate); the
+      // trial pair still requires the OpenCode token specifically.
+      anyTokenConfigured: anyProviderTokenConfigured(config),
+      autostart: settingsPayload(services).autostart,
+    };
+  }));
   app.post("/api/onboarding/complete", mutateConfig, async (req, res) => {
     try {
       const status = await configSwitcher.markOnboarded();
