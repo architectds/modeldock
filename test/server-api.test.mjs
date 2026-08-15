@@ -959,7 +959,9 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     }
     assert.match(env, /MODELDOCK_CUSTOM_MODEL=vendor\/model-x/);
     assert.match(env, /MODELDOCK_CUSTOM_MAIN=1/);
-    assert.match(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);
+    // Adding an endpoint records what it may be used for; it must not take over
+    // the live selection, so the running main model is left alone.
+    assert.doesNotMatch(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);
 
     // Published to the catalog under the Custom provider.
     const catalog = await (await fetch(`${instance.base}/v1/models`)).json();

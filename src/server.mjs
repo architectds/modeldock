@@ -249,7 +249,15 @@ function modelsPayload(services) {
     selected,
     options,
     providers: providerOptions(services.config),
-    selectedProvider: services.config.profileId || "opencode-go",
+    // Derive the provider from the model actually selected, the same way the
+    // vision and subagent pickers do. Reporting config.profileId here let the two
+    // drift apart: selecting a custom/ollama model as main updates mainModel but
+    // never touches profileId, so the dashboard rendered impossible pairs like
+    // "OpenCode Go / qwen3.8:27b". profileId remains the fallback for a model the
+    // catalog cannot place.
+    selectedProvider: options.find((entry) => entry.id === selected.mainModel)?.provider
+      || services.config.profileId
+      || "opencode-go",
     visionProviders,
     selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : "",
   };
@@ -1552,32 +1560,48 @@ export function createApp(services = createServices()) {
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
       if (!String(apiKey || "").trim()) throw new CustomEndpointError("key", "An API key is required.");
       const probe = await probeCustomResponses({ baseUrl, apiKey, modelId: model });
+      // Advertised context window (llama.cpp meta.n_ctx) so compaction limits
+      // match the real backend instead of the 250K custom fallback.
+      const listed = await listEndpointModels({ baseUrl, apiKey });
+      const advertisedContext = listed.models.find((m) => m.id === model)?.contextWindow || 0;
       const qualified = `${model}${PROVIDER_SEPARATOR}custom`;
       const updates = {
         MODELDOCK_CUSTOM_BASE_URL: normalizeBaseUrl(baseUrl),
         MODELDOCK_CUSTOM_API_KEY: apiKey,
         MODELDOCK_CUSTOM_MODEL: model,
+        MODELDOCK_CUSTOM_CONTEXT_WINDOW: advertisedContext ? String(advertisedContext) : "",
         MODELDOCK_CUSTOM_MAIN: asMain ? "1" : "0",
         MODELDOCK_CUSTOM_VISION: asVision ? "1" : "0",
       };
-      if (asMain) updates.MODELDOCK_MAIN_MODEL = qualified;
-      else if ((config.mainModel || "") === qualified) updates.MODELDOCK_MAIN_MODEL = "";
-      if (asVision) updates.MODELDOCK_VISION_MODEL = qualified;
-      else if ((config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
+      // The Main/Vision toggles mark what this endpoint may be USED FOR - they do
+      // not hijack the live selection. MODELDOCK_CUSTOM_MAIN/VISION above already
+      // record that: CUSTOM_VISION drives supportsVision (so the model shows up in
+      // the vision picker) and CUSTOM_MAIN is the boot fallback when no main model
+      // is configured. Overwriting MODELDOCK_MAIN_MODEL/VISION_MODEL here made
+      // merely adding an endpoint replace whatever the user was already running.
+      // Only the un-toggle case still writes: a selection pointing at this model
+      // must not dangle once the endpoint is no longer offered for that role.
+      if (!asMain && (config.mainModel || "") === qualified) updates.MODELDOCK_MAIN_MODEL = "";
+      if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
       writeEnvFile(updates, config.envFile);
       config.customBaseUrl = updates.MODELDOCK_CUSTOM_BASE_URL;
       config.customApiKey = apiKey;
       config.customModel = model;
+      config.customContextWindow = advertisedContext;
       config.customMain = Boolean(asMain);
       config.customVision = Boolean(asVision);
       config.tokens.custom = apiKey;
       applyCustomProfile(config);
-      if (asMain) {
-        config.mainModel = qualified;
-        services.modelSelection.mainModel = qualified;
-        services.configSwitcher.model = qualified;
+      // Mirror the un-toggle cleanup above into the live selection so a role this
+      // endpoint no longer fills does not keep pointing at it.
+      if (!asMain && config.mainModel === qualified) {
+        config.mainModel = "";
+        services.modelSelection.mainModel = "";
       }
-      if (asVision) services.modelSelection.visionModel = qualified;
+      if (!asVision && config.visionModel === qualified) {
+        config.visionModel = "";
+        services.modelSelection.visionModel = "";
+      }
       // Rewrite the catalog file so the Codex picker sees the model immediately
       // instead of waiting for the next hourly refresh.
       services.writeCatalogFile?.();
