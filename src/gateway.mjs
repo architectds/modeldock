@@ -929,6 +929,38 @@ export function stripLocalSkills(instructions) {
   return stripSkillsBlock(instructions);
 }
 
+// Small-context local backends have no image_gen (Codex does not send hosted
+// tools to routed models). Teach them the two working paths: a native
+// modeldock_subagent that carries image_gen, or a direct POST to the gateway's
+// native image relay - the same endpoint the built-in tool uses. The token
+// is read at runtime from ~/.codex/auth.json, never baked into the prompt.
+const IMAGE_GENERATION_GUIDANCE = (imageUrl) =>
+  [
+    "Image generation: you have no image_gen tool. To create an image, ask a modeldock_subagent",
+    '(agent_type="modeldock_subagent", fork_turns="none") to generate it with its native image_gen tool.',
+    imageUrl
+      ? `Or POST directly to ${imageUrl} with headers { "Content-Type": "application/json", "Authorization": "Bearer <access_token from ~/.codex/auth.json tokens.access_token>" } and body { "model": "gpt-image-1", "prompt": "<describe the image>", "size": "1024x1024", "n": 1 }. The response is JSON with the PNG as base64 in data[0].b64_json; decode it to a .png file and show it.`
+      : "",
+  ].filter(Boolean).join(" ");
+
+// Append the image-generation guidance to the payload instructions, preserving
+// the string-vs-array shape Codex sent so the upstream prefix cache stays stable.
+export function appendImageGuidance(instructions, imageUrl) {
+  const text = IMAGE_GENERATION_GUIDANCE(imageUrl);
+  if (Array.isArray(instructions)) {
+    if (!instructions.length) return [{ type: "input_text", text }];
+    const last = instructions.at(-1);
+    if (last && typeof last.text === "string") {
+      return [...instructions.slice(0, -1), { ...last, text: `${last.text}\n\n${text}` }];
+    }
+    return [...instructions, { type: "input_text", text }];
+  }
+  if (typeof instructions === "string") {
+    return instructions ? `${instructions}\n\n${text}` : text;
+  }
+  return instructions;
+}
+
 // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
 // and drop anything else so local custom/Ollama routes never trip the template
@@ -2500,6 +2532,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // tokens the model no longer pays to read on each turn.
   if (trimLocalTools) {
     normalizedPayload.instructions = stripLocalSkills(normalizedPayload.instructions);
+    if (normalizedPayload.instructions != null) {
+      const imageUrl = services.callerKey
+        ? `http://${config.host || "127.0.0.1"}:${config.port || 4097}/c/${services.callerKey}/v1/images/generations`
+        : null;
+      normalizedPayload.instructions = appendImageGuidance(normalizedPayload.instructions, imageUrl);
+    }
   }
 
   const target = upstreamTargetFor(config, normalizedPayload.model);

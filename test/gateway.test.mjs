@@ -6,6 +6,7 @@ import path from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import {
   RouteAffinity,
+  appendImageGuidance,
   applyToolPolicy,
   compactFailureReport,
   createUsageTee,
@@ -1091,6 +1092,78 @@ test("relayResponses keeps goal tools for small-context custom models", async ()
       assert.ok(names.includes(goal), `${goal} survives the whitelist`);
     }
     assert.ok(!names.includes("request_user_input"), "other flat tools stay stripped");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("appendImageGuidance adds the working image paths to string and array instructions", () => {
+  const url = "http://127.0.0.1:4097/c/abcdefghijklmnopqrstuvwxyz123456/v1/images/generations";
+  const asString = appendImageGuidance("You are Codex.", url);
+  assert.ok(asString.includes("Image generation"), "string instructions get the guidance");
+  assert.ok(asString.includes(url), "the direct relay URL is embedded");
+  assert.ok(asString.includes("modeldock_subagent"), "the native subagent path is offered");
+  assert.ok(asString.includes("gpt-image-1") && asString.includes("data[0].b64_json"), "the recipe is concrete");
+
+  const parts = [
+    { type: "input_text", text: "You are Codex." },
+    { type: "input_text", text: "Some tool notes." },
+  ];
+  const asArray = appendImageGuidance(parts, url);
+  assert.equal(asArray.length, 2, "array shape is preserved");
+  assert.ok(asArray[1].text.includes("Image generation"), "guidance appends to the last text part");
+  assert.equal(asArray[0], parts[0], "earlier parts are untouched");
+
+  const noUrl = appendImageGuidance("You are Codex.", null);
+  assert.ok(noUrl.includes("modeldock_subagent"), "subagent path survives without a URL");
+  assert.ok(!noUrl.includes("/images/generations"), "no URL means no direct-relay instruction");
+});
+
+test("relayResponses teaches image generation to small-context custom models", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("ok");
+  };
+  try {
+    const services = {
+      ...compactServices(),
+      callerKey: "abcdefghijklmnopqrstuvwxyz1234567890",
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        host: "127.0.0.1",
+        port: 4097,
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const result = await relayResponses(
+      {
+        model: "qwen3.8:27b@custom",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "draw a logo" }] }],
+        instructions: "You are Codex.",
+      },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    const sent = calls[0].body;
+    assert.ok(sent.instructions.includes("Image generation"), "qwen receives the image guidance");
+    assert.ok(
+      sent.instructions.includes("http://127.0.0.1:4097/c/abcdefghijklmnopqrstuvwxyz1234567890/v1/images/generations"),
+      "the relay URL carries the live caller key",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
