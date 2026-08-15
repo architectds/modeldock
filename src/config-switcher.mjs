@@ -158,7 +158,7 @@ function restoreTopLevel(lines, key, originalLine) {
   }
 }
 
-export function mergeRestoredCodexConfig(current, original) {
+function mergeRestoredCodexConfig(current, original) {
   const newline = current.includes("\r\n") ? "\r\n" : "\n";
   const originalSection = providerSection(original);
   const lines = removeManagedRoute(current.replace(/\r\n/g, "\n").split("\n"));

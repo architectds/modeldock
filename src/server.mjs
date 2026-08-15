@@ -806,7 +806,10 @@ async function refreshProfileModels(profile, config) {
   // so newly added upstream ids appear alongside the curated ones. Vision
   // probing/evaluation (probeVisionCandidates/evaluateVision) is dev-only test
   // tooling and is NOT wired into this path or into startup.
-  if (config.modelProbeEnabled === false) return;
+  // Opt-in, as the comment above says: a config that simply omits the key (a test
+  // fixture, an embedder) must not start probing upstreams. `=== false` only
+  // behaved that way because loadConfig always fills a boolean in.
+  if (!config.modelProbeEnabled) return;
   try {
     const base = config.goBaseUrl.replace(/\/$/, "");
     const headers = { Authorization: `Bearer ${opencodeToken}` };

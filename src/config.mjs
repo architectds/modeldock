@@ -48,13 +48,6 @@ export function sanitizeEnvValue(value) {
   return String(value).replace(/[\r\n]+/g, " ").trim();
 }
 
-export function serializeEnvFile(entries) {
-  return Object.entries(entries)
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => `${key}=${sanitizeEnvValue(value)}`)
-    .join("\n") + "\n";
-}
-
 // One spelling of "on" and one of "off" for every boolean env var. These were
 // written out per flag and drifted: MODELDOCK_CUSTOM_MAIN accepted "true" while
 // MODELDOCK_TRIAL only accepted "1", and MODELDOCK_MEMORY honoured "no" while
@@ -459,11 +452,6 @@ export function loadConfig() {
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
-    // md_memory: the whole memory-compression line (rolling summaries, the assistant
-    // sliding window, reasoning clipping, anti-breakpoint revival) behind one switch.
-    // Set MODELDOCK_MD_MEMORY=0 to hand context management back to the client and
-    // compare the two - the code stays in place either way.
-    mdMemory: !envOff("MODELDOCK_MD_MEMORY"),
     // Model catalog refresh. Off by default: the shipped curated catalog in catalog.mjs
     // is the primary source and is published with the release. When enabled it only does a
     // light GET /models merge (new ids appended, vision metadata untouched). The heavier
