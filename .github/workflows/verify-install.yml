@@ -9,8 +9,34 @@ permissions:
   contents: read
 
 jobs:
+  # Tagged release commits are verified end to end by the Release workflow's
+  # verify-install job, which waits for the publish to finish before it runs.
+  # Running the same script here too would duplicate that gate, so the standalone
+  # job skips any commit that a v* tag points at.
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Skip tagged release commits
+        id: check
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          elif git tag --points-at "$GITHUB_SHA" | grep -q '^v'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   verify-install:
     runs-on: windows-latest
+    needs: decide
+    if: needs.decide.outputs.skip != 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
