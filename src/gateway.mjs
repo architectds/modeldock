@@ -26,9 +26,11 @@ const HOSTED_TOOL_TYPES = new Set([
 // The vision path is vision_inspect or direct image escalation, not view_image.
 const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
 
-// Local backends (llama.cpp / Ollama) run on ~32K context; Codex sends 150+
-// tool schemas (mostly MCP) that alone cost ~39K tokens and blow the window.
-// Whitelist the core tools so the fixed overhead fits and the model can act.
+// Local backends (llama.cpp / Ollama) run on 32K-100K context; Codex sends
+// 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and, together
+// with the system prompt, eat roughly 61K of the window. Whitelist the core
+// tools so the fixed overhead fits and the model keeps real conversation room
+// (a qwen3.8 at 80K would otherwise be left with only ~5K for the task).
 const LOCAL_TOOL_ALLOWLIST = new Set([
   "exec_command",
   "apply_patch",
@@ -49,11 +51,12 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__modeldock__vision_inspect",
 ]);
 
-// Only backends whose advertised context is too small for Codex's ~61K fixed
-// overhead (system prompt + 150 tool schemas) get the tool whitelist. Custom
-// endpoints may be OpenAI/OpenRouter with 128K+ contexts - those must keep the
-// full toolset. 0 (unknown) also means no trimming, to never hurt a big model.
-const LOCAL_TOOL_TRIM_MAX_CONTEXT = 40_000;
+// Backends whose advertised context cannot spare Codex's ~61K fixed overhead
+// (system prompt + 150 tool schemas) get the tool whitelist: custom/Ollama
+// endpoints up to 100K. Endpoints above that (OpenAI/OpenRouter at 128K+) keep
+// the full toolset. 0 (unknown) also means no trimming, to never hurt a big
+// model.
+const LOCAL_TOOL_TRIM_MAX_CONTEXT = 100_000;
 
 // A custom/ollama backend whose advertised context is too small to survive
 // Codex's fixed overhead. This is the single criterion for both the tool

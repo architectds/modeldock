@@ -19,6 +19,7 @@ import {
   isCompactV1Request,
   isCompactV2Request,
   isNativeModel,
+  isLocalSmallContextBackend,
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
@@ -832,6 +833,43 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
     "only whitelisted survive",
   );
   assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
+});
+
+test("isLocalSmallContextBackend trims custom/ollama backends up to 100K only", () => {
+  const base = configStub();
+  const customCfg = (ctx) => ({
+    ...base,
+    profileId: "custom",
+    tokens: { ...base.tokens, custom: "k" },
+    customBaseUrl: "http://127.0.0.1:11435/v1",
+    customModel: "qwen3.8:27b",
+    profile: { id: "custom", availableModels: [{ id: "qwen3.8:27b", contextWindow: ctx }] },
+  });
+  assert.equal(
+    isLocalSmallContextBackend(customCfg(80_000), "qwen3.8:27b@custom"),
+    true,
+    "a qwen3.8 at 80K gets the tool whitelist so the ~61K fixed overhead leaves room",
+  );
+  assert.equal(isLocalSmallContextBackend(customCfg(32_000), "qwen3.8:27b@custom"), true, "small custom still trims");
+  assert.equal(
+    isLocalSmallContextBackend(customCfg(128_000), "qwen3.8:27b@custom"),
+    false,
+    "128K+ custom endpoints keep the full toolset",
+  );
+  assert.equal(isLocalSmallContextBackend(customCfg(0), "qwen3.8:27b@custom"), false, "unknown context never trims");
+
+  const ollamaCfg = {
+    ...base,
+    profileId: "ollama",
+    profile: { id: "ollama", availableModels: [{ id: "qwen3.8:27b", contextWindow: 80_000 }] },
+  };
+  assert.equal(isLocalSmallContextBackend(ollamaCfg, "qwen3.8:27b@ollama"), true, "ollama at 80K gets the whitelist");
+
+  assert.equal(
+    isLocalSmallContextBackend(base, "deepseek-v4-flash@opencode-go"),
+    false,
+    "non-local providers are never trimmed by this gate",
+  );
 });
 
 test("normalizeOpenCodeProInput repairs duplicate tool calls persisted from a hybrid Pro stream", () => {
