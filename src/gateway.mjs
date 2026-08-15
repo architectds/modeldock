@@ -1759,6 +1759,23 @@ function usageRecorder(services, { startedAt, sessionId, threadId }) {
   return (fields) => record({ durationMs: Date.now() - startedAt, sessionId, threadId, ...fields });
 }
 
+// A transform report for a request that reached the upstream unchanged. Most
+// call sites are failure paths that rewrote nothing, and each spelled out all
+// eight fields to say so; they now pass only what they actually observed.
+function noTransform(fields = {}) {
+  return {
+    blocked: { tool_search: 0, web_search: 0 },
+    toolChoiceRewritten: false,
+    imageRefs: [],
+    directVision: false,
+    droppedAssistantMessages: 0,
+    nativeToolCalls: 0,
+    nativeToolOutputs: 0,
+    fallbackToolResults: 0,
+    ...fields,
+  };
+}
+
 // The upstream's usage object in the field names the meter stores. Written out
 // per call site, this was five near-identical lines each time, and the two paths
 // that only wanted three of them were easy to mistake for a bug.
@@ -1829,16 +1846,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       }
       finish?.({ ok: false, httpStatus: upstream.status, upstream: "openai", error: redactBearer(raw).slice(0, 400) });
       metrics?.recordResponseUsage?.({ bytesOut: 0, usage });
-      metrics?.recordResponseTransform?.({
-        blocked: { tool_search: 0, web_search: 0 },
-        toolChoiceRewritten: false,
-        imageRefs: [],
-        directVision: false,
-        droppedAssistantMessages: 0,
-        nativeToolCalls: 0,
-        nativeToolOutputs: 0,
-        fallbackToolResults: 0,
-      }, { streaming: false, routeReason: "native_passthrough", bytesIn });
+      metrics?.recordResponseTransform?.(noTransform(), { streaming: false, routeReason: "native_passthrough", bytesIn });
       recordUsage({ ...nativeRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
     }
@@ -1872,16 +1880,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       reasoningTokens: usage?.output_tokens_details?.reasoning_tokens || 0,
     });
     metrics?.recordResponseUsage?.({ bytesOut, usage });
-    metrics?.recordResponseTransform?.({
-      blocked: { tool_search: 0, web_search: 0 },
-      toolChoiceRewritten: false,
-      imageRefs: [],
-      directVision: false,
-      droppedAssistantMessages: 0,
-      nativeToolCalls: 0,
-      nativeToolOutputs: 0,
-      fallbackToolResults: 0,
-    }, { streaming: payload.stream !== false, routeReason: "native_passthrough", bytesIn });
+    metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: "native_passthrough", bytesIn });
     recordUsage({
       ...nativeRoute,
       status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
@@ -2191,16 +2190,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         error: translated.body.error.message.slice(0, 400),
         requestShape: describeInputShape(payload.input),
       });
-      metrics?.recordResponseTransform?.({
-        blocked: { tool_search: 0, web_search: 0 },
-        toolChoiceRewritten: false,
-        imageRefs: [],
-        directVision: false,
-        droppedAssistantMessages: 0,
-        nativeToolCalls: 0,
-        nativeToolOutputs: 0,
-        fallbackToolResults: 0,
-      }, { streaming: false, routeReason: operation, bytesIn });
+      metrics?.recordResponseTransform?.(noTransform(), { streaming: false, routeReason: operation, bytesIn });
       recordUsage({ ...compactRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
@@ -2245,16 +2235,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       outputTokens: usage?.output_tokens || 0,
     });
     metrics?.recordResponseUsage?.({ bytesOut: bytes.length, usage });
-    metrics?.recordResponseTransform?.({
-      blocked: { tool_search: 0, web_search: 0 },
-      toolChoiceRewritten: false,
-      imageRefs: [],
-      directVision: false,
-      droppedAssistantMessages: 0,
-      nativeToolCalls: 0,
-      nativeToolOutputs: 0,
-      fallbackToolResults: 0,
-    }, { streaming: payload.stream !== false, routeReason: operation, bytesIn });
+    metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
     recordUsage({ ...compactRoute, status: 200, ...usageTokens(usage) });
     return {
       ok: true,
@@ -2395,16 +2376,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     res.statusCode = 503;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(error));
-    metrics?.recordResponseTransform?.({
-      blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
-      toolChoiceRewritten: false,
-      imageRefs: [],
-      directVision: route.directVision,
-      droppedAssistantMessages: 0,
-      nativeToolCalls: 0,
-      nativeToolOutputs: 0,
-      fallbackToolResults: 0,
-    }, { streaming: false, routeReason: route.reason, bytesIn });
+    metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
     return { ok: false, httpStatus: 503, route, error };
   }
 
@@ -2468,16 +2440,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         error: translated.body.error.message.slice(0, 400),
         requestShape: describeInputShape(normalizedPayload.input),
       });
-      metrics?.recordResponseTransform?.({
-        blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
-        toolChoiceRewritten: false,
-        imageRefs: [],
-        directVision: route.directVision,
-        droppedAssistantMessages: 0,
-      nativeToolCalls: 0,
-      nativeToolOutputs: 0,
-      fallbackToolResults: 0,
-    }, { streaming: false, routeReason: route.reason, bytesIn });
+      metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
     }
 
@@ -2516,16 +2479,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           error: translated.body.error.message.slice(0, 400),
           requestShape: describeInputShape(normalizedPayload.input),
         });
-        metrics?.recordResponseTransform?.({
-          blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
-          toolChoiceRewritten: false,
-          imageRefs: [],
-          directVision: route.directVision,
-          droppedAssistantMessages: 0,
-          nativeToolCalls: 0,
-          nativeToolOutputs: 0,
-          fallbackToolResults: 0,
-        }, { streaming: false, routeReason: route.reason, bytesIn });
+        metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
         return { ok: false, httpStatus: errorStatus, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
       }
       // Real non-stream free response: rebuild the body as a web stream so the
@@ -2587,16 +2541,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
         reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
       });
-      metrics?.recordResponseTransform?.({
-        blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
-        toolChoiceRewritten: false,
-        imageRefs: [],
-        directVision: route.directVision,
-        droppedAssistantMessages: 0,
-        nativeToolCalls: 0,
-        nativeToolOutputs: 0,
-        fallbackToolResults: 0,
-      }, { streaming: true, routeReason: route.reason, bytesIn });
+      metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: true, routeReason: route.reason, bytesIn });
       metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
       recordUsage({ ...relayRoute, status: 429, ...usageTokens(traceUsage) });
       return { ok: false, httpStatus: 429, route, error: errorMessage.slice(0, 400), usage: traceUsage, bytesOut, upstreamBytes, latencyMs: Date.now() - startedAt, upstream: target.provider };
@@ -2618,16 +2563,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
       reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
     });
-    metrics?.recordResponseTransform?.({
-      blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
-      toolChoiceRewritten: false,
-      imageRefs: [],
-      directVision: route.directVision,
-      droppedAssistantMessages: 0,
-      nativeToolCalls: 0,
-      nativeToolOutputs: 0,
-      fallbackToolResults: 0,
-    }, { streaming: true, routeReason: route.reason, bytesIn });
+    metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: true, routeReason: route.reason, bytesIn });
     metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
     // Injectable so unit tests do not append to the real ~/.modeldock file.
     recordUsage({
