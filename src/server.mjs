@@ -255,16 +255,17 @@ function modelsPayload(services) {
     // never touches profileId, so the dashboard rendered impossible pairs like
     // "OpenCode Go / qwen3.8:27b". profileId remains the fallback for a model the
     // catalog cannot place.
-    selectedProvider: options.find((entry) => entry.id === selected.mainModel)?.provider
-      || services.config.profileId
-      || "opencode-go",
+    selectedProvider: modelProviderOf(options, selected.mainModel) || services.config.profileId || "opencode-go",
     visionProviders,
     selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : "",
   };
 }
 
+// The provider that owns a published model id, or "" when the catalog cannot
+// place it. Returning a placeholder here instead made every `modelProviderOf(...)
+// || config.profileId` fallback dead code, since the placeholder is truthy.
 function modelProviderOf(options, modelId) {
-  return options.find((entry) => entry.id === modelId)?.provider || "other";
+  return options.find((entry) => entry.id === modelId)?.provider || "";
 }
 
 // Sub Agent selector: the dashboard writes a ModelDock-managed Codex agent file
