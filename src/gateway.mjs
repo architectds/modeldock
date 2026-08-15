@@ -876,6 +876,49 @@ export function normalizeLocalPayload(payload) {
   return { ...payload, input: normalizeLocalInput(payload.input) };
 }
 
+// Skill entries stripped from the <skills_instructions> block for small-context
+// local backends (ctx <= 100K). Each prefix matches the skill name in the block,
+// so "hyperframes" removes every hyperframes-* variant in one pass. The entries
+// are irrelevant to a 27B local model and their schemas/instructions alone cost
+// ~2.4K tokens in every request.
+const LOCAL_SKILLS_STRIP_PREFIXES = ["hyperframes"];
+const SKILLS_BLOCK_RE = /<skills_instructions>[\s\S]*?<\/skills_instructions>/;
+
+function stripSkillsBlock(text) {
+  if (typeof text !== "string") return text;
+  const block = text.match(SKILLS_BLOCK_RE)?.[0];
+  if (!block) return text;
+  const kept = block
+    .split("\n")
+    .filter((line) => {
+      const entry = line.match(/^\s*-\s*([A-Za-z0-9._-]+)\s*:/);
+      if (!entry) return true;
+      return !LOCAL_SKILLS_STRIP_PREFIXES.some((prefix) => entry[1].startsWith(prefix));
+    })
+    .join("\n");
+  if (kept === block) return text;
+  return text.replace(block, kept);
+}
+
+// Remove LOCAL_SKILLS_STRIP_PREFIXES entries from the skills block in the
+// payload instructions. Codex sends instructions either as a plain string or as
+// an array of input_text parts; both shapes are handled and unchanged input is
+// returned as-is so the upstream prefix cache is not invalidated.
+export function stripLocalSkills(instructions) {
+  if (Array.isArray(instructions)) {
+    let changed = false;
+    const out = instructions.map((part) => {
+      if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
+      const text = stripSkillsBlock(part.text);
+      if (text === part.text) return part;
+      changed = true;
+      return { ...part, text };
+    });
+    return changed ? out : instructions;
+  }
+  return stripSkillsBlock(instructions);
+}
+
 // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
 // and drop anything else so local custom/Ollama routes never trip the template
@@ -2201,6 +2244,12 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   if (localPayload) {
     summarizeBody.reasoning = normalizeLocalReasoning(summarizeBody).reasoning;
   }
+  // Small-context local backends do not need the heavy creative skills; drop
+  // their entries from the instructions so the summarize call (which replays
+  // the full history) carries less dead weight.
+  if (isLocalSmallContextBackend(config, route.model)) {
+    summarizeBody.instructions = stripLocalSkills(summarizeBody.instructions);
+  }
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
   const bytesIn = Buffer.byteLength(JSON.stringify(payload));
@@ -2436,6 +2485,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
+  // Same budget logic as the tool whitelist: a small-context local model gets
+  // no value from the hyperframes skill entries, and every stripped line is
+  // tokens the model no longer pays to read on each turn.
+  if (trimLocalTools) {
+    normalizedPayload.instructions = stripLocalSkills(normalizedPayload.instructions);
+  }
 
   const target = upstreamTargetFor(config, normalizedPayload.model);
   // The upstream sees the bare model id; the route model (possibly owner-suffixed)

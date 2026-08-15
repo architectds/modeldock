@@ -39,6 +39,7 @@ import {
   rewriteHistoricalImages,
   routeGatewayRequest,
   sessionIdsFrom,
+  stripLocalSkills,
   upstreamTargetFor,
 } from "../src/gateway.mjs";
 
@@ -870,6 +871,121 @@ test("isLocalSmallContextBackend trims custom/ollama backends up to 100K only", 
     false,
     "non-local providers are never trimmed by this gate",
   );
+});
+
+test("stripLocalSkills removes hyperframes entries from the skills block", () => {
+  const instructions = `<skills_instructions>
+## Skills
+- hyperframes: Mandatory video entry point (file: C:/x/hyperframes/SKILL.md)
+- hyperframes-animation: Animation rules (file: C:/x/hyperframes-animation/SKILL.md)
+- hyperframes-cli: CLI loop (file: C:/x/hyperframes-cli/SKILL.md)
+- imagegen: Generate raster images (file: C:/x/imagegen/SKILL.md)
+- content-to-video: Turn content into MP4 (file: C:/x/content-to-video/SKILL.md)
+</skills_instructions>`;
+  const out = stripLocalSkills(instructions);
+  assert.ok(!out.includes("hyperframes"), "every hyperframes-* variant is removed");
+  assert.ok(out.includes("imagegen") && out.includes("content-to-video"), "other skill entries survive");
+  assert.ok(out.includes("<skills_instructions>") && out.includes("</skills_instructions>"), "block structure intact");
+});
+
+test("stripLocalSkills handles array-of-parts instructions and leaves no-ops untouched", () => {
+  const parts = [
+    { type: "input_text", text: "You are Codex." },
+    { type: "input_text", text: "<skills_instructions>\n- hyperframes: video (file: a)\n- github: gh (file: b)\n</skills_instructions>" },
+  ];
+  const out = stripLocalSkills(parts);
+  assert.equal(out[0], parts[0], "parts without the block are untouched");
+  assert.ok(!out[1].text.includes("hyperframes"));
+  assert.ok(out[1].text.includes("github"), "non-target skills survive in array parts");
+  // No-op inputs are returned by reference so the upstream prefix cache is stable.
+  const plain = "no skills block here";
+  assert.equal(stripLocalSkills(plain), plain);
+  assert.equal(stripLocalSkills(undefined), undefined);
+  const noHyper = "<skills_instructions>\n- imagegen: x\n</skills_instructions>";
+  assert.equal(stripLocalSkills(noHyper), noHyper);
+});
+
+test("relayResponses strips hyperframes from instructions for an 80K custom model", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("ok");
+  };
+  try {
+    const services = {
+      ...compactServices(),
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const instructions = `<skills_instructions>\n- hyperframes: video (file: a)\n- imagegen: images (file: b)\n</skills_instructions>`;
+    const result = await relayResponses(
+      {
+        model: "qwen3.8:27b@custom",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        instructions,
+      },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    const sent = calls[0].body;
+    assert.ok(!sent.instructions.includes("hyperframes"), "hyperframes stripped for an 80K custom model");
+    assert.ok(sent.instructions.includes("imagegen"), "other skill entries survive the relay");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses keeps hyperframes for a 128K custom model", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("ok");
+  };
+  try {
+    const services = {
+      ...compactServices(),
+      mainModel: "big-model@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "big-model@custom",
+        customBaseUrl: "https://api.example.com/v1",
+        customModel: "big-model",
+        profile: { availableModels: [{ id: "big-model", contextWindow: 128000 }] },
+        tokens: { ...configStub().tokens, custom: "big-key" },
+      },
+      knownModels: new Set(["big-model@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const instructions = `<skills_instructions>\n- hyperframes: video (file: a)\n- imagegen: images (file: b)\n</skills_instructions>`;
+    const result = await relayResponses(
+      { model: "big-model@custom", stream: false, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }], instructions },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    assert.ok(calls[0].body.instructions.includes("hyperframes"), "128K+ custom models keep the full skills block");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("normalizeOpenCodeProInput repairs duplicate tool calls persisted from a hybrid Pro stream", () => {
