@@ -91,9 +91,13 @@ if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   exit 1
 fi
 
-SERVER="$ROOT/src/server.mjs"
+# Prefer the built bundle, falling back to the source entry in a git checkout.
+# Must match start-hidden.sh: the two used to disagree, so a checkout served one
+# version on restart and another at login. dist wins because the self-updater
+# writes dist/modeldock.mjs and never touches src.
+SERVER="$ROOT/dist/modeldock.mjs"
 if [ ! -f "$SERVER" ]; then
-  SERVER="$ROOT/dist/modeldock.mjs"
+  SERVER="$ROOT/src/server.mjs"
 fi
 if [ ! -f "$SERVER" ]; then
   status "ERROR: gateway entry not found under $ROOT/src or $ROOT/dist"
@@ -218,7 +222,7 @@ fi
 
 nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
 NEW_PID=$!
-status "restart.sh: started gateway from $ROOT (logs: $LOG)"
+status "restart.sh: started gateway from $ROOT using $SERVER (logs: $LOG)"
 
 if wait_for_health "$OLD_PID"; then
   exit 0

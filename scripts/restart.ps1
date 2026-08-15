@@ -33,7 +33,16 @@ function Write-Status($message) {
   [Console]::Error.WriteLine($message)
 }
 
+# Seed from the environment before consulting .env, matching restart.sh. This script
+# used to ignore $env:MODELDOCK_PORT entirely, so a gateway told to use another port
+# by environment restarted against 4097 instead: it stopped whatever unrelated process
+# held the default port, then health-checked a port its own gateway was not on.
+# scheduleRestart passes the running gateway's environment through for exactly this.
 $port = 4097
+$envPort = 0
+if ($env:MODELDOCK_PORT -and [int]::TryParse($env:MODELDOCK_PORT, [ref]$envPort) -and $envPort -gt 0) {
+  $port = $envPort
+}
 if (Test-Path $envFile) {
   $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
   if ($line) {
@@ -162,11 +171,14 @@ if (-not $nodeExe) {
   exit 1
 }
 
-# Prefer src/server.mjs (git checkout: restart the code being edited); fall back
-# to the built bundle (installed layout ships dist/modeldock.mjs only). Mirrors
-# the server-selection in start-hidden.ps1.
-$server = Join-Path $root "src\server.mjs"
-if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "dist\modeldock.mjs" }
+# Prefer the built bundle, falling back to the source entry in a git checkout.
+# This must match start-hidden.ps1 exactly: the two used to disagree (this script
+# preferred src while the launcher preferred dist), so a checkout served one
+# version on restart and another at login. dist wins because the self-updater
+# writes dist/modeldock.mjs and never touches src - preferring src would leave an
+# applied update permanently unused, and the Update button permanently lit.
+$server = Join-Path $root "dist\modeldock.mjs"
+if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
 
 try {
   # Quote both paths: an installed layout under a home dir with a space
@@ -179,7 +191,7 @@ try {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root (logs: $log)"
+Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
 
 for ($i = 0; $i -lt 40; $i += 1) {
   Start-Sleep -Milliseconds 250
