@@ -611,7 +611,7 @@ function renderSessions(recent, names = {}) {
     return;
   }
   filter.hidden = false;
-  const signature = visible.map((session) => `${session.id}|${names[session.id] || session.model}`).join("\u0001");
+  const signature = visible.map((session) => `${session.id}|${names[session.id] || ""}|${session.model}`).join("\u0001");
   if (signature !== lastSessionSignature) {
     lastSessionSignature = signature;
     if (!visible.some((session) => session.id === sessionFilter)) sessionFilter = "";
@@ -623,7 +623,11 @@ function renderSessions(recent, names = {}) {
     visible.forEach((session) => {
       const option = document.createElement("option");
       option.value = session.id;
-      option.textContent = names[session.id] || `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
+      // "project - model@provider": the project comes from the Codex rollout
+      // file, the model is the trace record's own qualified id.
+      option.textContent = names[session.id]
+        ? `${names[session.id]} - ${session.model}`
+        : `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
       select.append(option);
     });
   }

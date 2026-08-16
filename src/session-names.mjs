@@ -15,8 +15,7 @@ import path from "node:path";
 // ago.
 
 const ROLLOUT_ID = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/;
-const HEAD_BYTES = 96 * 1024;
-const LABEL_MESSAGE_CHARS = 24;
+const HEAD_BYTES = 64 * 1024;
 
 function walk(root, visit) {
   let entries;
@@ -43,38 +42,9 @@ function buildIndex(sessionsRoot) {
   return index;
 }
 
-// Text of one user message, tolerant of the content shapes Codex writes (a
-// string, an array of {type,text} parts, or a nested object).
-function textOf(part) {
-  if (typeof part === "string") return part;
-  if (!part || typeof part !== "object") return "";
-  if (Array.isArray(part)) return part.map(textOf).join(" ").trim();
-  if (typeof part.text === "string") return part.text;
-  if (Array.isArray(part.content)) return part.content.map(textOf).join(" ").trim();
-  return "";
-}
-
-function firstUserText(payload) {
-  const messages = payload?.messages;
-  if (!Array.isArray(messages)) return "";
-  for (const message of messages) {
-    if (message?.role === "user") {
-      const text = textOf(message.content).replace(/\s+/g, " ").trim();
-      if (text) return text;
-    }
-  }
-  return "";
-}
-
-function truncate(text, max) {
-  const clean = text.trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, max - 1)}…`;
-}
-
 // Read only the head of the rollout file: the first session_meta line carries
-// the cwd, and the first user turn sits at the front of the file, so a bounded
-// read is enough and a multi-megabyte history is never loaded.
+// the cwd, whose basename is the project label. A bounded read is enough and a
+// multi-megabyte history is never loaded.
 export function sessionInfoFromFile(filePath) {
   let fd;
   try {
@@ -83,7 +53,6 @@ export function sessionInfoFromFile(filePath) {
     const read = readSync(fd, buffer, 0, HEAD_BYTES, 0);
     const head = buffer.subarray(0, read).toString("utf8");
     let cwd = "";
-    let user = "";
     for (const line of head.split(/\r?\n/)) {
       if (!line.trim()) continue;
       let entry;
@@ -94,22 +63,10 @@ export function sessionInfoFromFile(filePath) {
       }
       if (entry.type === "session_meta") {
         cwd = typeof entry.payload?.cwd === "string" ? entry.payload.cwd : "";
-      } else if (entry.type === "turn_context" && !user) {
-        user = firstUserText(entry.payload);
       }
     }
     const name = cwd ? path.basename(cwd) : "";
-    // The rollout filename carries the session's creation time, which keeps
-    // several sessions of the same project distinguishable when no first user
-    // message is recoverable from the file head.
-    const created = /rollout-(\d{4}-\d{2}-\d{2})T(\d{2}-\d{2})/.exec(path.basename(filePath));
-    const when = created ? `${created[1]} ${created[2]}` : "";
-    const label = user
-      ? `${name} · ${truncate(user, LABEL_MESSAGE_CHARS)}`
-      : when
-        ? `${name} · ${when}`
-        : name;
-    return { label: label || null, cwd, firstUser: user };
+    return { label: name || null, cwd };
   } catch {
     return null;
   } finally {
