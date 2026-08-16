@@ -86,12 +86,43 @@ function stripNoise(text) {
     .trim();
 }
 
+// Sentence terminators in both families. The boundary used to be "。" alone, so
+// an English conversation - the common case - never found one and always fell
+// back to a blind character cut.
+const SENTENCE_END = /[。！？]|[.!?](?=\s|$)/;
+
+// Snap a cut back to a word boundary, but only when one sits near the cut: CJK
+// has no word spaces, and dragging a Western cut halfway across the text to
+// reach a space would lose more than the ragged edge costs.
+function snapToWord(text, fromEnd = false) {
+  const at = fromEnd ? text.indexOf(" ") : text.lastIndexOf(" ");
+  if (at < 0) return text;
+  const kept = fromEnd ? text.length - at - 1 : at;
+  if (kept < text.length * 0.75) return text;
+  return fromEnd ? text.slice(at + 1) : text.slice(0, at);
+}
+
+// Keep a long assistant message's opening claim and its closing conclusion.
+// The head is bounded by the cap even when a sentence runs long: searching the
+// whole text for the first terminator let a message whose first sentence ended
+// 4000 characters in ignore the cap entirely.
 function firstAndLast(text, cap) {
   if (text.length <= cap) return text;
-  const firstEnd = text.indexOf("。");
-  const first = text.slice(0, firstEnd > 0 ? firstEnd + 1 : Math.floor(cap * 0.6));
-  return `${first} ... ${text.slice(-Math.floor(cap * 0.4))}`;
+  const headMax = Math.floor(cap * 0.6);
+  const window = text.slice(0, headMax);
+  const end = SENTENCE_END.exec(window);
+  const head = end ? window.slice(0, end.index + end[0].length) : snapToWord(window);
+  const tail = snapToWord(text.slice(-Math.floor(cap * 0.4)), true);
+  return `${head.trim()} ... ${tail.trim()}`;
 }
+
+// A file path inside serialized tool arguments: a Windows drive path on any
+// drive letter, or a POSIX/relative path, ending in a name with an extension.
+// The previous pattern matched only C:, D: and E:, so the inventory's file list
+// was always empty on macOS and Linux - platforms this project ships installers
+// for - and on any other Windows drive. Requiring an extension keeps command
+// flags and bare "/" arguments out of the list.
+const PATH_IN_ARGS = /(?:[A-Za-z]:[\\/]|\.{0,2}[\\/])?(?:[\w.@ +-]+[\\/])+[\w.@+-]+\.\w{1,8}/;
 
 // Aggregate older tool calls into a single inventory line so hundreds of
 // repetitive apply_patch/exec_command rows collapse to one.
@@ -105,7 +136,7 @@ export function aggregateToolCalls(lines, isKeptVerbatim) {
     const match = line.text.match(/TOOL_CALL: ([A-Za-z_]+)\(/);
     const name = match ? match[1] : "other";
     byName.set(name, (byName.get(name) || 0) + 1);
-    const fileMatch = line.text.match(/(?:D|C|E):[\\/][^")]{0,60}/);
+    const fileMatch = PATH_IN_ARGS.exec(line.text);
     if (fileMatch) {
       const file = fileMatch[0].split(/[\\/]/).slice(-2).join("/");
       if (!files.has(file)) files.set(file, name);
@@ -117,8 +148,37 @@ export function aggregateToolCalls(lines, isKeptVerbatim) {
   return `TOOLS_AGGREGATED: ${inventory}${fileList ? ` (files: ${fileList}...)` : ""}`;
 }
 
+// Raw character volume of the Responses input BEFORE any flattening: message
+// text, reasoning text, tool call arguments, and full tool outputs. The
+// compression ratio is measured against this, not against the flattened
+// lines - flattening already drops reasoning (~29% of a real session) and
+// truncates tool outputs (~33%), so measuring after flattening would report
+// only the extract's own shrink (18%) instead of what compaction actually
+// did (real ~4%). Arguments and input hold the same payload on a function
+// call, so count whichever is present, never both.
+function rawInputChars(input) {
+  let n = 0;
+  for (const item of input || []) {
+    if (!item || typeof item !== "object") continue;
+    if (Array.isArray(item.content)) {
+      for (const part of item.content) {
+        if (typeof part?.text === "string") n += part.text.length;
+      }
+    } else if (typeof item.content === "string") {
+      n += item.content.length;
+    }
+    if (typeof item.output === "string") n += item.output.length;
+    if (typeof item.arguments === "string") n += item.arguments.length;
+    else if (typeof item.input === "string") n += item.input.length;
+    else if (item.input && typeof item.input === "object") n += JSON.stringify(item.input).length;
+  }
+  return n;
+}
+
 // Compress a Responses input into handoff-oriented text. Deterministic, CPU
-// only, milliseconds. Returns { text, originalChars, compressedChars }.
+// only, milliseconds. Returns { text, originalChars, compressedChars } where
+// originalChars is the raw input volume (see rawInputChars) and compressedChars
+// is the extract's.
 export function compressConversation(input, options = {}) {
   const {
     tailLines = 24,
@@ -167,7 +227,7 @@ export function compressConversation(input, options = {}) {
     return { ...line, text };
   });
   if (inventory) cleaned.push({ kind: "tool", text: inventory });
-  const originalChars = lines.reduce((sum, line) => sum + line.text.length, 0);
+  const originalChars = rawInputChars(input);
   const compressedChars = cleaned.reduce((sum, line) => sum + line.text.length, 0);
   const text = cleaned.map((line) => line.text).join("\n");
   return { text, originalChars, compressedChars, keptCount: cleaned.length };
