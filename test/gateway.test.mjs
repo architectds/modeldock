@@ -930,6 +930,21 @@ test("stripLocalInstructions handles array-of-parts instructions and leaves no-o
   assert.equal(stripLocalInstructions(onlyKept), onlyKept);
 });
 
+test("stripLocalInstructions compresses the platform action rule and restart text", () => {
+  const instructions = [
+    "You are Codex, a coding agent.",
+    "IMPORTANT: To perform any action (read a file, run a command, search, edit, inspect an image), you MUST emit a function_call for the appropriate tool in THIS turn. Never describe an action in text and expect it to be performed. Never say 'let me read X' or 'I will do X' - emit the tool call now. If a previous turn's tool result was missing, re-emit the call.",
+    'Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: powershell -ExecutionPolicy Bypass -File "D:\\projects\\modeldock\\scripts\\restart.ps1". It stops the process on the configured port, starts a fresh detached instance, and prints gateway healthy when healthz passes; wait for that line before continuing.',
+  ].join("\n");
+  const out = stripLocalInstructions(instructions);
+  assert.ok(out.includes("You are Codex, a coding agent."), "the platform identity is untouched");
+  assert.ok(out.includes("emitting a function_call"), "the action rule essence survives");
+  assert.ok(!out.includes("Never say 'let me read X'"), "redundant action-rule reinforcement dropped");
+  assert.ok(out.includes('"D:\\projects\\modeldock\\scripts\\restart.ps1"'), "the restart command survives");
+  assert.ok(!out.includes("starts a fresh detached instance"), "restart explanation dropped");
+  assert.ok(out.includes("wait for \"gateway healthy\""), "the health wait instruction survives");
+});
+
 test("relayResponses strips dead-weight sections from instructions for an 80K custom model", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

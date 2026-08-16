@@ -913,6 +913,10 @@ const VERBOSE_VISION_GUIDANCE =
   /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
 const VERBOSE_DESIGN_FIRST =
   /Design-first workflow \(MANDATORY for frontend\/UI work\):[\s\S]*?read it with vision_inspect instead\./g;
+const VERBOSE_ACTION_RULE =
+  /IMPORTANT: To perform any action[\s\S]*?re-emit the call\./g;
+const VERBOSE_RESTART =
+  /Restarting the gateway: if you need to restart the ModelDock service[\s\S]*?wait for that line before continuing\./g;
 
 function stripSkillsBlock(text) {
   if (typeof text !== "string") return text;
@@ -975,6 +979,11 @@ function stripLocalInstructionText(text) {
   out = out
     .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images; use vision_inspect for any visual task.")
     .replace(VERBOSE_DESIGN_FIRST, "Design: only run image_gen when the user asks for a visual direction.")
+    .replace(VERBOSE_ACTION_RULE, "IMPORTANT: perform any action by emitting a function_call in this turn; never describe an action in text.")
+    .replace(VERBOSE_RESTART, (match) => {
+      const path = match.match(/"([^"]+\\restart\.ps1)"/)?.[1] || "scripts/restart.ps1";
+      return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for "gateway healthy".`;
+    })
     .replace(AGENT_BLOCK_RE, "")
     .replace(APPS_INSTRUCTIONS_RE, "")
     .replace(MEMORY_CITATION_RE, "");
