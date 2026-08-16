@@ -451,7 +451,7 @@ export function loadConfig() {
     memoryRefreshHours: Number(process.env.MODELDOCK_MEMORY_REFRESH_HOURS || 6),
     exaMcpUrl: normalizedBaseUrl(process.env.EXA_MCP_URL || "https://mcp.exa.ai/mcp"),
     exaApiKey: process.env.EXA_API_KEY || "",
-    recentLimit: integer("MODELDOCK_RECENT_LIMIT", 50, { min: 10, max: 500 }),
+    recentLimit: integer("MODELDOCK_RECENT_LIMIT", 200, { min: 10, max: 500 }),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
     // Model catalog refresh. Off by default: the shipped curated catalog in catalog.mjs
     // is the primary source and is published with the release. When enabled it only does a
