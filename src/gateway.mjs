@@ -67,32 +67,34 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "update_goal",
 ]);
 
-// Backends whose advertised context cannot spare Codex's ~61K fixed overhead
-// (system prompt + 150 tool schemas) get the tool whitelist: custom/Ollama
-// endpoints up to 100K. Endpoints above that (OpenAI/OpenRouter at 128K+) keep
-// the full toolset. 0 (unknown) also means no trimming, to never hurt a big
-// model.
-const LOCAL_TOOL_TRIM_MAX_CONTEXT = 100_000;
-
-// A custom/ollama backend whose advertised context is too small to survive
-// Codex's fixed overhead.
+// A custom/Ollama backend that runs on this machine (loopback base URL).
 //
-// This gates the *budget* decisions only - the tool whitelist and the
-// instruction stripping - because both trade capability for context and a large
-// endpoint should pay neither. It deliberately does NOT gate the *protocol*
-// adaptation (system hoisting, standard tool rewrite, reasoning mapping): a
-// qwen3.8 server can advertise 128K and still reject a mid-history system item,
-// so that adaptation keys off the provider alone, on both the main and compact
-// paths. Conflating the two is what made compact_v2 fail with "System message
-// must be at the beginning" on an 81920-context custom model; see the comment in
+// This is the real signal behind the budget decisions - the tool whitelist,
+// the instruction stripping, and the compact pre-compression - because all
+// three exist for slow local models. The earlier context-window proxy
+// (ctx <= 100K) existed only to avoid trimming remote endpoints like
+// OpenAI/OpenRouter; the loopback check excludes those directly instead of
+// guessing from a token count. A local backend with a large window still gets
+// the budget treatment (it is still a local model), and a remote one never
+// does, whatever it advertises.
+//
+// Like its predecessor it does NOT gate the *protocol* adaptation (system
+// hoisting, standard tool rewrite, reasoning mapping): that keys off the
+// provider alone, because a qwen3.8 server can reject a mid-history system
+// item at any advertised window. Conflating the two is what made compact_v2
+// fail with "System message must be at the beginning"; see the comment in
 // relayCompaction before widening this function's role again.
-//
-// 0 (unknown) means generic, to never hurt a large model.
-export function isLocalSmallContextBackend(config, model) {
+export function isLocalBackend(config, model) {
   const provider = providerForModel(config, model);
   if (provider !== "custom" && provider !== "ollama") return false;
-  const ctx = modelEntryFor(config, model)?.contextWindow || 0;
-  return ctx > 0 && ctx <= LOCAL_TOOL_TRIM_MAX_CONTEXT;
+  const baseUrl = provider === "ollama" ? config.ollamaBaseUrl : config.customBaseUrl;
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
 }
 
 function redactBearer(value) {
@@ -2326,7 +2328,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // template accepts. Context size is not the right gate here - a qwen3.8
   // server can advertise 128K and still reject a mid-history system item, so
   // this must match relayResponses unconditionally for the provider, not only
-  // for isLocalSmallContextBackend. Skipping the adaptation made compact_v2
+  // for isLocalBackend. Skipping the adaptation made compact_v2
   // fail with "System message must be at the beginning" whenever the compacted
   // history carried a mid-history system item.
   const routedProvider = providerForModel(config, route.model);
@@ -2362,7 +2364,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // shrinkable: a two-message exchange, no tool noise). That guard exists only
   // to avoid replacing the raw history with an identical copy.
   let compressionInfo = null;
-  if (isLocalSmallContextBackend(config, route.model)) {
+  if (isLocalBackend(config, route.model)) {
     const compressed = compressConversation(normalizedInput);
     if (compressed.compressedChars < compressed.originalChars * 0.95) {
       compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
@@ -2375,7 +2377,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // Small-context local backends do not need the heavy creative skills; drop
   // their entries from the instructions so the summarize call (which replays
   // the full history) carries less dead weight.
-  if (isLocalSmallContextBackend(config, route.model)) {
+  if (isLocalBackend(config, route.model)) {
     summarizeBody.instructions = stripLocalInstructions(summarizeBody.instructions);
   }
   delete summarizeBody.previous_response_id;
@@ -2610,7 +2612,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 
   // Trim tools only for small-context local backends (llama.cpp @32K etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
-  const trimLocalTools = isLocalSmallContextBackend(config, route.model);
+  const trimLocalTools = isLocalBackend(config, route.model);
   const { tools, stripped } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
   });

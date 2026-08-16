@@ -19,7 +19,7 @@ import {
   isCompactV1Request,
   isCompactV2Request,
   isNativeModel,
-  isLocalSmallContextBackend,
+  isLocalBackend,
   nativeTarget,
   normalizeNativeInput,
   normalizeGatewayInput,
@@ -836,40 +836,41 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
   assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
 });
 
-test("isLocalSmallContextBackend trims custom/ollama backends up to 100K only", () => {
+test("isLocalBackend identifies loopback custom/ollama backends only", () => {
   const base = configStub();
-  const customCfg = (ctx) => ({
+  const customCfg = (baseUrl, ctx) => ({
     ...base,
     profileId: "custom",
     tokens: { ...base.tokens, custom: "k" },
-    customBaseUrl: "http://127.0.0.1:11435/v1",
+    customBaseUrl: baseUrl,
     customModel: "qwen3.8:27b",
     profile: { id: "custom", availableModels: [{ id: "qwen3.8:27b", contextWindow: ctx }] },
   });
   assert.equal(
-    isLocalSmallContextBackend(customCfg(80_000), "qwen3.8:27b@custom"),
+    isLocalBackend(customCfg("http://127.0.0.1:11435/v1", 80_000), "qwen3.8:27b@custom"),
     true,
-    "a qwen3.8 at 80K gets the tool whitelist so the ~61K fixed overhead leaves room",
+    "a loopback custom backend is local",
   );
-  assert.equal(isLocalSmallContextBackend(customCfg(32_000), "qwen3.8:27b@custom"), true, "small custom still trims");
+  assert.equal(isLocalBackend(customCfg("http://localhost:11435/v1", 128_000), "qwen3.8:27b@custom"), true, "localhost counts");
   assert.equal(
-    isLocalSmallContextBackend(customCfg(128_000), "qwen3.8:27b@custom"),
+    isLocalBackend(customCfg("https://api.example.com/v1", 80_000), "qwen3.8:27b@custom"),
     false,
-    "128K+ custom endpoints keep the full toolset",
+    "a remote custom endpoint is not local even with a small window",
   );
-  assert.equal(isLocalSmallContextBackend(customCfg(0), "qwen3.8:27b@custom"), false, "unknown context never trims");
+  assert.equal(isLocalBackend(customCfg("http://192.168.1.5:11435/v1", 80_000), "qwen3.8:27b@custom"), false, "a LAN host is not loopback");
 
   const ollamaCfg = {
     ...base,
     profileId: "ollama",
+    ollamaBaseUrl: "http://127.0.0.1:11434",
     profile: { id: "ollama", availableModels: [{ id: "qwen3.8:27b", contextWindow: 80_000 }] },
   };
-  assert.equal(isLocalSmallContextBackend(ollamaCfg, "qwen3.8:27b@ollama"), true, "ollama at 80K gets the whitelist");
+  assert.equal(isLocalBackend(ollamaCfg, "qwen3.8:27b@ollama"), true, "a loopback ollama backend is local");
 
   assert.equal(
-    isLocalSmallContextBackend(base, "deepseek-v4-flash@opencode-go"),
+    isLocalBackend(base, "deepseek-v4-flash@opencode-go"),
     false,
-    "non-local providers are never trimmed by this gate",
+    "non-custom/ollama providers are never local",
   );
 });
 
