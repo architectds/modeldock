@@ -1,6 +1,6 @@
 {
   "name": "modeldock-opencode-go-gate",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "private": true,
   "type": "module",
   "description": "Give DeepSeek eyes, ears, a voice, a web connection, and a memory inside Codex - a thin local Responses bridge for OpenCode Go and DeepSeek official, with native GPT passthrough and live token, latency, and trace observability.",
@@ -14,8 +14,8 @@
     "test": "node --import ./test/preload-env.mjs --test test/*.test.mjs",
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
-  "probe:live": "node scripts/live-probe.mjs",
-  "build": "node scripts/build.mjs",
+    "probe:live": "node scripts/live-probe.mjs",
+    "build": "node scripts/build.mjs",
     "shot": "node scripts/shot.mjs"
   },
   "dependencies": {
