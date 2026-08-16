@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
+import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
@@ -2349,6 +2350,22 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   };
   if (localPayload) {
     summarizeBody.reasoning = normalizeLocalReasoning(summarizeBody).reasoning;
+  }
+  // A small-context local backend (e.g. qwen3.8 at 81920) cannot finish an LLM
+  // handoff of a large history inside Codex's ~5 minute timeout: prefill alone
+  // runs minutes on the AMD Vulkan backend. Shrink the history first - a
+  // CPU-only, deterministic extract of the task, findings, and recent state -
+  // so the summarize model sees ~1/5 of the tokens and finishes in the window.
+  // Small histories pass through untouched: the extract is only used when it
+  // meaningfully reduces the prompt.
+  if (isLocalSmallContextBackend(config, route.model)) {
+    const compressed = compressConversation(normalizedInput);
+    if (compressed.compressedChars < compressed.originalChars * 0.8) {
+      summarizeBody.input = [
+        { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${compressed.text}` }] },
+        messageItem(COMPACT_PROMPT),
+      ];
+    }
   }
   // Small-context local backends do not need the heavy creative skills; drop
   // their entries from the instructions so the summarize call (which replays

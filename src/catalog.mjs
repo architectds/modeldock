@@ -37,6 +37,11 @@ export function baseInstructionsFor(config) {
     ...(config.memoryEnabled
       ? ["Memory (MANDATORY): this project keeps persistent memory across sessions. Before starting substantive work, call recall_memory once with a query about the task - past decisions, baselines, and fixes are usually relevant. Call store_memory as soon as you learn something reusable: a hard-won fix, a stable project fact, a decision or baseline you relied on, or a correction to an earlier belief. If you would want it in the next session, store it now rather than leaving it only in this conversation. To correct a stale entry, recall it and store the correction under the same key from its result. Keep stored text short and factual."]
       : []),
+    // The goal tools are thread state that survives context compaction
+    // losslessly, so they are the durable anchor for resuming after a compact
+    // rewrites the history - get_goal restores the plan the compacted history
+    // no longer carries explicitly.
+    "Track the current objective with the goal tools (create_goal when a task starts, update_goal as it progresses); goals survive context compaction, so after compaction call get_goal to recover the plan.",
     // The MCP connection goes stale on a gateway restart and Codex never
     // re-establishes it, so this list is the only way a tool survives that. It
     // omitted image_gen, which quietly removed the "first-class" image tool

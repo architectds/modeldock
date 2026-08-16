@@ -80,6 +80,7 @@ test("compression keeps what a small model still needs", () => {
     "the prompt-injection rule survives",
   );
   assert.ok(out.includes("recall_memory"), "the memory rule survives");
+  assert.ok(out.includes("get_goal"), "the goal-recovery rule survives");
   assert.ok(/restart\.(ps1|sh)/.test(out), "the real restart command survives");
 });
 
