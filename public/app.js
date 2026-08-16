@@ -145,6 +145,12 @@ const waveHistory = [];
 const wavePeakState = { peak: 0 };
 const waveHoverState = { hover: -1 };
 let wavePoints = [];
+// The filtered slices actually on screen. Hover redraws must use them too, or
+// a session-filtered wave flashes back to the all-sessions plot on hover.
+let visibleContextHistory = [];
+let visibleCacheHistory = [];
+let visibleDataHistory = [];
+let visibleTpsHistory = [];
 
 // Per-session view: one dropdown above the cards. Picking a session filters
 // every card's wave (and the trace table) without touching the gateway-wide
@@ -193,6 +199,7 @@ function renderContextWave(recent) {
   waveHistory.sort((a, b) => a.t - b.t);
   if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
   const visible = visiblePoints(waveHistory);
+  visibleContextHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : 0;
   const lastLatency = responseLatencies.length
     ? Number(responseLatencies[responseLatencies.length - 1].firstResponseLatencyMs)
@@ -388,6 +395,7 @@ function renderCacheWave(recent) {
   cacheHistory.sort((a, b) => a.t - b.t);
   if (cacheHistory.length > WAVE_MAX_POINTS) cacheHistory.splice(0, cacheHistory.length - WAVE_MAX_POINTS);
   const visible = visiblePoints(cacheHistory);
+  visibleCacheHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : null;
   const avg = visible.length ? visible.reduce((sum, point) => sum + point.v, 0) / visible.length : null;
   set("cache-last", percent(last));
@@ -520,6 +528,7 @@ function renderDataWave(recent) {
   dataHistory.sort((a, b) => a.t - b.t);
   if (dataHistory.length > WAVE_MAX_POINTS) dataHistory.splice(0, dataHistory.length - WAVE_MAX_POINTS);
   const visible = visiblePoints(dataHistory);
+  visibleDataHistory = visible;
   dataPeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
   drawWave(canvas, visible, dataPeakState.peak, dataHoverState.hover, WAVE_GREEN, dataWavePoints);
 }
@@ -556,6 +565,7 @@ function renderTpsWave(recent) {
   tpsHistory.sort((a, b) => a.t - b.t);
   if (tpsHistory.length > WAVE_MAX_POINTS) tpsHistory.splice(0, tpsHistory.length - WAVE_MAX_POINTS);
   const visible = visiblePoints(tpsHistory);
+  visibleTpsHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : null;
   const avg = visible.length ? visible.reduce((sum, point) => sum + point.v, 0) / visible.length : null;
   set("tps-last", tps(last));
@@ -1073,10 +1083,10 @@ events.onerror = () => {
   poll().catch(() => {});
   };
 
-  attachAreaWaveHover({ canvasId: "context-wave", tooltipId: "wave-tooltip", pointsRef: wavePoints, hoverState: waveHoverState, draw: (canvas, hover) => drawWave(canvas, waveHistory, wavePeakState.peak, hover, WAVE_AMBER, wavePoints), formatValue: number });
-  attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawCacheWave(canvas, cacheHistory, hover), formatValue: percent });
-  attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, dataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
-  attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, tpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
+  attachAreaWaveHover({ canvasId: "context-wave", tooltipId: "wave-tooltip", pointsRef: wavePoints, hoverState: waveHoverState, draw: (canvas, hover) => drawWave(canvas, visibleContextHistory, wavePeakState.peak, hover, WAVE_AMBER, wavePoints), formatValue: number });
+  attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawCacheWave(canvas, visibleCacheHistory, hover), formatValue: percent });
+  attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, visibleDataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
+  attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, visibleTpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
 
 poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
