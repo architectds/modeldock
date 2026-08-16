@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compressConversation, flattenConversation, aggregateToolCalls } from "../src/compress.mjs";
+import { compressConversation, flattenConversation, aggregateToolCalls, extractErrorLines } from "../src/compress.mjs";
 
 function item({ type, role = "", text = "", name = "", args = "", output = "" }) {
   if (type === "message") {
@@ -138,4 +138,49 @@ test("the tool inventory finds paths on every platform, not just C/D/E drives", 
   assert.match(files(call('{"path":"./scripts/build.mjs"}')), /files: scripts\/build\.mjs/);
   // Requiring an extension keeps bare flags and directory arguments out.
   assert.doesNotMatch(aggregateToolCalls([{ kind: "tool", text: 'TOOL_CALL: exec_command({"cmd":"ls -la /tmp"})' }], () => false), /files:/);
+});
+
+test("extractErrorLines keeps decisive failures and skips source/stat/table noise", () => {
+  const out = (output) => [{ type: "function_call_output", output }];
+  const lines = extractErrorLines([
+    ...out("Success. Updated the following files:\nM src/gateway.mjs"),
+    ...out("Exit code: 1\n\nError: the probe failed"),
+    ...out("Traceback (most recent call last):\n  File \"x.py\", line 3, in <module>\nZeroDivisionError: division by zero"),
+    // Source text dumped by Get-Content must not look like a failure.
+    ...out('const msg = `Unable to decompress request body: ${error.message}`;'),
+    // Coverage/stat rows and markdown tables are not failures either.
+    ...out("3742 D:\\projects\\modeldock\\src\\error-translation.mjs\n| step | error |\n|---|\n| a | b |"),
+    ...out("apply_patch verification failed: Failed to find expected lines in architecture.md:"),
+  ]);
+  const joined = lines.join("\n");
+  assert.ok(joined.includes("Exit code: 1"), "nonzero exit code is kept");
+  assert.ok(joined.includes("Traceback"), "stack trace is kept");
+  assert.ok(joined.includes("ZeroDivisionError"), "exception line is kept");
+  assert.ok(joined.includes("apply_patch verification failed"), "apply failure is kept");
+  assert.ok(!joined.includes("Unable to decompress"), "dumped source is not an error line");
+  assert.ok(!joined.includes("error-translation.mjs"), "coverage/stat rows are not error lines");
+  assert.ok(!joined.includes("| step |"), "table rows are not error lines");
+});
+
+test("a decisive assistant sentence outranks ambient prose under equal TF-IDF", () => {
+  const items = [];
+  for (let i = 0; i < 40; i++) {
+    items.push(item({ type: "message", role: "user", text: `Repeat probe ${i} against the fixture` }));
+    items.push(item({ type: "function_call", name: "exec_command", args: `{"cmd":"run ${i}"}` }));
+    items.push(item({ type: "function_call_output", output: `probe ${i} returned a row` }));
+    // Ambient prose, information-dense but no decision signal.
+    items.push(item({ type: "message", role: "assistant", text: `Probe ${i} executed against the fixture and the executor returned without complaint.` }));
+  }
+  // A single decisive message buried mid-history: root cause + fix.
+  items.push(item({ type: "message", role: "assistant", text: "根因是缓存键没按 provider 区分，修复方案是把 provider 拼进 key。" }));
+  const { text } = compressConversation(items, { tailLines: 8 });
+  assert.ok(text.includes("根因是缓存键"), "the decisive sentence survives compression");
+});
+
+test("a long user ask keeps both edges instead of a blind head-cut", () => {
+  const tail = "以上就是全部报错信息，请先修这个再继续。".repeat(12);
+  const head = "请把网关的错误处理改掉：";
+  const { text } = compressConversation([item({ type: "message", role: "user", text: head + "x".repeat(400) + tail })], { tailLines: 2 });
+  assert.ok(text.includes("请把网关的错误处理改掉"), "the ask head survives");
+  assert.ok(text.includes("请先修这个再继续"), "the decisive tail survives the cap");
 });

@@ -117,6 +117,65 @@ function firstAndLast(text, cap) {
   return `${head.trim()} ... ${tail.trim()}`;
 }
 
+// --- decisive-output extraction ------------------------------------------
+// A handoff benefits more from the few lines that say what went wrong than
+// from the full command output. Scan each tool output's head and tail for
+// error-shaped lines (the tail carries late failures, the head early ones)
+// and keep a small deduped set as explicit LAST_ERROR entries.
+// Only decisive shapes count as error lines: explicit error markers, stack
+// traces, nonzero exit codes, and hard failure verbs. A bare "error" token
+// matches file names (error-translation.mjs), coverage tables, and prose, so
+// it is deliberately absent here.
+const ERROR_LINE_RE =
+  /(?:^\s*(?:[A-Za-z]+:\s*)?(?:ERROR|FATAL|SEVERE|Unhandled\s+exception)[:：]|\b[A-Z]\w*(?:Error|Exception)[:：]\s|Traceback \(most recent call last\)|FullyQualifiedErrorId|\b✗\b|❌|Exit code: [1-9]\d*|\bCannot (?:find|read|resolve|open|write|access|connect|parse|load)\b|\bUnable to \w+\b|\bexception of type\b|\b(?:error|failed|failure)[s]?\s+(?:occurred|happened|while|when|to|during)\b)/i;
+const ERROR_NEG_RE = /\b(?:no|zero)\s+errors?\b|\b0\s+errors?\b|\berrors?\s*:\s*0\b/i;
+const ERROR_TABLE_RE = /\s\|\s|^---|\s-\s-\s/;
+// A tool output that dumps source text (Get-Content / cat) reads like prose but
+// is code, not a runtime failure: braces, template literals, and common
+// statement keywords give it away.
+const ERROR_CODE_RE = /[{}\[\]]|\$\{|\b(?:const|let|var|function|return|if|else|instanceof|throw)\b|\/\/|\/\*|`/;
+const MAX_ERROR_LINES = 12;
+const ERROR_LINE_CAP = 200;
+const ERROR_SCAN = 80;
+
+export function extractErrorLines(input) {
+  const seen = new Set();
+  const lines = [];
+  for (const item of input || []) {
+    if (!item || (item.type !== "function_call_output" && item.type !== "custom_tool_call_output")) continue;
+    const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output || "");
+    const all = output.split(/\r?\n/);
+    const scanned = [...all.slice(0, ERROR_SCAN), ...all.slice(-ERROR_SCAN)];
+    for (const raw of scanned) {
+      const line = raw.trim();
+      if (line.length < 4 || line.length > 400) continue;
+      if (/^\s*\d/.test(line)) continue; // coverage/stat rows
+      if (ERROR_TABLE_RE.test(line)) continue; // markdown/ASCII tables
+      if (ERROR_CODE_RE.test(line)) continue; // dumped source, not a failure
+      if (!ERROR_LINE_RE.test(line)) continue;
+      if (ERROR_NEG_RE.test(line)) continue;
+      const key = line.slice(0, 60);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      lines.push(`LAST_ERROR: ${line.slice(0, ERROR_LINE_CAP)}`);
+      if (lines.length >= MAX_ERROR_LINES) return lines;
+    }
+  }
+  return lines;
+}
+
+// Decisive-sentence signal for assistant findings: sentences that state a
+// conclusion, decision, or cause outrank information-dense-but-ambient prose
+// under equal TF-IDF. Deterministic word signals only - no model involved.
+const SIGNAL_CJK_RE = /结论|决定|修复|解决|原因|因为|需要|注意|改用|建议|成功|发现|下一步|归根结底|问题出在/g;
+const SIGNAL_EN_RE = /\b(root cause|fixed|decided|switched|conclusion|because|success|resolved|summary|turned out)\b/gi;
+
+function signalScore(text) {
+  const cjk = String(text).match(SIGNAL_CJK_RE);
+  const en = String(text).match(SIGNAL_EN_RE);
+  return (cjk ? cjk.length : 0) + (en ? en.length : 0);
+}
+
 // A file path inside serialized tool arguments: a Windows drive path on any
 // drive letter, or a POSIX/relative path, ending in a name with an extension.
 // The previous pattern matched only C:, D: and E:, so the inventory's file list
@@ -203,12 +262,14 @@ export function compressConversation(input, options = {}) {
   }
   // 2. the tail - recent state, verbatim.
   for (let i = Math.max(0, lines.length - tailLines); i < lines.length; i++) keep[i] = true;
-  // 3. assistant findings - TF-IDF-scored, noise-filtered, truncated.
+  // 3. assistant findings - TF-IDF-scored, signal-boosted, noise-filtered,
+  //    truncated. A sentence that states a conclusion or cause is kept before
+  //    one that merely scores high on rare tokens.
   const noisy = (text) => (text.match(/\d{1,2}:\d{2}\s*(AM|PM)/g) || []).length > 1 || /\n{3,}/.test(text);
   const assistants = lines
-    .map((line, i) => ({ i, score: scores[i], line }))
+    .map((line, i) => ({ i, score: scores[i], signal: signalScore(line.text), line }))
     .filter((x) => x.line.kind === "msg" && x.line.role === "assistant" && !keep[x.i] && !noisy(x.line.text))
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => (b.signal - a.signal) || (b.score - a.score));
   for (const { i } of assistants.slice(0, Math.floor(assistants.length * assistantKeepRatio))) keep[i] = true;
   // 4. recent tool calls verbatim.
   let keptTools = 0;
@@ -224,10 +285,15 @@ export function compressConversation(input, options = {}) {
   const cleaned = kept.map((line) => {
     let text = stripNoise(line.text);
     if (line.kind === "msg" && line.role === "assistant") text = firstAndLast(text, assistantCap);
-    if (line.kind === "msg" && line.role === "user" && text.length > userCap) text = `${text.slice(0, userCap - 3)}...`;
+    // User asks keep their opening and closing edges: pasted errors and long
+    // instructions usually end with the decisive part a blind head-cut would
+    // throw away.
+    if (line.kind === "msg" && line.role === "user" && text.length > userCap) text = firstAndLast(text, userCap);
     return { ...line, text };
   });
   if (inventory) cleaned.push({ kind: "tool", text: inventory });
+  // Decisive error lines from tool outputs ride along explicitly.
+  for (const errorLine of extractErrorLines(input)) cleaned.push({ kind: "tool", text: errorLine });
   const originalChars = rawInputChars(input);
   const compressedChars = cleaned.reduce((sum, line) => sum + line.text.length, 0);
   const text = cleaned.map((line) => line.text).join("\n");
