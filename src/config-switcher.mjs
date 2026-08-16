@@ -3,6 +3,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 
+// The dashboard writes this agent file into <codexHome>/agents. Codex reads that
+// directory at startup, so it has to be removed on disable: the file pins
+// model_provider = "openai" to a ModelDock-published slug, and once the managed
+// openai_base_url is gone that provider means the real OpenAI backend, where the
+// slug does not exist. Codex then fails to start - "Off" leaving the app broken.
+// The name lives here rather than in server.mjs because disable() is what has to
+// clean it up, and one spelling is what keeps writer and remover in step.
+export const SUBAGENT_AGENT_FILE = "modeldock-subagent.toml";
+
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -187,11 +196,29 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true, publishedModels = null }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  // Keep the model the user already had, as long as this route can still serve
+  // it. Enabling ModelDock means "route Codex through the local gate", not "pick
+  // Codex's model", and overwriting the selection on every enable is how
+  // ModelDock's own default - which a connected local endpoint could quietly
+  // become - replaced the user's choice.
+  //
+  // "As long as it can serve it" is the half that cannot be skipped: enabling
+  // also swaps Codex's catalog for the published one, and a model missing from
+  // that catalog leaves Codex pointed at something that no longer exists. A
+  // DeepSeek-only user onboarding while logged out of ChatGPT is exactly that
+  // case - their config says gpt-5.6-sol, but no native model is published, so
+  // the selection has to move. publishedModels null means "caller did not say",
+  // and then the old overwrite stands rather than guessing.
+  const existingModel = topLevelString(source, "model");
+  const canKeepExisting = Boolean(existingModel)
+    && Array.isArray(publishedModels)
+    && publishedModels.includes(existingModel);
+  const chosen = canKeepExisting ? existingModel : model;
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
-  lines = setTopLevel(lines, "model", model);
+  if (chosen) lines = setTopLevel(lines, "model", chosen);
 
   const managed = [
     "# BEGIN modeldock-managed",
@@ -239,13 +266,20 @@ export class CodexConfigSwitcher {
   // switcher), and a later enable then wrote the outdated id into config.toml.
   #model;
 
-  constructor({ codexHome, baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
+  // Same shape as #model: a function so the list is read at enable time. The
+  // published catalog changes with sign-in state and connected providers, and a
+  // snapshot taken at construction would decide "can we keep the user's model"
+  // from a stale answer.
+  #publishedModels;
+
+  constructor({ codexHome, baseUrl, model, publishedModels = null, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
     this.#model = model;
+    this.#publishedModels = publishedModels;
     this.catalogFile = catalogFile;
     this.mcpUrl = mcpUrl;
     this.mcpCommand = mcpCommand;
@@ -255,6 +289,14 @@ export class CodexConfigSwitcher {
 
   get model() {
     return typeof this.#model === "function" ? this.#model() : this.#model;
+  }
+
+  // null when the caller never supplied a list: buildManagedCodexConfig reads
+  // that as "unknown", and keeps writing the managed model rather than guessing
+  // that the user's current one is still routable.
+  get publishedModels() {
+    const value = typeof this.#publishedModels === "function" ? this.#publishedModels() : this.#publishedModels;
+    return Array.isArray(value) ? value : null;
   }
 
   set model(value) {
@@ -391,6 +433,7 @@ export class CodexConfigSwitcher {
     const managed = buildManagedCodexConfig(original, {
       baseUrl: this.baseUrl,
       model: this.model,
+      publishedModels: this.publishedModels,
       catalogFile: this.catalogFile,
       mcpUrl: this.mcpUrl,
       mcpCommand: this.mcpCommand,
@@ -454,6 +497,12 @@ export class CodexConfigSwitcher {
         assertConfigWriteSafe(restored);
         await writeFile(this.configPath, restored, { encoding: "utf8", mode: 0o600 });
       } else if (routeActive) await unlink(this.configPath);
+      // Codex reads <codexHome>/agents at startup, so restoring config.toml is
+      // not the whole of "Off": this file names a ModelDock slug under
+      // model_provider = "openai", which resolves to the real OpenAI backend
+      // once the managed base URL is gone. Leaving it there is what made Codex
+      // fail to start after switching off.
+      await unlink(path.join(this.codexHome, "agents", SUBAGENT_AGENT_FILE)).catch(() => {});
       await this.#writeState({
         version: 2,
         enabled: false,

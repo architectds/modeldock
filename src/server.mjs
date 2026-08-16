@@ -16,7 +16,7 @@ import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayRes
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
-import { CodexConfigSwitcher } from "./config-switcher.mjs";
+import { CodexConfigSwitcher, SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
@@ -278,7 +278,8 @@ function modelProviderOf(options, modelId) {
 // gate in transparent mode); routed roles keep the published "@provider" slug,
 // which the gateway parses for upstream routing.
 const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
-const SUBAGENT_FILE_NAME = "modeldock-subagent.toml";
+// One spelling, shared with the disable() path that has to remove it.
+const SUBAGENT_FILE_NAME = SUBAGENT_AGENT_FILE;
 const SUBAGENT_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
 
 function subagentModelOptions(config) {
@@ -931,6 +932,10 @@ export function createServices(config = loadConfig()) {
     // modelSelection without going through this switcher, and a stored copy then
     // wrote the stale model into config.toml on the next enable.
     model: () => modelSelection.mainModel,
+    // Read at enable time, not construction: sign-in state and connected
+    // providers change what is published, and enable() uses this to decide
+    // whether the user's current model is still one this route can serve.
+    publishedModels: () => [...publishedModelIds(mutableConfig)],
     catalogFile,
   });
   const autostart = createAutostart();

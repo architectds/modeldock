@@ -351,7 +351,15 @@ export function loadConfig() {
     return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
   };
   const customSlug = customModel ? `${customModel}${PROVIDER_SEPARATOR}custom` : "";
-  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || (customMain && customSlug ? customSlug : "deepseek-v4-flash"));
+  // Connecting a backend publishes a model; it does not select one. A custom
+  // endpoint used to become the default main model the moment MODELDOCK_CUSTOM_MAIN
+  // was set, and that flag persists in .env - so ticking "as main" once left a
+  // local 27B as the default across every later restart, silently, including for
+  // sessions that never wanted it. Worse, a local model then triggers the
+  // small-context tool whitelist, which strips Codex down to 23 of its ~150
+  // tools. MODELDOCK_MAIN_MODEL remains the one way to set a default, and the
+  // Codex picker remains the way to choose per session.
+  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a
