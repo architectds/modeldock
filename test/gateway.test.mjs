@@ -2707,6 +2707,61 @@ test("relayCompaction streams a v2 compaction item over SSE when stream is not f
   }
 });
 
+test("relayCompaction pre-compresses a large history for small-context custom models", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const metrics = new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("handoff summary");
+  };
+  try {
+    const input = [];
+    for (let i = 0; i < 60; i++) {
+      input.push({ type: "message", role: "user", content: [{ type: "input_text", text: `User request ${i} about the widget` }] });
+      input.push({ type: "function_call", name: "exec_command", input: JSON.stringify({ cmd: `probe ${i}` }) });
+      input.push({ type: "function_call_output", output: `result ${i}` });
+      input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: `Handled ${i} by probing the widget.` }] });
+    }
+    input.push({ type: "compaction_trigger" });
+    const services = {
+      ...compactServices(),
+      metrics,
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const result = await relayCompaction(
+      { model: "qwen3.8:27b@custom", stream: false, input },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    // The upstream summarize call receives the compressed history, not the raw one.
+    assert.ok(
+      calls[0].body.input[0].content[0].text.startsWith("[Compressed conversation history]"),
+      "the upstream sees the CPU-compressed history",
+    );
+    // The trace records the compression so it is visible in the dashboard.
+    const trace = metrics.recent.find((r) => r.operation === "compact_v2");
+    assert.ok(trace?.compression, "the compact trace records the compression");
+    assert.ok(trace.compression.toChars < trace.compression.fromChars * 0.8, "the compression meaningfully shrank the input");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayResponses synthesizes v1 replacement history on the compact path", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

@@ -2358,9 +2358,11 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // so the summarize model sees ~1/5 of the tokens and finishes in the window.
   // Small histories pass through untouched: the extract is only used when it
   // meaningfully reduces the prompt.
+  let compressionInfo = null;
   if (isLocalSmallContextBackend(config, route.model)) {
     const compressed = compressConversation(normalizedInput);
     if (compressed.compressedChars < compressed.originalChars * 0.8) {
+      compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
       summarizeBody.input = [
         { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${compressed.text}` }] },
         messageItem(COMPACT_PROMPT),
@@ -2451,6 +2453,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         upstream: target.provider,
         error: translated.body.error.message.slice(0, 400),
         requestShape: describeInputShape(payload.input),
+        compression: compressionInfo,
       });
       metrics?.recordResponseTransform?.(noTransform(), { streaming: false, routeReason: operation, bytesIn });
       recordUsage({ ...compactRoute, status: upstream.status });
@@ -2495,6 +2498,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       bytesOut: bytes.length,
       inputTokens: usage?.input_tokens || 0,
       outputTokens: usage?.output_tokens || 0,
+      compression: compressionInfo,
     });
     metrics?.recordResponseUsage?.({ bytesOut: bytes.length, usage });
     metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
