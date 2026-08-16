@@ -142,14 +142,12 @@ const wavePeakState = { peak: 0 };
 const waveHoverState = { hover: -1 };
 let wavePoints = [];
 
-// Per-session view: a dropdown plus one chip per session above the cards. The
-// chips are mini context-sparklines that double as filters; picking a session
-// filters every card's wave (and the trace table) without touching the
-// gateway-wide totals in the card headers. Session keys come from the trace
-// records, which carry the Codex conversation id (sessionId, threadId fallback).
+// Per-session view: one dropdown above the cards. Picking a session filters
+// every card's wave (and the trace table) without touching the gateway-wide
+// totals in the card headers. Session keys come from the trace records, which
+// carry the Codex conversation id (sessionId, threadId fallback).
 let sessionFilter = "";
 let lastSessionSignature = "";
-const SESSION_PALETTE = [WAVE_BLUE, WAVE_VIOLET, WAVE_GREEN, WAVE_AMBER, "#ff8ac9"];
 
 function sessionKeyOf(item) {
   return String(item.sessionId || item.threadId || "").trim();
@@ -575,69 +573,13 @@ function buildSessionList(recent) {
     if (item.kind !== "responses") continue;
     const key = sessionKeyOf(item);
     if (!key) continue;
-    const entry = map.get(key) || { id: key, model: "", count: 0, lastCtx: 0, lastAt: 0 };
+    const entry = map.get(key) || { id: key, model: "", count: 0, lastAt: 0 };
     entry.count += 1;
     if (item.model) entry.model = item.model;
-    const ctx = Number(item.inputTokens) || 0;
-    if (ctx > 0) entry.lastCtx = ctx;
     entry.lastAt = Math.max(entry.lastAt, Number(item.finishedAt || item.startedAt || 0));
     map.set(key, entry);
   }
   return [...map.values()].sort((a, b) => b.lastAt - a.lastAt);
-}
-
-function chipPoints(sessionId) {
-  return waveHistory.filter((point) => point.session === sessionId);
-}
-
-function drawMiniSpark(canvas, points, color) {
-  if (!canvas || !points.length) return;
-  const ctx = canvas.getContext("2d");
-  const width = canvas.width;
-  const height = canvas.height;
-  ctx.clearRect(0, 0, width, height);
-  const pad = 2;
-  const w = width - pad * 2;
-  const h = height - pad * 2;
-  const max = Math.max(...points.map((point) => point.v), 1);
-  const xFor = (index) => (points.length === 1 ? pad + w / 2 : pad + (w * index) / (points.length - 1));
-  const yFor = (value) => pad + h - (Math.min(max, value) / max) * h;
-  ctx.beginPath();
-  ctx.moveTo(xFor(0), pad + h);
-  points.forEach((point, index) => ctx.lineTo(xFor(index), yFor(point.v)));
-  ctx.lineTo(xFor(points.length - 1), pad + h);
-  ctx.closePath();
-  ctx.fillStyle = rgba(color, 0.16);
-  ctx.fill();
-  ctx.beginPath();
-  points.forEach((point, index) => {
-    const x = xFor(index);
-    const y = yFor(point.v);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-}
-
-function sessionChip(session, color) {
-  const chip = document.createElement("button");
-  chip.type = "button";
-  chip.className = "session-chip";
-  chip.dataset.session = session.id;
-  chip.title = `${session.model}\n${session.id}`;
-  const canvas = document.createElement("canvas");
-  canvas.width = 72;
-  canvas.height = 18;
-  const label = document.createElement("span");
-  label.className = "chip-label";
-  label.textContent = shortModel(session.model);
-  const value = document.createElement("span");
-  value.className = "chip-value";
-  value.textContent = session.lastCtx ? number(session.lastCtx) : "—";
-  chip.append(canvas, label, value);
-  return chip;
 }
 
 function renderSessions(recent) {
@@ -645,15 +587,12 @@ function renderSessions(recent) {
   if (!filter) return;
   const sessions = buildSessionList(recent);
   const select = $("session-select");
-  const chips = $("session-chips");
   if (!sessions.length) {
     filter.hidden = true;
     return;
   }
   filter.hidden = false;
-  const signature = sessions
-    .map((session) => `${session.id}|${session.model}|${session.count}|${session.lastCtx}`)
-    .join("\u0001");
+  const signature = sessions.map((session) => `${session.id}|${session.model}`).join("\u0001");
   if (signature !== lastSessionSignature) {
     lastSessionSignature = signature;
     if (!sessions.some((session) => session.id === sessionFilter)) sessionFilter = "";
@@ -668,20 +607,8 @@ function renderSessions(recent) {
       option.textContent = `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
       select.append(option);
     });
-    chips.replaceChildren();
-    sessions.forEach((session, index) => {
-      chips.append(sessionChip(session, SESSION_PALETTE[index % SESSION_PALETTE.length]));
-    });
   }
   select.value = sessionFilter;
-  Array.from(chips.children).forEach((chip, index) => {
-    chip.classList.toggle("active", chip.dataset.session === sessionFilter);
-    drawMiniSpark(
-      chip.querySelector("canvas"),
-      chipPoints(chip.dataset.session),
-      SESSION_PALETTE[index % SESSION_PALETTE.length],
-    );
-  });
 }
 
 function render(data) {
@@ -1651,13 +1578,6 @@ function resetWaveHovers() {
 
 $("session-select")?.addEventListener("change", (event) => {
   sessionFilter = event.target.value;
-  resetWaveHovers();
-  if (typeof lastData !== "undefined" && lastData) render(lastData);
-});
-$("session-chips")?.addEventListener("click", (event) => {
-  const chip = event.target.closest(".session-chip");
-  if (!chip) return;
-  sessionFilter = chip.dataset.session || "";
   resetWaveHovers();
   if (typeof lastData !== "undefined" && lastData) render(lastData);
 });
