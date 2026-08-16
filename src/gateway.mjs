@@ -946,7 +946,10 @@ function firstSentenceOf(text) {
   if (!text) return "";
   const boundary = text.indexOf(". ");
   const candidate = boundary > 0 ? text.slice(0, boundary + 1) : text;
-  return candidate.length <= 200 ? candidate : `${candidate.slice(0, 197)}...`;
+  if (candidate.length <= 90) return candidate;
+  const cut = candidate.slice(0, 90);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > 60 ? lastSpace : 90)}...`;
 }
 
 function stripAppContextBlock(text) {
@@ -970,8 +973,8 @@ function stripLocalInstructionText(text) {
   out = stripSkillsBlock(out);
   out = stripAppContextBlock(out);
   out = out
-    .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images. For any visual task, call vision_inspect and act on the text it returns.")
-    .replace(VERBOSE_DESIGN_FIRST, "Design-first: for frontend/UI work, only run image_gen when the user asks for a visual direction; otherwise keep changes surgical.")
+    .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images; use vision_inspect for any visual task.")
+    .replace(VERBOSE_DESIGN_FIRST, "Design: only run image_gen when the user asks for a visual direction.")
     .replace(AGENT_BLOCK_RE, "")
     .replace(APPS_INSTRUCTIONS_RE, "")
     .replace(MEMORY_CITATION_RE, "");
