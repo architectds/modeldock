@@ -1090,7 +1090,59 @@ test("relayResponses keeps goal tools for small-context custom models", async ()
     for (const goal of ["get_goal", "create_goal", "update_goal"]) {
       assert.ok(names.includes(goal), `${goal} survives the whitelist`);
     }
-    assert.ok(!names.includes("request_user_input"), "other flat tools stay stripped");
+    assert.ok(!names.includes("mcp__node_repl__js"), "other flat tools stay stripped");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses keeps speak, hear, and request_user_input for small-context custom models", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ body: JSON.parse(options.body) });
+    return summaryResponse("ok");
+  };
+  try {
+    const services = {
+      ...compactServices(),
+      mainModel: "qwen3.8:27b@custom",
+      visionModel: "gpt-5.6-luna",
+      config: {
+        ...configStub(),
+        mainModel: "qwen3.8:27b@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen3.8:27b",
+        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+      requestUrl: "/v1/responses",
+    };
+    const tools = [
+      { type: "function", name: "mcp__modeldock__speak" },
+      { type: "function", name: "mcp__modeldock__hear" },
+      { type: "function", name: "request_user_input" },
+      { type: "function", name: "mcp__node_repl__js" },
+    ];
+    const result = await relayResponses(
+      {
+        model: "qwen3.8:27b@custom",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        tools,
+      },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    const names = (calls[0].body.tools || []).map((tool) => tool.name);
+    assert.ok(names.includes("mcp__modeldock__speak"), "speak survives the whitelist");
+    assert.ok(names.includes("mcp__modeldock__hear"), "hear survives the whitelist");
+    assert.ok(names.includes("request_user_input"), "request_user_input survives the whitelist");
+    assert.ok(!names.includes("mcp__node_repl__js"), "node_repl stays stripped");
   } finally {
     globalThis.fetch = originalFetch;
   }

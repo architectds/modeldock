@@ -50,6 +50,10 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__modeldock__web_search_exa",
   "mcp__modeldock__vision_inspect",
   "mcp__modeldock__image_gen",
+  "mcp__modeldock__speak",
+  "mcp__modeldock__hear",
+  // Let the model stop and ask the user when it is stuck; cheap and flat.
+  "request_user_input",
   // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
   // only office tools a 27B local model can usefully drive. Names carry the
   // plugin's truncated+hashed suffixes; update them if the plugin renames.
