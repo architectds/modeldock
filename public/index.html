@@ -87,6 +87,14 @@
         <button id="restart-ack" type="button" data-i18n="restart.ack">I restarted Codex</button>
       </section>
 
+      <section id="session-filter" class="session-filter" hidden>
+        <div class="session-filter-head">
+          <div><p class="eyebrow" data-i18n="session.eyebrow">LIVE SESSIONS</p><h2 data-i18n="session.title">Per-session context</h2></div>
+          <select id="session-select" class="model-select session-select" aria-label="Session"></select>
+        </div>
+        <div id="session-chips" class="session-chips" role="tablist" aria-label="Sessions"></div>
+      </section>
+
       <section class="metric-grid">
         <article class="metric-card accent-blue wave-card">
           <div class="metric-head"><span data-i18n="metric.requests">Requests</span><b><span id="requests-active">0</span> <span data-i18n="metric.active">active</span> · <span id="requests-total">0</span> <span data-i18n="metric.total">total</span></b></div>

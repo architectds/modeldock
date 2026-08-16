@@ -142,11 +142,37 @@ const wavePeakState = { peak: 0 };
 const waveHoverState = { hover: -1 };
 let wavePoints = [];
 
+// Per-session view: a dropdown plus one chip per session above the cards. The
+// chips are mini context-sparklines that double as filters; picking a session
+// filters every card's wave (and the trace table) without touching the
+// gateway-wide totals in the card headers. Session keys come from the trace
+// records, which carry the Codex conversation id (sessionId, threadId fallback).
+let sessionFilter = "";
+let lastSessionSignature = "";
+const SESSION_PALETTE = [WAVE_BLUE, WAVE_VIOLET, WAVE_GREEN, WAVE_AMBER, "#ff8ac9"];
+
+function sessionKeyOf(item) {
+  return String(item.sessionId || item.threadId || "").trim();
+}
+
+function visiblePoints(history) {
+  return sessionFilter ? history.filter((point) => point.session === sessionFilter) : history;
+}
+
+function shortModel(model) {
+  return String(model || "—").split("@")[0];
+}
+
 function renderContextWave(recent) {
   const canvas = $("context-wave");
   if (!canvas) return;
   const responseLatencies = recent
-    .filter((item) => item.kind === "responses" && Number.isFinite(Number(item.firstResponseLatencyMs)))
+    .filter(
+      (item) =>
+        item.kind === "responses" &&
+        Number.isFinite(Number(item.firstResponseLatencyMs)) &&
+        (!sessionFilter || sessionKeyOf(item) === sessionFilter),
+    )
     .sort((a, b) => (a.finishedAt || a.startedAt || 0) - (b.finishedAt || b.startedAt || 0));
   const seen = new Set(waveHistory.map((point) => point.id));
   for (const item of recent) {
@@ -159,22 +185,24 @@ function renderContextWave(recent) {
       t: item.startedAt || 0,
       v: Number(item.inputTokens) || 0,
       firstResponseLatencyMs: Number(item.firstResponseLatencyMs) || 0,
+      session: sessionKeyOf(item),
     });
   }
   waveHistory.sort((a, b) => a.t - b.t);
   if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
-  const last = waveHistory.length ? waveHistory[waveHistory.length - 1].v : 0;
+  const visible = visiblePoints(waveHistory);
+  const last = visible.length ? visible[visible.length - 1].v : 0;
   const lastLatency = responseLatencies.length
     ? Number(responseLatencies[responseLatencies.length - 1].firstResponseLatencyMs)
-    : waveHistory.length
-      ? waveHistory[waveHistory.length - 1].firstResponseLatencyMs
+    : visible.length
+      ? visible[visible.length - 1].firstResponseLatencyMs
       : 0;
-  wavePeakState.peak = waveHistory.reduce((max, point) => Math.max(max, point.v), 0);
+  wavePeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
   set("wave-last", number(last));
   set("wave-peak", number(wavePeakState.peak));
   set("context-latency", duration(lastLatency));
-  set("wave-count", number(waveHistory.length));
-  drawWave(canvas, waveHistory, wavePeakState.peak, waveHoverState.hover, WAVE_AMBER, wavePoints);
+  set("wave-count", number(visible.length));
+  drawWave(canvas, visible, wavePeakState.peak, waveHoverState.hover, WAVE_AMBER, wavePoints);
 }
 
 // Shared area-wave renderer used by the context, cache, and transfer cards. The
@@ -352,16 +380,18 @@ function renderCacheWave(recent) {
       id: item.id,
       t: item.startedAt || 0,
       v: Math.min(1, Math.max(0, (Number(item.cachedTokens) || 0) / input)),
+      session: sessionKeyOf(item),
     });
   }
   cacheHistory.sort((a, b) => a.t - b.t);
   if (cacheHistory.length > WAVE_MAX_POINTS) cacheHistory.splice(0, cacheHistory.length - WAVE_MAX_POINTS);
-  const last = cacheHistory.length ? cacheHistory[cacheHistory.length - 1].v : null;
-  const avg = cacheHistory.length ? cacheHistory.reduce((sum, point) => sum + point.v, 0) / cacheHistory.length : null;
+  const visible = visiblePoints(cacheHistory);
+  const last = visible.length ? visible[visible.length - 1].v : null;
+  const avg = visible.length ? visible.reduce((sum, point) => sum + point.v, 0) / visible.length : null;
   set("cache-last", percent(last));
   set("cache-avg", percent(avg));
-  set("cache-count", number(cacheHistory.length));
-  drawCacheWave(canvas, cacheHistory, cacheHoverState.hover);
+  set("cache-count", number(visible.length));
+  drawCacheWave(canvas, visible, cacheHoverState.hover);
 }
 
 function drawCacheWave(canvas, history, hoverIndex = -1) {
@@ -483,12 +513,13 @@ function renderDataWave(recent) {
     if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
     const value = Number(item.bytesOut) || 0;
     if (value <= 0) continue;
-    dataHistory.push({ id: item.id, t: item.startedAt || 0, v: value });
+    dataHistory.push({ id: item.id, t: item.startedAt || 0, v: value, session: sessionKeyOf(item) });
   }
   dataHistory.sort((a, b) => a.t - b.t);
   if (dataHistory.length > WAVE_MAX_POINTS) dataHistory.splice(0, dataHistory.length - WAVE_MAX_POINTS);
-  dataPeakState.peak = dataHistory.reduce((max, point) => Math.max(max, point.v), 0);
-  drawWave(canvas, dataHistory, dataPeakState.peak, dataHoverState.hover, WAVE_GREEN, dataWavePoints);
+  const visible = visiblePoints(dataHistory);
+  dataPeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
+  drawWave(canvas, visible, dataPeakState.peak, dataHoverState.hover, WAVE_GREEN, dataWavePoints);
 }
 
 let lastData = null;
@@ -517,19 +548,140 @@ function renderTpsWave(recent) {
       id: item.id,
       t: item.startedAt || 0,
       v: output / (latencyMs / 1000),
+      session: sessionKeyOf(item),
     });
   }
   tpsHistory.sort((a, b) => a.t - b.t);
   if (tpsHistory.length > WAVE_MAX_POINTS) tpsHistory.splice(0, tpsHistory.length - WAVE_MAX_POINTS);
-  const last = tpsHistory.length ? tpsHistory[tpsHistory.length - 1].v : null;
-  const avg = tpsHistory.length ? tpsHistory.reduce((sum, point) => sum + point.v, 0) / tpsHistory.length : null;
+  const visible = visiblePoints(tpsHistory);
+  const last = visible.length ? visible[visible.length - 1].v : null;
+  const avg = visible.length ? visible.reduce((sum, point) => sum + point.v, 0) / visible.length : null;
   set("tps-last", tps(last));
   set("tps-avg", tps(avg));
 
   // Dynamic peak keeps the whole curve visible as the rate varies; the violet
   // reuses the Tokens card accent so no new color is introduced.
-  tpsPeakState.peak = tpsHistory.reduce((max, point) => Math.max(max, point.v), 0);
-  drawWave(canvas, tpsHistory, tpsPeakState.peak, tpsHoverState.hover, WAVE_VIOLET, tpsWavePoints);
+  tpsPeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
+  drawWave(canvas, visible, tpsPeakState.peak, tpsHoverState.hover, WAVE_VIOLET, tpsWavePoints);
+}
+
+// Session overview bar: one chip per session, each with a mini context
+// sparkline and the session's last context size. The dropdown above the chips
+// and the chips themselves both set the same filter; the chip DOM rebuilds
+// only when the session set changes, and the sparklines refresh on every push.
+function buildSessionList(recent) {
+  const map = new Map();
+  for (const item of recent) {
+    if (item.kind !== "responses") continue;
+    const key = sessionKeyOf(item);
+    if (!key) continue;
+    const entry = map.get(key) || { id: key, model: "", count: 0, lastCtx: 0, lastAt: 0 };
+    entry.count += 1;
+    if (item.model) entry.model = item.model;
+    const ctx = Number(item.inputTokens) || 0;
+    if (ctx > 0) entry.lastCtx = ctx;
+    entry.lastAt = Math.max(entry.lastAt, Number(item.finishedAt || item.startedAt || 0));
+    map.set(key, entry);
+  }
+  return [...map.values()].sort((a, b) => b.lastAt - a.lastAt);
+}
+
+function chipPoints(sessionId) {
+  return waveHistory.filter((point) => point.session === sessionId);
+}
+
+function drawMiniSpark(canvas, points, color) {
+  if (!canvas || !points.length) return;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  const pad = 2;
+  const w = width - pad * 2;
+  const h = height - pad * 2;
+  const max = Math.max(...points.map((point) => point.v), 1);
+  const xFor = (index) => (points.length === 1 ? pad + w / 2 : pad + (w * index) / (points.length - 1));
+  const yFor = (value) => pad + h - (Math.min(max, value) / max) * h;
+  ctx.beginPath();
+  ctx.moveTo(xFor(0), pad + h);
+  points.forEach((point, index) => ctx.lineTo(xFor(index), yFor(point.v)));
+  ctx.lineTo(xFor(points.length - 1), pad + h);
+  ctx.closePath();
+  ctx.fillStyle = rgba(color, 0.16);
+  ctx.fill();
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const x = xFor(index);
+    const y = yFor(point.v);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function sessionChip(session, color) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "session-chip";
+  chip.dataset.session = session.id;
+  chip.title = `${session.model}\n${session.id}`;
+  const canvas = document.createElement("canvas");
+  canvas.width = 72;
+  canvas.height = 18;
+  const label = document.createElement("span");
+  label.className = "chip-label";
+  label.textContent = shortModel(session.model);
+  const value = document.createElement("span");
+  value.className = "chip-value";
+  value.textContent = session.lastCtx ? number(session.lastCtx) : "—";
+  chip.append(canvas, label, value);
+  return chip;
+}
+
+function renderSessions(recent) {
+  const filter = $("session-filter");
+  if (!filter) return;
+  const sessions = buildSessionList(recent);
+  const select = $("session-select");
+  const chips = $("session-chips");
+  if (!sessions.length) {
+    filter.hidden = true;
+    return;
+  }
+  filter.hidden = false;
+  const signature = sessions
+    .map((session) => `${session.id}|${session.model}|${session.count}|${session.lastCtx}`)
+    .join("\u0001");
+  if (signature !== lastSessionSignature) {
+    lastSessionSignature = signature;
+    if (!sessions.some((session) => session.id === sessionFilter)) sessionFilter = "";
+    select.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = t("session.all");
+    select.append(all);
+    sessions.forEach((session) => {
+      const option = document.createElement("option");
+      option.value = session.id;
+      option.textContent = `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
+      select.append(option);
+    });
+    chips.replaceChildren();
+    sessions.forEach((session, index) => {
+      chips.append(sessionChip(session, SESSION_PALETTE[index % SESSION_PALETTE.length]));
+    });
+  }
+  select.value = sessionFilter;
+  Array.from(chips.children).forEach((chip, index) => {
+    chip.classList.toggle("active", chip.dataset.session === sessionFilter);
+    drawMiniSpark(
+      chip.querySelector("canvas"),
+      chipPoints(chip.dataset.session),
+      SESSION_PALETTE[index % SESSION_PALETTE.length],
+    );
+  });
 }
 
 function render(data) {
@@ -561,6 +713,7 @@ function render(data) {
   renderCacheWave(data.recent || []);
   renderDataWave(data.recent || []);
   renderTpsWave(data.recent || []);
+  renderSessions(data.recent || []);
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));
@@ -587,7 +740,10 @@ function render(data) {
   renderSpeech(data);
   renderUpdate(data);
   maybePromptSettings(data.config);
-  renderRecent(data.recent || []);
+  const sessionItems = sessionFilter
+    ? (data.recent || []).filter((item) => sessionKeyOf(item) === sessionFilter)
+    : (data.recent || []);
+  renderRecent(sessionItems);
 }
 
 let lastSpeechCheckAt = 0;
@@ -1483,6 +1639,28 @@ $("settings-open")?.addEventListener("click", openSettings);
 $("settings-close")?.addEventListener("click", closeSettings);
 $("settings-save")?.addEventListener("click", saveSettings);
 $("update-button")?.addEventListener("click", applyUpdate);
+
+// Session filter: the dropdown and the chips below it set the same filter;
+// both re-render in place so the cards, table, and chips stay consistent.
+function resetWaveHovers() {
+  waveHoverState.hover = -1;
+  cacheHoverState.hover = -1;
+  dataHoverState.hover = -1;
+  tpsHoverState.hover = -1;
+}
+
+$("session-select")?.addEventListener("change", (event) => {
+  sessionFilter = event.target.value;
+  resetWaveHovers();
+  if (typeof lastData !== "undefined" && lastData) render(lastData);
+});
+$("session-chips")?.addEventListener("click", (event) => {
+  const chip = event.target.closest(".session-chip");
+  if (!chip) return;
+  sessionFilter = chip.dataset.session || "";
+  resetWaveHovers();
+  if (typeof lastData !== "undefined" && lastData) render(lastData);
+});
 
 // Language selector: re-apply static text and refresh dynamic text in place.
 function refreshDynamicText() {

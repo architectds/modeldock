@@ -131,6 +131,39 @@ h2 { margin: 0; font-size: 17px; }
 .split-stats b { color: var(--text); }
 .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; }.dot.input { background: var(--violet); }.dot.output { background: #5a4c85; }
 
+/* Per-session filter bar above the cards: one dropdown plus one chip per
+   session. Same panel language as the cards; the dropdown reuses .model-select
+   so it matches every other control on the page. */
+.session-filter { margin-top: 14px; padding: 14px 20px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(16,27,38,.9); }
+.session-filter-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.session-filter-head .eyebrow { margin-bottom: 4px; }
+.session-filter-head h2 { font-size: 14px; }
+.session-select { width: min(340px, 45%); }
+.session-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.session-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .2s ease, background .2s ease;
+}
+.session-chip canvas { grid-row: span 2; display: block; width: 72px; height: 18px; }
+.session-chip .chip-label { font-size: 11px; font-weight: 600; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
+.session-chip .chip-value { font-size: 11px; color: var(--muted); line-height: 1.2; }
+.session-chip:hover { border-color: #2a78a9; }
+.session-chip.active { border-color: var(--blue); background: rgba(80,183,255,.08); }
+.session-chip.active .chip-value { color: var(--blue); }
+.session-chip:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
 /* Context-token waveform card */
 .wave-card { display: flex; flex-direction: column; }
 .wave-stats { display: flex; gap: 16px; margin-top: 14px; color: var(--muted); font-size: 11px; }
