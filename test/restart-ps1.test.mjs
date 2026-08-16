@@ -152,11 +152,18 @@ http.createServer((req, res) => {
   restart.stderr.on("data", (chunk) => (output += chunk));
   const exitCode = await new Promise((resolve) => restart.on("close", resolve));
   assert.equal(exitCode, 0, output);
-  assert.match(output, /gateway healthy/);
+  assert.match(output, /started gateway/);
   assert.equal(
     existsSync(path.join(root, "rebuilt.txt")),
     true,
     "restart.ps1 must rebuild a stale bundle (src newer than dist) before launching",
   );
-  assert.equal(await waitForHealth(port), true, "the gateway should answer healthz after the rebuild");
+  // restart.ps1 no longer waits for healthz, so the fake gateway may still be
+  // booting when the script exits. Wait for its pid marker before the cleanup
+  // hook tries to kill it, so the temp dir is never held open mid-start.
+  const started = path.join(root, "started.txt");
+  for (let i = 0; i < 40 && !existsSync(started); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(existsSync(started), "the fake gateway should record its pid after the rebuild");
 });

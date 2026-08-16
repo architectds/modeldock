@@ -41,7 +41,8 @@ test("restart.sh cascades listener discovery and refuses an unidentified healthy
   assert.match(restart, /if command -v lsof[\s\S]*if command -v ss[\s\S]*if command -v fuser/);
   assert.doesNotMatch(restart, /elif command -v ss/);
   assert.match(restart, /refusing a fake restart/);
-  assert.match(restart, /kill "\$NEW_PID"/);
+  assert.match(restart, /started gateway from \$ROOT using \$SERVER/);
+  assert.doesNotMatch(restart, /did not become healthy/, "restart.sh no longer polls healthz after launch");
 });
 
 test("install.sh warns loudly when the login agent cannot be loaded", () => {

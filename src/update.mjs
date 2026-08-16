@@ -11,7 +11,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -332,47 +332,25 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 // /healthz, and prints every step. The updater is the gateway itself, so the
 // script is spawned unref'd with -Force (deliberate takeover of our own port;
 // the owner guard's CIM command-line probe can come back empty for elevated
-// processes). Output is appended to modeldock-update.log - never discarded - so an
-// upgrade restart is traceable. No process.exit() here: the restart script
-// stops the old process, and if spawning it fails the current gateway keeps
-// serving instead of leaving the port dead.
+// processes). No process.exit() here: the restart script stops the old
+// process, and if spawning it fails the current gateway keeps serving instead
+// of leaving the port dead.
+//
+// stdio is fully detached ("ignore") on every platform. The restart script
+// writes the new gateway's logs to modeldock.log itself, so nothing here needs
+// a file descriptor. Earlier builds handed an update-log fd to the child as
+// stdout/stderr, then closed it on "spawn": restart.ps1 kills the very process
+// holding that fd, the handle vanished mid-start, and the whole restart died
+// silently - an empty update.log, no spawn error, the old gateway still
+// serving. Giving the child no fd at all is what the manual "run restart.ps1"
+// path already does, and that path works.
 export function scheduleRestart(rootDir, {
   spawnImpl = spawn,
   platform = process.platform,
-  delaySeconds = 1,
 } = {}) {
-  // The running gateway owns modeldock.log as stdout/stderr. Windows cmd.exe
-  // opens that redirection without append sharing, so trying to open the same
-  // path here fails with EBUSY before the restart process can even be spawned.
-  // Keep updater/supervisor output on a dedicated path; the new gateway resumes
-  // modeldock.log after the old process releases it.
-  const logPath = path.join(rootDir, "modeldock-update.log");
-  // Losing the log must not cost the restart. This open used to sit outside the
-  // try below, so anything it threw (a full disk, a permission change) aborted
-  // scheduleRestart before spawn ran and the gateway silently never came back.
-  // A null fd falls back to "ignore", which spawns without capturing output.
-  let logFd = null;
-  try {
-    logFd = openSync(logPath, "a");
-  } catch {
-    // Fall through: an unlogged restart still beats no restart.
-  }
-  const output = logFd === null ? "ignore" : logFd;
-  // The update API still needs to flush its success response before the restart
-  // script stops this gateway. The scripts consume this value before inspecting
-  // or terminating the listener; one second is ample for a loopback JSON reply.
   const env = {
     ...process.env,
     MODELDOCK_NODE_PATH: process.execPath,
-    MODELDOCK_RESTART_DELAY_SECONDS: String(delaySeconds),
-  };
-  const onSpawnError = (error) => {
-    try { appendFileSync(logPath, `[update] restart spawn failed: ${error.message}\n`); } catch { /* no recovery */ }
-  };
-  const closeLog = () => {
-    if (logFd === null) return;
-    try { closeSync(logFd); } catch { /* already gone */ }
-    logFd = null;
   };
   try {
     const [command, args] = platform === "win32"
@@ -388,27 +366,15 @@ export function scheduleRestart(rootDir, {
     // script stopping this gateway - which is all detached was ever there to buy.
     const child = spawnImpl(command, args, {
       env,
-      stdio: ["ignore", output, output],
+      stdio: ["ignore", "ignore", "ignore"],
       ...(platform === "win32" ? { windowsHide: true } : { detached: true }),
     });
-    // Hold the log fd until the child actually exists. spawn() returns before libuv
-    // has created the process, and this used to close the fd immediately in a
-    // finally - pulling the handle out from under stdio inheritance, so the detached
-    // restart came up with no usable stdout/stderr and, on Windows, did not come up
-    // at all. The symptom was a restart that never ran and never said why: the log
-    // file created, zero bytes in it, no spawn error, the old process still serving.
-    // Waiting for "spawn" costs nothing and removes the race.
     if (typeof child?.on === "function") {
-      child.on("spawn", closeLog);
-      child.on("error", (error) => { closeLog(); onSpawnError(error); });
+      child.on("error", () => { /* the old gateway keeps serving */ });
       child.unref?.();
-    } else {
-      // A test stub that is not an EventEmitter: nothing to wait for.
-      closeLog();
     }
   } catch (error) {
-    closeLog();
-    onSpawnError(error);
+    // The old gateway keeps serving; the Update button stays actionable.
   }
 }
 

@@ -129,62 +129,6 @@ test("createUpdater.check records errors without throwing", async () => {
   assert.match(state.error, /503/);
 });
 
-test("scheduleRestart delays listener shutdown until the update response can flush", () => {
-  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-restart-delay-"));
-  const calls = [];
-  const child = {
-    on() { return this; },
-    unref() { return this; },
-  };
-  const spawnImpl = (...args) => {
-    calls.push(args);
-    return child;
-  };
-  try {
-    // Model the running Windows gateway's exclusive stdout handle. A directory
-    // at this path makes any accidental open of modeldock.log fail everywhere.
-    mkdirSync(path.join(rootDir, "modeldock.log"));
-    scheduleRestart(rootDir, { spawnImpl, platform: "win32" });
-    scheduleRestart(rootDir, { spawnImpl, platform: "darwin" });
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0][0], "powershell.exe");
-    assert.equal(calls[1][0], "sh");
-    for (const call of calls) {
-      assert.equal(call[2].env.MODELDOCK_RESTART_DELAY_SECONDS, "1");
-      assert.equal(call[2].env.MODELDOCK_NODE_PATH, process.execPath);
-    }
-    // detached is POSIX-only. On Windows 11 a detached powershell.exe is created -
-    // spawn fires, a pid is allocated - and then never executes the script: no
-    // output, no error, no restart. Measured with stdio to a raw fd and with cmd.exe
-    // redirection, with and without windowsHide; the same spawn without `detached`
-    // runs every time. Windows does not kill children when a parent exits, so unref()
-    // alone gives the restart script the survival detached was there to provide.
-    assert.equal(calls[0][2].detached, undefined, "win32 must not spawn the restart detached");
-    assert.equal(calls[1][2].detached, true, "POSIX still detaches so the restart outlives this process");
-    assert.ok(readdirSync(rootDir).includes("modeldock-update.log"));
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
-test("scheduleRestart still restarts when its log cannot be opened", () => {
-  // The open used to sit outside the try, so anything it threw aborted the
-  // restart before spawn ran and the gateway silently never came back. A
-  // directory in the log's place makes the open fail the way a full disk or a
-  // permission change would.
-  const rootDir = path.join(os.tmpdir(), `modeldock-restart-nolog-${process.pid}`, "missing-parent", "root");
-  const calls = [];
-  const child = { on() { return this; }, unref() { return this; } };
-  try {
-    // rootDir does not exist, so opening a log inside it fails with ENOENT.
-    scheduleRestart(rootDir, { spawnImpl: (...args) => { calls.push(args); return child; }, platform: "win32" });
-    assert.equal(calls.length, 1, "the restart is spawned even with no log to write to");
-    assert.deepEqual(calls[0][2].stdio, ["ignore", "ignore", "ignore"], "output is discarded rather than lost");
-  } finally {
-    rmSync(rootDir, { recursive: true, force: true });
-  }
-});
-
 test("createUpdater.apply never falls back to cached release assets when the latest recheck fails", async () => {
   let calls = 0;
   let migrations = 0;

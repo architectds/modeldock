@@ -333,17 +333,6 @@ $restart = Join-Path $root "scripts\restart.ps1"
 
 $ErrorActionPreference = "Stop"
 
-# A self-update launches this script before its HTTP handler returns. Give that
-# loopback response a bounded window to flush before stopping the old gateway.
-$restartDelaySeconds = 0
-if ($env:MODELDOCK_RESTART_DELAY_SECONDS) {
-  $parsedDelay = 0
-  if ([int]::TryParse($env:MODELDOCK_RESTART_DELAY_SECONDS, [ref]$parsedDelay) -and $parsedDelay -ge 1 -and $parsedDelay -le 10) {
-    $restartDelaySeconds = $parsedDelay
-  }
-}
-if ($restartDelaySeconds -gt 0) { Start-Sleep -Seconds $restartDelaySeconds }
-
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
 
@@ -433,41 +422,16 @@ if ($listener) {
 
 $log = Join-Path $root "modeldock.log"
 
-# The old gateway's stdout/stderr handles can linger for a moment after
-# Stop-Process. Wait for the log to become writable BEFORE rotating: an
-# in-place Move-Item on a still-locked file fails, and that failure used to
-# abort the restart. If it stays locked, fall back to a per-run log file so
-# the redirect never races the dying process's file handles.
-function Test-WritableFile($file) {
-  try {
-    $probe = [System.IO.File]::Open($file, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    $probe.Close()
-    return $true
-  } catch {
-    return $false
-  }
-}
-$logsReady = $false
-for ($i = 0; $i -lt 20; $i += 1) {
-  if (Test-WritableFile $log) {
-    $logsReady = $true
-    break
-  }
-  Start-Sleep -Milliseconds 250
-}
-if (-not $logsReady) {
-  $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-  $log = Join-Path $root "modeldock-$stamp.log"
-  Write-Status "WARNING: modeldock.log was still locked; using per-run log ($log)"
-} elseif ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
-  # Rotate at startup, one previous generation (same policy as start-hidden.ps1):
-  # the log is append-only for the life of the process, so a cap on growth can
-  # only be applied between runs. 32 MB keeps roughly a month of daily use.
+# Rotate at startup, one previous generation (same policy as start-hidden.ps1):
+# the log is append-only for the life of the process, so a cap on growth can
+# only be applied between runs. 32 MB keeps roughly a month of daily use.
+if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 32MB)) {
   try {
     Move-Item -LiteralPath $log -Destination "$log.1" -Force
   } catch {
-    # Rotation is best-effort now that the lock wait passed; a raced lock must
-    # not turn a restart into a failure.
+    # Rotation is best-effort: a raced lock must not turn a restart into a
+    # failure. Stop-Process already waited for the old listener to exit, so the
+    # append-only redirect below uses a fresh handle.
     Write-Status "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
   }
 }
@@ -529,30 +493,7 @@ try {
   exit 1
 }
 Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
-
-for ($i = 0; $i -lt 40; $i += 1) {
-  Start-Sleep -Milliseconds 250
-  try {
-    Invoke-WebRequest -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2 -UseBasicParsing | Out-Null
-    Write-Status "restart.ps1: gateway healthy at http://127.0.0.1:$port"
-    exit 0
-  } catch {
-    # A returned HTTP status (e.g. 503 before a token is configured) still proves
-    # the gateway is up and listening - only a connection failure means it is not.
-    if ($_.Exception.Response) {
-      Write-Status "restart.ps1: gateway up at http://127.0.0.1:$port (awaiting token)"
-      exit 0
-    }
-    # Otherwise still booting / connection refused; keep polling.
-  }
-}
-
-Write-Status "ERROR: gateway did not become healthy within 10s"
-if (Test-Path $log) {
-  $tail = Get-Content $log -Tail 10 -ErrorAction SilentlyContinue
-  if ($tail) { $tail | ForEach-Object { [Console]::Error.WriteLine($_) } }
-}
-exit 1
+exit 0
 '@ | Out-File -FilePath $restart -Encoding ascii
 
 # Manual recovery menu: restart the gateway or restore the native Codex route.

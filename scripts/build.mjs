@@ -8,7 +8,7 @@
 //
 // Usage: node scripts/build.mjs   (or: npm run build)
 
-import { build } from "esbuild";
+import { build, transform } from "esbuild";
 import { readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,13 +22,28 @@ const TEXT_EXTENSIONS = new Set([".html", ".js", ".css", ".svg", ".json", ".txt"
 // are dev-only: loadTaskImage returns null when they are absent and the eval skips.
 const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico"];
 
-function inlineTree(dir, files) {
+// Minify an inlined text asset before it becomes a string literal in the
+// bundle. esbuild's own minify never touches string literals, so without this
+// the dashboard's JS/CSS would ship verbatim inside the single file. charset
+// stays utf8: the ascii default would re-escape every CJK translation string
+// as \uXXXX and make them larger, not smaller.
+async function minifyText(code, loader) {
+  const result = await transform(code, { minify: true, charset: "utf8", loader });
+  return result.code;
+}
+
+async function inlineTree(dir, files) {
   const entries = [];
   for (const file of files) {
     const full = path.join(dir, file);
     const ext = path.extname(file).toLowerCase();
+    let code;
     if (TEXT_EXTENSIONS.has(ext)) {
-      entries.push(`  ${JSON.stringify(file)}: ${JSON.stringify(readFileSync(full, "utf8"))}`);
+      code = readFileSync(full, "utf8");
+      if (ext === ".js" || ext === ".css") {
+        code = await minifyText(code, ext === ".css" ? "css" : "js");
+      }
+      entries.push(`  ${JSON.stringify(file)}: ${JSON.stringify(code)}`);
     } else {
       entries.push(`  ${JSON.stringify(file)}: Buffer.from(${JSON.stringify(readFileSync(full).toString("base64"))}, "base64")`);
     }
@@ -36,7 +51,7 @@ function inlineTree(dir, files) {
   return `{\n${entries.join(",\n")}\n}`;
 }
 
-function generateStaticModule() {
+async function generateStaticModule() {
   const publicDir = path.join(root, "public");
   const publicFiles = readdirSync(publicDir).filter((f) => statSync(path.join(publicDir, f)).isFile());
   const assetsDir = path.join(root, "assets");
@@ -46,8 +61,8 @@ function generateStaticModule() {
   return [
     `import { Buffer } from "node:buffer";`,
     `export default {`,
-    `public: ${inlineTree(publicDir, publicFiles)},`,
-    `assets: ${inlineTree(assetsDir, assetFiles)},`,
+    `public: ${await inlineTree(publicDir, publicFiles)},`,
+    `assets: ${await inlineTree(assetsDir, assetFiles)},`,
     `};`,
   ].join("\n");
 }
@@ -55,8 +70,8 @@ function generateStaticModule() {
 const staticInlinePlugin = {
   name: "static-inline",
   setup(pluginBuild) {
-    pluginBuild.onLoad({ filter: /static-inline\.mjs$/ }, () => ({
-      contents: generateStaticModule(),
+    pluginBuild.onLoad({ filter: /static-inline\.mjs$/ }, async () => ({
+      contents: await generateStaticModule(),
       loader: "js",
     }));
   },
@@ -71,8 +86,8 @@ const common = {
   platform: "node",
   target: "node22",
   format: "esm",
+  minify: true,
   sourcemap: false,
-  minify: false,
   logLevel: "info",
   // esbuild defaults to charset:"ascii", which re-escapes every translated string as
   // \uXXXX - correct but unreadable and 2x the bytes for CJK. The bundle is served as

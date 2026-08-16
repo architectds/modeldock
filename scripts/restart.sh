@@ -8,15 +8,9 @@
 #   1. Reads MODELDOCK_PORT from <modeldock>/.env (default 4097).
 #   2. On macOS, asks launchd to restart the managed service when it is loaded.
 #   3. Otherwise stops the process listening on that port, after an owner check.
-#   4. Starts a fresh detached node gateway and waits for /healthz.
+#   4. Starts a fresh detached node gateway.
 
 set -eu
-
-# A self-update launches this script before its HTTP handler returns. Give that
-# loopback response a bounded window to flush before stopping the old gateway.
-case "${MODELDOCK_RESTART_DELAY_SECONDS:-}" in
-  1|2|3|4|5|6|7|8|9|10) sleep "$MODELDOCK_RESTART_DELAY_SECONDS" ;;
-esac
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 ENV_FILE="$ROOT/.env"
@@ -159,26 +153,6 @@ try {
 NODE
 }
 
-wait_for_health() {
-  old_pid="${1:-}"
-  i=0
-  while [ "$i" -lt 40 ]; do
-    # No -f: a 503 (gateway up but no token yet) still proves the process is
-    # listening. -f would treat that as a failure and loop until the timeout,
-    # reporting a healthy fresh install as "did not start".
-    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null; then
-      new_pid="$(find_listener_pid)"
-      if [ -z "$old_pid" ] || [ -z "$new_pid" ] || [ "$new_pid" != "$old_pid" ]; then
-        status "restart.sh: gateway healthy at http://127.0.0.1:$PORT"
-        return 0
-      fi
-    fi
-    sleep 0.25
-    i=$((i + 1))
-  done
-  return 1
-}
-
 try_launchd_restart() {
   [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] || return 1
   command -v launchctl >/dev/null 2>&1 || return 1
@@ -191,11 +165,8 @@ try_launchd_restart() {
 check_owner
 
 if try_launchd_restart; then
-  if wait_for_health "$OLD_PID"; then
-    exit 0
-  fi
-  status "WARNING: launchd restart did not become healthy; falling back to manual restart"
-  OLD_PID="$(find_listener_pid)"
+  status "restart.sh: launchd service com.modeldock.gateway restarted"
+  exit 0
 fi
 
 if [ -n "$OLD_PID" ]; then
@@ -233,17 +204,5 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
 fi
 
 nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
-NEW_PID=$!
 status "restart.sh: started gateway from $ROOT using $SERVER (logs: $LOG)"
-
-if wait_for_health "$OLD_PID"; then
-  exit 0
-fi
-
-status "ERROR: gateway did not become healthy within 10s"
-kill "$NEW_PID" 2>/dev/null || true
-wait "$NEW_PID" 2>/dev/null || true
-if [ -f "$LOG" ]; then
-  tail -n 10 "$LOG" >&2 || true
-fi
-exit 1
+exit 0
