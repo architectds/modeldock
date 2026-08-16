@@ -21,6 +21,7 @@ import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
+import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
@@ -352,6 +353,20 @@ function subagentPayload(services) {
 
 function statusPayload(services) {
   const { config, metrics, mediaStore, routeAffinity, modelSelection, autostart, updater } = services;
+  // Real conversations have a Codex rollout file; one-shot background calls
+  // (vision probes, native subagent flashes) do not. The dashboard hides the
+  // latter by showing only sessions that resolve to a readable name.
+  const sessionNames = {};
+  if (services.sessionNames) {
+    const seen = new Set();
+    for (const record of metrics.recent) {
+      if (record.sessionId) seen.add(record.sessionId);
+    }
+    for (const id of seen) {
+      const info = services.sessionNames.labelFor(id);
+      if (info?.label) sessionNames[id] = info.label;
+    }
+  }
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
   const mainTokenReady = Boolean(tokenFor(config, selected.mainModel));
   // Which provider owns the selected main model is a display fact, and the picker
@@ -409,6 +424,7 @@ function statusPayload(services) {
       supported: Boolean(autostart?.supported?.()),
       enabled: Boolean(autostart?.enabled?.()),
     },
+    sessionNames,
     update: updater?.state?.() || null,
   });
 }
@@ -1008,11 +1024,17 @@ export function createServices(config = loadConfig()) {
     ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
+  // Tests inject a partial config that omits codexHome; fall back to the same
+  // default loadConfig would have chosen so the session index is always rooted.
+  const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
+    ? mutableConfig.codexHome
+    : path.join(os.homedir(), ".codex");
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
+    sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
   });
 }
 

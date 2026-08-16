@@ -102,9 +102,13 @@ function renderRecent(items) {
               : "—");
     // Context size per request: the input tokens actually sent upstream. The
     // upstream only reports usage when the request completes, so an in-flight
-    // row shows a pending ellipsis and non-token kinds render an em dash.
-    const contextTokens =
-      item.status === "active"
+    // row shows a pending ellipsis and non-token kinds render an em dash. A CPU
+    // compact event bills no upstream tokens, so its context cell shows the
+    // compacted history as a token range (chars / 3, the same estimate as the
+    // trace detail) - from -> to - making the compression visible at a glance.
+    const contextTokens = item.compression
+      ? `${number(Math.round(item.compression.fromChars / 3))} \u2192 ${number(Math.round(item.compression.toChars / 3))}`
+      : item.status === "active"
         ? "…"
         : Number.isFinite(Number(item.inputTokens)) && Number(item.inputTokens) > 0
           ? number(item.inputTokens)
@@ -573,8 +577,7 @@ function buildSessionList(recent) {
     if (item.kind !== "responses") continue;
     const key = sessionKeyOf(item);
     if (!key) continue;
-    const entry = map.get(key) || { id: key, model: "", count: 0, lastAt: 0 };
-    entry.count += 1;
+    const entry = map.get(key) || { id: key, model: "", lastAt: 0 };
     if (item.model) entry.model = item.model;
     entry.lastAt = Math.max(entry.lastAt, Number(item.finishedAt || item.startedAt || 0));
     map.set(key, entry);
@@ -582,29 +585,35 @@ function buildSessionList(recent) {
   return [...map.values()].sort((a, b) => b.lastAt - a.lastAt);
 }
 
-function renderSessions(recent) {
+function renderSessions(recent, names = {}) {
   const filter = $("session-filter");
   if (!filter) return;
   const sessions = buildSessionList(recent);
+  // Real conversations carry a readable name from their Codex rollout file;
+  // one-shot background sessions (native luna probes) do not. Only named
+  // sessions enter the dropdown; if the server supplied no names at all
+  // (older build), fall back to showing everything.
+  const useNames = Object.keys(names).length > 0;
+  const visible = useNames ? sessions.filter((session) => names[session.id]) : sessions;
   const select = $("session-select");
-  if (!sessions.length) {
+  if (!visible.length) {
     filter.hidden = true;
     return;
   }
   filter.hidden = false;
-  const signature = sessions.map((session) => `${session.id}|${session.model}`).join("\u0001");
+  const signature = visible.map((session) => `${session.id}|${names[session.id] || session.model}`).join("\u0001");
   if (signature !== lastSessionSignature) {
     lastSessionSignature = signature;
-    if (!sessions.some((session) => session.id === sessionFilter)) sessionFilter = "";
+    if (!visible.some((session) => session.id === sessionFilter)) sessionFilter = "";
     select.replaceChildren();
     const all = document.createElement("option");
     all.value = "";
     all.textContent = t("session.all");
     select.append(all);
-    sessions.forEach((session) => {
+    visible.forEach((session) => {
       const option = document.createElement("option");
       option.value = session.id;
-      option.textContent = `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
+      option.textContent = names[session.id] || `${shortModel(session.model)} · ${session.id.slice(0, 8)}`;
       select.append(option);
     });
   }
@@ -640,7 +649,7 @@ function render(data) {
   renderCacheWave(data.recent || []);
   renderDataWave(data.recent || []);
   renderTpsWave(data.recent || []);
-  renderSessions(data.recent || []);
+  renderSessions(data.recent || [], data.sessionNames || {});
   set("bytes-total", bytes(responses.bytesIn + responses.bytesOut));
   set("bytes-in", bytes(responses.bytesIn));
   set("bytes-out", bytes(responses.bytesOut));

@@ -1,0 +1,85 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { SessionNames, sessionInfoFromFile } from "../src/session-names.mjs";
+
+const REAL_ID = "019fdd19-4321-7490-ab24-d6f657c9e532";
+const TREE = "2026/08/16";
+
+function fixture() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-sessions-"));
+  const file = path.join(dir, TREE, `rollout-2026-08-16T10-00-00-${REAL_ID}.jsonl`);
+  mkdirSync(path.dirname(file), { recursive: true });
+  const meta = JSON.stringify({
+    type: "session_meta",
+    payload: { session_id: REAL_ID, cwd: "D:\\projects\\modeldock", originator: "Codex Desktop" },
+  });
+  const turn = JSON.stringify({
+    type: "turn_context",
+    payload: {
+      messages: [
+        { role: "system", content: [{ type: "text", text: "You are Codex." }] },
+        { role: "user", content: [{ type: "text", text: "熟悉一下这个代码库" }] },
+      ],
+    },
+  });
+  writeFileSync(file, `${meta}\n${turn}\n`, "utf8");
+  return { dir, file };
+}
+
+test("sessionInfoFromFile reads cwd and the first user message from the head", () => {
+  const { dir, file } = fixture();
+  try {
+    const info = sessionInfoFromFile(file);
+    assert.equal(info.cwd, "D:\\projects\\modeldock");
+    assert.match(info.firstUser, /熟悉一下这个代码库/);
+    assert.match(info.label, /^modeldock · 熟悉一下这个代码库$/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a rollout with no user text labels by the cwd name alone", () => {
+  const { dir, file } = fixture();
+  try {
+    writeFileSync(
+      file,
+      `${JSON.stringify({ type: "session_meta", payload: { cwd: "C:\\work" } })}\n`,
+      "utf8",
+    );
+    const info = sessionInfoFromFile(file);
+    assert.equal(info.label, "work · 2026-08-16 10-00");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SessionNames resolves indexed sessions and rejects one-shot ids", () => {
+  const { dir } = fixture();
+  try {
+    const names = new SessionNames({ sessionsRoot: dir, dateDir: () => TREE });
+    assert.match(names.labelFor(REAL_ID).label, /^modeldock /);
+    // Same id again comes from the cache and is identical.
+    assert.equal(names.labelFor(REAL_ID), names.labelFor(REAL_ID));
+    assert.equal(names.labelFor("01a00973-b5f8-71e2-b282-ed8155de561e"), null);
+    assert.equal(names.labelFor(""), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("SessionNames picks up a session created after the index", () => {
+  const { dir } = fixture();
+  try {
+    const names = new SessionNames({ sessionsRoot: dir, dateDir: () => TREE });
+    assert.equal(names.labelFor(REAL_ID).label, "modeldock · 熟悉一下这个代码库");
+    const freshId = "01a01000-0000-4000-8000-000000000000";
+    const fresh = path.join(dir, TREE, `rollout-2026-08-16T11-00-00-${freshId}.jsonl`);
+    writeFileSync(fresh, `${JSON.stringify({ type: "session_meta", payload: { cwd: "C:\\tmp\\fresh" } })}\n`, "utf8");
+    assert.equal(names.labelFor(freshId).label, "fresh · 2026-08-16 11-00");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
