@@ -90,6 +90,12 @@ h2 { margin: 0; font-size: 17px; }
 }
 .model-select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .model-select:disabled { opacity: .55; cursor: wait; }
+.model-select option {
+  font-family: inherit;
+  font-size: 11px;
+  background: var(--panel-2);
+  color: var(--text);
+}
 .model-static { display: flex; align-items: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-static.busy { opacity: .55; }
 .mode-toggle { position: relative; display: flex; align-items: center; gap: 8px; width: max-content; cursor: pointer; user-select: none; }
