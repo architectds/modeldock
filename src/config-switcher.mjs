@@ -196,26 +196,21 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true, publishedModels = null }) {
+export function buildManagedCodexConfig(source, { baseUrl, model, nativeModels = [], catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
-  // Keep the model the user already had, as long as this route can still serve
-  // it. Enabling ModelDock means "route Codex through the local gate", not "pick
-  // Codex's model", and overwriting the selection on every enable is how
-  // ModelDock's own default - which a connected local endpoint could quietly
-  // become - replaced the user's choice.
-  //
-  // "As long as it can serve it" is the half that cannot be skipped: enabling
-  // also swaps Codex's catalog for the published one, and a model missing from
-  // that catalog leaves Codex pointed at something that no longer exists. A
-  // DeepSeek-only user onboarding while logged out of ChatGPT is exactly that
-  // case - their config says gpt-5.6-sol, but no native model is published, so
-  // the selection has to move. publishedModels null means "caller did not say",
-  // and then the old overwrite stands rather than guessing.
+  // The top-level `model` stays a native slug Codex always recognizes. Routed
+  // slugs (deepseek-v4-flash@opencode-go) exist only in the published catalog,
+  // so writing one here makes Codex startup depend on ModelDock being healthy:
+  // the gateway down, the catalog stale, or ModelDock off all leave Codex
+  // pointed at a model that no longer exists. A native model starts under every
+  // condition. The picker, not this file, is where a routed model gets chosen.
+  const natives = Array.isArray(nativeModels) ? nativeModels : [];
   const existingModel = topLevelString(source, "model");
-  const canKeepExisting = Boolean(existingModel)
-    && Array.isArray(publishedModels)
-    && publishedModels.includes(existingModel);
-  const chosen = canKeepExisting ? existingModel : model;
+  const existingIsNative = Boolean(existingModel) && natives.includes(existingModel);
+  const nativeFallback = natives.includes("gpt-5.6-sol") ? "gpt-5.6-sol" : natives[0] || "";
+  // A native-less install (logged out of ChatGPT) has nothing to keep; the
+  // managed model is the only thing this route can serve then.
+  const chosen = existingIsNative ? existingModel : (nativeFallback || model);
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   if (chosen) lines = setTopLevel(lines, "model", chosen);
@@ -267,19 +262,18 @@ export class CodexConfigSwitcher {
   #model;
 
   // Same shape as #model: a function so the list is read at enable time. The
-  // published catalog changes with sign-in state and connected providers, and a
-  // snapshot taken at construction would decide "can we keep the user's model"
-  // from a stale answer.
-  #publishedModels;
+  // native set changes with sign-in state, and a snapshot taken at construction
+  // would decide "which model can Codex always start on" from a stale answer.
+  #nativeModels;
 
-  constructor({ codexHome, baseUrl, model, publishedModels = null, catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
+  constructor({ codexHome, baseUrl, model, nativeModels = [], catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
     this.stateDir = path.join(this.codexHome, "modeldock");
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
     this.#model = model;
-    this.#publishedModels = publishedModels;
+    this.#nativeModels = nativeModels;
     this.catalogFile = catalogFile;
     this.mcpUrl = mcpUrl;
     this.mcpCommand = mcpCommand;
@@ -291,12 +285,12 @@ export class CodexConfigSwitcher {
     return typeof this.#model === "function" ? this.#model() : this.#model;
   }
 
-  // null when the caller never supplied a list: buildManagedCodexConfig reads
-  // that as "unknown", and keeps writing the managed model rather than guessing
-  // that the user's current one is still routable.
-  get publishedModels() {
-    const value = typeof this.#publishedModels === "function" ? this.#publishedModels() : this.#publishedModels;
-    return Array.isArray(value) ? value : null;
+  // Empty when the caller never supplied a list: buildManagedCodexConfig then
+  // falls back to the managed model, the only one this route can serve without
+  // a native catalog (logged out of ChatGPT).
+  get nativeModels() {
+    const value = typeof this.#nativeModels === "function" ? this.#nativeModels() : this.#nativeModels;
+    return Array.isArray(value) ? value : [];
   }
 
   set model(value) {
@@ -433,7 +427,7 @@ export class CodexConfigSwitcher {
     const managed = buildManagedCodexConfig(original, {
       baseUrl: this.baseUrl,
       model: this.model,
-      publishedModels: this.publishedModels,
+      nativeModels: this.nativeModels,
       catalogFile: this.catalogFile,
       mcpUrl: this.mcpUrl,
       mcpCommand: this.mcpCommand,

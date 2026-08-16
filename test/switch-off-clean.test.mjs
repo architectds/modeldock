@@ -44,12 +44,12 @@ function files(dir, base = dir, out = []) {
   return out.sort();
 }
 
-function switcher(home, publishedModels = null) {
+function switcher(home, nativeModels = []) {
   return new CodexConfigSwitcher({
     codexHome: home,
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
     model: "deepseek-v4-flash@opencode-go",
-    publishedModels,
+    nativeModels,
     catalogFile: path.join(home, "catalog.json"),
     mcpUrl: "http://127.0.0.1:4097/c/KEY/mcp",
   });
@@ -109,38 +109,55 @@ test("Off is safe to run twice and without an agent file", async (t) => {
   assert.ok(existsSync(path.join(home, "config.toml")), "the config survives a second disable");
 });
 
-test("enabling keeps the user's model when this route can still serve it", () => {
-  // Enabling means "route Codex through the gate", not "pick Codex's model".
-  // Overwriting the selection on every enable is how a connected local endpoint
-  // silently became the default - and a local model then triggers the
-  // small-context tool whitelist, cutting Codex from ~150 tools to 23.
+test("the top-level model stays native so Codex can always start", () => {
+  // The top-level `model` must be a slug Codex recognizes unconditionally: a
+  // routed slug (deepseek-v4-flash@opencode-go) only exists in the published
+  // catalog, so writing one into config.toml makes Codex startup depend on
+  // ModelDock being healthy. A native model starts under every condition - the
+  // gateway down, the catalog stale, or ModelDock off.
   const managed = buildManagedCodexConfig(ORIGINAL, {
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
     model: "deepseek-v4-flash@opencode-go",
-    publishedModels: ["gpt-5.6-sol", "deepseek-v4-flash@opencode-go"],
+    nativeModels: ["gpt-5.6-sol"],
   });
   assert.match(managed, /^model = "gpt-5.6-sol"$/m, "the user's choice survives enable");
 });
 
-test("enabling moves the model when the route cannot serve the old one", () => {
-  // The half that cannot be skipped: enable also swaps in the published catalog.
-  // A DeepSeek-only user logged out of ChatGPT has gpt-5.6-sol in their config
-  // and no native model published, so leaving the selection alone would point
-  // Codex at a model that no longer exists.
+test("a routed config model is rewritten to a native slug", () => {
+  // A previous ModelDock build wrote a routed slug into the top-level model.
+  // Enabling again must repair that, not preserve it: the routed slug lives
+  // only in the published catalog, so Codex cannot start on it once the catalog
+  // or gateway is gone. The managed fallback picks a known native slug instead.
   const managed = buildManagedCodexConfig(ORIGINAL, {
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
     model: "deepseek-v4-flash@opencode-go",
-    publishedModels: ["deepseek-v4-flash@opencode-go"],
+    nativeModels: ["gpt-5.6-luna", "gpt-5.6-sol"],
+  });
+  assert.match(managed, /^model = "gpt-5.6-sol"$/m, "prefers the stable native default when present");
+});
+
+test("a native-less install falls back to the managed model", () => {
+  // Logged out of ChatGPT there is no native catalog, so no native slug can be
+  // served by the published catalog either. The managed model is then the only
+  // one this route can serve; writing a native slug would point Codex at
+  // nothing.
+  const managed = buildManagedCodexConfig(ORIGINAL, {
+    baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
+    model: "deepseek-v4-flash@opencode-go",
   });
   assert.match(managed, /^model = "deepseek-v4-flash@opencode-go"$/m);
 });
 
-test("an unknown published list keeps the old overwrite rather than guessing", () => {
-  const managed = buildManagedCodexConfig(ORIGINAL, {
-    baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
-    model: "deepseek-v4-flash@opencode-go",
-  });
-  assert.match(managed, /^model = "deepseek-v4-flash@opencode-go"$/m);
+test("a non-native top-level model never survives into the managed config", () => {
+  const managed = buildManagedCodexConfig(
+    'model = "qwen3.8:27b@custom"\napproval_policy = "on-request"\n',
+    {
+      baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
+      model: "deepseek-v4-flash@opencode-go",
+      nativeModels: ["gpt-5.6-sol"],
+    },
+  );
+  assert.match(managed, /^model = "gpt-5.6-sol"$/m, "a custom/routed top-level model is replaced by native");
 });
 
 test("connecting a custom endpoint publishes a model without becoming the default", async (t) => {

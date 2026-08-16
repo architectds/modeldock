@@ -932,10 +932,12 @@ export function createServices(config = loadConfig()) {
     // modelSelection without going through this switcher, and a stored copy then
     // wrote the stale model into config.toml on the next enable.
     model: () => modelSelection.mainModel,
-    // Read at enable time, not construction: sign-in state and connected
-    // providers change what is published, and enable() uses this to decide
-    // whether the user's current model is still one this route can serve.
-    publishedModels: () => [...publishedModelIds(mutableConfig)],
+    // Read at enable time, not construction: sign-in state changes what the
+    // native catalog holds, and enable() uses this to pick the one model Codex
+    // can always start on. Routed slugs never go into config.toml's top-level
+    // model - they exist only in the published catalog, so writing one there
+    // makes Codex startup depend on ModelDock being healthy.
+    nativeModels: () => [...nativeModelSlugs(mutableConfig)],
     catalogFile,
   });
   const autostart = createAutostart();
