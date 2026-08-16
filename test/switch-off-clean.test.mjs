@@ -122,6 +122,20 @@ test("the top-level model stays native so Codex can always start", () => {
   assert.match(managed, /^model = "gpt-5.6-sol"$/m, "the user's choice survives enable");
 });
 
+test("a non-default native model from the off state survives enable untouched", () => {
+  // The source is the off-state config that Codex itself wrote. Whatever native
+  // model Codex left there (gpt-5.6-luna here, not the fallback default) is
+  // exactly what the managed config must keep: the top-level model follows the
+  // machine, so a Codex upgrade that changes its default native model is
+  // preserved instead of being overwritten by a hard-coded slug.
+  const offState = 'model = "gpt-5.6-luna"\napproval_policy = "on-request"\n';
+  const managed = buildManagedCodexConfig(offState, {
+    baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
+    nativeModels: ["gpt-5.6-sol", "gpt-5.6-luna"],
+  });
+  assert.match(managed, /^model = "gpt-5.6-luna"$/m, "the off-state native model is kept, not replaced by the default");
+});
+
 test("a routed config model is rewritten to a native slug", () => {
   // A previous ModelDock build wrote a routed slug into the top-level model.
   // Enabling again must repair that, not preserve it: the routed slug lives
