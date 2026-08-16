@@ -40,7 +40,11 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
             type: z.enum(["auto", "fast", "deep"]).optional(),
             contextMaxCharacters: z.number().int().min(1_000).max(50_000).optional(),
           }),
-          annotations: { readOnlyHint: true, openWorldHint: true },
+          // A read-only query must not be gated behind Codex's open-world
+          // policy: openWorldHint: true hides the tool from sessions whose
+          // config does not enable open_world, which is the default. Web
+          // search never mutates external state, so it is read-only only.
+          annotations: { readOnlyHint: true, openWorldHint: false },
         },
         async (args) => {
           try {

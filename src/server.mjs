@@ -253,8 +253,8 @@ function modelsPayload(services) {
     // Derive the provider from the model actually selected, the same way the
     // vision and subagent pickers do. Reporting config.profileId here let the two
     // drift apart: selecting a custom/ollama model as main updates mainModel but
-    // never touches profileId, so the dashboard rendered impossible pairs like
-    // "OpenCode Go / qwen3.8:27b". profileId remains the fallback for a model the
+    // never touches profileId, so the dashboard rendered impossible pairs of
+    // a provider and a model. profileId remains the fallback for a model the
     // catalog cannot place.
     selectedProvider: modelProviderOf(options, selected.mainModel) || services.config.profileId || "opencode-go",
     visionProviders,

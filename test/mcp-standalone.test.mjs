@@ -99,6 +99,12 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
     const names = listed.result.tools.map((tool) => tool.name);
     assert.deepEqual(names.sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
+    const search = listed.result.tools.find((tool) => tool.name === "web_search_exa");
+    assert.equal(
+      search.annotations?.openWorldHint,
+      false,
+      "web search is read-only and must not be hidden by Codex's open-world gate",
+    );
   } finally {
     await stopBridge(bridge);
     await gateway.close();
@@ -119,6 +125,7 @@ test("stdio bridge exposes recall_memory when memory is enabled and forwards cal
     const names = listed.result.tools.map((tool) => tool.name);
     assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
     assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
+    assert.ok(names.includes("learn"), `learn missing from ${names.join(",")}`);
     const recallSchema = listed.result.tools.find((tool) => tool.name === "recall_memory")?.inputSchema || {};
     assert.equal(
       recallSchema.properties?.scope_only,

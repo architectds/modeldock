@@ -41,6 +41,7 @@ const upstreams = {
     ? {
         recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl),
         storeMemory: (args) => callMcpTool("store_memory", withSessionScope(args), baseUrl),
+        learnMemory: (args) => callMcpTool("learn", withSessionScope(args), baseUrl),
       }
     : {}),
 };

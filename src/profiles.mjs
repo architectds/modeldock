@@ -28,7 +28,7 @@ const DEEPSEEK_REASONING_LEVELS = [
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
 ];
 
-// llama.cpp qwen3.8 chat template accepts exactly these reasoning efforts
+// llama.cpp chat template accepts exactly these reasoning efforts
 // (verified in the GGUF template: 'xhigh', 'medium', 'low'; "high" raises).
 // Advertised for custom/Ollama local backends so the Codex picker only offers
 // values the template accepts.

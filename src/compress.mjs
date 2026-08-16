@@ -1,11 +1,12 @@
 // Structured, CPU-only conversation compression for the compact path.
 //
-// A local backend (qwen3.8 at 81920 ctx) cannot finish an LLM handoff summary
-// of a 60K+ token history inside Codex's ~5 minute request timeout: prefill of
-// the full history alone runs minutes on the AMD Vulkan backend, the client
-// aborts, and the retry only resumes via the llama.cpp KV cache. Instead of
-// shrinking the model, shrink the history: extract the parts a handoff needs
-// and drop the rest, deterministically, in milliseconds, on the CPU.
+// A local backend with a small context window cannot finish an LLM handoff
+// summary of a large history inside Codex's ~5 minute request timeout: prefill
+// of the full history alone can run for minutes on a modest local backend, the
+// client aborts, and the retry only resumes via the backend's KV cache.
+// Instead of shrinking the model, shrink the history: extract the parts a
+// handoff needs and drop the rest, deterministically, in milliseconds, on the
+// CPU.
 //
 // Priority, in order:
 //   1. user asks           - the task definition, deduped and noise-stripped

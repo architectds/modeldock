@@ -27,11 +27,12 @@ const HOSTED_TOOL_TYPES = new Set([
 // The vision path is vision_inspect or direct image escalation, not view_image.
 const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
 
-// Local backends (llama.cpp / Ollama) run on 32K-100K context; Codex sends
-// 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and, together
-// with the system prompt, eat roughly 61K of the window. Whitelist the core
-// tools so the fixed overhead fits and the model keeps real conversation room
-// (a qwen3.8 at 80K would otherwise be left with only ~5K for the task).
+// Local backends (llama.cpp / Ollama) run on a small context window; Codex
+// sends 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and,
+// together with the system prompt, eat roughly 61K of the window. Whitelist
+// the core tools so the fixed overhead fits and the model keeps real
+// conversation room (a small-context backend would otherwise be left with
+// almost no room for the task).
 const LOCAL_TOOL_ALLOWLIST = new Set([
   "exec_command",
   "apply_patch",
@@ -56,7 +57,7 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
   // Let the model stop and ask the user when it is stuck; cheap and flat.
   "request_user_input",
   // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
-  // only office tools a 27B local model can usefully drive. Names carry the
+  // only office tools a small local model can usefully drive. Names carry the
   // plugin's truncated+hashed suffixes; update them if the plugin renames.
   "mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa",
   "mcp__codex_apps__codex_document_control___get_docum_83c7f0565c0f",
@@ -80,7 +81,7 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
 //
 // Like its predecessor it does NOT gate the *protocol* adaptation (system
 // hoisting, standard tool rewrite, reasoning mapping): that keys off the
-// provider alone, because a qwen3.8 server can reject a mid-history system
+// provider alone, because a local server can reject a mid-history system
 // item at any advertised window. Conflating the two is what made compact_v2
 // fail with "System message must be at the beginning"; see the comment in
 // relayCompaction before widening this function's role again.
@@ -827,7 +828,7 @@ export function normalizeOllamaInput(input) {
   return normalizeGatewayInput(input).map(normalizeStandardToolItem);
 }
 
-// llama.cpp's qwen3.8 jinja template requires the system message to be first
+// llama.cpp's jinja template requires the system message to be first
 // ("System message must be at the beginning") and rejects a mid-history system
 // item - Codex can emit one after compaction or a tool turn. Merge every
 // system item's text into a single leading system message and drop the
@@ -837,7 +838,7 @@ export function hoistLocalSystem(input) {
   const texts = [];
   const rest = [];
   for (const item of input) {
-    // Codex sends its system guidance as role "developer"; llama.cpp's qwen3.8
+    // Codex sends its system guidance as role "developer"; llama.cpp's
     // template treats both developer and system as leading system messages.
     if (item?.role === "system" || item?.role === "developer") {
       const text = Array.isArray(item.content)
@@ -865,7 +866,7 @@ export function normalizeLocalInput(input) {
 }
 
 // llama.cpp's /v1/responses renders `instructions` as the system message, so a
-// role=system item anywhere in input then sits mid-history and trips the qwen3.8
+// role=system item anywhere in input then sits mid-history and trips the
 // template ("System message must be at the beginning"). When instructions exist,
 // merge every system item's text into them and drop the items; when they do not,
 // hoist system to the front as before. Both paths keep the standard-tool rewrite.
@@ -905,7 +906,7 @@ export function normalizeLocalPayload(payload) {
 // block: the four harness/media skills plus the office skills whose
 // codex_document_control tools ARE whitelisted (their SKILL.md guides how to
 // drive Word/PPT/Spreadsheet sessions). Everything else is dropped - its tools
-// are not whitelisted, so the descriptions are dead weight for a 27B model.
+// are not whitelisted, so the descriptions are dead weight for a small model.
 const LOCAL_SKILLS_KEEP = new Set([
   "imagegen",
   "openai-docs",
@@ -927,7 +928,7 @@ const AGENT_BLOCK_RE = /You are `\/root`, the primary agent[\s\S]*?<\/multi_agen
 const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating memories:)/g;
 // ModelDock's own base instructions, shortened for small models: the
 // mandatory design-first image-gen loop and the long vision preamble are
-// disproportionate for a 27B local backend.
+// disproportionate for a small-context local backend.
 const VERBOSE_VISION_GUIDANCE =
   /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
 const VERBOSE_DESIGN_FIRST =
@@ -1028,7 +1029,7 @@ export function stripLocalInstructions(instructions) {
   return stripLocalInstructionText(instructions);
 }
 
-// llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
+// llama.cpp's jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
 // and drop anything else so local custom/Ollama routes never trip the template
 // validator. Valid efforts pass through so the picker's selection is honored.
@@ -1221,7 +1222,8 @@ export function upstreamTargetFor(config, model) {
   }
   if (provider === "ollama") {
     // The published id is colon-free but Ollama only serves the original tag
-    // (qwen3.8-27b -> qwen3.8:27b), so the wire id comes from the profile entry.
+    // (a model tag may contain a colon that the slug cannot carry), so the
+    // wire id comes from the profile entry.
     const entry = modelEntryFor(config, model);
     return {
       provider,
@@ -2361,9 +2363,9 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // Custom/ollama backends must see the same adapted shape on the compact path
   // as on the main relay path: Codex's mid-history system/developer items
   // hoisted into a single leading system (or merged into instructions), the
-  // standard tool-item rewrite, and a reasoning effort the qwen3.8 jinja
-  // template accepts. Context size is not the right gate here - a qwen3.8
-  // server can advertise 128K and still reject a mid-history system item, so
+  // standard tool-item rewrite, and a reasoning effort the jinja template
+  // accepts. Context size is not the right gate here - a local server can
+  // advertise a large window and still reject a mid-history system item, so
   // this must match relayResponses unconditionally for the provider, not only
   // for isLocalBackend. Skipping the adaptation made compact_v2
   // fail with "System message must be at the beginning" whenever the compacted
@@ -2390,12 +2392,12 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   if (localPayload) {
     summarizeBody.reasoning = normalizeLocalReasoning(summarizeBody).reasoning;
   }
-  // A small-context local backend (e.g. qwen3.8 at 81920) cannot finish an LLM
-  // handoff of a large history inside Codex's ~5 minute timeout: prefill alone
-  // runs minutes on the AMD Vulkan backend. For these backends the CPU extract
-  // IS the handoff - task, findings, recent state, tool inventory - so it is
+  // A small-context local backend cannot finish an LLM handoff of a large
+  // history inside Codex's ~5 minute timeout: prefill alone can run for
+  // minutes on a modest local backend. For these backends the CPU extract IS
+  // the handoff - task, findings, recent state, tool inventory - so it is
   // handed straight back to Codex as the compaction summary. No upstream
-  // summarize call at all: milliseconds, deterministic, zero GPU time. The
+  // summarize call at all: milliseconds, deterministic, zero model time. The
   // degenerate guard (extract essentially the same size as the input: a
   // two-message exchange, no tool noise) simply means the extract carries no
   // compression credit, but the direct return is still correct - the raw
@@ -2659,7 +2661,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     ),
     model: route.model,
   };
-  // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and
+  // llama.cpp's jinja template accepts only xhigh/medium/low and
   // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
   // closest accepted value, and drop anything else so local routes never trip
   // the template validator.
@@ -2680,7 +2682,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // gate. Re-serializing the parsed payload is the honest post-decode size.
   const bytesIn = Buffer.byteLength(JSON.stringify(payload));
 
-  // Trim tools only for small-context local backends (llama.cpp @32K etc.).
+  // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
   const { tools, stripped } = applyToolPolicy(normalizedPayload.tools, {

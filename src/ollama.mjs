@@ -2,8 +2,9 @@
 //
 // Unlike the custom endpoint flow, Ollama needs no API key and no /v1 base URL
 // completion: the model list lives at the root (/api/tags) while the Responses
-// probe lives under /v1/responses. Model tags may contain a colon (qwen3.8:27b)
-// which the published slug cannot carry, so each entry keeps both the published
+// probe lives under /v1/responses. Model tags may contain a colon (e.g. a tag
+// with a size suffix) which the published slug cannot carry, so each entry
+// keeps both the published
 // id (colon -> dash) and the original upstream id for the wire.
 import path from "node:path";
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
