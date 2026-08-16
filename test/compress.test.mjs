@@ -187,10 +187,11 @@ test("a long user ask keeps both edges instead of a blind head-cut", () => {
 });
 
 test("a restored compaction item is not capped like a fresh user ask", () => {
-  // Codex restores our previous extract as a user message headed by the marker.
-  // It is already-compressed history: task lines, errors, and the tool
-  // inventory must survive the second hop instead of collapsing to userCap.
-  const extract = ("USER: 原始任务关键词\nASSISTANT: 某轮结论\nLAST_ERROR: boom\n").repeat(120);
+  // The gateway expands a compaction item into a user message whose text is our
+  // previous extract, starting with the handoff header line. The restored unit
+  // is already-compressed history: task lines, errors, and the tool inventory
+  // must survive the second hop instead of collapsing to userCap.
+  const extract = ("HEAD: task=原始任务关键词 | phase=某轮结论\nFAILED: boom\n---\nUSER: 原始任务关键词\nASSISTANT: 某轮结论\nLAST_ERROR: boom\n").repeat(120);
   const { text } = compressConversation(
     [
       { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${extract}` }] },
@@ -206,7 +207,7 @@ test("a restored compaction item is not capped like a fresh user ask", () => {
 });
 
 test("repeated compaction converges instead of doubling or forgetting", () => {
-  const marker = "[Compressed conversation history]\n";
+  const marker = "HEAD: task=继续修 | phase=好的继续\n---\n";
   const add = () => [
     item({ type: "message", role: "user", text: "继续" }),
     item({ type: "message", role: "assistant", text: "好的，继续处理。" }),

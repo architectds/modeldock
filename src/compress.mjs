@@ -20,12 +20,16 @@
 // each command printed.
 
 const TOOL_OUTPUT_CAP = 150;
-// Codex restores a compaction item into the conversation as a user message
-// headed by a marker line. That restored text is our own previous extract, not
-// a fresh user ask: it must never be capped like one, or the second compaction
-// of a long session silently throws the whole history away (task, errors, and
-// tool inventory all collapse to userCap characters and the model "forgets").
-const COMPRESSED_MARK_RE = /^\s*\[\s*Compressed conversation history\s*\]\s*$/m;
+// The gateway expands a compaction item back into a user message whose text is
+// our own previous extract - which always starts with the handoff header line
+// ("HEAD: task=..."). That restored text is not a fresh user ask: it must never
+// be capped like one, or the second compaction of a long session silently
+// throws the whole history away (task, errors, and tool inventory all collapse
+// to userCap characters and the model "forgets"). The marker is detected from
+// the extract's own first line, not a separately written tag: the old
+// "[Compressed conversation history]" header belonged to the removed
+// summarize-then-return path and is never produced anymore.
+const COMPRESSED_MARK_RE = /^HEAD:\s*(?:task|phase)=/m;
 // The restored history grows a little every hop; keep its task and error lines
 // plus the edges, bounded, instead of either capping it like a user ask or
 // letting it grow unbounded across hops.
@@ -53,9 +57,9 @@ export function flattenConversation(input) {
       const body = itemText(item);
       if (!body) continue;
       if (role === "user" && COMPRESSED_MARK_RE.test(body)) {
-        // A restored compaction item. Strip the marker so hops do not pile up
-        // "[Compressed conversation history]" headers, and keep the whole
-        // extract as one unit - it is already compressed history.
+        // A restored compaction item. Strip the header line so hops do not
+        // pile up "HEAD:" blocks, and keep the whole extract as one unit - it
+        // is already compressed history.
         const rest = body.replace(COMPRESSED_MARK_RE, "").trim();
         if (rest) lines.push({ kind: "base", role: "user", text: rest });
         continue;
