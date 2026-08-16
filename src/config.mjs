@@ -8,6 +8,7 @@ import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./o
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
+import { hasChatGptLogin } from "./codex-auth.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
@@ -283,18 +284,9 @@ function discoverCodexGoToken(codexHome) {
 // the Codex client sends, so a missing sign-in means every published native GPT
 // model answers 401. Detecting the sign-in here lets the published catalog skip
 // the native merge for logged-out users instead of advertising dead models.
-// A refresh token is treated as a sign-in too (Codex refreshes it silently).
-export function hasChatGptLogin(codexHome) {
-  try {
-    const authFile = path.join(codexHome, "auth.json");
-    if (!existsSync(authFile)) return false;
-    const parsed = JSON.parse(readFileSync(authFile, "utf8"));
-    const tokens = parsed?.tokens || {};
-    return Boolean(tokens.access_token || tokens.refresh_token || parsed?.OPENAI_API_KEY);
-  } catch {
-    return false;
-  }
-}
+// The file is parsed in codex-auth.mjs, which is also where the native image
+// call reads its token - one reader, so the two cannot disagree about the shape.
+export { hasChatGptLogin };
 
 export function loadConfig() {
   applyEnvFile(envFileFor());

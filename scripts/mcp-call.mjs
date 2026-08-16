@@ -9,6 +9,7 @@
 //   node scripts/mcp-call.mjs list_mcp_tools
 //   node scripts/mcp-call.mjs search <query> [numResults]
 //   node scripts/mcp-call.mjs vision <path> <question> [mode]
+//   node scripts/mcp-call.mjs image <prompt> [size] [model]
 //   node scripts/mcp-call.mjs speak <text>
 //   node scripts/mcp-call.mjs hear <file>
 //   node scripts/mcp-call.mjs recall <query> [scope_dir] [limit]
@@ -57,12 +58,20 @@ if (command === "tools") {
   const args = { path: rest[0], question: rest[1] };
   if (rest[2]) args.mode = rest[2];
   console.log(JSON.stringify(await callMcpTool("vision_inspect", args), null, 2));
+} else if (command === "image") {
+  // image_gen is a first-class tool but was missing here, so a stale MCP
+  // connection took it away entirely while the instructions still called it
+  // mandatory for frontend work.
+  const args = { prompt: rest[0] };
+  if (rest[1]) args.size = rest[1];
+  if (rest[2]) args.model = rest[2];
+  console.log(await callMcpTool("image_gen", args));
 } else if (command === "speak") {
   console.log(await callMcpTool("speak", { text: rest[0] }));
 } else if (command === "hear") {
   console.log(await callMcpTool("hear", { file: rest[0] }));
 } else {
-  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|speak|hear|recall|store> ...");
+  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|speak|hear|recall|store> ...");
   process.exitCode = 2;
 }
 
@@ -70,6 +79,7 @@ function exampleFor(toolName) {
   const examples = {
     web_search_exa: 'search "query"',
     vision_inspect: 'vision <path> "question"',
+    image_gen: 'image "prompt" [size]',
     speak: 'speak "text"',
     hear: "hear <file>",
     recall_memory: 'recall "query" [scope_dir]',

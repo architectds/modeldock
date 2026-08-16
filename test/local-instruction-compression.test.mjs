@@ -16,13 +16,22 @@
 // and that stripping actually removes it.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { baseInstructionsFor } from "../src/catalog.mjs";
 import { stripLocalInstructions } from "../src/gateway.mjs";
 
 // No mainModel entry resolves, so supportsVision is false and the TEXT-ONLY
 // vision guidance is emitted - the shape a local qwen backend actually receives.
-// memoryEnabled adds the memory rule, which must survive compression.
-const CONFIG = { memoryEnabled: true };
+// memoryEnabled adds the memory rule, which must survive compression. A signed-in
+// codexHome adds the design-first block, which is only emitted when image_gen can
+// actually work; the logged-out shape is covered by its own test below.
+const signedInHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-authed-"));
+writeFileSync(path.join(signedInHome, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");
+process.on("exit", () => rmSync(signedInHome, { recursive: true, force: true }));
+
+const CONFIG = { memoryEnabled: true, codexHome: signedInHome };
 
 // [span, a phrase from its middle, the short text that must replace it]
 const SPANS = [
@@ -72,6 +81,27 @@ test("compression keeps what a small model still needs", () => {
   );
   assert.ok(out.includes("recall_memory"), "the memory rule survives");
   assert.ok(/restart\.(ps1|sh)/.test(out), "the real restart command survives");
+});
+
+test("a logged-out install is not told to run a tool it cannot run", () => {
+  // image_gen generates through the native ChatGPT backend, so without a Codex
+  // sign-in every frontend task would have opened with a call that fails. The
+  // rule was MANDATORY and unconditional, which hurt exactly the setups least
+  // likely to be signed in: DeepSeek-only and local-model users.
+  const out = baseInstructionsFor({ memoryEnabled: true, codexHome: path.join(os.tmpdir(), "modeldock-no-such-home") });
+  assert.ok(!out.includes("Design-first workflow"), "no sign-in, no design-first rule");
+  assert.ok(!out.includes("image <prompt>"), "no sign-in, no image entry in the shell fallback list");
+  assert.ok(out.includes("vision_inspect"), "the vision rule does not depend on a sign-in");
+  assert.ok(out.includes("recall_memory"), "the memory rule does not depend on a sign-in");
+});
+
+test("the shell fallback list covers image_gen when it can be used", () => {
+  // The MCP connection goes stale on a gateway restart and Codex never
+  // re-establishes it, so a tool missing from this list disappears entirely at
+  // exactly the moment the fallback matters. image_gen was missing.
+  const out = baseInstructionsFor(CONFIG);
+  assert.ok(out.includes("mcp-call.mjs"), "the fallback entry point is named");
+  assert.ok(out.includes("image <prompt> [size]"), "image generation has a documented shell fallback");
 });
 
 test("compression is idempotent", () => {

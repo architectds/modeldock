@@ -2,7 +2,8 @@ import { bareModelId, providerForModel, tokenFor, profileById } from "./profiles
 import { VISION_EVIDENCE_INSTRUCTIONS, VISION_EVIDENCE_MAX_CHARS } from "./vision-evidence.mjs";
 import { visionCacheKey, visionEvidenceCache } from "./vision-cache.mjs";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { readCodexAuth } from "./codex-auth.mjs";
 import os from "node:os";
 import path from "node:path";
 function upstreamUrl(baseUrl, path) {
@@ -61,19 +62,12 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     const size = String(args.size || "1024x1024");
     const finish = metrics.begin("vision", { operation: "image_gen", model });
     try {
-      const authFile = path.join(config.codexHome || path.join(os.homedir(), ".codex"), "auth.json");
-      let token = "";
-      let accountId = "";
-      try {
-        const parsed = JSON.parse(readFileSync(authFile, "utf8"));
-        token = parsed?.tokens?.access_token || "";
-        accountId = parsed?.tokens?.account_id || "";
-      } catch {
-        // Fall through to the readable error below.
-      }
+      const auth = readCodexAuth(config.codexHome || path.join(os.homedir(), ".codex"));
+      const token = auth.accessToken;
+      const accountId = auth.accountId;
       if (!token) {
         throw new Error(
-          `No ChatGPT session token in ${authFile}; sign in to the Codex app so native image generation can use your subscription.`,
+          `No ChatGPT session token in ${auth.file}; sign in to the Codex app so native image generation can use your subscription.`,
         );
       }
       const response = await fetch(`${NATIVE_IMAGE_BASE}/images/generations`, {
@@ -88,7 +82,13 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       });
       const text = await response.text();
       if (!response.ok) {
-        throw new Error(`Native image API returned ${response.status}: ${safeErrorBody(text)}`);
+        // A rejected token reads as an opaque upstream error otherwise, and the
+        // access token in auth.json expires routinely - the one failure here a
+        // user can actually fix, so name the fix.
+        const expired = response.status === 401 || response.status === 403
+          ? ` The ChatGPT session in ${auth.file} was rejected; sign in again in the Codex app.`
+          : "";
+        throw new Error(`Native image API returned ${response.status}: ${safeErrorBody(text)}${expired}`);
       }
       const parsed = JSON.parse(text);
       const b64 = parsed?.data?.[0]?.b64_json;
