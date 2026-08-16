@@ -65,7 +65,10 @@ export function sessionInfoFromFile(filePath) {
         cwd = typeof entry.payload?.cwd === "string" ? entry.payload.cwd : "";
       }
     }
-    const name = cwd ? path.basename(cwd) : "";
+    // The rollout cwd is a path from the machine Codex actually ran on, which
+    // may be Windows (backslashes) even when the dashboard is not. basename()
+    // only splits on the host separator, so split on both explicitly.
+    const name = cwd ? cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop() : "";
     return { label: name || null, cwd };
   } catch {
     return null;
