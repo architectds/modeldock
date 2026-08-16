@@ -74,12 +74,19 @@ const LOCAL_TOOL_ALLOWLIST = new Set([
 const LOCAL_TOOL_TRIM_MAX_CONTEXT = 100_000;
 
 // A custom/ollama backend whose advertised context is too small to survive
-// Codex's fixed overhead. This is the single criterion for both the tool
-// whitelist and the compact-path local adaptation (system hoisting, standard
-// tool rewrite, reasoning mapping): all small-context local backends face the
-// same llama.cpp template constraints, while bigger custom endpoints (e.g.
-// OpenAI/OpenRouter at 128K+) keep the generic path. 0 (unknown) also means
-// generic, to never hurt a large model.
+// Codex's fixed overhead.
+//
+// This gates the *budget* decisions only - the tool whitelist and the
+// instruction stripping - because both trade capability for context and a large
+// endpoint should pay neither. It deliberately does NOT gate the *protocol*
+// adaptation (system hoisting, standard tool rewrite, reasoning mapping): a
+// qwen3.8 server can advertise 128K and still reject a mid-history system item,
+// so that adaptation keys off the provider alone, on both the main and compact
+// paths. Conflating the two is what made compact_v2 fail with "System message
+// must be at the beginning" on an 81920-context custom model; see the comment in
+// relayCompaction before widening this function's role again.
+//
+// 0 (unknown) means generic, to never hurt a large model.
 export function isLocalSmallContextBackend(config, model) {
   const provider = providerForModel(config, model);
   if (provider !== "custom" && provider !== "ollama") return false;
