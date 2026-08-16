@@ -184,3 +184,42 @@ test("a long user ask keeps both edges instead of a blind head-cut", () => {
   assert.ok(text.includes("请把网关的错误处理改掉"), "the ask head survives");
   assert.ok(text.includes("请先修这个再继续"), "the decisive tail survives the cap");
 });
+
+test("a restored compaction item is not capped like a fresh user ask", () => {
+  // Codex restores our previous extract as a user message headed by the marker.
+  // It is already-compressed history: task lines, errors, and the tool
+  // inventory must survive the second hop instead of collapsing to userCap.
+  const extract = ("USER: 原始任务关键词\nASSISTANT: 某轮结论\nLAST_ERROR: boom\n").repeat(120);
+  const { text } = compressConversation(
+    [
+      { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${extract}` }] },
+      item({ type: "message", role: "user", text: "继续修" }),
+      item({ type: "message", role: "assistant", text: "好，继续。" }),
+    ],
+    { tailLines: 2 },
+  );
+  assert.ok(text.includes("原始任务关键词"), "the task line survives the hop");
+  assert.ok(text.includes("LAST_ERROR: boom"), "error lines survive the hop");
+  assert.ok(text.length > 2000, "the extract is not truncated to the user cap");
+  assert.ok(!text.includes("USER: USER:"), "no role-prefix pileup on the restored unit");
+});
+
+test("repeated compaction converges instead of doubling or forgetting", () => {
+  const marker = "[Compressed conversation history]\n";
+  const add = () => [
+    item({ type: "message", role: "user", text: "继续" }),
+    item({ type: "message", role: "assistant", text: "好的，继续处理。" }),
+    item({ type: "function_call", name: "apply_patch", args: "{}" }),
+    item({ type: "function_call_output", output: "ok" }),
+  ];
+  let text = ("USER: 任务甲\nASSISTANT: 结论乙\n").repeat(2500); // ~60K, over the base budget
+  const sizes = [text.length];
+  for (let hop = 0; hop < 5; hop++) {
+    text = compressConversation([{ type: "message", role: "user", content: [{ type: "input_text", text: marker + text }] }, ...add()]).text;
+    sizes.push(text.length);
+  }
+  assert.ok(text.includes("任务甲"), "the original task survives five hops");
+  assert.ok(text.includes("USER: 任务甲"), "task line is preserved verbatim");
+  assert.ok(sizes[2] <= sizes[1] + 2000, `size converges after the first hop, got ${sizes}`);
+  assert.ok(sizes[4] <= sizes[2] + 2000, `no unbounded growth across hops, got ${sizes}`);
+});

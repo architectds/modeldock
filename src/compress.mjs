@@ -20,6 +20,17 @@
 // each command printed.
 
 const TOOL_OUTPUT_CAP = 150;
+// Codex restores a compaction item into the conversation as a user message
+// headed by a marker line. That restored text is our own previous extract, not
+// a fresh user ask: it must never be capped like one, or the second compaction
+// of a long session silently throws the whole history away (task, errors, and
+// tool inventory all collapse to userCap characters and the model "forgets").
+const COMPRESSED_MARK_RE = /^\s*\[\s*Compressed conversation history\s*\]\s*$/m;
+// The restored history grows a little every hop; keep its task and error lines
+// plus the edges, bounded, instead of either capping it like a user ask or
+// letting it grow unbounded across hops.
+const BASE_BUDGET = 40_000;
+const BASE_KEEP_RE = /^(?:USER:|LAST_ERROR:|TOOLS_AGGREGATED:)/;
 
 function itemText(item) {
   if (!item || typeof item !== "object") return "";
@@ -41,6 +52,14 @@ export function flattenConversation(input) {
       const role = item.role || "user";
       const body = itemText(item);
       if (!body) continue;
+      if (role === "user" && COMPRESSED_MARK_RE.test(body)) {
+        // A restored compaction item. Strip the marker so hops do not pile up
+        // "[Compressed conversation history]" headers, and keep the whole
+        // extract as one unit - it is already compressed history.
+        const rest = body.replace(COMPRESSED_MARK_RE, "").trim();
+        if (rest) lines.push({ kind: "base", role: "user", text: rest });
+        continue;
+      }
       lines.push({ kind: "msg", role, text: `${role.toUpperCase()}: ${body}` });
     } else if (type === "function_call" || type === "custom_tool_call") {
       const args = typeof item.input === "string" ? item.input : JSON.stringify(item.input || item.arguments || "");
@@ -235,6 +254,42 @@ function rawInputChars(input) {
   return n;
 }
 
+// Bound the restored-history unit: a long-lived session accumulates a little
+// every hop, so keep the decisive structure - the leading task lines, the
+// trailing edge (recent state), error/inventory lines, and the most recent
+// user asks - and summarize what fell out. If the first tier still exceeds the
+// budget, fall to smaller tiers; a hard head-only cap is the last resort. The
+// restored unit is one multi-line text, so the cap works on its lines.
+const BASE_TIERS = [
+  { head: 8, tail: 20, recent: 10 },
+  { head: 4, tail: 12, recent: 5 },
+  { head: 2, tail: 6, recent: 2 },
+];
+
+function boundedBaseText(text) {
+  if (text.length <= BASE_BUDGET) return text;
+  const lines = text.split("\n");
+  const n = lines.length;
+  for (const tier of BASE_TIERS) {
+    const userIdx = [];
+    for (let i = 0; i < n; i++) if (/^USER:/.test(lines[i])) userIdx.push(i);
+    const recent = new Set(userIdx.slice(-tier.recent));
+    const want = new Set();
+    for (let i = 0; i < n; i++) {
+      if (i < tier.head || i >= n - tier.tail) want.add(i);
+      else if (BASE_KEEP_RE.test(lines[i]) || recent.has(i)) want.add(i);
+    }
+    const kept = lines.filter((_, i) => want.has(i));
+    const size = kept.join("\n").length;
+    if (size <= BASE_BUDGET) {
+      const dropped = text.length - size;
+      return `${kept.join("\n")}\n... ${dropped} characters of earlier compressed history omitted ...`;
+    }
+  }
+  const head = lines.slice(0, 2).join("\n");
+  return `${head}\n... ${text.length - head.length} characters of earlier compressed history omitted ...`;
+}
+
 // Compress a Responses input into handoff-oriented text. Deterministic, CPU
 // only, milliseconds. Returns { text, originalChars, compressedChars } where
 // originalChars is the raw input volume (see rawInputChars) and compressedChars
@@ -251,6 +306,11 @@ export function compressConversation(input, options = {}) {
   const scores = tfidfScores(lines);
   const keep = new Array(lines.length).fill(false);
 
+  // 0. restored compaction output (previous hops) is already compressed
+  //    history - it survives as a unit, never capped like a fresh user ask.
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].kind === "base") keep[i] = true;
+  }
   // 1. user asks define the task - always survive, deduped.
   const seenUser = new Set();
   for (let i = 0; i < lines.length; i++) {
@@ -282,7 +342,8 @@ export function compressConversation(input, options = {}) {
   // 5. aggregate the older tool calls.
   const inventory = aggregateToolCalls(lines, (i) => keep[i]);
   const kept = lines.filter((_, i) => keep[i]).map((line) => ({ ...line }));
-  const cleaned = kept.map((line) => {
+  const baseLines = kept.filter((line) => line.kind === "base");
+  const cleaned = kept.filter((line) => line.kind !== "base").map((line) => {
     let text = stripNoise(line.text);
     if (line.kind === "msg" && line.role === "assistant") text = firstAndLast(text, assistantCap);
     // User asks keep their opening and closing edges: pasted errors and long
@@ -295,7 +356,8 @@ export function compressConversation(input, options = {}) {
   // Decisive error lines from tool outputs ride along explicitly.
   for (const errorLine of extractErrorLines(input)) cleaned.push({ kind: "tool", text: errorLine });
   const originalChars = rawInputChars(input);
-  const compressedChars = cleaned.reduce((sum, line) => sum + line.text.length, 0);
-  const text = cleaned.map((line) => line.text).join("\n");
+  const assembled = [...baseLines.map((line) => ({ ...line, text: boundedBaseText(line.text) })), ...cleaned];
+  const compressedChars = assembled.reduce((sum, line) => sum + line.text.length, 0);
+  const text = assembled.map((line) => line.text).join("\n");
   return { text, originalChars, compressedChars, keptCount: cleaned.length };
 }
