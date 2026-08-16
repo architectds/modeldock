@@ -8,7 +8,7 @@
 #   2. Stops the process listening on that port (if any).
 #   3. Rebuilds the bundle when a source checkout has drifted ahead of it.
 #   4. Starts a fresh detached gateway from the built bundle (dist/modeldock.mjs).
-#   5. Waits for /healthz and reports the result.
+#   5. Prints where the gateway started and exits; runtime logs go to modeldock.log.
 
 $ErrorActionPreference = "Stop"
 

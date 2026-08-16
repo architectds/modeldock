@@ -328,8 +328,8 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 }
 
 // Relaunch through the platform restart script, which is the supervisor for an
-// upgrade: it stops the old listener, starts the new gateway, waits for
-// /healthz, and prints every step. The updater is the gateway itself, so the
+// upgrade: it stops the old listener, starts the new gateway, and prints
+// every step. The updater is the gateway itself, so the
 // script is spawned unref'd with -Force (deliberate takeover of our own port;
 // the owner guard's CIM command-line probe can come back empty for elevated
 // processes). No process.exit() here: the restart script stops the old

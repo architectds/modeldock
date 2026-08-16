@@ -49,7 +49,7 @@ export function baseInstructionsFor(config) {
     "ModelDock MCP tools also work directly when the session MCP connection is unavailable: run `node scripts/mcp-call.mjs <tool> ...` in a shell. Key tools: `vision <path> <question>` (inspect an image), `search <query>` (web search), `recall <query> [scope_dir]` (recall memory), `store <content> [scope_dir] [kind]` (store memory)"
       + (canGenerateImages ? ", `image <prompt> [size]` (generate an image)" : "")
       + ". Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
-    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops or restarts the process on the configured port, starts a fresh detached instance when needed, and prints 'gateway healthy' when /healthz passes; wait for that line before continuing.`,
+    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops the process on the configured port, starts a fresh detached instance, and prints 'started gateway from <root>' once launched; wait for that line before continuing.`,
   ].join(" ");
 }
 
