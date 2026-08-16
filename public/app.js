@@ -87,13 +87,19 @@ function renderRecent(items) {
     const detail =
       item.error ||
       item.query ||
-      (item.harnessToolRounds
-        ? t("detail.toolRound", { n: item.harnessToolRounds })
-        : item.filteredTools
-          ? t("detail.filteredTools", { n: item.filteredTools })
-          : item.imageRefs?.length
-            ? t("detail.imageRef", { n: item.imageRefs.length })
-            : "—");
+      (item.compression
+        ? t("detail.compressed", {
+            pct: percent(item.compression.toChars / item.compression.fromChars),
+            from: number(item.compression.fromChars),
+            to: number(item.compression.toChars),
+          })
+        : item.harnessToolRounds
+          ? t("detail.toolRound", { n: item.harnessToolRounds })
+          : item.filteredTools
+            ? t("detail.filteredTools", { n: item.filteredTools })
+            : item.imageRefs?.length
+              ? t("detail.imageRef", { n: item.imageRefs.length })
+              : "—");
     // Context size per request: the input tokens actually sent upstream. The
     // upstream only reports usage when the request completes, so an in-flight
     // row shows a pending ellipsis and non-token kinds render an em dash.
