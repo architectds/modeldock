@@ -290,6 +290,49 @@ function boundedBaseText(text) {
   return `${head}\n... ${text.length - head.length} characters of earlier compressed history omitted ...`;
 }
 
+function truncateHead(text, max) {
+  const clean = String(text).replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max - 1)}…`;
+}
+
+// A short, deterministic handoff header: what the task was, where the work
+// stands, what failed, and which tools were used. This is the narrative layer
+// a model-written handoff would provide, assembled from material the extract
+// already kept - no model call, CPU only.
+// The first field is deliberately named `task`, not `goal`: Codex's built-in
+// `goal` tool carries the model-maintained objective and budget, while this
+// header's value is only the compressor's read of the most recent user ask.
+// Same word, different semantics would invite the model to conflate them.
+function handoffHeader({ lines, kept, inventory, errorLines }) {
+  const userLines = lines.filter((l) => l.kind === "msg" && l.role === "user");
+  // Prefer a kept conclusion, falling back to the most recent assistant line:
+  // the keep ratio can round a one-message session down to zero, but the
+  // header still wants a phase.
+  const lastAssistant =
+    [...kept].reverse().find((l) => l.kind === "msg" && l.role === "assistant") ||
+    [...lines].reverse().find((l) => l.kind === "msg" && l.role === "assistant");
+  // The goal is the most recent real user ask: the leading user messages of a
+  // session are usually injected system blocks (<recommended_plugins>, skills),
+  // so skip those when picking it.
+  const lastUser = [...userLines].reverse().find((l) => !/^USER:\s*</.test(l.text)) || userLines[userLines.length - 1];
+  const goal = lastUser ? truncateHead(lastUser.text.replace(/^USER:\s*/, ""), 100) : "";
+  const phase = lastAssistant ? truncateHead(lastAssistant.text.replace(/^ASSISTANT:\s*/, ""), 100) : "";
+  const head = [goal && `task=${goal}`, phase && `phase=${phase}`].filter(Boolean).join(" | ");
+  const parts = [];
+  if (head) parts.push(`HEAD: ${head}`);
+  if (errorLines.length) {
+    const failures = errorLines
+      .slice(0, 3)
+      .map((line) => line.replace(/^LAST_ERROR:\s*/, "").slice(0, 60))
+      .join(" | ");
+    parts.push(`FAILED: ${failures}`);
+  }
+  if (inventory) parts.push(`TOOLS: ${inventory.replace(/^TOOLS_AGGREGATED:\s*/, "")}`);
+  if (!parts.length) return "";
+  return `${parts.join("\n")}\n---`;
+}
+
 // Compress a Responses input into handoff-oriented text. Deterministic, CPU
 // only, milliseconds. Returns { text, originalChars, compressedChars } where
 // originalChars is the raw input volume (see rawInputChars) and compressedChars
@@ -354,10 +397,13 @@ export function compressConversation(input, options = {}) {
   });
   if (inventory) cleaned.push({ kind: "tool", text: inventory });
   // Decisive error lines from tool outputs ride along explicitly.
-  for (const errorLine of extractErrorLines(input)) cleaned.push({ kind: "tool", text: errorLine });
+  const errorLines = extractErrorLines(input);
+  for (const errorLine of errorLines) cleaned.push({ kind: "tool", text: errorLine });
   const originalChars = rawInputChars(input);
   const assembled = [...baseLines.map((line) => ({ ...line, text: boundedBaseText(line.text) })), ...cleaned];
-  const compressedChars = assembled.reduce((sum, line) => sum + line.text.length, 0);
-  const text = assembled.map((line) => line.text).join("\n");
+  const header = handoffHeader({ lines, kept, inventory, errorLines });
+  const body = assembled.map((line) => line.text).join("\n");
+  const text = header ? `${header}\n${body}` : body;
+  const compressedChars = text.length;
   return { text, originalChars, compressedChars, keptCount: cleaned.length };
 }

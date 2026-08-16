@@ -60,13 +60,14 @@ test("compressConversation is deterministic", () => {
   assert.equal(a.compressedChars, b.compressedChars);
 });
 
-test("compressConversation passes small histories through untouched", () => {
+test("compressConversation passes small histories through with just a header", () => {
   const small = [
     item({ type: "message", role: "user", text: "one quick question" }),
     item({ type: "message", role: "assistant", text: "a short answer." }),
   ];
   const { text, originalChars, compressedChars } = compressConversation(small);
-  assert.equal(text, "USER: one quick question\nASSISTANT: a short answer.");
+  assert.ok(text.startsWith("HEAD: task=one quick question | phase=a short answer.\n---"), `header first, got ${JSON.stringify(text)}`);
+  assert.ok(text.endsWith("USER: one quick question\nASSISTANT: a short answer."), "the exchange itself is unchanged");
   assert.ok(compressedChars > originalChars, "the prefixed extract of a tiny exchange is larger than the raw input, so the gateway's 0.95 guard keeps the raw history");
 });
 
@@ -222,4 +223,29 @@ test("repeated compaction converges instead of doubling or forgetting", () => {
   assert.ok(text.includes("USER: 任务甲"), "task line is preserved verbatim");
   assert.ok(sizes[2] <= sizes[1] + 2000, `size converges after the first hop, got ${sizes}`);
   assert.ok(sizes[4] <= sizes[2] + 2000, `no unbounded growth across hops, got ${sizes}`);
+});
+
+test("the handoff header states task, phase, failures, and tool usage", () => {
+  const items = [];
+  for (let i = 0; i < 30; i++) {
+    items.push(item({ type: "message", role: "user", text: `第 ${i} 轮背景请求` }));
+    items.push(item({ type: "message", role: "assistant", text: `第 ${i} 轮背景结论。` }));
+  }
+  // An old tool call, pushed out of the verbatim tail by newer calls below, so
+  // it is aggregated rather than kept verbatim.
+  items.push(item({ type: "function_call", name: "apply_patch", args: "{}" }));
+  items.push(item({ type: "function_call_output", output: "ok" }));
+  for (let i = 0; i < 45; i++) {
+    items.push(item({ type: "function_call", name: "exec_command", args: `{"cmd":"bg ${i}"}` }));
+    items.push(item({ type: "function_call_output", output: "ok" }));
+  }
+  // The recent edge: the real ask, its conclusion, and a failing output.
+  items.push(item({ type: "message", role: "user", text: "请修复网关的压缩 bug" }));
+  items.push(item({ type: "message", role: "assistant", text: "根因是 userCap，我改了识别逻辑并加了测试。" }));
+  items.push(item({ type: "function_call_output", output: "Exit code: 1\nError: boom" }));
+  const { text } = compressConversation(items);
+  assert.ok(text.startsWith("HEAD: task=请修复网关的压缩 bug | phase=根因是 userCap"), `task is the real ask, not the injected block, got ${JSON.stringify(text.slice(0, 80))}`);
+  assert.ok(text.includes("Error: boom"), "the header lists the failure");
+  assert.ok(text.includes("TOOLS: apply_patch×1"), "the header lists tool usage");
+  assert.ok(text.includes("\n---\n"), "the header is separated from the body");
 });
