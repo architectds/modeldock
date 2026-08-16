@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { compressConversation } from "../src/compress.mjs";
-import { encodeCompactionSummary, decodeCompactionSummary, normalizeGatewayInput } from "../src/gateway.mjs";
+import { capDirectSummary, encodeCompactionSummary, decodeCompactionSummary, normalizeGatewayInput } from "../src/gateway.mjs";
 
 const msg = (role, text) => ({ type: "message", role, content: [{ type: "input_text", text }] });
 
@@ -109,4 +109,28 @@ test("a structured summary from another harness still expands", () => {
     },
   ]);
   assert.equal(expanded[0].content[0].text, "earlier progress\nand the remaining steps");
+});
+
+// The direct-return path had no size ceiling while the upstream compact path
+// refused anything over MAX_COMPACT_RESPONSE_BYTES. The extract is bounded in
+// practice (2.1M of history came to 70K), but it is produced by ratio, not to a
+// budget: user messages are always kept, so a history with tens of thousands of
+// them grows the extract without limit. One path guarded and the other not is
+// the defect, whether or not the ceiling is ever reached.
+test("an oversized extract keeps both ends and says what it dropped", () => {
+  const CAP = 200;
+  const summary = `HEAD-MARKER
+${"x".repeat(CAP * 3)}
+TAIL-MARKER`;
+  const capped = capDirectSummary(summary, CAP);
+  assert.ok(Buffer.byteLength(capped) <= CAP + 120, "the kept text fits the cap (plus the marker line)");
+  assert.ok(capped.startsWith("HEAD-MARKER"), "the task at the head survives");
+  assert.ok(capped.endsWith("TAIL-MARKER"), "the recent state at the tail survives");
+  assert.match(capped, /characters of this handoff were dropped/, "the loss is stated, not silent");
+});
+
+test("an extract inside the cap is passed through untouched", () => {
+  const summary = "USER: do the thing\nTOOLS_AGGREGATED: apply_patch×3";
+  assert.equal(capDirectSummary(summary), summary);
+  assert.equal(capDirectSummary(summary, 10_000), summary);
 });

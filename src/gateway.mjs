@@ -2305,6 +2305,20 @@ function writeCompactionSse(res, model, summary) {
 // for a local backend) instead of synthesizing one from an upstream summarize
 // call. v1 gets replacement history, v2 gets the single compaction item on
 // either wire. Returns the JSON byte count so the trace can record bytesOut.
+// The upstream compact path refuses a response over MAX_COMPACT_RESPONSE_BYTES;
+// the direct path wrote whatever the extract came to, with no ceiling at all.
+// The extract is ours and deterministic, so the right answer to an oversized one
+// is not a 502 that leaves the session unable to compact - it is to keep the two
+// ends that carry the handoff (the task at the head, the recent state at the
+// tail) and say what went missing. Slicing by characters against a byte budget
+// only ever under-fills, so the result cannot exceed the cap.
+export function capDirectSummary(summary, cap = MAX_COMPACT_RESPONSE_BYTES) {
+  const bytes = Buffer.byteLength(summary);
+  if (bytes <= cap) return summary;
+  const half = Math.floor(cap / 2);
+  return `${summary.slice(0, half)}\n[... ${bytes - cap} characters of this handoff were dropped to fit the compaction size limit ...]\n${summary.slice(-half)}`;
+}
+
 function writeDirectCompaction(res, payload, summary, v2) {
   if (v2) {
     if (payload.stream === false) {
@@ -2419,33 +2433,33 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const startedAt = Date.now();
   const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
   const compactRoute = { model: route.model, provider: target.provider, route: operation };
-  // A direct-return compact never touches the upstream, so there is no real
-  // usage to report. Estimate the context the request carried from the raw
-  // character count the CPU compression measured: mixed Chinese/English text
-  // runs around three characters per token, close enough for the trace's
-  // context column and the usage meter.
-  const CHARS_PER_TOKEN_ESTIMATE = 3;
   let usage;
   try {
     // Local backend: the CPU extract is the compaction summary. Hand it back
     // directly - no upstream call, no token needed, no GPU prefill. The trace
     // records the compression credit and the synthesized response bytes.
     if (directSummary) {
-      const bytesOut = writeDirectCompaction(res, payload, directSummary, v2);
-      const inputTokens = compressionInfo
-        ? Math.round(compressionInfo.fromChars / CHARS_PER_TOKEN_ESTIMATE)
-        : undefined;
+      const bytesOut = writeDirectCompaction(res, payload, capDirectSummary(directSummary), v2);
+      // No inputTokens here, deliberately. This path makes no upstream call, so
+      // it consumes none, and inputTokens means "tokens the upstream billed"
+      // everywhere else it is read: the per-request context column, the context
+      // waveform, and the cache-rate denominator. Reporting fromChars/3 as if it
+      // were usage put an estimate into a series of measurements with no way to
+      // tell them apart afterwards - and the estimate is large (a 1.4M-char
+      // history reads as ~460K tokens), so it would become the waveform's peak
+      // and flatten every real point. The history size is still reported, as
+      // measured characters, in `compression` - which is what the trace's detail
+      // column renders.
       finish?.({
         ok: true,
         httpStatus: 200,
         upstream: target.provider,
         bytesOut,
-        ...(inputTokens !== undefined ? { inputTokens } : {}),
         compression: compressionInfo,
       });
       metrics?.recordResponseUsage?.({ bytesOut });
       metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
-      recordUsage({ ...compactRoute, status: 200, ...(inputTokens !== undefined ? { inputTokens } : {}), compression: compressionInfo });
+      recordUsage({ ...compactRoute, status: 200, compression: compressionInfo });
       return {
         ok: true,
         httpStatus: 200,

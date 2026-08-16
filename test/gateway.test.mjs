@@ -2759,7 +2759,15 @@ test("relayCompaction returns the CPU-compressed extract directly for a large lo
     // asserted - the structural content checks above are the real contract.
     const trace = metrics.recent.find((r) => r.operation === "compact_v2");
     assert.ok(trace?.compression, "the compact trace records the compression");
-    assert.ok(Number.isInteger(trace.inputTokens) && trace.inputTokens > 0, "the trace estimates the carried context tokens from the raw chars");
+    // No inputTokens: this path makes no upstream call, so it consumes none.
+    // inputTokens means "tokens the upstream billed" everywhere it is read - the
+    // context column, the context waveform, the cache-rate denominator - and an
+    // estimate of the pre-compression history (fromChars/3, so ~460K for a 1.4M
+    // char history) would land in that series as its peak, with no way to tell
+    // estimate from measurement afterwards. The size is reported as measured
+    // characters in `compression` instead.
+    assert.equal(trace.inputTokens, undefined, "a compact with no upstream call reports no upstream tokens");
+    assert.ok(trace.compression.fromChars > trace.compression.toChars, "the history size is still reported, in characters");
     const event = usageEvents.find((e) => e.route === "compact_v2");
     assert.ok(event?.compression, "the usage event records the compression");
     assert.equal(event.compression.fromChars, trace.compression.fromChars);
