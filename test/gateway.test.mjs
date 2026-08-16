@@ -39,7 +39,7 @@ import {
   rewriteHistoricalImages,
   routeGatewayRequest,
   sessionIdsFrom,
-  stripLocalSkills,
+  stripLocalInstructions,
   upstreamTargetFor,
 } from "../src/gateway.mjs";
 
@@ -873,39 +873,64 @@ test("isLocalSmallContextBackend trims custom/ollama backends up to 100K only", 
   );
 });
 
-test("stripLocalSkills removes hyperframes entries from the skills block", () => {
+test("stripLocalInstructions keeps only the four local skills, compressed to one line", () => {
   const instructions = `<skills_instructions>
 ## Skills
 - hyperframes: Mandatory video entry point (file: C:/x/hyperframes/SKILL.md)
 - hyperframes-animation: Animation rules (file: C:/x/hyperframes-animation/SKILL.md)
 - hyperframes-cli: CLI loop (file: C:/x/hyperframes-cli/SKILL.md)
-- imagegen: Generate raster images (file: C:/x/imagegen/SKILL.md)
-- content-to-video: Turn content into MP4 (file: C:/x/content-to-video/SKILL.md)
+- imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals. Use when Codex should create a brand-new image. (file: C:/x/imagegen/SKILL.md)
+- content-to-video: Turn arbitrary source content into a finished high-quality MP4 video with TTS voiceover and quality gates. Use when the user asks to make a video. (file: C:/x/content-to-video/SKILL.md)
+- openai-docs: Use for Codex models, pricing, settings and OpenAI APIs. Do not use for generic tasks. (file: C:/x/openai-docs/SKILL.md)
+- github:gh-fix-ci: Use when the user asks to debug CI. (file: C:/x/gh-fix-ci/SKILL.md)
 </skills_instructions>`;
-  const out = stripLocalSkills(instructions);
+  const out = stripLocalInstructions(instructions);
   assert.ok(!out.includes("hyperframes"), "every hyperframes-* variant is removed");
-  assert.ok(out.includes("imagegen") && out.includes("content-to-video"), "other skill entries survive");
+  assert.ok(!out.includes("github"), "skills whose tools are not whitelisted are dropped");
+  assert.ok(out.includes("imagegen"), "imagegen survives");
+  assert.ok(out.includes("openai-docs") && out.includes("content-to-video"), "the four local skills survive");
+  assert.ok(!out.includes("brand-new image"), "kept skills are compressed to one sentence (second sentence gone)");
+  assert.ok(out.includes("(file: C:/x/imagegen/SKILL.md)"), "the locator is retained");
   assert.ok(out.includes("<skills_instructions>") && out.includes("</skills_instructions>"), "block structure intact");
 });
 
-test("stripLocalSkills handles array-of-parts instructions and leaves no-ops untouched", () => {
-  const parts = [
-    { type: "input_text", text: "You are Codex." },
-    { type: "input_text", text: "<skills_instructions>\n- hyperframes: video (file: a)\n- github: gh (file: b)\n</skills_instructions>" },
-  ];
-  const out = stripLocalSkills(parts);
-  assert.equal(out[0], parts[0], "parts without the block are untouched");
-  assert.ok(!out[1].text.includes("hyperframes"));
-  assert.ok(out[1].text.includes("github"), "non-target skills survive in array parts");
-  // No-op inputs are returned by reference so the upstream prefix cache is stable.
-  const plain = "no skills block here";
-  assert.equal(stripLocalSkills(plain), plain);
-  assert.equal(stripLocalSkills(undefined), undefined);
-  const noHyper = "<skills_instructions>\n- imagegen: x\n</skills_instructions>";
-  assert.equal(stripLocalSkills(noHyper), noHyper);
+test("stripLocalInstructions drops dead app-context, agent, and memory-ceremony sections", () => {
+  const instructions = [
+    "You are Codex.",
+    "<app-context>\n### Images/Visuals/Files\n- Use markdown image syntax.\n### Automations\n- Use automation_update for reminders.\n### Thread Coordination\n- Use create_thread for threads.\n### Workspace Dependencies\n- Call load_workspace_dependencies for sheets.\n### Inline Code Comments\n- Use ::code-comment directives.\n### Git\n- Branch prefix: codex/.\n</app-context>",
+    "Memory citation requirements:\n- append exactly one <oai-mem-citation> block\n- use rollout_ids to track sessions\n- never cite blank lines\nUpdating memories:\n- only when the user asks.",
+    "<apps_instructions>\n- Apps are MCP tool sets.\n</apps_instructions>\nYou are `/root`, the primary agent in a team of agents.\nYou can use spawn_agent and send_message.\n<multi_agent_mode>Do not spawn sub-agents.</multi_agent_mode>",
+  ].join("\n");
+  const out = stripLocalInstructions(instructions);
+  assert.ok(!out.includes("Automations"), "automation guidance dropped");
+  assert.ok(!out.includes("Thread Coordination"), "thread guidance dropped");
+  assert.ok(!out.includes("Workspace Dependencies"), "workspace-dependencies guidance dropped");
+  assert.ok(out.includes("Images/Visuals/Files") && out.includes("Inline Code Comments") && out.includes("Branch prefix"), "functional app-context survives");
+  assert.ok(!out.includes("oai-mem-citation"), "memory citation ceremony dropped");
+  assert.ok(out.includes("Updating memories:"), "the updating-memories rule survives");
+  assert.ok(!out.includes("spawn_agent"), "multi-agent guidance for non-whitelisted tools dropped");
+  assert.ok(!out.includes("apps_instructions"), "apps-connector guidance dropped");
 });
 
-test("relayResponses strips hyperframes from instructions for an 80K custom model", async () => {
+test("stripLocalInstructions handles array-of-parts instructions and leaves no-ops untouched", () => {
+  const parts = [
+    { type: "input_text", text: "You are Codex." },
+    { type: "input_text", text: "<skills_instructions>\n- hyperframes: video (file: a)\n- github: gh (file: b)\n- imagegen: images (file: c)\n</skills_instructions>" },
+  ];
+  const out = stripLocalInstructions(parts);
+  assert.equal(out[0], parts[0], "parts without the block are untouched");
+  assert.ok(!out[1].text.includes("hyperframes"));
+  assert.ok(!out[1].text.includes("github"), "skills with stripped tools do not survive");
+  assert.ok(out[1].text.includes("imagegen"), "the four local skills survive in array parts");
+  // No-op inputs are returned by reference so the upstream prefix cache is stable.
+  const plain = "no skills block here";
+  assert.equal(stripLocalInstructions(plain), plain);
+  assert.equal(stripLocalInstructions(undefined), undefined);
+  const onlyKept = "<skills_instructions>\n- imagegen: images (file: c)\n</skills_instructions>";
+  assert.equal(stripLocalInstructions(onlyKept), onlyKept);
+});
+
+test("relayResponses strips dead-weight sections from instructions for an 80K custom model", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];

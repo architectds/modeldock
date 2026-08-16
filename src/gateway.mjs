@@ -891,13 +891,28 @@ export function normalizeLocalPayload(payload) {
   return { ...payload, input: normalizeLocalInput(payload.input) };
 }
 
-// Skill entries stripped from the <skills_instructions> block for small-context
-// local backends (ctx <= 100K). Each prefix matches the skill name in the block,
-// so "hyperframes" removes every hyperframes-* variant in one pass. The entries
-// are irrelevant to a 27B local model and their schemas/instructions alone cost
-// ~2.4K tokens in every request.
-const LOCAL_SKILLS_STRIP_PREFIXES = ["hyperframes"];
+// The only skills a small-context local backend keeps in the
+// <skills_instructions> block. Everything else is dropped: their tools are not
+// whitelisted, so the full descriptions are dead weight for a 27B model. The
+// model reads a kept skill's SKILL.md when it actually needs it.
+const LOCAL_SKILLS_KEEP = new Set(["imagegen", "openai-docs", "content-to-video", "media-use"]);
 const SKILLS_BLOCK_RE = /<skills_instructions>[\s\S]*?<\/skills_instructions>/;
+const APP_CONTEXT_BLOCK_RE = /<app-context>[\s\S]*?<\/app-context>/;
+const APPS_INSTRUCTIONS_RE = /<apps_instructions>[\s\S]*?<\/apps_instructions>\s*/g;
+// The collaboration "/root primary agent" block plus its mode fence describe
+// tools (spawn_agent, send_message, wait_agent...) that are not whitelisted
+// for small local backends, so the whole span is removable.
+const AGENT_BLOCK_RE = /You are `\/root`, the primary agent[\s\S]*?<\/multi_agent_mode>\s*/g;
+// The memory citation ceremony (oai-mem-citation block, rollout ids, format
+// rules) is platform bookkeeping; recall_memory results do not need it.
+const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating memories:)/g;
+// ModelDock's own base instructions, shortened for small models: the
+// mandatory design-first image-gen loop and the long vision preamble are
+// disproportionate for a 27B local backend.
+const VERBOSE_VISION_GUIDANCE =
+  /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
+const VERBOSE_DESIGN_FIRST =
+  /Design-first workflow \(MANDATORY for frontend\/UI work\):[\s\S]*?read it with vision_inspect instead\./g;
 
 function stripSkillsBlock(text) {
   if (typeof text !== "string") return text;
@@ -908,30 +923,78 @@ function stripSkillsBlock(text) {
     .filter((line) => {
       const entry = line.match(/^\s*-\s*([A-Za-z0-9._-]+)\s*:/);
       if (!entry) return true;
-      return !LOCAL_SKILLS_STRIP_PREFIXES.some((prefix) => entry[1].startsWith(prefix));
+      return LOCAL_SKILLS_KEEP.has(entry[1]);
     })
+    .map((line) => (line.match(/^\s*-\s*([A-Za-z0-9._-]+)\s*:/) ? compressSkillLine(line) : line))
     .join("\n");
   if (kept === block) return text;
   return text.replace(block, kept);
 }
 
-// Remove LOCAL_SKILLS_STRIP_PREFIXES entries from the skills block in the
-// payload instructions. Codex sends instructions either as a plain string or as
-// an array of input_text parts; both shapes are handled and unchanged input is
-// returned as-is so the upstream prefix cache is not invalidated.
-export function stripLocalSkills(instructions) {
+// "name + one sentence + locator": a kept skill's entry is compressed to its
+// first sentence so the picker stays a directory, not a brochure. The model
+// reads the SKILL.md when it actually uses the skill.
+function compressSkillLine(line) {
+  const match = line.match(/^(\s*-\s*[A-Za-z0-9._:-]+:\s*)([\s\S]*?)(\s*\((?:file|environment resource|orchestrator package|custom resource):[\s\S]*\)\s*)$/);
+  if (!match) return line;
+  const [, head, description, locator] = match;
+  const firstSentence = firstSentenceOf(description.trim());
+  return `${head}${firstSentence}${locator}`;
+}
+
+function firstSentenceOf(text) {
+  if (!text) return "";
+  const boundary = text.indexOf(". ");
+  const candidate = boundary > 0 ? text.slice(0, boundary + 1) : text;
+  return candidate.length <= 200 ? candidate : `${candidate.slice(0, 197)}...`;
+}
+
+function stripAppContextBlock(text) {
+  if (typeof text !== "string") return text;
+  const block = text.match(APP_CONTEXT_BLOCK_RE)?.[0];
+  if (!block) return text;
+  const dropHeaders = new Set(["### Automations", "### Thread Coordination", "### Workspace Dependencies"]);
+  const lines = block.split("\n");
+  let dropping = false;
+  const kept = lines.filter((line) => {
+    if (line.startsWith("### ")) dropping = dropHeaders.has(line.trim());
+    return !dropping;
+  }).join("\n");
+  if (kept === block) return text;
+  return text.replace(block, kept);
+}
+
+function stripLocalInstructionText(text) {
+  if (typeof text !== "string") return text;
+  let out = text;
+  out = stripSkillsBlock(out);
+  out = stripAppContextBlock(out);
+  out = out
+    .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images. For any visual task, call vision_inspect and act on the text it returns.")
+    .replace(VERBOSE_DESIGN_FIRST, "Design-first: for frontend/UI work, only run image_gen when the user asks for a visual direction; otherwise keep changes surgical.")
+    .replace(AGENT_BLOCK_RE, "")
+    .replace(APPS_INSTRUCTIONS_RE, "")
+    .replace(MEMORY_CITATION_RE, "");
+  return out;
+}
+
+// Remove the dead-weight sections from the payload instructions for
+// small-context local backends. Codex sends instructions either as a plain
+// string or as an array of input_text parts; both shapes are handled and
+// unchanged input is returned as-is so the upstream prefix cache is stable.
+export function stripLocalInstructions(instructions) {
   if (Array.isArray(instructions)) {
     let changed = false;
     const out = instructions.map((part) => {
       if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
-      const text = stripSkillsBlock(part.text);
+      const text = stripLocalInstructionText(part.text);
       if (text === part.text) return part;
       changed = true;
       return { ...part, text };
     });
     return changed ? out : instructions;
   }
-  return stripSkillsBlock(instructions);
+  return stripLocalInstructionText(instructions);
 }
 
 // llama.cpp's qwen3.8 jinja template accepts only xhigh/medium/low and raises
@@ -2263,7 +2326,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // their entries from the instructions so the summarize call (which replays
   // the full history) carries less dead weight.
   if (isLocalSmallContextBackend(config, route.model)) {
-    summarizeBody.instructions = stripLocalSkills(summarizeBody.instructions);
+    summarizeBody.instructions = stripLocalInstructions(summarizeBody.instructions);
   }
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
@@ -2504,7 +2567,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // no value from the hyperframes skill entries, and every stripped line is
   // tokens the model no longer pays to read on each turn.
   if (trimLocalTools) {
-    normalizedPayload.instructions = stripLocalSkills(normalizedPayload.instructions);
+    normalizedPayload.instructions = stripLocalInstructions(normalizedPayload.instructions);
   }
 
   const target = upstreamTargetFor(config, normalizedPayload.model);
