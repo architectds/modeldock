@@ -46,9 +46,12 @@ export function recordUsageEvent({
   reasoningTokens,
   sessionId,
   threadId,
+  compression,
   at = Date.now(),
   filePath = usageEventsPath(),
 } = {}) {
+  const fromChars = safeCount(compression?.fromChars);
+  const toChars = safeCount(compression?.toChars);
   const event = {
     meteringVersion: 2,
     at: new Date(at).toISOString(),
@@ -64,6 +67,7 @@ export function recordUsageEvent({
     ...(safeCount(reasoningTokens) !== undefined ? { reasoningTokens: safeCount(reasoningTokens) } : {}),
     ...(safeText(sessionId, "") ? { sessionId: safeText(sessionId, "") } : {}),
     ...(safeText(threadId, "") ? { threadId: safeText(threadId, "") } : {}),
+    ...(fromChars !== undefined && toChars !== undefined ? { compression: { fromChars, toChars } } : {}),
   };
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });

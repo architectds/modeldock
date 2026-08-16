@@ -2301,6 +2301,29 @@ function writeCompactionSse(res, model, summary) {
   res.end("data: [DONE]\n\n");
 }
 
+// Write a compaction response whose summary already exists (the CPU extract
+// for a local backend) instead of synthesizing one from an upstream summarize
+// call. v1 gets replacement history, v2 gets the single compaction item on
+// either wire. Returns the JSON byte count so the trace can record bytesOut.
+function writeDirectCompaction(res, payload, summary, v2) {
+  if (v2) {
+    if (payload.stream === false) {
+      const body = JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), null));
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json");
+      res.end(body);
+      return Buffer.byteLength(body);
+    }
+    writeCompactionSse(res, payload.model, summary);
+    return 0;
+  }
+  const body = JSON.stringify({ output: compactOutput(payload.input, summary) });
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(body);
+  return Buffer.byteLength(body);
+}
+
 // Synthesize the compaction response Codex expects instead of forwarding the
 // compact request to a routed model that would answer with a plain summary.
 // The model is asked for a handoff summary in a separate non-streaming call;
@@ -2355,24 +2378,22 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   }
   // A small-context local backend (e.g. qwen3.8 at 81920) cannot finish an LLM
   // handoff of a large history inside Codex's ~5 minute timeout: prefill alone
-  // runs minutes on the AMD Vulkan backend. Shrink the history first - a
-  // CPU-only, deterministic extract of the task, findings, and recent state -
-  // so the summarize model sees ~1/5 of the tokens and finishes in the window.
-  // Every small-context backend gets the pre-compression - the point of the
-  // feature is keeping the GPU context in the safe zone - except the degenerate
-  // case where the extract is essentially the same size as the input (nothing
-  // shrinkable: a two-message exchange, no tool noise). That guard exists only
-  // to avoid replacing the raw history with an identical copy.
+  // runs minutes on the AMD Vulkan backend. For these backends the CPU extract
+  // IS the handoff - task, findings, recent state, tool inventory - so it is
+  // handed straight back to Codex as the compaction summary. No upstream
+  // summarize call at all: milliseconds, deterministic, zero GPU time. The
+  // degenerate guard (extract essentially the same size as the input: a
+  // two-message exchange, no tool noise) simply means the extract carries no
+  // compression credit, but the direct return is still correct - the raw
+  // history is tiny and is exactly what a handoff of it should look like.
   let compressionInfo = null;
+  let directSummary = null;
   if (isLocalBackend(config, route.model)) {
     const compressed = compressConversation(normalizedInput);
     if (compressed.compressedChars < compressed.originalChars * 0.95) {
       compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
-      summarizeBody.input = [
-        { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${compressed.text}` }] },
-        messageItem(COMPACT_PROMPT),
-      ];
     }
+    directSummary = compressed.text;
   }
   // Small-context local backends do not need the heavy creative skills; drop
   // their entries from the instructions so the summarize call (which replays
@@ -2398,8 +2419,43 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const startedAt = Date.now();
   const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
   const compactRoute = { model: route.model, provider: target.provider, route: operation };
+  // A direct-return compact never touches the upstream, so there is no real
+  // usage to report. Estimate the context the request carried from the raw
+  // character count the CPU compression measured: mixed Chinese/English text
+  // runs around three characters per token, close enough for the trace's
+  // context column and the usage meter.
+  const CHARS_PER_TOKEN_ESTIMATE = 3;
   let usage;
   try {
+    // Local backend: the CPU extract is the compaction summary. Hand it back
+    // directly - no upstream call, no token needed, no GPU prefill. The trace
+    // records the compression credit and the synthesized response bytes.
+    if (directSummary) {
+      const bytesOut = writeDirectCompaction(res, payload, directSummary, v2);
+      const inputTokens = compressionInfo
+        ? Math.round(compressionInfo.fromChars / CHARS_PER_TOKEN_ESTIMATE)
+        : undefined;
+      finish?.({
+        ok: true,
+        httpStatus: 200,
+        upstream: target.provider,
+        bytesOut,
+        ...(inputTokens !== undefined ? { inputTokens } : {}),
+        compression: compressionInfo,
+      });
+      metrics?.recordResponseUsage?.({ bytesOut });
+      metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
+      recordUsage({ ...compactRoute, status: 200, ...(inputTokens !== undefined ? { inputTokens } : {}), compression: compressionInfo });
+      return {
+        ok: true,
+        httpStatus: 200,
+        route,
+        usage: null,
+        bytesOut,
+        latencyMs: Date.now() - startedAt,
+        upstream: target.provider,
+      };
+    }
     if (!target.token && target.tokenRequired !== false) {
       const body = JSON.stringify({
         error: {

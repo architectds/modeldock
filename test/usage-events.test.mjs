@@ -70,6 +70,24 @@ test("recordUsageEvent sanitizes junk without throwing", (t) => {
   assert.equal(event.inputTokens, undefined);
 });
 
+test("recordUsageEvent records CPU compaction chars when present", (t) => {
+  const { dir, file } = tempFile();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const event = recordUsageEvent({ model: "qwen3.8:27b@custom", compression: { fromChars: 17910, toChars: 4946 }, filePath: file });
+  assert.deepEqual(event.compression, { fromChars: 17910, toChars: 4946 });
+  assert.equal(event.compression.fromChars, 17910);
+  assert.equal(event.compression.toChars, 4946);
+});
+
+test("recordUsageEvent omits compression when absent or incomplete", (t) => {
+  const { dir, file } = tempFile();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const plain = recordUsageEvent({ model: "x", filePath: file });
+  assert.equal("compression" in plain, false);
+  const partial = recordUsageEvent({ model: "x", compression: { fromChars: 1 }, filePath: file });
+  assert.equal("compression" in partial, false);
+});
+
 test("recordUsageEvent never throws when the path is unwritable", () => {
   // A directory path that cannot be a file: append must fail silently.
   const event = recordUsageEvent({ model: "x", filePath: os.tmpdir() });
