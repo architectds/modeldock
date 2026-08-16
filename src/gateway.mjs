@@ -2356,12 +2356,15 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // runs minutes on the AMD Vulkan backend. Shrink the history first - a
   // CPU-only, deterministic extract of the task, findings, and recent state -
   // so the summarize model sees ~1/5 of the tokens and finishes in the window.
-  // Small histories pass through untouched: the extract is only used when it
-  // meaningfully reduces the prompt.
+  // Every small-context backend gets the pre-compression - the point of the
+  // feature is keeping the GPU context in the safe zone - except the degenerate
+  // case where the extract is essentially the same size as the input (nothing
+  // shrinkable: a two-message exchange, no tool noise). That guard exists only
+  // to avoid replacing the raw history with an identical copy.
   let compressionInfo = null;
   if (isLocalSmallContextBackend(config, route.model)) {
     const compressed = compressConversation(normalizedInput);
-    if (compressed.compressedChars < compressed.originalChars * 0.8) {
+    if (compressed.compressedChars < compressed.originalChars * 0.95) {
       compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
       summarizeBody.input = [
         { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${compressed.text}` }] },
