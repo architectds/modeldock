@@ -31,6 +31,11 @@ function tomlString(value) {
 // fields live inside a sentinel block so detection and restore are exact.
 const MANAGED_BEGIN = /^\s*#\s*BEGIN\s+modeldock-managed\s*(?:#.*)?$/m;
 const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
+// Routed slugs are always published as <model>@<provider>; native GPT slugs
+// never carry the separator. The top-level config.toml model must be a native
+// slug so Codex can start without the published catalog, so "@" is the whole
+// test.
+const PROVIDER_SEPARATOR = "@";
 const MANAGED_ORIGINAL_EXISTED = /^\s*#\s*ModelDock original config existed:\s*(true|false)\s*$/im;
 const CODERX_ROUTER_BEGIN = /^\s*#\s*BEGIN\s+codex-router-managed\s*(?:#.*)?$/m;
 
@@ -196,7 +201,7 @@ function setTopLevel(lines, key, value) {
 // base URL is redirected to the local gate, and the realtime endpoints point at
 // OpenAI so Codex Voice never dials the loopback. The catalog file keeps naming
 // our models in the App picker (openai/codex#32119 only affects custom providers).
-export function buildManagedCodexConfig(source, { baseUrl, model, nativeModels = [], catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
+export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {}, originalExisted = true }) {
   const newline = source.includes("\r\n") ? "\r\n" : "\n";
   // The top-level `model` stays a native slug Codex always recognizes. Routed
   // slugs (deepseek-v4-flash@opencode-go) exist only in the published catalog,
@@ -204,13 +209,18 @@ export function buildManagedCodexConfig(source, { baseUrl, model, nativeModels =
   // the gateway down, the catalog stale, or ModelDock off all leave Codex
   // pointed at a model that no longer exists. A native model starts under every
   // condition. The picker, not this file, is where a routed model gets chosen.
-  const natives = Array.isArray(nativeModels) ? nativeModels : [];
   const existingModel = topLevelString(source, "model");
-  const existingIsNative = Boolean(existingModel) && natives.includes(existingModel);
-  const nativeFallback = natives.includes("gpt-5.6-sol") ? "gpt-5.6-sol" : natives[0] || "";
-  // A native-less install (logged out of ChatGPT) has nothing to keep; the
-  // managed model is the only thing this route can serve then.
-  const chosen = existingIsNative ? existingModel : (nativeFallback || model);
+  // A native slug is any id without the provider separator: Codex recognizes
+  // native GPT ids unconditionally, so an existing native choice is kept as-is
+  // instead of being normalized to a fixed default.
+  const existingIsNative = Boolean(existingModel) && !existingModel.includes(PROVIDER_SEPARATOR);
+  // The fallback is a native slug too, not the routed managed model: Codex
+  // recognizes native GPT ids even when the captured catalog is missing or
+  // empty (logged-out installs), while a routed slug exists only in the
+  // published catalog and would leave Codex unable to start without it.
+  const natives = Array.isArray(nativeModels) ? nativeModels : [];
+  const nativeFallback = natives.includes("gpt-5.6-sol") ? "gpt-5.6-sol" : (natives[0] || "gpt-5.6-sol");
+  const chosen = existingIsNative ? existingModel : nativeFallback;
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   if (chosen) lines = setTopLevel(lines, "model", chosen);
@@ -327,10 +337,13 @@ export class CodexConfigSwitcher {
     let current = "";
     if (configExists) current = await readFile(this.configPath, "utf8");
     const routeActive = hasManagedRoute(current);
+    const topLevelModel = topLevelString(current, "model");
+    const topLevelModelNative = !topLevelModel || !topLevelModel.includes(PROVIDER_SEPARATOR);
     return {
       enabled: Boolean(state.enabled && routeActive),
       managed: Boolean(state.enabled && routeActive),
       externallyRestored: Boolean(state.enabled && !routeActive),
+      topLevelModelNative,
       restartRequired: Boolean(state.restartRequired),
       configExists,
       configPath: this.configPath,
@@ -364,7 +377,10 @@ export class CodexConfigSwitcher {
       if (status.enabled) {
         // Re-write the config once when it still carries the pre-transparent
         // modeldock_go provider shape, so upgrades land on openai_base_url.
-        if (status.needsMigration) {
+        // Also rewrite when the top-level model is a routed slug: older builds
+        // wrote one there, and Codex cannot start on it without the published
+        // catalog.
+        if (status.needsMigration || !status.topLevelModelNative) {
           await this.disable();
           return this.enable();
         }
@@ -426,7 +442,6 @@ export class CodexConfigSwitcher {
 
     const managed = buildManagedCodexConfig(original, {
       baseUrl: this.baseUrl,
-      model: this.model,
       nativeModels: this.nativeModels,
       catalogFile: this.catalogFile,
       mcpUrl: this.mcpUrl,

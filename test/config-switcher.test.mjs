@@ -32,10 +32,12 @@ async function fixture(t) {
   };
 }
 
-test("a function model follows the caller's live selection instead of a snapshot", async (t) => {
+test("the switcher's model view follows the live selection without writing it to config.toml", async (t) => {
   // Codex's own picker moves the selection without going through the switcher.
-  // When the model was stored as a copy, a later enable wrote the stale id into
-  // config.toml; reading through the function keeps them in step.
+  // The switcher still reports the live selection for the dashboard, but the
+  // top-level config.toml model must stay a native slug: a routed slug exists
+  // only in the published catalog, so writing it there makes Codex startup
+  // depend on ModelDock being healthy.
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-live-model-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));
   const selection = { mainModel: "deepseek-v4-flash" };
@@ -51,17 +53,17 @@ test("a function model follows the caller's live selection instead of a snapshot
 
   await switcher.enable();
   const written = await readFile(path.join(codexHome, "config.toml"), "utf8");
-  assert.match(written, /^model = "glm-5\.2@opencode-go"$/m, "config.toml carries the live model");
+  assert.doesNotMatch(written, /^model = "glm-5\.2@opencode-go"$/m, "the routed selection is not written as the top-level model");
+  assert.match(written, /^model = "gpt-5\.6-sol"$/m, "the top-level model stays the native fallback");
 });
 
 test("managed config keeps the built-in provider and redirects its base URL", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
-    model: "deepseek-v4-flash",
     catalogFile: "C:/Users/x/.modeldock/codex-model-catalog.json",
     mcpUrl: "http://127.0.0.1:4097/c/test-caller-key/mcp",
   });
-  assert.match(managed, /^model = "deepseek-v4-flash"/m);
+  assert.match(managed, /^model = "gpt-5\.6-sol"$/m);
   assert.match(managed, /^openai_base_url = "http:\/\/127\.0\.0\.1:4097\/c\/callerkey\/v1"$/m);
   assert.doesNotMatch(managed, /model_provider/);
   assert.doesNotMatch(managed, /^web_search\s*=/m);
@@ -84,7 +86,6 @@ test("managed config keeps the built-in provider and redirects its base URL", ()
 test("managed config without mcpUrl writes no mcp_servers.modeldock section", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/v1",
-    model: "deepseek-v4-flash",
   });
   assert.doesNotMatch(managed, /\[mcp_servers\.modeldock\]/);
 });
@@ -92,7 +93,6 @@ test("managed config without mcpUrl writes no mcp_servers.modeldock section", ()
 test("managed config writes the stdio bridge when mcpCommand is set", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/c/callerkey/v1",
-    model: "deepseek-v4-flash",
     mcpCommand: "C:/Program Files/nodejs/node.exe",
     mcpArgs: ["D:/projects/modeldock/src/mcp-standalone.mjs"],
     mcpEnv: { MODELDOCK_GATEWAY_URL: "http://127.0.0.1:4097/c/test-caller-key" },
@@ -111,7 +111,6 @@ test("managed config writes the stdio bridge when mcpCommand is set", () => {
 test("managed config without catalogFile writes no model_catalog_json", () => {
   const managed = buildManagedCodexConfig(originalConfig, {
     baseUrl: "http://127.0.0.1:4097/v1",
-    model: "deepseek-v4-flash",
   });
   assert.doesNotMatch(managed, /model_catalog_json/);
 });
@@ -324,6 +323,36 @@ experimental_bearer_token = "local-modeldock"
   assert.doesNotMatch(text, /modeldock_go/);
   assert.doesNotMatch(text, /^web_search\s*=/m);
   assert.match(text, /model_catalog_json = "C:\/Users\/x\/\.modeldock\/codex-model-catalog\.json"/);
+});
+
+test("an already-enabled config with a routed top-level model is rewritten to native", async (t) => {
+  // Older builds wrote the routed slug into the top-level model. Upgrading must
+  // repair that on the next enable: Codex cannot start on a routed slug without
+  // the published catalog, so leaving it would keep Codex broken after ModelDock
+  // rewrites its own config.
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-routed-model-fix-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const configPath = path.join(codexHome, "config.toml");
+  await writeFile(configPath, originalConfig, "utf8");
+  const switcher = new CodexConfigSwitcher({
+    codexHome,
+    baseUrl: "http://127.0.0.1:4097/v1",
+    model: "deepseek-v4-flash",
+  });
+  await switcher.enable();
+
+  // Simulate an older ModelDock build writing its routed selection on top.
+  const current = await readFile(configPath, "utf8");
+  await writeFile(configPath, current.replace(/^model = .*$/m, 'model = "deepseek-v4-flash@opencode-go"'), "utf8");
+  const before = await switcher.status();
+  assert.equal(before.enabled, true);
+  assert.equal(before.topLevelModelNative, false, "the routed top-level model is detected as a startup risk");
+
+  const reEnabled = await switcher.enable();
+  assert.equal(reEnabled.enabled, true);
+  assert.match(await readFile(configPath, "utf8"), /^model = "gpt-5\.6-sol"$/m,
+    "re-enable rewrites the routed top-level model to native");
+  assert.equal((await switcher.status()).topLevelModelNative, true);
 });
 
 test("enable refuses when codex-router already manages openai_base_url", async (t) => {

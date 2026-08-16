@@ -117,7 +117,6 @@ test("the top-level model stays native so Codex can always start", () => {
   // gateway down, the catalog stale, or ModelDock off.
   const managed = buildManagedCodexConfig(ORIGINAL, {
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
-    model: "deepseek-v4-flash@opencode-go",
     nativeModels: ["gpt-5.6-sol"],
   });
   assert.match(managed, /^model = "gpt-5.6-sol"$/m, "the user's choice survives enable");
@@ -130,22 +129,20 @@ test("a routed config model is rewritten to a native slug", () => {
   // or gateway is gone. The managed fallback picks a known native slug instead.
   const managed = buildManagedCodexConfig(ORIGINAL, {
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
-    model: "deepseek-v4-flash@opencode-go",
     nativeModels: ["gpt-5.6-luna", "gpt-5.6-sol"],
   });
   assert.match(managed, /^model = "gpt-5.6-sol"$/m, "prefers the stable native default when present");
 });
 
-test("a native-less install falls back to the managed model", () => {
-  // Logged out of ChatGPT there is no native catalog, so no native slug can be
-  // served by the published catalog either. The managed model is then the only
-  // one this route can serve; writing a native slug would point Codex at
-  // nothing.
+test("a native-less install still keeps a native top-level model", () => {
+  // Even with no captured native catalog, the top-level model stays a native
+  // slug: Codex recognizes native GPT ids unconditionally, while a routed slug
+  // exists only in the published catalog and would leave Codex unable to start
+  // without it.
   const managed = buildManagedCodexConfig(ORIGINAL, {
     baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
-    model: "deepseek-v4-flash@opencode-go",
   });
-  assert.match(managed, /^model = "deepseek-v4-flash@opencode-go"$/m);
+  assert.match(managed, /^model = "gpt-5.6-sol"$/m);
 });
 
 test("a non-native top-level model never survives into the managed config", () => {
@@ -153,7 +150,6 @@ test("a non-native top-level model never survives into the managed config", () =
     'model = "qwen3.8:27b@custom"\napproval_policy = "on-request"\n',
     {
       baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
-      model: "deepseek-v4-flash@opencode-go",
       nativeModels: ["gpt-5.6-sol"],
     },
   );

@@ -599,7 +599,10 @@ test("DeepSeek-only onboarding selects a working DeepSeek main route with no vis
   assert.match(env, /^MODELDOCK_PROFILE=deepseek-official$/m);
   assert.match(env, /^MODELDOCK_MAIN_MODEL=deepseek-v4-flash@deepseek-official$/m);
   assert.match(env, /^MODELDOCK_VISION_MODEL=none$/m);
-  assert.match(await readFile(configPath, "utf8"), /model = "deepseek-v4-flash@deepseek-official"/);
+  // The routed DeepSeek selection lives in .env (the gateway's default route);
+  // config.toml's top-level model stays a native slug so Codex can always
+  // start, even without the published catalog.
+  assert.match(await readFile(configPath, "utf8"), /model = "gpt-5.6-sol"/);
 
   const relayed = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
