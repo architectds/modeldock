@@ -873,7 +873,7 @@ test("isLocalSmallContextBackend trims custom/ollama backends up to 100K only", 
   );
 });
 
-test("stripLocalInstructions keeps only the four local skills, compressed to one line", () => {
+test("stripLocalInstructions keeps the local + office skills, compressed to one line", () => {
   const instructions = `<skills_instructions>
 ## Skills
 - hyperframes: Mandatory video entry point (file: C:/x/hyperframes/SKILL.md)
@@ -882,6 +882,10 @@ test("stripLocalInstructions keeps only the four local skills, compressed to one
 - imagegen: Generate or edit raster images when the task benefits from AI-created bitmap visuals. Use when Codex should create a brand-new image. (file: C:/x/imagegen/SKILL.md)
 - content-to-video: Turn arbitrary source content into a finished high-quality MP4 video with TTS voiceover and quality gates. Use when the user asks to make a video. (file: C:/x/content-to-video/SKILL.md)
 - openai-docs: Use for Codex models, pricing, settings and OpenAI APIs. Do not use for generic tasks. (file: C:/x/openai-docs/SKILL.md)
+- documents: Create, edit, redline and comment on Word documents with a render-and-verify workflow. Use for docx work. (file: C:/x/documents/SKILL.md)
+- presentations: Read, create or edit PowerPoint or Google Slides decks. Use for slide deck work. (file: C:/x/presentations/SKILL.md)
+- spreadsheets: Create, edit and verify spreadsheet files. Use for xlsx or sheets work. (file: C:/x/spreadsheets/SKILL.md)
+- spreadsheets:excel-live-control: Control an open Excel workbook through the add-in. (file: C:/x/excel-live-control/SKILL.md)
 - github:gh-fix-ci: Use when the user asks to debug CI. (file: C:/x/gh-fix-ci/SKILL.md)
 </skills_instructions>`;
   const out = stripLocalInstructions(instructions);
@@ -889,6 +893,9 @@ test("stripLocalInstructions keeps only the four local skills, compressed to one
   assert.ok(!out.includes("github"), "skills whose tools are not whitelisted are dropped");
   assert.ok(out.includes("imagegen"), "imagegen survives");
   assert.ok(out.includes("openai-docs") && out.includes("content-to-video"), "the four local skills survive");
+  assert.ok(out.includes("documents"), "office skills whose tools are whitelisted survive");
+  assert.ok(out.includes("presentations") && out.includes("spreadsheets"), "PPT and spreadsheet skills survive");
+  assert.ok(out.includes("excel-live-control"), "the excel-live-control entry survives via the spreadsheets prefix");
   assert.ok(!out.includes("brand-new image"), "kept skills are compressed to one sentence (second sentence gone)");
   assert.ok(out.includes("(file: C:/x/imagegen/SKILL.md)"), "the locator is retained");
   assert.ok(out.includes("<skills_instructions>") && out.includes("</skills_instructions>"), "block structure intact");

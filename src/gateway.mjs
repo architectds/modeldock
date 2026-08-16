@@ -891,11 +891,20 @@ export function normalizeLocalPayload(payload) {
   return { ...payload, input: normalizeLocalInput(payload.input) };
 }
 
-// The only skills a small-context local backend keeps in the
-// <skills_instructions> block. Everything else is dropped: their tools are not
-// whitelisted, so the full descriptions are dead weight for a 27B model. The
-// model reads a kept skill's SKILL.md when it actually needs it.
-const LOCAL_SKILLS_KEEP = new Set(["imagegen", "openai-docs", "content-to-video", "media-use"]);
+// The skills a small-context local backend keeps in the <skills_instructions>
+// block: the four harness/media skills plus the office skills whose
+// codex_document_control tools ARE whitelisted (their SKILL.md guides how to
+// drive Word/PPT/Spreadsheet sessions). Everything else is dropped - its tools
+// are not whitelisted, so the descriptions are dead weight for a 27B model.
+const LOCAL_SKILLS_KEEP = new Set([
+  "imagegen",
+  "openai-docs",
+  "content-to-video",
+  "media-use",
+  "documents",
+  "presentations",
+  "spreadsheets", // covers both the spreadsheet skill and excel-live-control
+]);
 const SKILLS_BLOCK_RE = /<skills_instructions>[\s\S]*?<\/skills_instructions>/;
 const APP_CONTEXT_BLOCK_RE = /<app-context>[\s\S]*?<\/app-context>/;
 const APPS_INSTRUCTIONS_RE = /<apps_instructions>[\s\S]*?<\/apps_instructions>\s*/g;
