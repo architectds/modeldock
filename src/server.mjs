@@ -57,7 +57,11 @@ function serveInlineStatic(app) {
   const publicTree = staticFiles.public || {};
   const assetTree = staticFiles.assets || {};
   const serve = (req, res, tree, stripPrefix) => {
-    const rel = req.path.slice(stripPrefix.length).replace(/^\/+/, "");
+    // originalUrl, not req.path: an app.use("/assets", fn) mount rewrites
+    // req.path to the mount-relative form (/icon.png), which made the prefix
+    // slice land mid-filename and every inlined asset 404. originalUrl keeps
+    // the full path in both mounted and unmounted routes.
+    const rel = req.originalUrl.split("?")[0].slice(stripPrefix.length).replace(/^\/+/, "");
     const file = rel || "index.html";
     if (!(file in tree)) return false;
     const body = tree[file];
