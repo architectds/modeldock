@@ -109,13 +109,18 @@ test("evicts least recently accessed entries beyond maxEntries", () => {
 });
 
 test("evicts expired entries by lastAccessAt not createdAt", async () => {
+  // cleanup() already takes an explicit `now`, so the expiry window can be
+  // arithmetic instead of a race against the scheduler: under a loaded parallel
+  // run the second 60ms setTimeout can land past the 100ms TTL and evict the
+  // entry the test requires to survive. Only the first sleep stays real, to
+  // separate r1's lastAccessAt from its createdAt.
   const store = makeStore({ ttlMs: 100, maxEntries: 2 });
   const r1 = store.put(DATA_URL);
   const r2 = store.put(DATA_URL_OTHER);
   await new Promise((resolve) => setTimeout(resolve, 60));
   store.get(r1);
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  store.cleanup();
+  const accessedAt = Date.now();
+  store.cleanup(accessedAt + 60);
   assert.ok(store.get(r1), "r1 was accessed recently so must survive");
   assert.equal(store.get(r2), undefined, "r2 expired and must be gone");
   const r3 = store.put("data:image/png;base64,EEEE");
