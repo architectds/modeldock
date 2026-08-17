@@ -344,7 +344,7 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 // silently - an empty update.log, no spawn error, the old gateway still
 // serving. Giving the child no fd at all is what the manual "run restart.ps1"
 // path already does, and that path works.
-export function scheduleRestart(rootDir, {
+function scheduleRestart(rootDir, {
   spawnImpl = spawn,
   platform = process.platform,
 } = {}) {
