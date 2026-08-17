@@ -46,7 +46,7 @@ export function parseEnvFile(source) {
 // additional KEY=VALUE lines that take effect on the next load (e.g. a crafted
 // custom-model id turning MODELDOCK_REQUIRE_CALLER_KEY off). No legitimate value
 // here (token, url, model id) contains a CR/LF, so strip them at every write.
-export function sanitizeEnvValue(value) {
+function sanitizeEnvValue(value) {
   return String(value).replace(/[\r\n]+/g, " ").trim();
 }
 
@@ -59,7 +59,7 @@ const TRUE_WORDS = new Set(["1", "true", "on", "yes"]);
 const FALSE_WORDS = new Set(["0", "false", "off", "no"]);
 
 // Opt-in flag: off unless the value says otherwise.
-export function envOn(name) {
+function envOn(name) {
   return TRUE_WORDS.has(String(process.env[name] || "").trim().toLowerCase());
 }
 

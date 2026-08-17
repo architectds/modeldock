@@ -184,7 +184,7 @@ function providerLabelFor(entry) {
   return PROVIDER_LABELS[provider] || provider;
 }
 
-export function orderCatalogByProvider(models) {
+function orderCatalogByProvider(models) {
   if (!Array.isArray(models)) return models;
   return models
     .map((entry, index) => ({ entry, label: providerLabelFor(entry), index }))

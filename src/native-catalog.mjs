@@ -123,7 +123,7 @@ export function nativeModelSlugs(config) {
   return slugs;
 }
 
-export async function codexVersion() {
+async function codexVersion() {
   try {
     const out = await runCodex(["--version"], 5_000);
     return String(out || "").trim().split(/\s+/)[0] || "";

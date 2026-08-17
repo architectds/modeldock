@@ -51,7 +51,7 @@ function localContextWindow(actual) {
 // `tool_call_mcp_elicitation` = let the model request MCP tool schemas it does not have,
 // `workspace_dependencies` = codex_app.load_workspace_dependencies,
 // `computer_use` = desktop screen control, `browser_use` = Chrome control.
-export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
+const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
 // One catalog entry. Codex's model picker lists whatever the active provider returns
 // from /v1/models, so emitting an entry per available model is what makes them all

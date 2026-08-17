@@ -10,11 +10,11 @@ import path from "node:path";
 // One JSON object per line. Telemetry must never interrupt or fail a model
 // request: every write is wrapped and errors are swallowed.
 
-export const USAGE_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "usage-events.jsonl");
+const USAGE_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "usage-events.jsonl");
 
 // Tests and packaging can redirect the metering file without touching the real
 // ~/.modeldock state (mirrors MODELDOCK_SETTINGS_EVENTS_FILE in settings-events.mjs).
-export function usageEventsPath() {
+function usageEventsPath() {
   return process.env.MODELDOCK_USAGE_EVENTS_FILE || USAGE_EVENTS_PATH;
 }
 

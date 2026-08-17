@@ -17,7 +17,7 @@ import path from "node:path";
 
 const EMPTY = Object.freeze({ present: false, accessToken: "", refreshToken: "", accountId: "", apiKey: "" });
 
-export function codexAuthPath(codexHome) {
+function codexAuthPath(codexHome) {
   return codexHome ? path.join(codexHome, "auth.json") : "";
 }
 

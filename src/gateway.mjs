@@ -1877,7 +1877,7 @@ export function freeResponseFailure(parsed) {
 // free-tier guidance. Non-free traffic and upstream failures are untouched -
 // only a response.completed block starts the hold. The tee still receives every
 // chunk so usage extraction keeps working.
-export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
+async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, empty: false, usage: undefined };
