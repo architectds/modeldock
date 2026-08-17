@@ -7,7 +7,7 @@ function Save-Bmp($bitmap, $path) {
   $bitmap.Dispose()
 }
 
-# T1: 纯色块 (红/绿/蓝)
+# T1: solid colour blocks (red / green / blue)
 $colors = @{
   "t1-red.png"   = [System.Drawing.Color]::FromArgb(255, 220, 0, 0)
   "t1-green.png" = [System.Drawing.Color]::FromArgb(255, 0, 170, 0)
@@ -21,7 +21,7 @@ foreach ($entry in $colors.GetEnumerator()) {
   Save-Bmp $bmp (Join-Path $dir $entry.Key)
 }
 
-# T2: 计数 - 3 红圆 + 2 蓝方 (数圆 = 3)
+# T2: counting - 3 red circles + 2 blue squares (circles = 3)
 $bmp = [System.Drawing.Bitmap]::new(640, 200)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.Clear([System.Drawing.Color]::White)
@@ -41,7 +41,7 @@ $g.DrawString("HELLO VISION 42", $font, [System.Drawing.Brushes]::Black, 20, 40)
 $g.Dispose()
 Save-Bmp $bmp (Join-Path $dir "t3-ocr.png")
 
-# T4: 柱状图 - A=2 B=5 C=3 (最高 = B, 值 5)
+# T4: bar chart - A=2 B=5 C=3 (tallest = B, value 5)
 $bmp = [System.Drawing.Bitmap]::new(480, 320)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.Clear([System.Drawing.Color]::White)
@@ -58,7 +58,7 @@ foreach ($entry in $bars.GetEnumerator()) {
 $g.Dispose()
 Save-Bmp $bmp (Join-Path $dir "t4-chart.png")
 
-# T5: 方向 - 红色大箭头朝右 (粗线 + 三角形箭头)
+# T5: direction - a large red arrow pointing right (thick line + triangular head)
 $bmp = [System.Drawing.Bitmap]::new(480, 200)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.Clear([System.Drawing.Color]::White)

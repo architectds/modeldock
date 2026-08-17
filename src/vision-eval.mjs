@@ -58,7 +58,7 @@ export const TASKS = [
     image: "t5-arrow.png",
     difficulty: 5,
     question: "Which direction does the red arrow point? Answer with one word (left/right/up/down)." + VERBATIM,
-    check: (answer) => /(^|\W)(right|east|rightarrow|→)(\W|$)/i.test(answer),
+    check: (answer) => /(^|\W)(right|east|rightarrow|\u2192)(\W|$)/i.test(answer),
   },
 ];
 

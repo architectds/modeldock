@@ -110,10 +110,12 @@ function stripNoise(text) {
     .trim();
 }
 
-// Sentence terminators in both families. The boundary used to be "。" alone, so
-// an English conversation - the common case - never found one and always fell
-// back to a blind character cut.
-const SENTENCE_END = /[。！？]|[.!?](?=\s|$)/;
+// Sentence terminators in both families. The boundary used to be the ideographic
+// full stop alone, so an English conversation - the common case - never found
+// one and always fell back to a blind character cut. The CJK codepoints are
+// escaped because sources here are ASCII-only (AGENTS.md): U+3002 ideographic
+// full stop, U+FF01 fullwidth exclamation, U+FF1F fullwidth question mark.
+const SENTENCE_END = /[\u3002\uFF01\uFF1F]|[.!?](?=\s|$)/;
 
 // Snap a cut back to a word boundary, but only when one sits near the cut: CJK
 // has no word spaces, and dragging a Western cut halfway across the text to
@@ -150,7 +152,7 @@ function firstAndLast(text, cap) {
 // matches file names (error-translation.mjs), coverage tables, and prose, so
 // it is deliberately absent here.
 const ERROR_LINE_RE =
-  /(?:^\s*(?:[A-Za-z]+:\s*)?(?:ERROR|FATAL|SEVERE|Unhandled\s+exception)[:：]|\b[A-Z]\w*(?:Error|Exception)[:：]\s|Traceback \(most recent call last\)|FullyQualifiedErrorId|\b✗\b|❌|Exit code: [1-9]\d*|\bCannot (?:find|read|resolve|open|write|access|connect|parse|load)\b|\bUnable to \w+\b|\bexception of type\b|\b(?:error|failed|failure)[s]?\s+(?:occurred|happened|while|when|to|during)\b)/i;
+  /(?:^\s*(?:[A-Za-z]+:\s*)?(?:ERROR|FATAL|SEVERE|Unhandled\s+exception)[:\uFF1A]|\b[A-Z]\w*(?:Error|Exception)[:\uFF1A]\s|Traceback \(most recent call last\)|FullyQualifiedErrorId|\b\u2717\b|\u274C|Exit code: [1-9]\d*|\bCannot (?:find|read|resolve|open|write|access|connect|parse|load)\b|\bUnable to \w+\b|\bexception of type\b|\b(?:error|failed|failure)[s]?\s+(?:occurred|happened|while|when|to|during)\b)/i;
 const ERROR_NEG_RE = /\b(?:no|zero)\s+errors?\b|\b0\s+errors?\b|\berrors?\s*:\s*0\b/i;
 const ERROR_TABLE_RE = /\s\|\s|^---|\s-\s-\s/;
 // A tool output that dumps source text (Get-Content / cat) reads like prose but
@@ -190,7 +192,10 @@ export function extractErrorLines(input) {
 // Decisive-sentence signal for assistant findings: sentences that state a
 // conclusion, decision, or cause outrank information-dense-but-ambient prose
 // under equal TF-IDF. Deterministic word signals only - no model involved.
-const SIGNAL_CJK_RE = /结论|决定|修复|解决|原因|因为|需要|注意|改用|建议|成功|发现|下一步|归根结底|问题出在/g;
+// Escaped per AGENTS.md (ASCII-only sources). In order: conclusion, decision,
+// fix, resolve, cause, because, need, note, switch-to, suggest, success, found,
+// next-step, ultimately, the-problem-is.
+const SIGNAL_CJK_RE = /\u7ED3\u8BBA|\u51B3\u5B9A|\u4FEE\u590D|\u89E3\u51B3|\u539F\u56E0|\u56E0\u4E3A|\u9700\u8981|\u6CE8\u610F|\u6539\u7528|\u5EFA\u8BAE|\u6210\u529F|\u53D1\u73B0|\u4E0B\u4E00\u6B65|\u5F52\u6839\u7ED3\u5E95|\u95EE\u9898\u51FA\u5728/g;
 const SIGNAL_EN_RE = /\b(root cause|fixed|decided|switched|conclusion|because|success|resolved|summary|turned out)\b/gi;
 
 function signalScore(text) {
@@ -226,7 +231,7 @@ export function aggregateToolCalls(lines, isKeptVerbatim) {
     }
   }
   if (!byName.size) return "";
-  const inventory = [...byName.entries()].map(([name, count]) => `${name}×${count}`).join(", ");
+  const inventory = [...byName.entries()].map(([name, count]) => `${name}\u00D7${count}`).join(", ");
   const fileList = [...files.keys()].slice(0, 12).join(", ");
   return `TOOLS_AGGREGATED: ${inventory}${fileList ? ` (files: ${fileList}...)` : ""}`;
 }
@@ -297,7 +302,7 @@ function boundedBaseText(text) {
 function truncateHead(text, max) {
   const clean = String(text).replace(/\s+/g, " ").trim();
   if (clean.length <= max) return clean;
-  return `${clean.slice(0, max - 1)}…`;
+  return `${clean.slice(0, max - 1)}\u2026`;
 }
 
 // A short, deterministic handoff header: what the task was, where the work

@@ -19,7 +19,7 @@ test("a vision-capable main model reads the image itself instead of escalating t
 });
 
 test("text-only requests never route to Luna, even with visual wording", () => {
-  for (const input of ["Inspect this screenshot carefully", "看一下这个按钮为什么被遮挡", "这张截图里显示什么", "用浏览器截图看前端"]) {
+  for (const input of ["Inspect this screenshot carefully", "\u770B\u4E00\u4E0B\u8FD9\u4E2A\u6309\u94AE\u4E3A\u4EC0\u4E48\u88AB\u906E\u6321", "\u8FD9\u5F20\u622A\u56FE\u91CC\u663E\u793A\u4EC0\u4E48", "\u7528\u6D4F\u89C8\u5668\u622A\u56FE\u770B\u524D\u7AEF"]) {
     const route = routeResponsesRequest({ input }, models);
     assert.equal(route.model, "deepseek-v4-flash", `"${input}" must stay on the main model`);
     assert.equal(route.reason, "default_main");

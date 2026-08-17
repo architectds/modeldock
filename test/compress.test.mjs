@@ -78,13 +78,14 @@ test("aggregateToolCalls builds an inventory line", () => {
     { kind: "tool", text: "TOOL_CALL: apply_patch({\"input\":\"*** Update File: D:/p/x.js\"})" },
   ];
   const inventory = aggregateToolCalls(lines, () => false);
-  assert.match(inventory, /exec_command×2/);
-  assert.match(inventory, /apply_patch×1/);
+  assert.match(inventory, /exec_command\u00D72/);
+  assert.match(inventory, /apply_patch\u00D71/);
   assert.match(inventory, /files: p\/x\.js/);
 });
 
 // A long assistant message is truncated to its opening claim and its closing
-// conclusion. The boundary search used to accept "。" only, so English - the
+// conclusion. The boundary search used to accept the ideographic full stop
+// (U+3002) only, so English - the
 // common case - never matched and always fell back to a blind character cut at
 // 60% of the cap, slicing mid-word.
 function assistantLine(text) {
@@ -112,13 +113,13 @@ test("a long English finding is cut at a sentence boundary, not mid-word", () =>
 
 test("a long Chinese finding still splits on the ideographic full stop", () => {
   const line = assistantLine(
-    "重启从来没有真正执行过，因为 Windows 上的 detached spawn 是坏的。"
-    + "我在网关之外用标记文件复现了这个问题，脚本一次都没有跑起来，日志里一个字节都没有。"
-    + "去掉 detached 之后每次都正常，而且 unref 就够了，因为 Windows 不会因为父进程退出而杀掉子进程。"
-    + "所以结论是 detached 只保留在 POSIX 上。",
+    "\u91CD\u542F\u4ECE\u6765\u6CA1\u6709\u771F\u6B63\u6267\u884C\u8FC7\uFF0C\u56E0\u4E3A Windows \u4E0A\u7684 detached spawn \u662F\u574F\u7684\u3002"
+    + "\u6211\u5728\u7F51\u5173\u4E4B\u5916\u7528\u6807\u8BB0\u6587\u4EF6\u590D\u73B0\u4E86\u8FD9\u4E2A\u95EE\u9898\uFF0C\u811A\u672C\u4E00\u6B21\u90FD\u6CA1\u6709\u8DD1\u8D77\u6765\uFF0C\u65E5\u5FD7\u91CC\u4E00\u4E2A\u5B57\u8282\u90FD\u6CA1\u6709\u3002"
+    + "\u53BB\u6389 detached \u4E4B\u540E\u6BCF\u6B21\u90FD\u6B63\u5E38\uFF0C\u800C\u4E14 unref \u5C31\u591F\u4E86\uFF0C\u56E0\u4E3A Windows \u4E0D\u4F1A\u56E0\u4E3A\u7236\u8FDB\u7A0B\u9000\u51FA\u800C\u6740\u6389\u5B50\u8FDB\u7A0B\u3002"
+    + "\u6240\u4EE5\u7ED3\u8BBA\u662F detached \u53EA\u4FDD\u7559\u5728 POSIX \u4E0A\u3002",
   );
   const head = line.replace(/^ASSISTANT: /, "").split(" ... ")[0];
-  assert.ok(head.endsWith("。"), `head should end at 。, got ${JSON.stringify(head.slice(-20))}`);
+  assert.ok(head.endsWith("\u3002"), `head should end at \u3002, got ${JSON.stringify(head.slice(-20))}`);
 });
 
 test("the head stays inside the cap even when the first sentence is enormous", () => {
@@ -173,17 +174,17 @@ test("a decisive assistant sentence outranks ambient prose under equal TF-IDF", 
     items.push(item({ type: "message", role: "assistant", text: `Probe ${i} executed against the fixture and the executor returned without complaint.` }));
   }
   // A single decisive message buried mid-history: root cause + fix.
-  items.push(item({ type: "message", role: "assistant", text: "根因是缓存键没按 provider 区分，修复方案是把 provider 拼进 key。" }));
+  items.push(item({ type: "message", role: "assistant", text: "\u6839\u56E0\u662F\u7F13\u5B58\u952E\u6CA1\u6309 provider \u533A\u5206\uFF0C\u4FEE\u590D\u65B9\u6848\u662F\u628A provider \u62FC\u8FDB key\u3002" }));
   const { text } = compressConversation(items, { tailLines: 8 });
-  assert.ok(text.includes("根因是缓存键"), "the decisive sentence survives compression");
+  assert.ok(text.includes("\u6839\u56E0\u662F\u7F13\u5B58\u952E"), "the decisive sentence survives compression");
 });
 
 test("a long user ask keeps both edges instead of a blind head-cut", () => {
-  const tail = "以上就是全部报错信息，请先修这个再继续。".repeat(12);
-  const head = "请把网关的错误处理改掉：";
+  const tail = "\u4EE5\u4E0A\u5C31\u662F\u5168\u90E8\u62A5\u9519\u4FE1\u606F\uFF0C\u8BF7\u5148\u4FEE\u8FD9\u4E2A\u518D\u7EE7\u7EED\u3002".repeat(12);
+  const head = "\u8BF7\u628A\u7F51\u5173\u7684\u9519\u8BEF\u5904\u7406\u6539\u6389\uFF1A";
   const { text } = compressConversation([item({ type: "message", role: "user", text: head + "x".repeat(400) + tail })], { tailLines: 2 });
-  assert.ok(text.includes("请把网关的错误处理改掉"), "the ask head survives");
-  assert.ok(text.includes("请先修这个再继续"), "the decisive tail survives the cap");
+  assert.ok(text.includes("\u8BF7\u628A\u7F51\u5173\u7684\u9519\u8BEF\u5904\u7406\u6539\u6389"), "the ask head survives");
+  assert.ok(text.includes("\u8BF7\u5148\u4FEE\u8FD9\u4E2A\u518D\u7EE7\u7EED"), "the decisive tail survives the cap");
 });
 
 test("a restored compaction item is not capped like a fresh user ask", () => {
@@ -191,37 +192,37 @@ test("a restored compaction item is not capped like a fresh user ask", () => {
   // previous extract, starting with the handoff header line. The restored unit
   // is already-compressed history: task lines, errors, and the tool inventory
   // must survive the second hop instead of collapsing to userCap.
-  const extract = ("HEAD: task=原始任务关键词 | phase=某轮结论\nFAILED: boom\n---\nUSER: 原始任务关键词\nASSISTANT: 某轮结论\nLAST_ERROR: boom\n").repeat(120);
+  const extract = ("HEAD: task=\u539F\u59CB\u4EFB\u52A1\u5173\u952E\u8BCD | phase=\u67D0\u8F6E\u7ED3\u8BBA\nFAILED: boom\n---\nUSER: \u539F\u59CB\u4EFB\u52A1\u5173\u952E\u8BCD\nASSISTANT: \u67D0\u8F6E\u7ED3\u8BBA\nLAST_ERROR: boom\n").repeat(120);
   const { text } = compressConversation(
     [
       { type: "message", role: "user", content: [{ type: "input_text", text: `[Compressed conversation history]\n${extract}` }] },
-      item({ type: "message", role: "user", text: "继续修" }),
-      item({ type: "message", role: "assistant", text: "好，继续。" }),
+      item({ type: "message", role: "user", text: "\u7EE7\u7EED\u4FEE" }),
+      item({ type: "message", role: "assistant", text: "\u597D\uFF0C\u7EE7\u7EED\u3002" }),
     ],
     { tailLines: 2 },
   );
-  assert.ok(text.includes("原始任务关键词"), "the task line survives the hop");
+  assert.ok(text.includes("\u539F\u59CB\u4EFB\u52A1\u5173\u952E\u8BCD"), "the task line survives the hop");
   assert.ok(text.includes("LAST_ERROR: boom"), "error lines survive the hop");
   assert.ok(text.length > 2000, "the extract is not truncated to the user cap");
   assert.ok(!text.includes("USER: USER:"), "no role-prefix pileup on the restored unit");
 });
 
 test("repeated compaction converges instead of doubling or forgetting", () => {
-  const marker = "HEAD: task=继续修 | phase=好的继续\n---\n";
+  const marker = "HEAD: task=\u7EE7\u7EED\u4FEE | phase=\u597D\u7684\u7EE7\u7EED\n---\n";
   const add = () => [
-    item({ type: "message", role: "user", text: "继续" }),
-    item({ type: "message", role: "assistant", text: "好的，继续处理。" }),
+    item({ type: "message", role: "user", text: "\u7EE7\u7EED" }),
+    item({ type: "message", role: "assistant", text: "\u597D\u7684\uFF0C\u7EE7\u7EED\u5904\u7406\u3002" }),
     item({ type: "function_call", name: "apply_patch", args: "{}" }),
     item({ type: "function_call_output", output: "ok" }),
   ];
-  let text = ("USER: 任务甲\nASSISTANT: 结论乙\n").repeat(2500); // ~60K, over the base budget
+  let text = ("USER: \u4EFB\u52A1\u7532\nASSISTANT: \u7ED3\u8BBA\u4E59\n").repeat(2500); // ~60K, over the base budget
   const sizes = [text.length];
   for (let hop = 0; hop < 5; hop++) {
     text = compressConversation([{ type: "message", role: "user", content: [{ type: "input_text", text: marker + text }] }, ...add()]).text;
     sizes.push(text.length);
   }
-  assert.ok(text.includes("任务甲"), "the original task survives five hops");
-  assert.ok(text.includes("USER: 任务甲"), "task line is preserved verbatim");
+  assert.ok(text.includes("\u4EFB\u52A1\u7532"), "the original task survives five hops");
+  assert.ok(text.includes("USER: \u4EFB\u52A1\u7532"), "task line is preserved verbatim");
   assert.ok(sizes[2] <= sizes[1] + 2000, `size converges after the first hop, got ${sizes}`);
   assert.ok(sizes[4] <= sizes[2] + 2000, `no unbounded growth across hops, got ${sizes}`);
 });
@@ -229,8 +230,8 @@ test("repeated compaction converges instead of doubling or forgetting", () => {
 test("the handoff header states task, phase, failures, and tool usage", () => {
   const items = [];
   for (let i = 0; i < 30; i++) {
-    items.push(item({ type: "message", role: "user", text: `第 ${i} 轮背景请求` }));
-    items.push(item({ type: "message", role: "assistant", text: `第 ${i} 轮背景结论。` }));
+    items.push(item({ type: "message", role: "user", text: `\u7B2C ${i} \u8F6E\u80CC\u666F\u8BF7\u6C42` }));
+    items.push(item({ type: "message", role: "assistant", text: `\u7B2C ${i} \u8F6E\u80CC\u666F\u7ED3\u8BBA\u3002` }));
   }
   // An old tool call, pushed out of the verbatim tail by newer calls below, so
   // it is aggregated rather than kept verbatim.
@@ -241,12 +242,12 @@ test("the handoff header states task, phase, failures, and tool usage", () => {
     items.push(item({ type: "function_call_output", output: "ok" }));
   }
   // The recent edge: the real ask, its conclusion, and a failing output.
-  items.push(item({ type: "message", role: "user", text: "请修复网关的压缩 bug" }));
-  items.push(item({ type: "message", role: "assistant", text: "根因是 userCap，我改了识别逻辑并加了测试。" }));
+  items.push(item({ type: "message", role: "user", text: "\u8BF7\u4FEE\u590D\u7F51\u5173\u7684\u538B\u7F29 bug" }));
+  items.push(item({ type: "message", role: "assistant", text: "\u6839\u56E0\u662F userCap\uFF0C\u6211\u6539\u4E86\u8BC6\u522B\u903B\u8F91\u5E76\u52A0\u4E86\u6D4B\u8BD5\u3002" }));
   items.push(item({ type: "function_call_output", output: "Exit code: 1\nError: boom" }));
   const { text } = compressConversation(items);
-  assert.ok(text.startsWith("HEAD: task=请修复网关的压缩 bug | phase=根因是 userCap"), `task is the real ask, not the injected block, got ${JSON.stringify(text.slice(0, 80))}`);
+  assert.ok(text.startsWith("HEAD: task=\u8BF7\u4FEE\u590D\u7F51\u5173\u7684\u538B\u7F29 bug | phase=\u6839\u56E0\u662F userCap"), `task is the real ask, not the injected block, got ${JSON.stringify(text.slice(0, 80))}`);
   assert.ok(text.includes("Error: boom"), "the header lists the failure");
-  assert.ok(text.includes("TOOLS: apply_patch×1"), "the header lists tool usage");
+  assert.ok(text.includes("TOOLS: apply_patch\u00D71"), "the header lists tool usage");
   assert.ok(text.includes("\n---\n"), "the header is separated from the body");
 });
