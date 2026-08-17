@@ -235,25 +235,24 @@ function onModeSelection(services) {
       && model.id === bareModelId(modelSelection.mainModel)
   ));
   const main = currentMain || models[0];
-  const visionModels = models.filter((model) => model.supportsVision);
-  const currentVision = visionModels.find((model) => (
-    providerForModel(config, modelSelection.visionModel) === providerId
-      && model.id === bareModelId(modelSelection.visionModel)
-  ));
-  let vision = currentVision || visionModels[0] || null;
-  // Vision is deliberately cross-provider: a main provider with no vision model
-  // (e.g. DeepSeek Official) must not silently lose a vision model owned by
-  // another enabled provider.
-  if (!vision) {
-    vision = visionOptionsAcrossProviders(config, providerId)[0] || null;
-  }
+  // Vision is deliberately cross-provider, so the pick the user is already on
+  // outranks whatever the new main provider happens to catalog: keeping it only
+  // when it shared a provider silently swapped a deliberate choice on every
+  // main-provider switch. A pick no enabled provider can serve falls back to
+  // this provider's own vision model, then to any enabled provider's.
+  const servableVision = visionOptionsAcrossProviders(config, providerId);
+  const visionOwner = providerForModel(config, modelSelection.visionModel);
+  const visionBare = bareModelId(modelSelection.visionModel);
+  const vision = (modelSelection.visionModel
+    && servableVision.find((entry) => entry.provider === visionOwner && bareModelId(entry.id) === visionBare))
+    || servableVision.find((entry) => entry.provider === providerId)
+    || servableVision[0]
+    || null;
   return {
     providerId,
     profile: profileById(providerId),
     mainModel: publishedSlugFor(providerId, main),
-    visionModel: vision ? (vision.provider && vision.provider !== providerId
-      ? publishedSlugFor(vision.provider, vision)
-      : publishedSlugFor(providerId, vision)) : "",
+    visionModel: vision?.id || "",
   };
 }
 
