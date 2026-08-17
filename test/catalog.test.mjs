@@ -30,6 +30,15 @@ test("catalogFor keeps a text-only main model text-only", () => {
   assert.equal(main.reasoning_summary_format, "experimental");
 });
 
+test("catalogFor writes per-model base instructions for vision capability", () => {
+  const catalog = catalogFor(configStub());
+  const text = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
+  const vision = catalog.models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
+  assert.ok(text && vision, "both a text-only and a vision-capable entry are published");
+  assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
+  assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
+});
+
 test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
   assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
@@ -62,9 +71,11 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   }
 });
 
-test("baseInstructionsFor omits the TEXT-ONLY vision guidance for a vision-capable main model", () => {
-  const instructions = baseInstructionsFor({ ...configStub(), mainModel: "gpt-5.6-luna" });
-  assert.doesNotMatch(instructions, /TEXT-ONLY model and CANNOT see images/);
+test("baseInstructionsFor takes the vision capability explicitly, not from mainModel", () => {
+  const text = baseInstructionsFor(configStub());
+  const vision = baseInstructionsFor(configStub(), { supportsVision: true });
+  assert.match(text, /TEXT-ONLY model and CANNOT see images/);
+  assert.doesNotMatch(vision, /TEXT-ONLY model and CANNOT see images/);
 });
 
 test("baseInstructionsFor includes the design-first workflow when images can be generated", () => {
