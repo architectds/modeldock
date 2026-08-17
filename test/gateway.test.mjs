@@ -6,6 +6,7 @@ import path from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import {
   RouteAffinity,
+  adaptImageUrlShape,
   applyToolPolicy,
   compactFailureReport,
   createUsageTee,
@@ -2995,4 +2996,67 @@ test("relayResponses leaves the string image_url alone for models that want it",
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// adaptImageUrlShape is not about which models can see images - that is
+// supportsVision. Both MiMo and Luna are vision models; they disagree on the
+// wire format of the same Responses field, and only the declared side gets
+// rewritten. These cover the branches the relay tests cannot reach: the relay
+// only ever hands it well-formed Codex input with one string image.
+const SHAPE_IMAGE = "data:image/png;base64,AAAA";
+
+function imageInput(image_url) {
+  return [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "what is this" }, { type: "input_image", image_url, detail: "high" }],
+  }];
+}
+
+test("adaptImageUrlShape wraps a string image_url and keeps the other part fields", () => {
+  const [item] = adaptImageUrlShape(imageInput(SHAPE_IMAGE), "object");
+  const image = item.content.find((part) => part.type === "input_image");
+  assert.deepEqual(image.image_url, { url: SHAPE_IMAGE });
+  assert.equal(image.detail, "high", "sibling fields on the part survive the rewrite");
+  assert.equal(item.content[0].text, "what is this", "non-image parts are untouched");
+});
+
+test("adaptImageUrlShape is identity for every model that did not declare the shape", () => {
+  // The overwhelming majority of models want the string form, so an undeclared
+  // shape must not even copy the input: same reference in, same reference out.
+  const input = imageInput(SHAPE_IMAGE);
+  for (const shape of [undefined, "", "string"]) {
+    assert.equal(adaptImageUrlShape(input, shape), input, `shape ${JSON.stringify(shape)} must pass the input straight through`);
+  }
+});
+
+test("adaptImageUrlShape passes through anything that is not a content array", () => {
+  // normalizeInputForRoute can hand back a non-array for the local/native paths,
+  // and Codex sends items with no content of their own (reasoning, tool calls).
+  for (const input of [undefined, null, "", { input: [] }]) {
+    assert.equal(adaptImageUrlShape(input, "object"), input, "a non-array input is returned as-is");
+  }
+  const items = [null, { type: "reasoning" }, { type: "message", content: "plain text" }];
+  assert.deepEqual(adaptImageUrlShape(items, "object"), items, "items without a content array are left alone");
+});
+
+test("adaptImageUrlShape never double-wraps an image_url that is already an object", () => {
+  const already = { url: SHAPE_IMAGE };
+  const input = imageInput(already);
+  const [item] = adaptImageUrlShape(input, "object");
+  const image = item.content.find((part) => part.type === "input_image");
+  assert.deepEqual(image.image_url, already, "an object image_url is not wrapped again");
+  assert.equal(item, input[0], "an item with nothing to change keeps its identity");
+});
+
+test("adaptImageUrlShape leaves an image-free item as the same object", () => {
+  // rewriteHistoricalImages runs first and turns older images into image_ref
+  // text, so most items reaching this function have no image left to convert.
+  const input = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "image_ref: img_1" }],
+  }];
+  const output = adaptImageUrlShape(input, "object");
+  assert.equal(output[0], input[0], "an untouched item is not needlessly copied");
 });
