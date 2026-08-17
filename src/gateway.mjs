@@ -1140,6 +1140,29 @@ export function currentTurnStartForTesting(input) {
 // real input_image parts for the vision escalation path, which must see the
 // bytes. Without a media store the rewrite is a no-op, so a partial services stub
 // stays safe.
+// Codex always sends `image_url` as a string. MiMo's Responses endpoint rejects
+// that form and requires an object - measured against opencode.ai/zen/go/v1 with
+// mimo-v2.5 and a 1x1 PNG data URL: the string form returns 400 "Param
+// Incorrect", the object form returns 200. gpt-5.6-luna is the exact opposite,
+// so this is opt-in per model via imageUrlShape rather than a blanket rewrite.
+//
+// This must run AFTER rewriteHistoricalImages, which decides what to replace by
+// testing `typeof image_url === "string"`; converting first would make every
+// image invisible to it.
+export function adaptImageUrlShape(input, shape) {
+  if (shape !== "object" || !Array.isArray(input)) return input;
+  return input.map((item) => {
+    if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
+    let changed = false;
+    const content = item.content.map((part) => {
+      if (part?.type !== "input_image" || typeof part.image_url !== "string") return part;
+      changed = true;
+      return { ...part, image_url: { url: part.image_url } };
+    });
+    return changed ? { ...item, content } : item;
+  });
+}
+
 export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImages = false } = {}) {
   if (!Array.isArray(input)) return input;
   const turnStart = currentTurnStart(input);
@@ -2404,10 +2427,13 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     tools: [],
     tool_choice: "none",
     input: [
-      ...rewriteHistoricalImages(
-        normalizedInput,
-        mediaStore,
-        { preserveCurrentImages: route.directVision },
+      ...adaptImageUrlShape(
+        rewriteHistoricalImages(
+          normalizedInput,
+          mediaStore,
+          { preserveCurrentImages: route.directVision },
+        ),
+        modelEntryFor(config, route.model)?.imageUrlShape,
       ),
       messageItem(COMPACT_PROMPT),
     ],
@@ -2686,10 +2712,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
   let normalizedPayload = {
     ...(localPayload || payload),
-    input: rewriteHistoricalImages(
-      normalizedInput,
-      mediaStore,
-      { preserveCurrentImages: route.directVision },
+    input: adaptImageUrlShape(
+      rewriteHistoricalImages(
+        normalizedInput,
+        mediaStore,
+        { preserveCurrentImages: route.directVision },
+      ),
+      modelEntryFor(config, route.model)?.imageUrlShape,
     ),
     model: route.model,
   };

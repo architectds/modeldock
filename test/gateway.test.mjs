@@ -2908,3 +2908,91 @@ test("compactFailureReport names unpaired tool items and any server-side state k
   assert.ok(!serialized.includes("secret output"), "tool output text must never be recorded");
   assert.ok(!serialized.includes("secret prompt"), "prompt text must never be recorded");
 });
+
+test("relayResponses sends MiMo an object-shaped image_url", async () => {
+  // MiMo's Responses endpoint rejects the string form Codex sends. Measured
+  // against opencode.ai/zen/go/v1 with mimo-v2.5 and a 1x1 PNG data URL:
+  //   image_url: "data:image/png;base64,..."          -> 400 Param Incorrect
+  //   image_url: { url: "data:image/png;base64,..." } -> 200
+  // MiMo is selectable as the vision model (supportsVision: true), so without
+  // this every image sent to it fails.
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("ok");
+  };
+  try {
+    const dataUrl = "data:image/png;base64,AAAA";
+    await relayResponses(
+      {
+        model: "mimo-v2.5@opencode-go",
+        stream: false,
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "what is this" }, { type: "input_image", image_url: dataUrl }],
+        }],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "mimo-v2.5@opencode-go",
+        visionModel: "mimo-v2.5@opencode-go",
+        config: { ...configStub(), mainModel: "mimo-v2.5@opencode-go", visionModel: "mimo-v2.5@opencode-go" },
+        knownModels: new Set(["mimo-v2.5@opencode-go", "deepseek-v4-flash@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    const parts = calls[0].input.flatMap((item) => item.content || []);
+    const image = parts.find((part) => part.type === "input_image");
+    assert.ok(image, "the image reaches the upstream");
+    assert.deepEqual(image.image_url, { url: dataUrl }, "MiMo needs the object form");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses leaves the string image_url alone for models that want it", async () => {
+  // gpt-5.6-luna is the exact opposite: it takes the string and 400s on the
+  // object. The adaptation must be opt-in per model, not a blanket rewrite.
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("ok");
+  };
+  try {
+    const dataUrl = "data:image/png;base64,AAAA";
+    await relayResponses(
+      {
+        model: "gpt-5.6-luna@opencode-go",
+        stream: false,
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "what is this" }, { type: "input_image", image_url: dataUrl }],
+        }],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "gpt-5.6-luna@opencode-go",
+        visionModel: "gpt-5.6-luna@opencode-go",
+        config: { ...configStub(), mainModel: "gpt-5.6-luna@opencode-go" },
+        knownModels: new Set(["gpt-5.6-luna@opencode-go", "deepseek-v4-flash@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    const parts = calls[0].input.flatMap((item) => item.content || []);
+    const image = parts.find((part) => part.type === "input_image");
+    assert.ok(image, "the image reaches the upstream");
+    assert.equal(image.image_url, dataUrl, "the string form is untouched");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
