@@ -175,7 +175,8 @@ test("connecting a custom endpoint publishes a model without becoming the defaul
   // local 27B the default across every later restart - for sessions that never
   // asked for it. A local model then trips the small-context tool whitelist,
   // which strips Codex from ~150 tools to 23. Connecting publishes a model; it
-  // does not select one. MODELDOCK_MAIN_MODEL stays the way to set a default.
+  // does not select one. The routing fallback is derived per session and
+  // bootstrapped from the native default, not from a persisted env slot.
   const envFile = path.join(mkdtempSync(path.join(os.tmpdir(), "modeldock-env-")), ".env");
   writeFileSync(envFile, "", "utf8");
   t.after(() => rmSync(path.dirname(envFile), { recursive: true, force: true }));

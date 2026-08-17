@@ -5,9 +5,9 @@
 // and a byte cap so a long transcription cannot blow the process heap.
 import { createHash } from "node:crypto";
 
-export const VISION_CACHE_TTL_MS = 60 * 60 * 1_000;
-export const VISION_CACHE_MAX_ENTRIES = 128;
-export const VISION_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const VISION_CACHE_TTL_MS = 60 * 60 * 1_000;
+const VISION_CACHE_MAX_ENTRIES = 128;
+const VISION_CACHE_MAX_BYTES = 8 * 1024 * 1024;
 
 export function visionCacheKey(parts) {
   return createHash("sha256").update(JSON.stringify(parts)).digest("base64url");

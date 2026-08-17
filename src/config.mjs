@@ -1,7 +1,7 @@
 import process from "node:process";
 import os from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
@@ -46,20 +46,20 @@ export function parseEnvFile(source) {
 // additional KEY=VALUE lines that take effect on the next load (e.g. a crafted
 // custom-model id turning MODELDOCK_REQUIRE_CALLER_KEY off). No legitimate value
 // here (token, url, model id) contains a CR/LF, so strip them at every write.
-export function sanitizeEnvValue(value) {
+function sanitizeEnvValue(value) {
   return String(value).replace(/[\r\n]+/g, " ").trim();
 }
 
 // One spelling of "on" and one of "off" for every boolean env var. These were
 // written out per flag and drifted: MODELDOCK_CUSTOM_MAIN accepted "true" while
-// MODELDOCK_TRIAL only accepted "1", and MODELDOCK_MEMORY honoured "no" while
+// MODELDOCK_MEMORY honoured "no" while
 // MODELDOCK_MD_MEMORY did not - so the same word switched one feature and was
 // silently ignored by the next.
 const TRUE_WORDS = new Set(["1", "true", "on", "yes"]);
 const FALSE_WORDS = new Set(["0", "false", "off", "no"]);
 
 // Opt-in flag: off unless the value says otherwise.
-export function envOn(name) {
+function envOn(name) {
   return TRUE_WORDS.has(String(process.env[name] || "").trim().toLowerCase());
 }
 
@@ -144,7 +144,14 @@ export function writeEnvFile(updates, file = envFileFor()) {
       }
     }
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, content, "utf8");
+    const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+    writeFileSync(tmp, content, "utf8");
+    try {
+      renameSync(tmp, file);
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch { /* keep the original error */ }
+      throw error;
+    }
     if (hasSecretUpdate) pruneEnvBackups(file);
     for (const [key, value] of Object.entries(updates)) {
       if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
@@ -207,6 +214,14 @@ export function migrateEnvSecrets(file = envFileFor()) {
       copyFileSync(backup, file);
       return { file, migrated: 0, reason: "verify-failed", backup };
     }
+  }
+  // The backup exists only as the rollback for the round-trip check above. Once
+  // the encrypted file verifies, it is a cleartext copy of every secret we just
+  // encrypted, so keeping it is worse than the migration it protected against.
+  try {
+    rmSync(backup, { force: true });
+  } catch {
+    // Best effort: a leftover backup is handled by pruneEnvBackups-like cleanup.
   }
   return { file, migrated: plainSecrets.length, backup };
 }
@@ -357,16 +372,17 @@ export function loadConfig() {
   // local 27B as the default across every later restart, silently, including for
   // sessions that never wanted it. Worse, a local model then triggers the
   // small-context tool whitelist, which strips Codex down to 23 of its ~150
-  // tools. MODELDOCK_MAIN_MODEL remains the one way to set a default, and the
-  // Codex picker remains the way to choose per session.
-  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
+  // tools. The Codex picker remains the way to choose per session; the routing
+  // fallback is derived per session and bootstrapped from the native default.
+  // The routing fallback is derived per session and bootstrapped from the
+  // native config default (see gateway.mjs). This value is only a
+  // display/catalog default; MODELDOCK_MAIN_MODEL is no longer a slot.
+  const mainModel = modelRef("deepseek-v4-flash");
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a
-  // bare response.completed). Trial is the fixed free pair and OFF has no native
-  // GPT to fall back on, so both keep the free vision model unless explicitly
-  // overridden via MODELDOCK_VISION_MODEL.
-  const trialMode = envOn("MODELDOCK_TRIAL");
+  // bare response.completed). OFF has no native GPT to fall back on, so it keeps
+  // the free vision model unless explicitly overridden via MODELDOCK_VISION_MODEL.
   // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
   // subscription so the picker never advertises models that 401 on request.
   // Defaults to the signed-in state when the env key is unset: a detected
@@ -377,7 +393,7 @@ export function loadConfig() {
     if (raw) return !["0", "false", "off"].includes(raw);
     return hasChatGptLogin(codexHome);
   })();
-  const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
+  const defaultVisionModel = !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
   const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
   // "none" is the durable representation for a provider with no vision model.
   // An empty env value cannot represent this because it intentionally falls back
@@ -410,8 +426,8 @@ export function loadConfig() {
     opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
-    // Zen free tier (trial): the fixed free models route here instead of zen/go.
-    // Overridable so sandbox/CI can point trial at a mock upstream.
+    // Zen free tier: the free models route here instead of zen/go. Overridable
+    // so sandbox/CI can point free traffic at a mock upstream.
     zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
     goTokenSource: opencodeGoSource,
     tokens,
@@ -426,10 +442,6 @@ export function loadConfig() {
     mainModel,
     visionModel,
     visionFallbackModel,
-    // Trial mode: the fixed zen-free model pair (deepseek-v4-flash-free /
-    // mimo-v2.5-free) on the opencode-go profile with a free-only catalog and
-    // trial-specific upstream error copy. Managed by /api/config/mode.
-    trialMode,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).

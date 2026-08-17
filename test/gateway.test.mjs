@@ -1237,7 +1237,7 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
   assert.equal(free.provider, "opencode-go");
   assert.equal(free.url, "https://opencode.ai/zen/v1/responses");
   assert.equal(free.token, "go-token");
-  assert.equal(free.free, true, "free models are flagged so failures carry trial guidance");
+  assert.equal(free.free, true, "free models are flagged so failures carry free-tier guidance");
 
   const mimo = upstreamTargetFor(config, "mimo-v2.5-free");
   assert.equal(mimo.url, "https://opencode.ai/zen/v1/responses");

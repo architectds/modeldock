@@ -21,10 +21,6 @@
 #   MODELDOCK_ROOT          install directory             (default: ~/.modeldock)
 #   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
 #   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
-#   MODELDOCK_SKILL_BASE_URL  base URL for the content-to-video skill files
-#                             (default: raw.githubusercontent.com/<repo>/main/skills/content-to-video)
-#   MODELDOCK_CODEX_HOME    Codex home dir (default: ~/.codex; skills land in
-#                             <codexHome>/skills/content-to-video)
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
 #   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
 #   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
@@ -967,7 +963,12 @@ restart_gateway() {
 }
 
 restore_native() {
-  if curl -fsS --max-time 3 -X POST "http://127.0.0.1:$PORT/api/config/disable" >/dev/null 2>&1; then
+  KEY_FILE="${MODELDOCK_STATE_DIR:-$ROOT}/caller-key"
+  KEY=""
+  if [ -f "$KEY_FILE" ]; then
+    KEY="$(tr -d '\r\n' < "$KEY_FILE")"
+  fi
+  if [ -n "$KEY" ] && curl -fsS --max-time 3 -X POST -H "x-modeldock-key: $KEY" "http://127.0.0.1:$PORT/api/config/disable" >/dev/null 2>&1; then
     echo "Codex native route restored through the running gateway."
     return
   fi
@@ -1348,44 +1349,6 @@ function exampleFor(toolName) {
   return examples[toolName] || `${toolName} <args>`;
 }
 EOF
-
-# 2.5. Install the content-to-video skill into the Codex skills directory.
-# The skill is small (18 text files, ~0.1 MB) and ships as source in the repo,
-# so the installer mirrors the same files from GitHub raw instead of bundling
-# an archive. The skill is additive: a download failure warns and continues,
-# it never fails the install.
-CODEX_HOME_VALUE="${MODELDOCK_CODEX_HOME:-${CODEX_HOME:-$HOME/.codex}}"
-SKILL_BASE="${MODELDOCK_SKILL_BASE_URL:-https://raw.githubusercontent.com/$REPO/main/skills/content-to-video}"
-SKILL_DEST="$CODEX_HOME_VALUE/skills/content-to-video"
-mkdir -p "$SKILL_DEST"
-SKILL_FILES="
-SKILL.md
-agents/openai.yaml
-references/beat-sync.md
-references/classification.md
-references/hyperframes.md
-references/methodology.md
-references/pipeline.md
-references/pipelines.md
-references/quality.md
-references/sound-design.md
-references/sprites.md
-references/tech-stack.md
-scripts/build_film.py
-scripts/classify.mjs
-scripts/preview-scenes.mjs
-scripts/qa-frames.mjs
-scripts/render-clip.mjs
-scripts/static-server-range.mjs
-"
-for rel in $SKILL_FILES; do
-  mkdir -p "$SKILL_DEST/$(dirname "$rel")"
-  if ! curl -fsSL --max-time 20 "$SKILL_BASE/$rel" -o "$SKILL_DEST/$rel"; then
-    rm -f "$SKILL_DEST/$rel"
-    echo "  WARNING: could not download skill file $rel" >&2
-  fi
-done
-echo "  content-to-video skill installed to $SKILL_DEST"
 
 # 3. Enable login autostart on every install (macOS). The gateway also has a
 #    first-run default-on safeguard, but doing it here makes the install result

@@ -19,12 +19,13 @@ import { memoryStoreFor } from "./memory.mjs";
 import { CodexConfigSwitcher, SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
+import { createDerivedFallback } from "./derived-fallback.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -205,6 +206,16 @@ function anyProviderTokenConfigured(config) {
   return profileOptions().some((provider) => providerTokenConfigured(config, provider.id));
 }
 
+// Vision is cross-provider, but only across providers that can actually serve
+// requests once the new main provider is active. The old active profile can
+// remain enabled until the switch lands, so filter out providers that would
+// lose their "active" pass without a configured token.
+function visionOptionsAcrossProviders(config, providerId) {
+  return modelOptions(config, providerId).filter((model) =>
+    model.supportsVision && (model.provider === providerId || providerTokenConfigured(config, model.provider))
+  );
+}
+
 // Pick one complete route for ON mode. The current provider wins when it is
 // usable; otherwise the first configured provider becomes active. Main and
 // vision are selected from that same provider so a DeepSeek-only install does
@@ -224,32 +235,29 @@ function onModeSelection(services) {
       && model.id === bareModelId(modelSelection.mainModel)
   ));
   const main = currentMain || models[0];
-  // "One complete route" means every leg has a usable token, not that main and
-  // vision share a provider. Keep the current vision model when some enabled
-  // provider can still serve it, and fall back to this provider's own only when
-  // none can.
-  const servableVision = modelOptions(config, providerId)
-    .find((entry) => entry.id === modelSelection.visionModel && entry.supportsVision);
-  const fallbackVision = models.find((model) => model.supportsVision) || null;
+  // Vision is deliberately cross-provider, so the pick the user is already on
+  // outranks whatever the new main provider happens to catalog: keeping it only
+  // when it shared a provider silently swapped a deliberate choice on every
+  // main-provider switch. A pick no enabled provider can serve falls back to
+  // this provider's own vision model, then to any enabled provider's.
+  const servableVision = visionOptionsAcrossProviders(config, providerId);
+  const visionOwner = providerForModel(config, modelSelection.visionModel);
+  const visionBare = bareModelId(modelSelection.visionModel);
+  const vision = (modelSelection.visionModel
+    && servableVision.find((entry) => entry.provider === visionOwner && bareModelId(entry.id) === visionBare))
+    || servableVision.find((entry) => entry.provider === providerId)
+    || servableVision[0]
+    || null;
   return {
     providerId,
     profile: profileById(providerId),
     mainModel: publishedSlugFor(providerId, main),
-    visionModel: servableVision?.id
-      || (fallbackVision ? publishedSlugFor(providerId, fallbackVision) : ""),
+    visionModel: vision?.id || "",
   };
 }
 
-// Trial mode narrows the dashboard options to the fixed free pair so the pickers
-// and route card cannot advertise paid models while the free experience runs.
-function visibleModelOptions(config, options) {
-  if (!config.trialMode) return options;
-  const trial = new Set([TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL]);
-  return options.filter((entry) => trial.has(bareModelId(entry.id)));
-}
-
 function modelsPayload(services) {
-  const options = visibleModelOptions(services.config, modelOptions(services.config, services.config.profileId));
+  const options = modelOptions(services.config, services.config.profileId);
   const selected = services.modelSelection;
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
@@ -400,8 +408,6 @@ function statusPayload(services) {
     ready: mainTokenReady,
     config: {
       ...publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
-      // Trial mode marker for the dashboard's OFF/TRIAL/ON mode picker.
-      trial: Boolean(config.trialMode),
       // Selection-aware routing facts for the route card and forwarding map: which
       // provider owns the selected main model, which base URL and wire style it hits.
       mainProvider,
@@ -499,7 +505,7 @@ async function probeSettingsToken(config, provider, token) {
   return probeCustomResponses({ baseUrl, apiKey: token, modelId: model });
 }
 
-function configMutationGuard(config) {
+function configMutationGuard(config, callerKey) {
   const allowedOrigins = new Set([
     `http://${urlHost(config.host)}:${config.port}`,
     `http://127.0.0.1:${config.port}`,
@@ -509,6 +515,16 @@ function configMutationGuard(config) {
     const origin = req.get("origin");
     if (origin && !allowedOrigins.has(origin)) {
       return res.status(403).json({ error: { type: "origin_not_allowed", message: "Config changes are allowed only from this local dashboard." } });
+    }
+    // Browsers always send Origin, so a local web page is covered above. A
+    // non-browser local caller (curl, scripts) sends no Origin; require the
+    // caller capability key when enforcement is on so the dashboard's same-origin
+    // path stays open while nothing unauthenticated can drive config writes.
+    if (!origin && isCallerKeyEnforced()) {
+      const supplied = req.get("x-modeldock-key") || "";
+      if (!callerKeyEqual(supplied, callerKey)) {
+        return res.status(401).json({ error: { type: "caller_key_required", message: "This config endpoint requires the caller key; pass x-modeldock-key." } });
+      }
     }
     if (!req.is("application/json")) {
       return res.status(415).json({ error: { type: "content_type_required", message: "Config changes require application/json." } });
@@ -895,6 +911,7 @@ export function createServices(config = loadConfig()) {
     stateDir: mutableConfig.mediaDir,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
+  const derivedFallback = createDerivedFallback();
   const services = {};
   const memoryStore = memoryStoreFor(mutableConfig);
   const upstreams = createUpstreams({
@@ -1037,7 +1054,7 @@ export function createServices(config = loadConfig()) {
     : path.join(os.homedir(), ".codex");
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
-    autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
+    autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
@@ -1249,10 +1266,9 @@ export function createApp(services = createServices()) {
   }));
   app.get("/api/config", jsonRoute("config_status_error", async () => ({
     ...(await configSwitcher.status()),
-    trial: Boolean(config.trialMode),
   })));
 
-  const mutateConfig = configMutationGuard(config);
+  const mutateConfig = configMutationGuard(config, services.callerKey);
   let configMutationQueue = Promise.resolve();
   const configAction = (operation) => async (req, res) => {
     try {
@@ -1270,55 +1286,48 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
-  // Three-way mode switch (OFF / TRIAL / ON). OFF and ON reuse the existing switch
-  // operations; TRIAL additionally locks the modelSelection to the zen-free pair and
-  // rewrites the .env so a restart keeps the trial configuration. The catalog file is
-  // refreshed immediately so the Codex App picker narrows to the free pair too.
+  // Two-way mode switch (OFF / ON). ON enables the managed Codex config with a
+  // configured provider; free zen models are ordinary selectable entries and
+  // still require the provider to be reachable, so there is no separate trial
+  // mode. The catalog file is refreshed immediately so the App picker follows.
   app.post("/api/config/mode", mutateConfig, async (req, res) => {
     const mode = String(req.body?.mode || "");
-    if (mode !== "off" && mode !== "trial" && mode !== "on") {
-      return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off', 'trial' or 'on'." } });
+    if (mode !== "off" && mode !== "on") {
+      return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off' or 'on'." } });
     }
     try {
       const run = configMutationQueue.then(async () => {
         let result;
         // Wizard-managed native-GPT merge opt-out (no ChatGPT subscription). It is a
-        // persistent property of the account, so it is applied on every enabling mode
-        // (trial included): a non-subscriber who later moves trial -> on must not get
-        // the native GPT catalog back. "0"/"false"/"off" are accepted for curl users.
+        // persistent property of the account, so it is applied on every enabling mode.
+        // "0"/"false"/"off" are accepted for curl users.
         const nativeMergeRaw = req.body?.nativeMerge;
         const nativeMerge = nativeMergeRaw === undefined
           ? undefined
           : !["0", "false", "off"].includes(String(nativeMergeRaw).toLowerCase());
         if (mode === "off") {
           result = await configSwitcher.disable();
-          config.trialMode = false;
-          writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
         } else {
-          let onSelection = null;
-          let previousSelection = null;
-          if (mode === "on") {
-            onSelection = onModeSelection(services);
-            if (!onSelection) {
-              const error = new Error("Configure a provider token before enabling ON mode.");
-              error.code = "provider_token_required";
-              throw error;
-            }
-            previousSelection = {
-              profile: config.profile,
-              profileId: config.profileId,
-              mainModel: config.mainModel,
-              visionModel: config.visionModel,
-              selectedMainModel: services.modelSelection.mainModel,
-              selectedVisionModel: services.modelSelection.visionModel,
-            };
-            config.profile = onSelection.profile;
-            config.profileId = onSelection.providerId;
-            config.mainModel = onSelection.mainModel;
-            config.visionModel = onSelection.visionModel;
-            services.modelSelection.mainModel = onSelection.mainModel;
-            services.modelSelection.visionModel = onSelection.visionModel;
+          const onSelection = onModeSelection(services);
+          if (!onSelection) {
+            const error = new Error("Configure a provider token before enabling ON mode.");
+            error.code = "provider_token_required";
+            throw error;
           }
+          const previousSelection = {
+            profile: config.profile,
+            profileId: config.profileId,
+            mainModel: config.mainModel,
+            visionModel: config.visionModel,
+            selectedMainModel: services.modelSelection.mainModel,
+            selectedVisionModel: services.modelSelection.visionModel,
+          };
+          config.profile = onSelection.profile;
+          config.profileId = onSelection.providerId;
+          config.mainModel = onSelection.mainModel;
+          config.visionModel = onSelection.visionModel;
+          services.modelSelection.mainModel = onSelection.mainModel;
+          services.modelSelection.visionModel = onSelection.visionModel;
           try {
             result = await configSwitcher.enable();
           } catch (error) {
@@ -1332,40 +1341,17 @@ export function createApp(services = createServices()) {
             }
             throw error;
           }
-          if (mode === "trial") {
-            config.trialMode = true;
-            // The catalog is fully owner-qualified, so the selected pair is
-            // stored and persisted in its published form too - a bare trial id
-            // would make the dashboard selected value disagree with the picker
-            // until the next restart.
-            const trialMain = publishedSlugFor(config.profileId, TRIAL_MAIN_MODEL);
-            const trialVision = publishedSlugFor(config.profileId, TRIAL_VISION_MODEL);
-            services.modelSelection.mainModel = trialMain;
-            services.modelSelection.visionModel = trialVision;
-            const trialEnv = {
-              MODELDOCK_TRIAL: "1",
-              MODELDOCK_MAIN_MODEL: trialMain,
-              MODELDOCK_VISION_MODEL: trialVision,
-            };
-            if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
-            writeEnvFile(trialEnv, config.envFile);
-            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
-          } else {
-            config.trialMode = false;
-            const onEnv = {
-              MODELDOCK_TRIAL: "0",
-              MODELDOCK_PROFILE: onSelection.providerId,
-              MODELDOCK_MAIN_MODEL: onSelection.mainModel,
-              MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
-            };
-            if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
-            writeEnvFile(onEnv, config.envFile);
-            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
-          }
+          const onEnv = {
+            MODELDOCK_PROFILE: onSelection.providerId,
+            MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
+          };
+          if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
+          writeEnvFile(onEnv, config.envFile);
+          if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           services.writeCatalogFile();
         }
         recordConfigAction(metrics, `config_mode_${mode}`, { ok: true });
-        return { ...result, trial: Boolean(config.trialMode) };
+        return result;
       });
       configMutationQueue = run.catch(() => {});
       return res.json(await run);
@@ -1385,13 +1371,12 @@ export function createApp(services = createServices()) {
       onboarded: Boolean(status.onboarded),
       onboardedAt: status.onboardedAt || null,
       nativeMerge: config.nativeMerge !== false,
-      mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
+      mode: status.enabled ? "on" : "off",
       tokenConfigured: {
         "opencode-go": Boolean(config.tokens?.["opencode-go"]),
         "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
       },
-      // Any provider token unlocks the ON mode (the wizard's Apply gate); the
-      // trial pair still requires the OpenCode token specifically.
+      // Any provider token unlocks the ON mode (the wizard's Apply gate).
       anyTokenConfigured: anyProviderTokenConfigured(config),
       autostart: settingsPayload(services).autostart,
     };
@@ -1417,27 +1402,13 @@ export function createApp(services = createServices()) {
     let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
     let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
     const nextProvider = req.body?.provider;
-    // Trial mode pins the free pair and the opencode-go provider; only the mode
-    // switch can move models while it is active.
-    if (config.trialMode) {
-      nextMain = qualify(TRIAL_MAIN_MODEL);
-      nextVision = qualify(TRIAL_VISION_MODEL);
-    }
-    if (!config.trialMode && nextProvider !== undefined && nextProvider !== config.profileId) {
+    if (nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
       if (!known) return res.status(400).json({ error: { type: "invalid_provider", message: `Unknown provider: ${nextProvider}` } });
       config.profile = profileById(nextProvider);
       config.profileId = nextProvider;
       const profileModels = modelCatalogModels(config, config.profileId);
       if (!profileModels.some((entry) => entry.id === nextMain)) nextMain = profileModels[0]?.id || nextMain;
-      // Vision is deliberately cross-provider - visionProviders lists every
-      // enabled provider that owns a vision model - so a main-provider switch
-      // keeps the current pick whenever some enabled provider still serves it.
-      // Only a model no enabled provider can serve falls back to the new
-      // profile's own vision model.
-      if (!modelOptions(config, config.profileId).some((entry) => entry.id === nextVision && entry.supportsVision)) {
-        nextVision = profileModels.find((entry) => entry.supportsVision)?.id || "";
-      }
     }
     const options = modelOptions(config, config.profileId);
     const main = options.find((entry) => entry.id === nextMain);
@@ -1445,7 +1416,6 @@ export function createApp(services = createServices()) {
     if (!main || (nextVision && (!vision || !vision.supportsVision))) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be None or selected from a vision-capable model." } });
     services.modelSelection.mainModel = nextMain;
     services.modelSelection.visionModel = nextVision;
-    config.mainModel = nextMain;
     config.visionModel = nextVision;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
@@ -1616,11 +1586,10 @@ export function createApp(services = createServices()) {
       // not hijack the live selection. MODELDOCK_CUSTOM_MAIN/VISION above already
       // record that: CUSTOM_VISION drives supportsVision (so the model shows up in
       // the vision picker) and CUSTOM_MAIN is the boot fallback when no main model
-      // is configured. Overwriting MODELDOCK_MAIN_MODEL/VISION_MODEL here made
-      // merely adding an endpoint replace whatever the user was already running.
+      // is configured. Overwriting MODELDOCK_VISION_MODEL here made merely
+      // adding an endpoint replace whatever the user was already running.
       // Only the un-toggle case still writes: a selection pointing at this model
       // must not dangle once the endpoint is no longer offered for that role.
-      if (!asMain && (config.mainModel || "") === qualified) updates.MODELDOCK_MAIN_MODEL = "";
       if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
       writeEnvFile(updates, config.envFile);
       config.customBaseUrl = updates.MODELDOCK_CUSTOM_BASE_URL;
@@ -1703,7 +1672,6 @@ export function createApp(services = createServices()) {
       // they pointed at an Ollama model.
       const updates = {};
       if (providerForModel(config, config.mainModel) === "ollama") {
-        updates.MODELDOCK_MAIN_MODEL = "";
         config.mainModel = "deepseek-v4-flash@opencode-go";
         services.modelSelection.mainModel = config.mainModel;
       }

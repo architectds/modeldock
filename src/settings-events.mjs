@@ -6,13 +6,13 @@ import process from "node:process";
 // Durable, append-only audit events for dashboard settings changes. Values and
 // request bodies must never be written here: this file is for change diagnosis,
 // not secret storage.
-export const SETTINGS_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "settings-events.jsonl");
+const SETTINGS_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "settings-events.jsonl");
 
 const ROTATE_BYTES = 5 * 1024 * 1024;
 
 // Tests and packaging can redirect the audit file without touching the real
 // ~/.modeldock state.
-export function settingsEventsPath() {
+function settingsEventsPath() {
   return process.env.MODELDOCK_SETTINGS_EVENTS_FILE || SETTINGS_EVENTS_PATH;
 }
 

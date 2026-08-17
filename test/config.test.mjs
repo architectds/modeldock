@@ -111,13 +111,12 @@ test("nativeMerge defaults to the ChatGPT sign-in state when MODELDOCK_NATIVE_ME
 
 test("MODELDOCK_VISION_MODEL=none persists a provider with no vision route", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-no-vision-"));
-  const keys = ["MODELDOCK_CODEX_HOME", "MODELDOCK_ENV_FILE", "MODELDOCK_PROFILE", "MODELDOCK_MAIN_MODEL", "MODELDOCK_VISION_MODEL"];
+  const keys = ["MODELDOCK_CODEX_HOME", "MODELDOCK_ENV_FILE", "MODELDOCK_PROFILE", "MODELDOCK_VISION_MODEL"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   try {
     process.env.MODELDOCK_CODEX_HOME = home;
     process.env.MODELDOCK_ENV_FILE = path.join(home, "isolated.env");
     process.env.MODELDOCK_PROFILE = "deepseek-official";
-    process.env.MODELDOCK_MAIN_MODEL = "deepseek-v4-flash@deepseek-official";
     process.env.MODELDOCK_VISION_MODEL = "none";
     const config = loadConfig();
     assert.equal(config.profileId, "deepseek-official");

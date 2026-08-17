@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { stateFile } from "./state-dir.mjs";
 
@@ -81,7 +81,14 @@ export function loadOrCreateCallerKey(filePath = keyFilePath()) {
   const key = randomBytes(32).toString("base64url");
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
-    writeFileSync(filePath, `${key}\n`, "utf8");
+    const tmp = `${filePath}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${key}\n`, "utf8");
+    try {
+      renameSync(tmp, filePath);
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch { /* keep the original error */ }
+      throw error;
+    }
     try {
       protectPrivateFile(filePath);
     } catch {

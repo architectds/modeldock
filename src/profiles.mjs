@@ -13,12 +13,6 @@ const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCEN
 
 export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
-// The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
-// (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
-// new upstream, so these ids are the only thing Trial touches at runtime.
-export const TRIAL_MAIN_MODEL = "deepseek-v4-flash-free";
-export const TRIAL_VISION_MODEL = "mimo-v2.5-free";
-
 const DEEPSEEK_REASONING_LEVELS = [
   { effort: "none", description: "No reasoning; direct responses only" },
   { effort: "minimal", description: "Barely any reasoning; fastest replies" },
@@ -57,7 +51,7 @@ function localContextWindow(actual) {
 // `tool_call_mcp_elicitation` = let the model request MCP tool schemas it does not have,
 // `workspace_dependencies` = codex_app.load_workspace_dependencies,
 // `computer_use` = desktop screen control, `browser_use` = Chrome control.
-export const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
+const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "workspace_dependencies", "computer_use", "browser_use"];
 
 // One catalog entry. Codex's model picker lists whatever the active provider returns
 // from /v1/models, so emitting an entry per available model is what makes them all

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 // The benchmark images ship inside the repo (assets/vision). The old hardcoded
 // developer path (D:/projects/...) broke every other checkout; default to the
 // repo-relative layout, overridable for mirrored deployments.
-export const VISION_ASSETS_DIR = process.env.MODELDOCK_VISION_ASSETS_DIR
+const VISION_ASSETS_DIR = process.env.MODELDOCK_VISION_ASSETS_DIR
   || resolve(dirname(fileURLToPath(import.meta.url)), "..", "assets", "vision");
 
 const VERBATIM = " Answer directly and briefly, no explanation.";
@@ -58,7 +58,7 @@ export const TASKS = [
     image: "t5-arrow.png",
     difficulty: 5,
     question: "Which direction does the red arrow point? Answer with one word (left/right/up/down)." + VERBATIM,
-    check: (answer) => /(^|\W)(right|east|rightarrow|→)(\W|$)/i.test(answer),
+    check: (answer) => /(^|\W)(right|east|rightarrow|\u2192)(\W|$)/i.test(answer),
   },
 ];
 

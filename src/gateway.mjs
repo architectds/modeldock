@@ -316,6 +316,28 @@ export function sessionIdsFrom(headers) {
   return { sessionId, threadId };
 }
 
+// The fallback for requests that carry no model id. Per session we remember the
+// last actual main request so a no-model continuation stays on the model the
+// user picked. Before a session has seen one, the current selected main model
+// applies (e.g. what ON mode selected); only when there is no routed selection
+// does the native config default apply, so a fresh session behaves exactly as
+// Codex would without ModelDock.
+const NATIVE_DEFAULT_MODEL = "gpt-5.6-sol";
+function mainModelFor(services, sessionId) {
+  const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
+  if (sessionModel) return sessionModel;
+  const selected = services.mainModel || services.config?.mainModel || "";
+  // A routed selection is provider-qualified or a known legacy bare id; a bare
+  // native slug (gpt-5.6-sol) is not published in the routed catalog.
+  if (selected && (selected.includes("@") || services.knownModels?.has?.(selected))) return selected;
+  return NATIVE_DEFAULT_MODEL;
+}
+
+function recordDerivedFallback(services, sessionId, route) {
+  if (!route || (route.reason !== "client_selected" && route.reason !== "default_main")) return;
+  services.derivedFallback?.record?.(sessionId, route.model);
+}
+
 // Threads created under codex-router (or our own pre-rewrite config) persist
 // merged-catalog ids of the form "<provider>/<model>". Left alone they would
 // look like native GPT slugs and get shipped to the ChatGPT backend, which
@@ -1243,7 +1265,7 @@ export function upstreamTargetFor(config, model) {
     model: upstreamModel,
     url: `${baseUrl.replace(/\/+$/, "")}/responses`,
     token: config.tokens?.["opencode-go"] || "",
-    // Zen free tier: failure copy should carry trial-mode guidance instead of the
+    // Zen free tier: failure copy should carry free-tier guidance instead of the
     // generic hint (see error-translation.mjs FREE_HINTS).
     free: Boolean(entry?.free),
   };
@@ -1855,7 +1877,7 @@ export function freeResponseFailure(parsed) {
 // free-tier guidance. Non-free traffic and upstream failures are untouched -
 // only a response.completed block starts the hold. The tee still receives every
 // chunk so usage extraction keeps working.
-export async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
+async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResponse) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, empty: false, usage: undefined };
@@ -2351,7 +2373,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
-  const mainModel = services.mainModel || config.mainModel;
+  const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {
     mainModel,
@@ -2360,6 +2382,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  recordDerivedFallback(services, sessionId, route);
   // Custom/ollama backends must see the same adapted shape on the compact path
   // as on the main relay path: Codex's mid-history system/developer items
   // hoisted into a single leading system (or merged into instructions), the
@@ -2635,7 +2658,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (isCompactV2Request(payload)) {
     return relayCompaction(payload, res, services, { signal }, true);
   }
-  const mainModel = services.mainModel || config.mainModel;
+  const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {
     mainModel,
@@ -2644,6 +2667,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  recordDerivedFallback(services, sessionId, route);
+  // A no-model request can fall back to the native default (gpt-5.6-sol) until
+  // the session has seen a routed main request. That model must reach the
+  // ChatGPT backend like any other native slug, not the external upstream.
+  const routedNative = !payload.model
+    && (services.nativeSlugs?.has?.(route.model) || route.model === NATIVE_DEFAULT_MODEL);
+  if (routedNative) {
+    return relayNativeResponses({ ...payload, model: route.model }, res, services, { signal });
+  }
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
   // Pro additionally needs the id, assistant-content, tool-history and stream

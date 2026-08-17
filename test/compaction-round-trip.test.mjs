@@ -24,7 +24,7 @@ const msg = (role, text) => ({ type: "message", role, content: [{ type: "input_t
 // break a naive encoder: CJK, emoji, quotes, backslashes, newlines.
 function history() {
   const items = [
-    msg("user", 'Fix the restart: it dies on paths like "D:\\projects\\model dock\\src" 重启失败 🔁'),
+    msg("user", 'Fix the restart: it dies on paths like "D:\\projects\\model dock\\src" \u91CD\u542F\u5931\u8D25 \uD83D\uDD01'),
   ];
   for (let i = 0; i < 40; i++) {
     items.push(msg("user", `Step ${i}: check module ${i} and report what changed.`));
@@ -78,8 +78,8 @@ test("the task and the non-ASCII in it survive to the resumed turn", () => {
   // looks like the model forgetting what it was doing.
   const restored = replay(compressConversation(history()).text)[0].content[0].text;
   assert.ok(restored.includes("Fix the restart"), "the original ask survives");
-  assert.ok(restored.includes("重启失败"), "CJK survives base64 as UTF-8");
-  assert.ok(restored.includes("🔁"), "an astral-plane emoji survives");
+  assert.ok(restored.includes("\u91CD\u542F\u5931\u8D25"), "CJK survives base64 as UTF-8");
+  assert.ok(restored.includes("\uD83D\uDD01"), "an astral-plane emoji survives");
   assert.ok(restored.includes("D:\\projects\\model dock\\src"), "backslashes and spaces in paths survive");
 });
 
@@ -130,7 +130,7 @@ TAIL-MARKER`;
 });
 
 test("an extract inside the cap is passed through untouched", () => {
-  const summary = "USER: do the thing\nTOOLS_AGGREGATED: apply_patch×3";
+  const summary = "USER: do the thing\nTOOLS_AGGREGATED: apply_patch\u00D73";
   assert.equal(capDirectSummary(summary), summary);
   assert.equal(capDirectSummary(summary, 10_000), summary);
 });

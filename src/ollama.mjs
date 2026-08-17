@@ -33,7 +33,7 @@ export function normalizeOllamaBase(raw) {
 
 // Only https and loopback http are acceptable: Ollama is a local service, and a
 // remote plaintext endpoint would send every prompt over the LAN unencrypted.
-export function validateOllamaBase(raw) {
+function validateOllamaBase(raw) {
   const trimmed = String(raw || "").trim().replace(/\/+$/, "");
   if (!/^https?:\/\//i.test(trimmed)) {
     throw new OllamaError("connect", "Ollama base URL must be an http(s) URL.");
@@ -52,7 +52,7 @@ export function validateOllamaBase(raw) {
   return value;
 }
 
-export function publishedOllamaId(upstreamId) {
+function publishedOllamaId(upstreamId) {
   return String(upstreamId || "").replace(/:/g, "-");
 }
 

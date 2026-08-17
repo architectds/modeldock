@@ -360,6 +360,22 @@ test("caller-key enforcement defaults to on: bare paths 401 without an explicit 
   await keyed.text();
 });
 
+test("mutating /api requires the caller key when enforcement is on", async (t) => {
+  const instance = await startApp({ goToken: null });
+  t.after(instance.stop);
+  process.env.MODELDOCK_REQUIRE_CALLER_KEY = "1";
+  t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
+  const headers = { "content-type": "application/json" };
+  const noKey = await fetch(`${instance.base}/api/models`, { method: "POST", headers, body: "{}" });
+  assert.equal(noKey.status, 401, "a no-Origin mutating /api call is refused without the caller key");
+  const withKey = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { ...headers, "x-modeldock-key": instance.services.callerKey },
+    body: "{}",
+  });
+  assert.equal(withKey.status, 200, "the caller key header passes the mutating guard");
+});
+
 test("zstd-encoded request bodies are decompressed before the relay", { skip: typeof (await import("node:zlib")).zstdCompressSync !== "function" }, async (t) => {
   const zlib = await import("node:zlib");
   let seenModel = null;
@@ -495,7 +511,7 @@ test("gateway: nativeMerge=false hides native models from /v1/models but the rel
   assert.equal(seen[0].model, "deepseek-v4-flash", "the upstream receives the routed model");
 });
 
-test("gateway: trial mode serves only the free pair and relays zen-free models to the zen base", async (t) => {
+test("gateway: a selected zen-free model relays to the zen base", async (t) => {
   const seen = [];
   const upstream = createServer(async (req, res) => {
     seen.push({ url: req.url, model: (await jsonBody(req)).model });
@@ -512,22 +528,23 @@ test("gateway: trial mode serves only the free pair and relays zen-free models t
     goBaseUrl: `http://127.0.0.1:${port}`,
     opencodeBaseUrl: `http://127.0.0.1:${port}`,
     zenBaseUrl: `http://127.0.0.1:${port}/v1`,
-    trialMode: true,
+    mainModel: "deepseek-v4-flash-free",
+    visionModel: "mimo-v2.5-free",
   });
   t.after(instance.stop);
 
   const models = await (await fetch(`${instance.base}/v1/models`)).json();
-  assert.deepEqual(models.models.map((model) => model.slug).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
+  assert.ok(models.models.some((model) => model.slug === "deepseek-v4-flash-free@opencode-go"));
 
   const relay = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       model: "deepseek-v4-flash-free",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "trial" }] }],
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "free" }] }],
     }),
   });
-  assert.equal(relay.status, 200, "a zen-free model relays in trial mode");
+  assert.equal(relay.status, 200, "a zen-free model relays");
   await relay.text();
   assert.equal(seen[0].model, "deepseek-v4-flash-free", "the zen base receives the free model");
   assert.match(seen[0].url, /\/responses$/, "the free model goes over the responses wire");

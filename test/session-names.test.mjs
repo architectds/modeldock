@@ -21,7 +21,7 @@ function fixture() {
     payload: {
       messages: [
         { role: "system", content: [{ type: "text", text: "You are Codex." }] },
-        { role: "user", content: [{ type: "text", text: "熟悉一下这个代码库" }] },
+        { role: "user", content: [{ type: "text", text: "\u719F\u6089\u4E00\u4E0B\u8FD9\u4E2A\u4EE3\u7801\u5E93" }] },
       ],
     },
   });

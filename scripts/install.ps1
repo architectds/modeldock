@@ -21,10 +21,6 @@
 #   MODELDOCK_ROOT          install directory             (default: ~\.modeldock)
 #   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
 #   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
-#   MODELDOCK_SKILL_BASE_URL  base URL for the content-to-video skill files
-#                             (default: raw.githubusercontent.com/<repo>/main/skills/content-to-video)
-#   MODELDOCK_CODEX_HOME     Codex home dir (default: ~\.codex; skills land in
-#                             <codexHome>\skills\content-to-video)
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
 #   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
 #   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
@@ -678,8 +674,14 @@ function Restart-Gateway {
 
 function Restore-Native {
   $uri = "http://127.0.0.1:$port/api/config/disable"
+  $keyFile = if ($env:MODELDOCK_STATE_DIR) { Join-Path $env:MODELDOCK_STATE_DIR "caller-key" } else { Join-Path $root "caller-key" }
+  $headers = @{}
+  if (Test-Path -LiteralPath $keyFile) {
+    $key = (Get-Content -LiteralPath $keyFile -Raw).Trim()
+    if ($key) { $headers["x-modeldock-key"] = $key }
+  }
   try {
-    Invoke-RestMethod -Method Post -Uri $uri -TimeoutSec 3 | Out-Null
+    Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -TimeoutSec 3 | Out-Null
     Write-Output "Codex native route restored through the running gateway."
     return
   } catch {
@@ -739,51 +741,6 @@ try {
   exit 1
 }
 '@ | Out-File -FilePath $recover -Encoding ascii
-
-# 2.5. Install the content-to-video skill into the Codex skills directory.
-# The skill is small (18 text files, ~0.1 MB) and ships as source in the repo,
-# so the installer mirrors the same files from GitHub raw instead of bundling
-# an archive. The skill is additive: a download failure warns and continues,
-# it never fails the install.
-$codexHome = if ($env:MODELDOCK_CODEX_HOME) { $env:MODELDOCK_CODEX_HOME } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
-$skillBase = if ($env:MODELDOCK_SKILL_BASE_URL) { $env:MODELDOCK_SKILL_BASE_URL } else { "https://raw.githubusercontent.com/$repo/main/skills/content-to-video" }
-$skillDest = Join-Path $codexHome "skills\content-to-video"
-$skillFiles = @(
-    "SKILL.md",
-    "agents/openai.yaml",
-    "references/beat-sync.md",
-    "references/classification.md",
-    "references/hyperframes.md",
-    "references/methodology.md",
-    "references/pipeline.md",
-    "references/pipelines.md",
-    "references/quality.md",
-    "references/sound-design.md",
-    "references/sprites.md",
-    "references/tech-stack.md",
-    "scripts/build_film.py",
-    "scripts/classify.mjs",
-    "scripts/preview-scenes.mjs",
-    "scripts/qa-frames.mjs",
-    "scripts/render-clip.mjs",
-    "scripts/static-server-range.mjs"
-)
-try {
-    New-Item -ItemType Directory -Force $skillDest | Out-Null
-    foreach ($rel in $skillFiles) {
-        $dest = Join-Path $skillDest ($rel -replace "/", "\")
-        New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri "$skillBase/$rel" -OutFile $dest -TimeoutSec 20
-        } catch {
-            Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
-            Write-Warning "  could not download skill file $rel : $($_.Exception.Message)"
-        }
-    }
-    Write-Host "  content-to-video skill installed to $skillDest"
-} catch {
-    Write-Warning "  could not install content-to-video skill: $($_.Exception.Message)"
-}
 
 # 3. Enable login autostart on a first install. The gateway also has this
 #    safeguard, but doing it here makes the install result deterministic even

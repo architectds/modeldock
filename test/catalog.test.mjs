@@ -30,6 +30,15 @@ test("catalogFor keeps a text-only main model text-only", () => {
   assert.equal(main.reasoning_summary_format, "experimental");
 });
 
+test("catalogFor writes per-model base instructions for vision capability", () => {
+  const catalog = catalogFor(configStub());
+  const text = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
+  const vision = catalog.models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
+  assert.ok(text && vision, "both a text-only and a vision-capable entry are published");
+  assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
+  assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
+});
+
 test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
   assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
@@ -62,9 +71,11 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   }
 });
 
-test("baseInstructionsFor omits the TEXT-ONLY vision guidance for a vision-capable main model", () => {
-  const instructions = baseInstructionsFor({ ...configStub(), mainModel: "gpt-5.6-luna" });
-  assert.doesNotMatch(instructions, /TEXT-ONLY model and CANNOT see images/);
+test("baseInstructionsFor takes the vision capability explicitly, not from mainModel", () => {
+  const text = baseInstructionsFor(configStub());
+  const vision = baseInstructionsFor(configStub(), { supportsVision: true });
+  assert.match(text, /TEXT-ONLY model and CANNOT see images/);
+  assert.doesNotMatch(vision, /TEXT-ONLY model and CANNOT see images/);
 });
 
 test("baseInstructionsFor includes the design-first workflow when images can be generated", () => {
@@ -192,34 +203,7 @@ test("catalogFor with nativeMerge=false skips the native GPT merge for non-subsc
   }
 });
 
-test("catalogFor in trial mode publishes only the fixed free pair and never merges native", () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-trial-"));
-  const file = path.join(dir, "native-catalog.json");
-  writeFileSync(file, JSON.stringify({
-    captured_with: "0.1.0",
-    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
-  }), "utf8");
-  try {
-    const trial = catalogFor({
-      ...configStub(),
-      trialMode: true,
-      mainModel: "deepseek-v4-flash-free",
-      visionModel: "mimo-v2.5-free",
-      nativeCatalogFile: file,
-    });
-    assert.deepEqual(trial.models.map((entry) => entry.slug).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
-    assert.equal(trial.models[0].slug, "deepseek-v4-flash-free@opencode-go", "the fixed trial main model leads");
-    assert.ok(!trial.models.some((entry) => entry.slug === "gpt-5.6-luna"), "trial never merges native GPT models");
-
-    // The same native capture outside trial publishes the native model.
-    const normal = catalogFor({ ...configStub(), nativeCatalogFile: file });
-    assert.ok(normal.models.some((entry) => entry.slug === "gpt-5.6-luna"), "native model appears outside trial");
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("catalogFor outside trial still publishes the free models alongside the paid ones", () => {
+test("catalogFor publishes the free models alongside the paid ones", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
   assert.ok(slugs.includes("deepseek-v4-flash-free@opencode-go"));

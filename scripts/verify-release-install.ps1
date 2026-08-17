@@ -137,11 +137,12 @@ try {
   }
   Write-Step "autostart Run key present and correct"
 
-  # The installer mirrors the content-to-video skill into the Codex home.
-  if (-not (Test-Path (Join-Path $codexHome "skills\content-to-video\SKILL.md"))) {
-    throw "content-to-video skill was not installed"
+  # The installer no longer downloads the content-to-video skill; only a manual
+  # copy from the repo supplies it, so the install must not create the dir.
+  if (Test-Path (Join-Path $codexHome "skills\content-to-video\SKILL.md")) {
+    throw "content-to-video skill should not be installed by the installer anymore"
   }
-  Write-Step "content-to-video skill installed"
+  Write-Step "content-to-video skill not installed (manual copy only)"
 
   $bridge = Join-Path $root "dist\mcp-standalone.mjs"
   $probe = Join-Path $PSScriptRoot "mcp-probe.cjs"
@@ -245,6 +246,13 @@ try {
 } finally {
   Stop-ProbeUpstream
   Stop-TestGateway
-  reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null
+  try {
+    $null = reg.exe query $autostartKey /v $autostartName 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      try { reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null } catch { }
+    }
+  } catch {
+    # A missing autostart key is fine during cleanup; just leave it absent.
+  }
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }

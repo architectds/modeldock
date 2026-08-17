@@ -74,7 +74,7 @@ test("migrateEnvSecrets is safe and non-destructive on every platform", (t) => {
 
   // Windows: plaintext secrets are encrypted, comments/blanks/empty keys preserved.
   assert.equal(result.migrated, 2);
-  assert.ok(existsSync(result.backup));
+  assert.equal(existsSync(result.backup), false, "the cleartext .plain.bak is removed once the encrypted file verifies");
   assert.match(after, /^# comment line$/m);
   assert.match(after, /^MODELDOCK_PORT=4097$/m);
   assert.ok(String(entries.OPENCODE_GO_TOKEN).startsWith(PREFIX));

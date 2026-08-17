@@ -118,4 +118,3 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   return { model: mainModel, reason: "default_main", directVision: false };
 }
 
-export const routerInternals = { currentTurnItems, hasImage, continuationCallIds };
