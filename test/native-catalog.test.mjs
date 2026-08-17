@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { desktopCodexCandidates, nativeCatalogPath, nativeModelSlugs, readNativeCatalog } from "../src/native-catalog.mjs";
+import { desktopCodexCandidates, nativeCatalogPath, nativeModelSlugs, parseCodexVersion, readNativeCatalog } from "../src/native-catalog.mjs";
 
 function writeCapture(file, models) {
   writeFileSync(file, JSON.stringify({ captured_with: "0.1.0", models }), "utf8");
@@ -60,4 +60,19 @@ test("desktopCodexCandidates covers the bundled Windows and macOS CLIs", () => {
 
   const win = desktopCodexCandidates("win32");
   assert.ok(win.every((candidate) => candidate.endsWith("codex.exe")), "Windows candidates must point at codex.exe");
+});
+
+test("parseCodexVersion reads the version out of the CLI banner", () => {
+  assert.equal(parseCodexVersion("codex-cli 0.145.0"), "0.145.0");
+  assert.equal(parseCodexVersion("codex-cli 0.145.0\n"), "0.145.0");
+  assert.equal(parseCodexVersion("0.130.0"), "0.130.0", "a bare version still parses");
+  assert.equal(parseCodexVersion("codex-cli 0.148.0-alpha.9"), "0.148.0-alpha.9", "prereleases are kept whole");
+  assert.equal(parseCodexVersion("codex-cli 0.142.5 (abc1234)"), "0.142.5", "trailing build metadata is ignored");
+});
+
+test("parseCodexVersion returns empty for anything it cannot read", () => {
+  // "" means "unknown", which is a usable answer; a wrong version is not.
+  for (const input of ["", "   ", "codex-cli", "not a version", null, undefined]) {
+    assert.equal(parseCodexVersion(input), "", `expected "" for ${JSON.stringify(input)}`);
+  }
 });
