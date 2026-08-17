@@ -43,6 +43,11 @@ test("restart.sh cascades listener discovery and refuses an unidentified healthy
   assert.match(restart, /refusing a fake restart/);
   assert.match(restart, /started gateway from \$ROOT using \$SERVER/);
   assert.doesNotMatch(restart, /did not become healthy/, "restart.sh no longer polls healthz after launch");
+  assert.match(
+    restart,
+    /setsid/,
+    "the gateway must detach into its own session (setsid) so an agent-exec restart survives the launching session being reaped",
+  );
 });
 
 test("install.sh warns loudly when the login agent cannot be loaded", () => {

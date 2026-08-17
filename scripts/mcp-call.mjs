@@ -14,8 +14,105 @@
 //   node scripts/mcp-call.mjs hear <file>
 //   node scripts/mcp-call.mjs recall <query> [scope_dir] [limit]
 //   node scripts/mcp-call.mjs store <content> [scope_dir] [kind]
+//
+// This file is self-contained ON PURPOSE: it is shipped to installed layouts
+// (via install.sh) that have no src/ directory at all, so it must not import
+// ../src/mcp-client.mjs or ../src/caller-key.mjs. The ~60 lines below are the
+// minimal faithful copy of those two modules (keyed base URL + stateless MCP
+// client); keep them in lockstep when either changes.
 
-import { callMcpTool, listMcpTools } from "../src/mcp-client.mjs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// State-dir resolution, mirroring src/state-dir.mjs: MODELDOCK_STATE_DIR
+// redirects the whole directory (tests, throwaway installs), otherwise
+// ~/.modeldock. The gateway and this CLI both resolve the caller key there, so
+// they always agree on the keyed base URL.
+function stateFile(name) {
+  const dir = process.env.MODELDOCK_STATE_DIR
+    ? path.resolve(process.env.MODELDOCK_STATE_DIR)
+    : path.join(os.homedir(), ".modeldock");
+  return path.join(dir, name);
+}
+
+// Caller-key resolution, mirroring src/caller-key.mjs. Read the persisted key
+// and mint one on first use (the gateway does the same, so whichever runs
+// first creates it; both write the same file).
+const KEY_PATTERN = /^[A-Za-z0-9_-]{32,}$/;
+
+function loadOrCreateCallerKey() {
+  const filePath = stateFile("caller-key");
+  try {
+    const existing = readFileSync(filePath, "utf8").trim();
+    if (KEY_PATTERN.test(existing)) return existing;
+  } catch {
+    // Missing or unreadable: mint below.
+  }
+  const key = randomBytes(32).toString("base64url");
+  try {
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${key}\n`, "utf8");
+    try {
+      chmodSync(filePath, 0o600);
+    } catch {
+      // Hardening must never block the fallback.
+    }
+  } catch {
+    // Unwritable state dir: the key still works for this process lifetime.
+  }
+  return key;
+}
+
+// Keyed gateway base URL, mirroring src/mcp-client.mjs.
+function gatewayBaseUrl() {
+  if (process.env.MODELDOCK_GATEWAY_URL) return process.env.MODELDOCK_GATEWAY_URL;
+  return `http://127.0.0.1:4097/c/${loadOrCreateCallerKey()}`;
+}
+
+async function requestMcp(baseUrl, method, params) {
+  const response = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const text = await response.text();
+  let message = null;
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    try {
+      message = JSON.parse(line.slice(5).trim());
+      break;
+    } catch {
+      // Try the next data line.
+    }
+  }
+  if (!message) {
+    throw new Error(`MCP ${method} failed (HTTP ${response.status}): ${text.slice(0, 200)}`);
+  }
+  if (message.error) {
+    throw new Error(message.error.message || JSON.stringify(message.error));
+  }
+  return message.result;
+}
+
+async function listMcpTools(baseUrl = gatewayBaseUrl()) {
+  const result = await requestMcp(baseUrl, "tools/list", {});
+  return result.tools || [];
+}
+
+// Returns the tool result text; when that text is itself JSON the parsed value
+// is returned so callers can work with the object directly.
+async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
+  const result = await requestMcp(baseUrl, "tools/call", { name, arguments: args });
+  const text = (result.content || []).find((item) => item.type === "text")?.text ?? "";
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
 
 const [command, ...rest] = process.argv.slice(2);
 

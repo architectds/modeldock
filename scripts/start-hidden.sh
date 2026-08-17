@@ -68,4 +68,13 @@ LOG="$ROOT/modeldock.log"
 if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
   mv -f "$LOG" "$LOG.1"
 fi
-nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+# Detach into a fresh session, not just a nohup background job: the Codex/agent
+# exec environment reaps the whole session when the launching command returns,
+# and nohup only ignores SIGHUP - the gateway would die a few seconds later
+# with a clean startup block and no error. setsid escapes the session; plain
+# terminals keep working through the nohup fallback.
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 < /dev/null &
+else
+  nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+fi

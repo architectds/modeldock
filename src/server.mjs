@@ -1844,7 +1844,27 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   if (migration.migrated > 0) {
     console.log(`Encrypted ${migration.migrated} secret(s) in ${migration.file} (backup: ${migration.backup})`);
   }
-  const instance = await startServer();
+  let instance;
+  try {
+    instance = await startServer();
+  } catch (error) {
+    if (error?.code === "EADDRINUSE") {
+      // A second gateway on the same port is almost always a stale instance of
+      // this same install (the owner file may even be clobbered by the dead
+      // sibling). Point at the restart script instead of dumping a stack trace
+      // that reads like a crash.
+      const config = loadConfig();
+      const restart = process.platform === "win32"
+        ? `powershell -ExecutionPolicy Bypass -File "${path.resolve(dirname, "../scripts/restart.ps1")}"`
+        : `sh "${path.resolve(dirname, "../scripts/restart.sh")}"`;
+      console.error(`ModelDock cannot start: port ${config.port} is already in use by another process.`);
+      console.error(`If a ModelDock gateway is already running there, restart it instead of starting a second one:`);
+      console.error(`  ${restart}`);
+      console.error(`If the port is held by something else, set MODELDOCK_PORT in .env to a free port.`);
+      process.exit(1);
+    }
+    throw error;
+  }
   // Record port ownership so restart.ps1 and future instances can tell whose
   // process holds the port (we have shipped stale code from a lookalike
   // instance before). A conflict only warns: the listen already succeeded.

@@ -669,6 +669,8 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   assert.ok(existsSync(path.join(installDir, "scripts", "restart.ps1")), "scripts/restart.ps1 should be written");
   if (!isWindows) {
     assert.ok(existsSync(path.join(installDir, "scripts", "restart.sh")), "scripts/restart.sh should be written");
+    assert.ok(existsSync(path.join(installDir, "scripts", "mcp-call.sh")), "scripts/mcp-call.sh should be written");
+    assert.ok(existsSync(path.join(installDir, "scripts", "mcp-call.mjs")), "scripts/mcp-call.mjs should be written");
   }
   assert.ok(
     existsSync(path.join(installDir, "scripts", isWindows ? "recover.ps1" : "recover.sh")),

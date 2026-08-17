@@ -60,7 +60,14 @@ const files = [
     name: "install.sh",
     sync(source) {
       let result = source;
-      for (const [variable, name] of [["LAUNCHER", "start-hidden.sh"], ["RESTART", "restart.ps1"], ["RESTART_SH", "restart.sh"], ["RECOVER", "recover.sh"]]) {
+      for (const [variable, name] of [
+        ["LAUNCHER", "start-hidden.sh"],
+        ["RESTART", "restart.ps1"],
+        ["RESTART_SH", "restart.sh"],
+        ["RECOVER", "recover.sh"],
+        ["MCP_CALL_SH", "mcp-call.sh"],
+        ["MCP_CALL_MJS", "mcp-call.mjs"],
+      ]) {
         result = replaceShellBlock(result, variable, helper(name));
       }
       return result;

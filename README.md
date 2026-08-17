@@ -114,10 +114,17 @@ main model and `None` for vision, and persists that route across restarts.
 The `speak` and `hear` tools become available to the model.
 
 **MCP tools** - web search, vision, and speech reach Codex as tools that
-survive gateway restarts. If a session's tool connection is stale, call them
-directly instead of restarting Codex:
+survive gateway restarts. The connection Codex opens to them goes stale on a
+restart and the client never re-establishes it, so a tool that starts failing
+with a connection error (`fetch failed`, `ECONNREFUSED`, `unsupported call`)
+will not heal on its own. Call the tools directly from the shell instead of
+restarting Codex:
 `node scripts/mcp-call.mjs search "..."` or
 `node scripts/mcp-call.mjs vision <path> <question>`.
+On Linux/macOS installs where `node` is not on PATH, use the bundled-runtime
+wrapper: `sh scripts/mcp-call.sh search "..."`. The injected base instructions
+already tell the model to switch to the shell fallback when an MCP call fails,
+so you normally do not have to repeat it.
 
 **Language** - the dashboard speaks English, 简体中文, 日本語, Français,
 Español. Change it anytime under Settings -> Interface language.

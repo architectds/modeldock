@@ -46,7 +46,10 @@ export function baseInstructionsFor(config) {
     // re-establishes it, so this list is the only way a tool survives that. It
     // omitted image_gen, which quietly removed the "first-class" image tool
     // exactly when the fallback was needed - and named it mandatory anyway.
-    "ModelDock MCP tools also work directly when the session MCP connection is unavailable: run `node scripts/mcp-call.mjs <tool> ...` in a shell. Key tools: `vision <path> <question>` (inspect an image), `search <query>` (web search), `recall <query> [scope_dir]` (recall memory), `store <content> [scope_dir] [kind]` (store memory)"
+    // The rule is stated as a hard trigger ("if the call fails, switch") rather
+    // than a passive availability note: a text-only model otherwise retries the
+    // dead tool and reports the capability as gone.
+    "ModelDock MCP tools ride a session connection that Codex never re-establishes after a gateway restart. If an MCP tool call fails with a connection error (fetch failed, ECONNREFUSED, 'unsupported call', or a stale tool list), do NOT retry it and do NOT treat the capability as gone: run the CLI fallback immediately in a shell - `node scripts/mcp-call.mjs <tool> ...` (on macOS/Linux, `sh scripts/mcp-call.sh <tool> ...` also works when plain `node` is not on PATH). Key tools: `vision <path> <question>` (inspect an image), `search <query>` (web search), `recall <query> [scope_dir]` (recall memory), `store <content> [scope_dir] [kind]` (store memory)"
       + (canGenerateImages ? ", `image <prompt> [size]` (generate an image)" : "")
       + ". Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
     `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops the process on the configured port, starts a fresh detached instance, and prints 'started gateway from <root>' once launched; wait for that line before continuing.`,

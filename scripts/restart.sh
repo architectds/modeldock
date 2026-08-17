@@ -128,28 +128,61 @@ import fs from "node:fs";
 import path from "node:path";
 
 const [ownerFile, oldPid, root, port] = process.argv.slice(2);
+const candidates = [path.join(root, "src", "server.mjs"), path.join(root, "dist", "modeldock.mjs")];
+
+// The command line is the ground truth: a listener that provably runs this
+// install's gateway is ours no matter what the owner record says. The record
+// can go stale - a crash or a manual start never updates it, and a second
+// instance that died with EADDRINUSE can even clobber it with its own pid -
+// and blocking the restart on that stale file leaves the old process serving
+// forever (the "restart does nothing" failure). Only refuse when the listener
+// cannot be identified as ours AND the record names a different live owner.
+let listenerIsOurs = false;
 try {
-  const owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
-  const ownerRoot = path.resolve(String(owner?.root || ""));
-  const thisRoot = path.resolve(root);
-  if (Number(owner?.pid) !== Number(oldPid) || Number(owner?.port) !== Number(port) || ownerRoot !== thisRoot) {
-    throw new Error("owner record does not match this listener and install root");
-  }
-  const candidates = [path.join(thisRoot, "src", "server.mjs"), path.join(thisRoot, "dist", "modeldock.mjs")];
-  let commandMatches = false;
   if (process.platform === "linux") {
     const argv = fs.readFileSync(`/proc/${oldPid}/cmdline`).toString("utf8").split("\0").filter(Boolean);
-    commandMatches = argv.some((arg) => candidates.includes(path.resolve(arg)));
+    listenerIsOurs = argv.some((arg) => candidates.includes(path.resolve(arg)));
   } else {
-    const command = execFileSync("ps", ["-p", oldPid, "-o", "command="], { encoding: "utf8" });
-    commandMatches = candidates.some((candidate) => command.includes(candidate));
+    try {
+      const command = execFileSync("ps", ["-p", oldPid, "-o", "command="], { encoding: "utf8" });
+      listenerIsOurs = candidates.some((candidate) => command.includes(candidate));
+    } catch {
+      // ps failed (pid vanished mid-check); treat as unknown and consult the record.
+    }
   }
-  if (!commandMatches) throw new Error("listener command does not run this ModelDock install");
-} catch (error) {
-  console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because ownership could not be verified: ${error.message}`);
-  console.error("Re-run with --force to take the port over deliberately.");
-  process.exit(2);
+} catch {
+  // /proc vanished: the listener died between discovery and the check.
+  process.exit(0);
 }
+if (listenerIsOurs) process.exit(0);
+
+// Not provably ours. A record naming a LIVE pid that is not the listener is a
+// genuine conflict with another ModelDock instance - refuse. A missing or stale
+// record (recorded pid dead) identifies nothing, so the listener still cannot be
+// trusted; refuse rather than risk killing a foreign process.
+let owner;
+try {
+  owner = JSON.parse(fs.readFileSync(ownerFile, "utf8"));
+} catch {
+  // No record at all.
+}
+if (owner) {
+  let alive = false;
+  try {
+    process.kill(Number(owner.pid), 0);
+    alive = true;
+  } catch {
+    // ESRCH: the recorded process is gone; the record is stale.
+  }
+  if (alive && Number(owner.pid) !== Number(oldPid)) {
+    console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because port ${port} is recorded as owned by live PID ${owner.pid} (root: ${owner.root}).`);
+    console.error("Re-run with --force to take the port over deliberately.");
+    process.exit(2);
+  }
+}
+console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because ownership could not be verified: the listener is not a ModelDock gateway from this install and the owner record is missing or stale.`);
+console.error("Re-run with --force to take the port over deliberately.");
+process.exit(2);
 NODE
 }
 
@@ -203,6 +236,18 @@ if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 33554432 ]; then
   mv -f "$LOG" "$LOG.1"
 fi
 
-nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+# Detach the gateway into its own session. nohup alone is not enough when the
+# launcher runs inside the Codex/agent exec environment: that environment tears
+# down the whole session (process group) when the command returns, and nohup
+# only ignores SIGHUP - the child stays in the dying session and is reaped a
+# few seconds later, which reads as "the gateway died right after the agent
+# restarted it" with a clean startup block and no error in the log. setsid
+# moves the child into a fresh session the reaper cannot reach; a normal
+# terminal keeps working through the nohup fallback.
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 < /dev/null &
+else
+  nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+fi
 status "restart.sh: started gateway from $ROOT using $SERVER (logs: $LOG)"
 exit 0
