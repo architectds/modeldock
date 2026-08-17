@@ -144,8 +144,14 @@ function Restart-Gateway {
 
 function Restore-Native {
   $uri = "http://127.0.0.1:$port/api/config/disable"
+  $keyFile = if ($env:MODELDOCK_STATE_DIR) { Join-Path $env:MODELDOCK_STATE_DIR "caller-key" } else { Join-Path $root "caller-key" }
+  $headers = @{}
+  if (Test-Path -LiteralPath $keyFile) {
+    $key = (Get-Content -LiteralPath $keyFile -Raw).Trim()
+    if ($key) { $headers["x-modeldock-key"] = $key }
+  }
   try {
-    Invoke-RestMethod -Method Post -Uri $uri -TimeoutSec 3 | Out-Null
+    Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -TimeoutSec 3 | Out-Null
     Write-Output "Codex native route restored through the running gateway."
     return
   } catch {
