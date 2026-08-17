@@ -28,7 +28,7 @@ import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
-import { stateFile } from "./state-dir.mjs";
+import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1765,7 +1765,7 @@ export function createApp(services = createServices()) {
 // and re-enabling happens at most once per version, so the dashboard toggle
 // keeps working and nothing re-registers repeatedly. Safe to call repeatedly.
 export async function initAutostartDefault(autostart, {
-  stateDir = path.join(os.homedir(), ".modeldock"),
+  stateDir = resolveStateDir(),
   markName = "autostart-initialized",
   version = localVersion(),
 } = {}) {

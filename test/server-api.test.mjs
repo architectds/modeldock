@@ -851,6 +851,30 @@ test("initAutostartDefault re-enables exactly once per new version", async (t) =
   assert.deepEqual(autostart.calls, [true, true], "re-enabling happens exactly once per version");
 });
 
+test("initAutostartDefault honours MODELDOCK_STATE_DIR", async (t) => {
+  // Every other caller in this file passes stateDir explicitly, so the default
+  // was never exercised: it resolved to the real ~/.modeldock regardless of the
+  // redirect. A spawned test gateway therefore stamped the developer's own
+  // marker, and the version recorded there made their next real start re-enable
+  // login autostart.
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-statedir-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const previous = process.env.MODELDOCK_STATE_DIR;
+  process.env.MODELDOCK_STATE_DIR = dir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MODELDOCK_STATE_DIR;
+    else process.env.MODELDOCK_STATE_DIR = previous;
+  });
+  const autostart = fakeAutostart();
+
+  assert.equal(await initAutostartDefault(autostart, { version: "1.2.3" }), true);
+  assert.equal(
+    JSON.parse(await readFile(path.join(dir, "autostart-initialized"), "utf8")).version,
+    "1.2.3",
+    "the marker lands in the redirected state dir, not the real home",
+  );
+});
+
 test("initAutostartDefault migrates a legacy timestamp marker for the new version", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-autostart-legacy-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
