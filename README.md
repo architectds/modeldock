@@ -40,17 +40,17 @@ without rewriting the conversation history:
 - **Speak** - the `speak` tool turns text into a local audio file.
 - **Hear** - the `hear` tool transcribes an audio file back to text.
 - **Search** - the `web_search_exa` tool queries the web through Exa.
-- **Remember** - `store_memory` and `recall_memory` give the model a lightweight
-  cross-session memory, so decisions and baselines survive between sessions. It
-  is on by default; set `MODELDOCK_MEMORY=0` in `~/.modeldock/.env` and restart
-  to disable it.
-- **Make** - the `content-to-video` skill lets the model produce finished MP4
-  videos end-to-end: classify content, storyboard per-shot tech stacks, narrate
-  with measured durations, build three.js / HTML or HyperFrames scenes, assemble
-  with ffmpeg, and QA every frame. Audio assets (BGM / SFX) are not bundled to
-  keep the skill small - download the library from the
-  [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
-  (sparse-checkout `assets/audio`) when a project needs sound.
+- **Remember** - `store_memory`, `recall_memory`, and `learn` give the model a
+  lightweight cross-session memory: store decisions, recall them later, or
+  bulk-ingest notes and docs. On by default; set `MODELDOCK_MEMORY=0` in
+  `~/.modeldock/.env` and restart to disable it.
+- **Generate** - the `image_gen` tool creates AI images through the Codex
+  ChatGPT backend (requires a Codex account with ChatGPT sign-in).
+- **Make** - the `content-to-video` skill produces finished MP4 videos from a
+  prompt — storyboard, build scenes in three.js / HTML or HyperFrames, assemble
+  with ffmpeg, and QA every frame. Audio assets are not bundled; download from
+  the [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
+  when a project needs sound.
 
 The bridge is a thin local gateway: the Responses stream passes through
 untouched, and multi-turn tool loops, streaming, and long-session compaction
@@ -74,9 +74,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 The installer checks Node.js >= 24, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Add at
-least one provider token in Settings: [OpenCode Go](https://opencode.ai/auth),
-DeepSeek official, or a configured custom Responses endpoint.
-The `content-to-video` skill is not downloaded by the installer; copy
+least one provider in Settings: [OpenCode Go](https://opencode.ai/auth),
+DeepSeek official, a custom Responses endpoint, or connect Ollama for local
+models. The `content-to-video` skill is not downloaded by the installer; copy
 `skills/content-to-video` into Codex's skills directory manually when you want
 the video capability.
 
@@ -96,35 +96,48 @@ Model Dock shows the active provider and model read-only on the dashboard; it
 does not change your Codex model.
 
 **Vision model** - choose the vision model from the dashboard picker. It is
-used for pasted images and for `vision_inspect` calls. Providers without a
-vision-capable model show `None` instead of advertising an unusable route.
+used for pasted images and for `vision_inspect` calls. The picker lists
+vision-capable models from all enabled providers, so you can pair a DeepSeek
+main model with a MiMo vision model, for example. Switching the main provider
+preserves your current vision pick if it remains reachable. Providers with no
+vision-capable model show `None`.
 
-**Upstreams** - OpenCode Go and DeepSeek official are both supported. The
-owner suffix in the model id (for example `deepseek-v4-flash@deepseek-official`)
-selects the upstream; plain ids resolve to OpenCode Go. Native GPT
-models stay in the Codex model picker. Codex's own authenticated requests
-are passed through unchanged to OpenAI. ModelDock never accesses, stores,
-copies, or replays OpenAI credentials.
+**Upstreams** - four providers are supported:
+- **OpenCode Go** — `OPENCODE_GO_TOKEN`; large catalog including free models.
+- **DeepSeek official** — `DEEPSEEK_API_KEY`; has built-in web search.
+- **Custom** — any Responses-compatible endpoint, configured in Settings.
+- **Ollama** — local models; connect from Settings and pick from the list.
+
+Every model id carries a provider suffix — for example
+`deepseek-v4-flash@deepseek-official` — that selects the upstream and is
+stripped before the request reaches the API. Native GPT models stay in the
+Codex model picker; ModelDock never accesses, stores, copies, or replays
+OpenAI credentials.
 
 The setup guide accepts any configured provider token for ON mode. On a
 DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
 main model and `None` for vision, and persists that route across restarts.
 
+**Sub-agent** - choose a dedicated model for the sub-agent role from the
+dashboard. The picker includes models from all enabled providers plus native
+GPT models from your signed-in Codex account.
+
 **Speech** - open the TTS / STT tile on the dashboard and toggle TTS or STT on.
 The `speak` and `hear` tools become available to the model.
 
-**MCP tools** - web search, vision, and speech reach Codex as tools that
-survive gateway restarts. The connection Codex opens to them goes stale on a
-restart and the client never re-establishes it, so a tool that starts failing
-with a connection error (`fetch failed`, `ECONNREFUSED`, `unsupported call`)
-will not heal on its own. Call the tools directly from the shell instead of
-restarting Codex:
+**MCP tools** - web search, vision, image generation, speech, and memory reach
+Codex as tools that survive gateway restarts. The connection Codex opens to
+them goes stale on a restart and the client never re-establishes it, so a tool
+that starts failing with a connection error (`fetch failed`, `ECONNREFUSED`,
+`unsupported call`) will not heal on its own. Call the tools directly from the
+shell — `search`, `vision`, `image`, `speak`, `hear`, `recall`, `store` — for
+example:
 `node scripts/mcp-call.mjs search "..."` or
 `node scripts/mcp-call.mjs vision <path> <question>`.
 On Linux/macOS installs where `node` is not on PATH, use the bundled-runtime
-wrapper: `sh scripts/mcp-call.sh search "..."`. The injected base instructions
-already tell the model to switch to the shell fallback when an MCP call fails,
-so you normally do not have to repeat it.
+wrapper: `sh scripts/mcp-call.sh <command> <args>`. The injected base
+instructions already tell the model to switch to the shell fallback when an MCP
+call fails, so you normally do not have to repeat it.
 
 **Language** - the dashboard speaks English, 简体中文, 日本語, Français,
 Español. Change it anytime under Settings -> Interface language.
@@ -137,9 +150,7 @@ release, migrates the managed Node runtime when needed, restarts, and reloads.
 If the version in the header does not change after an update, the download
 succeeded and only the restart did not: the new files are already installed and
 just are not running yet. Run `scripts/restart.ps1` (Windows) or
-`scripts/restart.sh` (macOS/Linux) once from your install directory. Versions up
-to 0.3.6 relaunch using their own code, so this can happen on the first upgrade
-away from them; later upgrades restart on their own.
+`scripts/restart.sh` (macOS/Linux) once from your install directory.
 
 ---
 
@@ -221,7 +232,8 @@ DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话�
 - **说话** - `speak` 工具把文本合成本地音频文件。
 - **听写** - `hear` 工具把音频文件转写成文本。
 - **搜索** - `web_search_exa` 工具通过 Exa 查询网络。
-- **记住** - `store_memory` 和 `recall_memory` 给模型一份轻量跨会话记忆，决策和基线在会话之间也能保留。此功能默认开启；如需关闭，在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=0` 并重启即可。
+- **记住** - `store_memory`、`recall_memory` 和 `learn` 给模型一份轻量跨会话记忆：存储决策、随时检索，或批量导入笔记和文档。此功能默认开启；如需关闭，在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=0` 并重启即可。
+- **生成图片** - `image_gen` 工具通过 Codex 的 ChatGPT 后端创建 AI 图像（需要 Codex 绑定 ChatGPT 账号）。
 
 桥接层是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生通道一致。
 
@@ -242,8 +254,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 ```
 
 安装程序会检查 Node.js >= 24，把 Model Dock For Codex 下载到
-`~/.modeldock`，在后台启动并打开仪表盘。在弹出的设置对话框中粘贴你的
-[opencode.ai](https://opencode.ai/auth) token。
+`~/.modeldock`，在后台启动并打开仪表盘。在弹出的设置对话框中添加至少一个
+provider：[OpenCode Go](https://opencode.ai/auth)、DeepSeek 官方、自定义
+Responses 端点，或连接 Ollama 使用本地模型。
 
 ### 接入 Codex
 
@@ -260,12 +273,19 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 显示当前 provider 和模型，不会改动你的 Codex 模型。
 
 **视觉模型** - 在仪表盘选择视觉模型，用于粘贴的图片和 `vision_inspect`
-调用。
+调用。选择器会列出所有已启用 provider 中支持视觉的模型，可以将 DeepSeek
+主模型与 MiMo 视觉模型配对使用。切换主 provider 时，只要当前视觉模型仍然
+可达，选择会自动保留。
 
-**上游** - 同时支持 OpenCode Go 和 DeepSeek 官方。模型 id 中的 owner 后缀
-（例如 `deepseek-v4-flash@deepseek-official`）选择上游；不带后缀的 id 走
-OpenCode Go。原生 GPT 模型保留在 Codex 的模型选单中。Codex 自身已认证的请
-求会原样透传给 OpenAI。ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
+**上游** - 支持四个 provider：**OpenCode Go**（`OPENCODE_GO_TOKEN`，包含免费模型）、
+**DeepSeek 官方**（`DEEPSEEK_API_KEY`，自带网络搜索）、**自定义**（任意兼容
+Responses 接口的端点，在设置中配置）和 **Ollama**（本地模型，在设置中连接）。
+每个模型 id 都带有 provider 后缀（例如 `deepseek-v4-flash@deepseek-official`），
+用于选择上游，请求到达 API 前后缀会自动去除。原生 GPT 模型保留在 Codex 的模型
+选单中；ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
+
+**子代理** - 在仪表盘为子代理角色单独选择一个模型。选择器包含所有已启用
+provider 的模型以及你 Codex 账号中的原生 GPT 模型。
 
 **语音** - 打开仪表盘的 TTS / STT 磁贴并启用 TTS 或 STT，`speak` 和 `hear`
 工具即可供模型使用。
@@ -335,9 +355,12 @@ Codex はこれら 5 つをツールとして追加し、会話履歴は書き�
 - **話す** - `speak` ツールがテキストをローカル音声ファイルに変換します。
 - **聞く** - `hear` ツールが音声ファイルをテキストに書き起こします。
 - **検索** - `web_search_exa` ツールが Exa 経由でウェブ検索します。
-- **記憶** - `store_memory` と `recall_memory` で軽量なクロスセッション記憶を
-  提供します。デフォルトで有効です；無効にするには `~/.modeldock/.env` で
+- **記憶** - `store_memory`、`recall_memory`、`learn` で軽量なクロスセッション記憶を
+  提供します。決定事項を保存し、後から検索したり、メモやドキュメントを一括取り込むことができます。
+  デフォルトで有効です；無効にするには `~/.modeldock/.env` で
   `MODELDOCK_MEMORY=0` を設定して再起動してください。
+- **生成** - `image_gen` ツールが Codex の ChatGPT バックエンド経由で AI 画像を
+  生成します（Codex の ChatGPT サインインが必要です）。
 
 ブリッジは Responses ストリームをバッファリングも再合成もせずそのまま転送
 します。書き換えは文書化された最小限のものだけです：コンパクトタスクが
@@ -364,8 +387,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 インストーラーは Node.js >= 24 を確認し、Model Dock For Codex を
 `~/.modeldock` にダウンロードしてバックグラウンドで起動し、ダッシュボード
-を開きます。表示された設定ダイアログに [opencode.ai](https://opencode.ai/auth)
-のトークンを貼り付けます。
+を開きます。設定ダイアログで少なくとも1つのプロバイダーを追加してください：
+[OpenCode Go](https://opencode.ai/auth)、DeepSeek 公式、カスタム Responses
+エンドポイント、または Ollama（ローカルモデル）。
 
 ### Codex への接続
 
@@ -385,14 +409,21 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 モデルは変更しません。
 
 **ビジョンモデル** - ダッシュボードでビジョンモデルを選択します。貼り付け
-た画像と `vision_inspect` 呼び出しに使われます。
+た画像と `vision_inspect` 呼び出しに使われます。ピッカーはすべての有効な
+プロバイダーのビジョン対応モデルを一覧表示するため、DeepSeek のメインモデル
+と MiMo のビジョンモデルを組み合わせることができます。メインプロバイダーを
+切り替えても、現在のビジョン選択がまだ到達可能であれば保持されます。
 
-**上流** - OpenCode Go と DeepSeek 公式の両方をサポートします。モデル ID の
-owner サフィックス（例 `deepseek-v4-flash@deepseek-official`）で上流を選択。
-サフィックスなしは OpenCode Go になります。ネイティブ GPT モデルは Codex の
-モデルピッカーに残ります。Codex 自身の認証済みリクエストは変更されずに
-OpenAI へ転送されます。ModelDock は OpenAI の認証情報にアクセスせず、保存・
-コピー・再生もしません。
+**上流** - 4つのプロバイダーをサポートします：**OpenCode Go**（`OPENCODE_GO_TOKEN`、
+無料モデルを含む）、**DeepSeek 公式**（`DEEPSEEK_API_KEY`、ウェブ検索内蔵）、
+**カスタム**（Responses 互換エンドポイント、設定画面で設定）、**Ollama**（ローカルモデル、
+設定画面から接続）。すべてのモデル ID はプロバイダーサフィックスを持ちます（例：
+`deepseek-v4-flash@deepseek-official`）。ネイティブ GPT モデルは Codex の
+モデルピッカーに残ります。ModelDock は OpenAI の認証情報にアクセスしません。
+
+**サブエージェント** - ダッシュボードでサブエージェント専用モデルを選択できます。
+すべての有効なプロバイダーのモデルと、Codex アカウントのネイティブ GPT モデルが
+表示されます。
 
 **音声** - ダッシュボードの TTS / STT タイルで有効にすると、`speak` と
 `hear` ツールがモデルから使えます。
@@ -469,9 +500,13 @@ conversation :
 - **Parler** - l'outil `speak` transforme un texte en fichier audio local.
 - **Écouter** - l'outil `hear` transcrit un fichier audio en texte.
 - **Chercher** - l'outil `web_search_exa` interroge le web via Exa.
-- **Se souvenir** - `store_memory` et `recall_memory` offrent au modèle une
-  mémoire légère entre sessions. C'est activé par défaut : définissez
-  `MODELDOCK_MEMORY=0` dans `~/.modeldock/.env` et redémarrez pour le désactiver.
+- **Se souvenir** - `store_memory`, `recall_memory` et `learn` offrent au modèle
+  une mémoire légère entre sessions : stocker des décisions, les rappeler plus
+  tard ou ingérer des notes et documents en masse. C'est activé par défaut :
+  définissez `MODELDOCK_MEMORY=0` dans `~/.modeldock/.env` et redémarrez pour
+  le désactiver.
+- **Générer** - l'outil `image_gen` crée des images IA via le backend ChatGPT
+  de Codex (nécessite un compte Codex avec ChatGPT).
 
 Le pont relaie le flux Responses sans bufferiser ni resynthétiser le SSE. Ses
 seules réécritures sont chirurgicales et documentées : les lignes d'outils
@@ -497,8 +532,10 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 ```
 
 L'installeur vérifie Node.js >= 24, télécharge Model Dock For Codex dans
-`~/.modeldock`, le démarre en arrière-plan et ouvre le tableau de bord. Collez
-votre jeton [opencode.ai](https://opencode.ai/auth) dans la boîte de dialogue.
+`~/.modeldock`, le démarre en arrière-plan et ouvre le tableau de bord. Ajoutez
+au moins un fournisseur dans les réglages : [OpenCode Go](https://opencode.ai/auth),
+DeepSeek officiel, un endpoint Responses personnalisé, ou connectez Ollama pour
+les modèles locaux.
 
 ### Connecter Codex
 
@@ -518,15 +555,24 @@ votre jeton [opencode.ai](https://opencode.ai/auth) dans la boîte de dialogue.
 lecture seule sur le tableau de bord.
 
 **Modèle de vision** - choisissez le modèle de vision sur le tableau de bord. Il
-est utilisé pour les images collées et les appels `vision_inspect`.
+est utilisé pour les images collées et les appels `vision_inspect`. Le sélecteur
+liste les modèles vision de tous les fournisseurs actifs, vous permettant par
+exemple d'associer un modèle principal DeepSeek à un modèle de vision MiMo.
+Changer le fournisseur principal conserve votre sélection vision si elle reste
+accessible.
 
-**Amonts** - OpenCode Go et DeepSeek officiel sont pris en charge. Le suffixe
-owner dans l'id du modèle (par exemple
-`deepseek-v4-flash@deepseek-official`) sélectionne l'amont ; les ids simples
-passent par OpenCode Go. Les modèles GPT natifs restent dans le sélecteur de
-modèles de Codex. Les requêtes authentifiées de Codex sont transmises telles
-quelles à OpenAI. ModelDock n'accède jamais aux identifiants OpenAI, ne les
-stocke pas, ne les copie pas et ne les rejoue pas.
+**Fournisseurs** - quatre fournisseurs sont pris en charge : **OpenCode Go**
+(`OPENCODE_GO_TOKEN`, inclut des modèles gratuits), **DeepSeek officiel**
+(`DEEPSEEK_API_KEY`, avec recherche web intégrée), **Personnalisé** (tout
+endpoint compatible Responses, configuré dans les réglages) et **Ollama**
+(modèles locaux, connecté depuis les réglages). Chaque id de modèle porte un
+suffixe fournisseur — par exemple `deepseek-v4-flash@deepseek-official` — qui
+sélectionne l'amont. Les modèles GPT natifs restent dans le sélecteur de Codex ;
+ModelDock n'accède jamais aux identifiants OpenAI.
+
+**Sous-agent** - choisissez un modèle dédié au rôle de sous-agent depuis le
+tableau de bord. Le sélecteur inclut les modèles de tous les fournisseurs actifs
+ainsi que les modèles GPT natifs de votre compte Codex.
 
 **Parole** - ouvrez la tuile TTS / STT sur le tableau de bord et activez TTS ou
 STT. Les outils `speak` et `hear` deviennent disponibles.
@@ -607,9 +653,12 @@ conversación:
   local.
 - **Escuchar** - la herramienta `hear` transcribe un archivo de audio a texto.
 - **Buscar** - la herramienta `web_search_exa` consulta la web mediante Exa.
-- **Recordar** - `store_memory` y `recall_memory` dan al modelo una memoria
-  ligera entre sesiones. Está activada por defecto: define `MODELDOCK_MEMORY=0` en
-  `~/.modeldock/.env` y reinicia para desactivarla.
+- **Recordar** - `store_memory`, `recall_memory` y `learn` dan al modelo una
+  memoria ligera entre sesiones: guarda decisiones, recupéralas más tarde o
+  ingiere notas y documentos en masa. Está activada por defecto: define
+  `MODELDOCK_MEMORY=0` en `~/.modeldock/.env` y reinicia para desactivarla.
+- **Generar** - la herramienta `image_gen` crea imágenes IA a través del backend
+  ChatGPT de Codex (requiere cuenta Codex con ChatGPT).
 
 El puente retransmite el flujo Responses sin almacenar ni resintetizar SSE. Sus
 únicas reescrituras son quirúrgicas y documentadas: las filas de herramientas
@@ -635,8 +684,9 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 ```
 
 El instalador verifica Node.js >= 24, descarga Model Dock For Codex en
-`~/.modeldock`, lo inicia en segundo plano y abre el panel. Pega tu token de
-[opencode.ai](https://opencode.ai/auth) en el diálogo de configuración.
+`~/.modeldock`, lo inicia en segundo plano y abre el panel. Añade al menos un
+proveedor en Ajustes: [OpenCode Go](https://opencode.ai/auth), DeepSeek oficial,
+un endpoint Responses personalizado, o conecta Ollama para modelos locales.
 
 ### Conectar Codex
 
@@ -656,14 +706,23 @@ El instalador verifica Node.js >= 24, descarga Model Dock For Codex en
 solo lectura en el panel.
 
 **Modelo de visión** - elige el modelo de visión en el panel. Se usa para
-imágenes pegadas y llamadas `vision_inspect`.
+imágenes pegadas y llamadas `vision_inspect`. El selector lista los modelos con
+capacidad de visión de todos los proveedores activos, por lo que puedes combinar
+un modelo principal DeepSeek con un modelo de visión MiMo. Cambiar el proveedor
+principal conserva tu selección de visión si sigue siendo accesible.
 
-**Upstreams** - se admiten OpenCode Go y DeepSeek oficial. El sufijo owner en el
-id del modelo (por ejemplo `deepseek-v4-flash@deepseek-official`) selecciona el
-upstream; los ids simples usan OpenCode Go. Los modelos GPT nativos permanecen
-en el selector de modelos de Codex. Las solicitudes autenticadas de Codex se
-reenvían sin cambios a OpenAI. ModelDock nunca accede, almacena, copia ni
-reproduce las credenciales de OpenAI.
+**Proveedores** - cuatro proveedores compatibles: **OpenCode Go**
+(`OPENCODE_GO_TOKEN`, incluye modelos gratuitos), **DeepSeek oficial**
+(`DEEPSEEK_API_KEY`, búsqueda web integrada), **Personalizado** (cualquier
+endpoint Responses, configurado en Ajustes) y **Ollama** (modelos locales,
+conectado desde Ajustes). Cada id de modelo lleva un sufijo de proveedor — por
+ejemplo `deepseek-v4-flash@deepseek-official` — que selecciona el upstream. Los
+modelos GPT nativos permanecen en el selector de Codex; ModelDock nunca accede
+a las credenciales de OpenAI.
+
+**Subagente** - elige un modelo dedicado al rol de subagente desde el panel. El
+selector incluye modelos de todos los proveedores activos más los modelos GPT
+nativos de tu cuenta Codex.
 
 **Voz** - abre la tarjeta TTS / STT en el panel y activa TTS o STT. Las
 herramientas `speak` y `hear` quedan disponibles.
