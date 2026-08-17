@@ -105,6 +105,15 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
       false,
       "web search is read-only and must not be hidden by Codex's open-world gate",
     );
+    // hear writes: sttTranscribe transcodes the input to a WAV with `ffmpeg -y`,
+    // at the caller-supplied `output` path when one is given. A readOnlyHint of
+    // true tells a client it can run the tool without a write confirmation.
+    const hear = listed.result.tools.find((tool) => tool.name === "hear");
+    assert.equal(
+      hear.annotations?.readOnlyHint,
+      false,
+      "hear writes an intermediate WAV, so it must not be annotated read-only",
+    );
   } finally {
     await stopBridge(bridge);
     await gateway.close();
