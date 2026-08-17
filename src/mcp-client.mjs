@@ -2,8 +2,9 @@
 //
 // The gateway serves MCP over streamable HTTP in the stateless legacy mode
 // (see src/mcp.mjs), so every request stands alone and no session bookkeeping
-// is needed. This module is shared by the stdio bridge (src/mcp-standalone.mjs)
-// and the direct CLI (scripts/mcp-call.mjs).
+// is needed. The consumer is the stdio bridge (src/mcp-standalone.mjs);
+// scripts/mcp-call.mjs ships to installs with no src/ and inlines its own copy
+// on purpose, so it is not an importer.
 
 import { callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 
@@ -14,7 +15,7 @@ export function gatewayBaseUrl() {
     || `${DEFAULT_GATEWAY_URL}${callerRootPath(loadOrCreateCallerKey())}`;
 }
 
-export async function requestMcp(baseUrl, method, params) {
+async function requestMcp(baseUrl, method, params) {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
@@ -38,11 +39,6 @@ export async function requestMcp(baseUrl, method, params) {
     throw new Error(message.error.message || JSON.stringify(message.error));
   }
   return message.result;
-}
-
-export async function listMcpTools(baseUrl = gatewayBaseUrl()) {
-  const result = await requestMcp(baseUrl, "tools/list", {});
-  return result.tools || [];
 }
 
 // Returns the tool result text; when that text is itself JSON the parsed value
