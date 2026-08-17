@@ -13,12 +13,6 @@ const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCEN
 
 export { CONTEXT_WINDOW, DEEPSEEK_CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
-// The fixed model pair the Trial mode runs on. Both live in the opencode-go profile
-// (zen free endpoint, same OpenCode token); Trial is a mode over that profile, not a
-// new upstream, so these ids are the only thing Trial touches at runtime.
-export const TRIAL_MAIN_MODEL = "deepseek-v4-flash-free";
-export const TRIAL_VISION_MODEL = "mimo-v2.5-free";
-
 const DEEPSEEK_REASONING_LEVELS = [
   { effort: "none", description: "No reasoning; direct responses only" },
   { effort: "minimal", description: "Barely any reasoning; fastest replies" },

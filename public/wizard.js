@@ -5,7 +5,7 @@
 // import app.js/i18n.js and never collides with the dashboard's own modules.
 // The flow is the four-user decision table:
 //   GPT subscription?  x  OpenCode/third-party account (none / free / paid)
-//   -> recommended OFF / TRIAL / ON (+ nativeMerge persistence for subscribers).
+//   -> recommended OFF / ON (+ nativeMerge persistence for subscribers).
 // Everything it writes goes through the same APIs the dashboard uses:
 //   GET  /api/onboarding          (prefill + first-run flag)
 //   POST /api/config/mode         (apply mode + nativeMerge)
@@ -34,7 +34,6 @@
       "wizard.autostartOff": "Off",
       "wizard.autostartUnsupported": "Unsupported",
       "wizard.modeOff": "Off",
-      "wizard.modeTrial": "Trial",
       "wizard.modeOn": "On",
       "wizard.start": "Get started",
       "wizard.skip": "Skip for now",
@@ -64,11 +63,9 @@
       "wizard.skipTitle": "Skip setup",
       "wizard.skipBody": "Your Codex stays as it is. Re-run this guide anytime from Settings.",
       "reco.onMode": "Mode: ON",
-      "reco.trialMode": "Mode: TRIAL (free)",
       "reco.offMode": "Mode: OFF (unchanged)",
       "reco.catalogFull": "Full OpenCode Go catalog",
       "reco.catalogProvider": "Full catalog for the configured provider",
-      "reco.catalogTrial": "Only the two free zen models",
       "reco.nativeOn": "Native GPT models stay in the picker",
       "reco.nativeOff": "Native GPT models hidden (no subscription)",
       "reco.nativeKeep": "Codex keeps using your ChatGPT setup",
@@ -79,11 +76,8 @@
       "reco.paidNoGpt": "OpenCode Go only (GPT models hidden)",
       "reco.providerGpt": "Configured API with native GPT models",
       "reco.providerNoGpt": "Configured API only (GPT models hidden)",
-      "reco.trial": "Free trial on the two zen-free models",
       "reco.offGpt": "Keep your ChatGPT setup (OFF)",
       "reco.guide": "No third-party account yet",
-      "warn.noToken": "No OpenCode Go token detected.",
-      "warn.noTokenHint": "Add it in Settings or register first, then apply.",
       "warn.noProviderToken": "No provider token detected.",
       "warn.noProviderTokenHint": "Add an OpenCode Go, DeepSeek, or custom provider key in Settings, then apply.",
       "warn.register": "Register OpenCode Go",
@@ -112,7 +106,6 @@
       "wizard.autostartOff": "关闭",
       "wizard.autostartUnsupported": "不支持",
       "wizard.modeOff": "关闭",
-      "wizard.modeTrial": "试用",
       "wizard.modeOn": "开启",
       "wizard.start": "开始设置",
       "wizard.skip": "暂时跳过",
@@ -142,10 +135,8 @@
       "wizard.skipTitle": "跳过设置",
       "wizard.skipBody": "Codex 保持当前配置不变。之后可随时从设置中重新运行本引导。",
       "reco.onMode": "模式：开启",
-      "reco.trialMode": "模式：试用（免费）",
       "reco.offMode": "模式：关闭（保持原样）",
       "reco.catalogFull": "OpenCode Go 全量模型目录",
-      "reco.catalogTrial": "仅两个 zen 免费模型",
       "reco.nativeOn": "选择器中保留原生 GPT 模型",
       "reco.nativeOff": "隐藏原生 GPT 模型（无订阅）",
       "reco.nativeKeep": "Codex 继续使用你的 ChatGPT 原生配置",
@@ -154,11 +145,8 @@
       "reco.rerun": "之后从设置中重新运行本引导",
       "reco.paidGpt": "OpenCode Go + 原生 GPT 模型",
       "reco.paidNoGpt": "仅 OpenCode Go（隐藏 GPT 模型）",
-      "reco.trial": "两个 zen 免费模型的免费试用",
       "reco.offGpt": "保持 ChatGPT 原生配置（关闭）",
       "reco.guide": "还没有第三方账号",
-      "warn.noToken": "未检测到 OpenCode Go 令牌。",
-      "warn.noTokenHint": "请先在设置中添加，或先注册，然后再应用。",
       "warn.register": "注册 OpenCode Go",
       "warn.openSettings": "打开设置",
       "warn.applyDisabled": "配置令牌后即可应用。",
@@ -185,7 +173,6 @@
       "wizard.autostartOff": "オフ",
       "wizard.autostartUnsupported": "非対応",
       "wizard.modeOff": "オフ",
-      "wizard.modeTrial": "トライアル",
       "wizard.modeOn": "オン",
       "wizard.start": "はじめる",
       "wizard.skip": "あとで",
@@ -215,10 +202,8 @@
       "wizard.skipTitle": "セットアップをスキップ",
       "wizard.skipBody": "Codex の設定はそのままです。このガイドはいつでも設定から再実行できます。",
       "reco.onMode": "モード：オン",
-      "reco.trialMode": "モード：トライアル（無料）",
       "reco.offMode": "モード：オフ（変更なし）",
       "reco.catalogFull": "OpenCode Go 全カタログ",
-      "reco.catalogTrial": "無料の zen モデル2つのみ",
       "reco.nativeOn": "ネイティブ GPT モデルを選択肢に保持",
       "reco.nativeOff": "ネイティブ GPT モデルを非表示（サブスクなし）",
       "reco.nativeKeep": "Codex は ChatGPT の設定を引き続き使用",
@@ -227,11 +212,8 @@
       "reco.rerun": "その後、設定からこのガイドを再実行",
       "reco.paidGpt": "OpenCode Go + ネイティブ GPT モデル",
       "reco.paidNoGpt": "OpenCode Go のみ（GPT モデル非表示）",
-      "reco.trial": "無料の zen モデル2つのトライアル",
       "reco.offGpt": "ChatGPT の設定を維持（オフ）",
       "reco.guide": "サードパーティのアカウントがまだない",
-      "warn.noToken": "OpenCode Go トークンが検出されませんでした。",
-      "warn.noTokenHint": "設定で追加するか、先に登録してから適用してください。",
       "warn.register": "OpenCode Go に登録",
       "warn.openSettings": "設定を開く",
       "warn.applyDisabled": "トークンを設定すると適用できるようになります。",
@@ -258,7 +240,6 @@
       "wizard.autostartOff": "Désactivé",
       "wizard.autostartUnsupported": "Non pris en charge",
       "wizard.modeOff": "Désactivé",
-      "wizard.modeTrial": "Essai",
       "wizard.modeOn": "Activé",
       "wizard.start": "Commencer",
       "wizard.skip": "Plus tard",
@@ -288,10 +269,8 @@
       "wizard.skipTitle": "Ignorer la configuration",
       "wizard.skipBody": "Votre Codex reste tel quel. Vous pouvez relancer ce guide à tout moment depuis les Paramètres.",
       "reco.onMode": "Mode : ACTIVÉ",
-      "reco.trialMode": "Mode : ESSAI (gratuit)",
       "reco.offMode": "Mode : DÉSACTIVÉ (inchangé)",
       "reco.catalogFull": "Catalogue complet OpenCode Go",
-      "reco.catalogTrial": "Seulement les deux modèles zen gratuits",
       "reco.nativeOn": "Les modèles GPT natifs restent dans le sélecteur",
       "reco.nativeOff": "Modèles GPT natifs masqués (sans abonnement)",
       "reco.nativeKeep": "Codex continue d'utiliser votre configuration ChatGPT",
@@ -300,11 +279,8 @@
       "reco.rerun": "Relancez ensuite ce guide depuis les Paramètres",
       "reco.paidGpt": "OpenCode Go avec modèles GPT natifs",
       "reco.paidNoGpt": "OpenCode Go uniquement (modèles GPT masqués)",
-      "reco.trial": "Essai gratuit sur les deux modèles zen gratuits",
       "reco.offGpt": "Conserver votre configuration ChatGPT (DÉSACTIVÉ)",
       "reco.guide": "Aucun compte tiers pour l'instant",
-      "warn.noToken": "Aucun jeton OpenCode Go détecté.",
-      "warn.noTokenHint": "Ajoutez-le dans les Paramètres ou inscrivez-vous d'abord, puis appliquez.",
       "warn.register": "S'inscrire à OpenCode Go",
       "warn.openSettings": "Ouvrir les Paramètres",
       "warn.applyDisabled": "L'application se débloque une fois un jeton configuré.",
@@ -331,7 +307,6 @@
       "wizard.autostartOff": "Desactivado",
       "wizard.autostartUnsupported": "No compatible",
       "wizard.modeOff": "Desactivado",
-      "wizard.modeTrial": "Prueba",
       "wizard.modeOn": "Activado",
       "wizard.start": "Empezar",
       "wizard.skip": "Ahora no",
@@ -361,10 +336,8 @@
       "wizard.skipTitle": "Omitir configuración",
       "wizard.skipBody": "Tu Codex permanece como está. Puedes volver a ejecutar esta guía en cualquier momento desde Ajustes.",
       "reco.onMode": "Modo: ACTIVADO",
-      "reco.trialMode": "Modo: PRUEBA (gratis)",
       "reco.offMode": "Modo: DESACTIVADO (sin cambios)",
       "reco.catalogFull": "Catálogo completo de OpenCode Go",
-      "reco.catalogTrial": "Solo los dos modelos zen gratuitos",
       "reco.nativeOn": "Los modelos GPT nativos permanecen en el selector",
       "reco.nativeOff": "Modelos GPT nativos ocultos (sin suscripción)",
       "reco.nativeKeep": "Codex sigue usando tu configuración de ChatGPT",
@@ -373,11 +346,8 @@
       "reco.rerun": "Luego vuelve a ejecutar esta guía desde Ajustes",
       "reco.paidGpt": "OpenCode Go con modelos GPT nativos",
       "reco.paidNoGpt": "Solo OpenCode Go (modelos GPT ocultos)",
-      "reco.trial": "Prueba gratuita de los dos modelos zen gratuitos",
       "reco.offGpt": "Conservar tu configuración de ChatGPT (DESACTIVADO)",
       "reco.guide": "Aún no hay cuenta de terceros",
-      "warn.noToken": "No se detectó ningún token de OpenCode Go.",
-      "warn.noTokenHint": "Añádelo en Ajustes o regístrate primero y luego aplica.",
       "warn.register": "Regístrate en OpenCode Go",
       "warn.openSettings": "Abrir Ajustes",
       "warn.applyDisabled": "Aplicar se desbloquea cuando se configura un token.",
@@ -483,13 +453,11 @@
   .wz-reco { border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
     background: rgba(16,27,38,.8); }
   .wz-reco.on { border-color: rgba(72,214,160,.4); }
-  .wz-reco.trial { border-color: rgba(255,138,201,.4); }
   .wz-reco.off { border-color: rgba(80,183,255,.35); }
   .wz-reco h3 { margin: 0 0 10px; font-size: 15px; line-height: 1.3; }
   .wz-reco h3::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
     margin-right: 9px; background: var(--blue); }
   .wz-reco.on h3::before { background: var(--green); }
-  .wz-reco.trial h3::before { background: #ff8ac9; }
   .wz-reco.off h3::before { background: var(--blue); }
   .wz-reco ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; color: var(--muted); font-size: 13px; line-height: 1.5; }
   .wz-warning { margin-top: 12px; border: 1px solid rgba(247,185,85,.45); border-radius: 10px; padding: 10px 12px;
@@ -703,8 +671,8 @@
   function recommendationFor() {
     const goToken = Boolean(state.onboard?.tokenConfigured?.["opencode-go"]);
     // ON mode can be served by any provider token (the dashboard lets the user
-    // pick which provider owns the main model); TRIAL pins the zen-free pair,
-    // which only the OpenCode token can authenticate.
+    // pick which provider owns the main model); free zen models are ordinary
+    // selectable entries that also route through ON once reachable.
     const anyToken = Boolean(state.onboard?.anyTokenConfigured);
     if (state.goTier === "paid") {
       return state.hasGpt
@@ -721,9 +689,9 @@
     }
     if (state.goTier === "free") {
       return {
-        mode: "trial", nativeMerge: state.hasGpt, tokenNeeded: !goToken, variant: "trial",
-        title: L("reco.trial"),
-        bullets: [L("reco.trialMode"), L("reco.catalogTrial"), L("reco.nativeOff")],
+        mode: "on", nativeMerge: state.hasGpt, tokenNeeded: !goToken, variant: "on",
+        title: L("reco.providerNoGpt"),
+        bullets: [L("reco.onMode"), L("reco.catalogProvider"), L("reco.nativeOff")],
       };
     }
     return state.hasGpt
@@ -777,7 +745,7 @@
     );
     body.append(factsWrap);
 
-    const modeLabel = { off: L("wizard.modeOff"), trial: L("wizard.modeTrial"), on: L("wizard.modeOn") };
+    const modeLabel = { off: L("wizard.modeOff"), on: L("wizard.modeOn") };
     const modeHint = document.createElement("p");
     modeHint.textContent = `${L("wizard.currentMode")}: ${modeLabel[state.onboard?.mode] || modeLabel.off}`;
     body.append(modeHint);
@@ -882,9 +850,9 @@
       const warning = document.createElement("div");
       warning.className = "wz-warning";
       const strong = document.createElement("strong");
-      strong.textContent = L(rec.mode === "trial" ? "warn.noToken" : "warn.noProviderToken");
+      strong.textContent = L("warn.noProviderToken");
       const hint = document.createElement("span");
-      hint.textContent = L(rec.mode === "trial" ? "warn.noTokenHint" : "warn.noProviderTokenHint");
+      hint.textContent = L("warn.noProviderTokenHint");
       const row = document.createElement("div");
       row.className = "wz-warn-row";
       const register = document.createElement("a");

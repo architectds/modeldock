@@ -641,7 +641,7 @@ function render(data) {
   status.className = `status-pill ${ready ? "ready" : "error"}`;
   status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
   renderModelOptions(data);
-  renderSubagent(data.subagent, { trial: Boolean(data.config?.trial) });
+  renderSubagent(data.subagent);
   set("uptime", "v" + (data.update?.currentVersion || "") + " " + t("status.uptime") + " " + uptime(data.uptimeMs));
   set("main-model", data.config.routeModel || data.config.mainModel);
   if (data.config.routeProviderLabel || data.config.mainProviderLabel) set("route-provider", data.config.routeProviderLabel || data.config.mainProviderLabel);
@@ -815,7 +815,7 @@ function renderModelOptions(data) {
       : selectedVisionProvider;
     fillSelect(visionProviderSelect, visionProviders, {
       value: wanted,
-      disabled: !visionProviders.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial),
+      disabled: !visionProviders.length || modelBusy,
     });
   }
   const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
@@ -826,7 +826,7 @@ function renderModelOptions(data) {
     value: selected.visionModel,
     label: (model) => (model.tierLabel ? `${model.label} (${model.tierLabel})` : model.label),
     data: (model) => ({ provider: model.provider, tier: model.visionTier }),
-    disabled: !visionModels.length || modelBusy || currentMode === "trial" || Boolean(data.config?.trial),
+    disabled: !visionModels.length || modelBusy,
   });
 }
 
@@ -843,7 +843,7 @@ function renderSubagent(payload, options = {}) {
   if (!providerSelect || !modelSelect) return;
   const providers = payload.providers || [];
   const entries = payload.options || [];
-  const disabled = !entries.length || modelBusy || currentMode === "trial" || Boolean(options.trial);
+  const disabled = !entries.length || modelBusy;
   const provider = fillSelect(providerSelect, providers, {
     value: payload.selectedProvider || providers[0]?.id || "",
     placeholder: false,
@@ -899,7 +899,7 @@ async function saveSubagent() {
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Subagent update ${response.status}`);
-    renderSubagent(body, { trial: Boolean(lastData?.config?.trial) });
+    renderSubagent(body);
     pollConfig().catch(() => {});
   } catch (error) {
     window.alert(error.message);
@@ -1016,9 +1016,9 @@ function renderModeSegments(mode) {
 
 function renderConfigSwitch(data) {
   switchState = data;
-  const mode = data.enabled ? (data.trial ? "trial" : "on") : "off";
+  const mode = data.enabled ? "on" : "off";
   renderModeSegments(mode);
-  set("switch-description", mode === "trial" ? t("switch.descTrial") : (data.enabled ? t("switch.descEnabled") : t("switch.descDisabled")));
+  set("switch-description", data.enabled ? t("switch.descEnabled") : t("switch.descDisabled"));
   set("switch-default", `${t("switch.mode")} - ${t("switch." + mode)}`);
   const message = $("switch-message");
   message.className = "";
@@ -1056,7 +1056,7 @@ async function setMode(mode) {
     const message = $("switch-message");
     message.textContent = error.message;
     message.className = "error";
-    renderModeSegments(switchState ? (switchState.enabled ? (switchState.trial ? "trial" : "on") : "off") : "off");
+    renderModeSegments(switchState ? (switchState.enabled ? "on" : "off") : "off");
   } finally {
     switchBusy = false;
     renderModeSegments(currentMode);

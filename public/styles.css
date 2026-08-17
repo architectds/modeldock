@@ -48,7 +48,6 @@ h2 { margin: 0; font-size: 17px; }
 .mode-segment { border: 0; border-radius: 99px; padding: 6px 12px; color: var(--muted); background: transparent; font: 700 10px ui-monospace, monospace; text-transform: uppercase; cursor: pointer; transition: color .2s ease, background .2s ease; }
 .mode-segment:hover { color: var(--text); background: rgba(80,183,255,.1); }
 .mode-segment.active { color: #fff; background: rgba(80,183,255,.22); }
-.mode-segment.active[data-mode="trial"] { background: rgba(255,138,201,.2); }
 .mode-segment.active[data-mode="on"] { background: rgba(72,214,160,.2); }
 .mode-segment:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .mode-segment:disabled { opacity: .48; cursor: wait; }

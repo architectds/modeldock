@@ -1265,7 +1265,7 @@ export function upstreamTargetFor(config, model) {
     model: upstreamModel,
     url: `${baseUrl.replace(/\/+$/, "")}/responses`,
     token: config.tokens?.["opencode-go"] || "",
-    // Zen free tier: failure copy should carry trial-mode guidance instead of the
+    // Zen free tier: failure copy should carry free-tier guidance instead of the
     // generic hint (see error-translation.mjs FREE_HINTS).
     free: Boolean(entry?.free),
   };

@@ -25,7 +25,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -257,16 +257,8 @@ function onModeSelection(services) {
   };
 }
 
-// Trial mode narrows the dashboard options to the fixed free pair so the pickers
-// and route card cannot advertise paid models while the free experience runs.
-function visibleModelOptions(config, options) {
-  if (!config.trialMode) return options;
-  const trial = new Set([TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL]);
-  return options.filter((entry) => trial.has(bareModelId(entry.id)));
-}
-
 function modelsPayload(services) {
-  const options = visibleModelOptions(services.config, modelOptions(services.config, services.config.profileId));
+  const options = modelOptions(services.config, services.config.profileId);
   const selected = services.modelSelection;
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
@@ -417,8 +409,6 @@ function statusPayload(services) {
     ready: mainTokenReady,
     config: {
       ...publicConfig({ ...config, mainModel: selected.mainModel, visionModel: selected.visionModel }),
-      // Trial mode marker for the dashboard's OFF/TRIAL/ON mode picker.
-      trial: Boolean(config.trialMode),
       // Selection-aware routing facts for the route card and forwarding map: which
       // provider owns the selected main model, which base URL and wire style it hits.
       mainProvider,
@@ -1277,7 +1267,6 @@ export function createApp(services = createServices()) {
   }));
   app.get("/api/config", jsonRoute("config_status_error", async () => ({
     ...(await configSwitcher.status()),
-    trial: Boolean(config.trialMode),
   })));
 
   const mutateConfig = configMutationGuard(config, services.callerKey);
@@ -1298,55 +1287,48 @@ export function createApp(services = createServices()) {
   app.post("/api/config/enable", mutateConfig, configAction("enable"));
   app.post("/api/config/disable", mutateConfig, configAction("disable"));
   app.post("/api/config/restart-ack", mutateConfig, configAction("acknowledgeRestart"));
-  // Three-way mode switch (OFF / TRIAL / ON). OFF and ON reuse the existing switch
-  // operations; TRIAL additionally locks the modelSelection to the zen-free pair and
-  // rewrites the .env so a restart keeps the trial configuration. The catalog file is
-  // refreshed immediately so the Codex App picker narrows to the free pair too.
+  // Two-way mode switch (OFF / ON). ON enables the managed Codex config with a
+  // configured provider; free zen models are ordinary selectable entries and
+  // still require the provider to be reachable, so there is no separate trial
+  // mode. The catalog file is refreshed immediately so the App picker follows.
   app.post("/api/config/mode", mutateConfig, async (req, res) => {
     const mode = String(req.body?.mode || "");
-    if (mode !== "off" && mode !== "trial" && mode !== "on") {
-      return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off', 'trial' or 'on'." } });
+    if (mode !== "off" && mode !== "on") {
+      return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off' or 'on'." } });
     }
     try {
       const run = configMutationQueue.then(async () => {
         let result;
         // Wizard-managed native-GPT merge opt-out (no ChatGPT subscription). It is a
-        // persistent property of the account, so it is applied on every enabling mode
-        // (trial included): a non-subscriber who later moves trial -> on must not get
-        // the native GPT catalog back. "0"/"false"/"off" are accepted for curl users.
+        // persistent property of the account, so it is applied on every enabling mode.
+        // "0"/"false"/"off" are accepted for curl users.
         const nativeMergeRaw = req.body?.nativeMerge;
         const nativeMerge = nativeMergeRaw === undefined
           ? undefined
           : !["0", "false", "off"].includes(String(nativeMergeRaw).toLowerCase());
         if (mode === "off") {
           result = await configSwitcher.disable();
-          config.trialMode = false;
-          writeEnvFile({ MODELDOCK_TRIAL: "0" }, config.envFile);
         } else {
-          let onSelection = null;
-          let previousSelection = null;
-          if (mode === "on") {
-            onSelection = onModeSelection(services);
-            if (!onSelection) {
-              const error = new Error("Configure a provider token before enabling ON mode.");
-              error.code = "provider_token_required";
-              throw error;
-            }
-            previousSelection = {
-              profile: config.profile,
-              profileId: config.profileId,
-              mainModel: config.mainModel,
-              visionModel: config.visionModel,
-              selectedMainModel: services.modelSelection.mainModel,
-              selectedVisionModel: services.modelSelection.visionModel,
-            };
-            config.profile = onSelection.profile;
-            config.profileId = onSelection.providerId;
-            config.mainModel = onSelection.mainModel;
-            config.visionModel = onSelection.visionModel;
-            services.modelSelection.mainModel = onSelection.mainModel;
-            services.modelSelection.visionModel = onSelection.visionModel;
+          const onSelection = onModeSelection(services);
+          if (!onSelection) {
+            const error = new Error("Configure a provider token before enabling ON mode.");
+            error.code = "provider_token_required";
+            throw error;
           }
+          const previousSelection = {
+            profile: config.profile,
+            profileId: config.profileId,
+            mainModel: config.mainModel,
+            visionModel: config.visionModel,
+            selectedMainModel: services.modelSelection.mainModel,
+            selectedVisionModel: services.modelSelection.visionModel,
+          };
+          config.profile = onSelection.profile;
+          config.profileId = onSelection.providerId;
+          config.mainModel = onSelection.mainModel;
+          config.visionModel = onSelection.visionModel;
+          services.modelSelection.mainModel = onSelection.mainModel;
+          services.modelSelection.visionModel = onSelection.visionModel;
           try {
             result = await configSwitcher.enable();
           } catch (error) {
@@ -1360,38 +1342,17 @@ export function createApp(services = createServices()) {
             }
             throw error;
           }
-          if (mode === "trial") {
-            config.trialMode = true;
-            // The catalog is fully owner-qualified, so the selected pair is
-            // stored and persisted in its published form too - a bare trial id
-            // would make the dashboard selected value disagree with the picker
-            // until the next restart.
-            const trialMain = publishedSlugFor(config.profileId, TRIAL_MAIN_MODEL);
-            const trialVision = publishedSlugFor(config.profileId, TRIAL_VISION_MODEL);
-            services.modelSelection.mainModel = trialMain;
-            services.modelSelection.visionModel = trialVision;
-            const trialEnv = {
-              MODELDOCK_TRIAL: "1",
-              MODELDOCK_VISION_MODEL: trialVision,
-            };
-            if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
-            writeEnvFile(trialEnv, config.envFile);
-            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
-          } else {
-            config.trialMode = false;
-            const onEnv = {
-              MODELDOCK_TRIAL: "0",
-              MODELDOCK_PROFILE: onSelection.providerId,
-              MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
-            };
-            if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
-            writeEnvFile(onEnv, config.envFile);
-            if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
-          }
+          const onEnv = {
+            MODELDOCK_PROFILE: onSelection.providerId,
+            MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
+          };
+          if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
+          writeEnvFile(onEnv, config.envFile);
+          if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           services.writeCatalogFile();
         }
         recordConfigAction(metrics, `config_mode_${mode}`, { ok: true });
-        return { ...result, trial: Boolean(config.trialMode) };
+        return result;
       });
       configMutationQueue = run.catch(() => {});
       return res.json(await run);
@@ -1411,13 +1372,12 @@ export function createApp(services = createServices()) {
       onboarded: Boolean(status.onboarded),
       onboardedAt: status.onboardedAt || null,
       nativeMerge: config.nativeMerge !== false,
-      mode: status.enabled ? (config.trialMode ? "trial" : "on") : "off",
+      mode: status.enabled ? "on" : "off",
       tokenConfigured: {
         "opencode-go": Boolean(config.tokens?.["opencode-go"]),
         "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
       },
-      // Any provider token unlocks the ON mode (the wizard's Apply gate); the
-      // trial pair still requires the OpenCode token specifically.
+      // Any provider token unlocks the ON mode (the wizard's Apply gate).
       anyTokenConfigured: anyProviderTokenConfigured(config),
       autostart: settingsPayload(services).autostart,
     };
@@ -1443,13 +1403,7 @@ export function createApp(services = createServices()) {
     let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
     let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
     const nextProvider = req.body?.provider;
-    // Trial mode pins the free pair and the opencode-go provider; only the mode
-    // switch can move models while it is active.
-    if (config.trialMode) {
-      nextMain = qualify(TRIAL_MAIN_MODEL);
-      nextVision = qualify(TRIAL_VISION_MODEL);
-    }
-    if (!config.trialMode && nextProvider !== undefined && nextProvider !== config.profileId) {
+    if (nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
       if (!known) return res.status(400).json({ error: { type: "invalid_provider", message: `Unknown provider: ${nextProvider}` } });
       config.profile = profileById(nextProvider);

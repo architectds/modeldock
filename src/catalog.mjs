@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bareModelId, modelEntryFor, profileById, publishedSlugFor, TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL } from "./profiles.mjs";
+import { bareModelId, modelEntryFor, profileById, publishedSlugFor } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 
@@ -90,13 +90,6 @@ export function catalogFor(config) {
     return enabledProviderIds.has(owner)
       && !(modelEntry?.endpoint === "chat" || modelEntry?.status === "unavailable");
   });
-  // Trial mode publishes exactly the fixed free pair and never merges the native
-  // GPT catalog: the free experience must not advertise paid models.
-  if (config.trialMode) {
-    const trialIds = new Set([TRIAL_MAIN_MODEL, TRIAL_VISION_MODEL]);
-    const trialModels = models.filter((entry) => trialIds.has(bareModelId(entry.slug)));
-    return { ...catalog, models: orderCatalogByProvider(trialModels) };
-  }
   // Wizard-managed opt-out: without a GPT subscription the native GPT models are
   // "see it, can't use it" noise (every request 401s), so subscribers keep the
   // merge and everyone else gets the curated catalog only.

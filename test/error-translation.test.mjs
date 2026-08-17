@@ -45,7 +45,7 @@ test("translateUpstreamError names the provider and appends the right hint", () 
   assert.match(empty.body.error.message, /Upstream returned 500/);
 });
 
-test("free upstream errors carry trial-mode guidance instead of the generic hint", () => {
+test("free upstream errors carry free-tier guidance instead of the generic hint", () => {
   const quota = translateUpstreamError({ provider: "opencode-go", status: 503, bodyText: '{"error":{"message":"free quota exhausted"}}', free: true });
   assert.equal(quota.classification, "quota_exhausted");
   assert.match(quota.body.error.message, /zen free endpoint/);

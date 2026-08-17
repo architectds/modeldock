@@ -352,7 +352,7 @@ test("config API defaults off and performs reversible user-triggered switching",
   assert.equal(await readFile(configPath, "utf8"), original);
 });
 
-test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in trial", async (t) => {
+test("config mode endpoint switches OFF / ON", async (t) => {
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-mode-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));
   const configPath = path.join(codexHome, "config.toml");
@@ -370,34 +370,11 @@ test("config mode endpoint switches OFF / TRIAL / ON and locks the free pair in 
   const invalid = await post({ mode: "bogus" });
   assert.equal(invalid.status, 400);
 
-  const trial = await (await post({ mode: "trial" })).json();
-  assert.equal(trial.enabled, true);
-  assert.equal(trial.trial, true);
-  assert.equal(trial.restartRequired, true);
-  assert.equal(instance.services.modelSelection.mainModel, "deepseek-v4-flash-free@opencode-go");
-  assert.equal(instance.services.modelSelection.visionModel, "mimo-v2.5-free@opencode-go");
-  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_TRIAL=1/);
-
-  const trialStatus = await (await fetch(`${instance.base}/api/status`)).json();
-  assert.equal(trialStatus.config.trial, true);
-  assert.deepEqual(trialStatus.models.options.map((model) => model.id).sort(), ["deepseek-v4-flash-free@opencode-go", "mimo-v2.5-free@opencode-go"]);
-
-  // /api/models cannot escape the trial pair while trial is active.
-  const locked = await (await fetch(`${instance.base}/api/models`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }),
-  })).json();
-  assert.deepEqual(locked.selected, { mainModel: "deepseek-v4-flash-free@opencode-go", visionModel: "mimo-v2.5-free@opencode-go" });
-
   const on = await (await post({ mode: "on" })).json();
   assert.equal(on.enabled, true);
-  assert.equal(on.trial, false);
-  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_TRIAL=0/);
 
   const off = await (await post({ mode: "off" })).json();
   assert.equal(off.enabled, false);
-  assert.equal(off.trial, false);
   assert.equal(await readFile(configPath, "utf8"), original, "off restores the original Codex config");
 });
 
@@ -437,12 +414,6 @@ test("config mode ON writes the wizard nativeMerge switch and drops native GPT m
   assert.equal(JSON.parse(await readFile(catalogFile, "utf8")).models.some((model) => model.slug === "gpt-5.6-luna"),
     false, "nativeMerge=false drops the native GPT model from the catalog file");
 
-  // Trial also persists the switch: a non-subscriber moving trial -> on must not get
-  // the native GPT catalog back.
-  const trial = await (await post({ mode: "trial", nativeMerge: false })).json();
-  assert.equal(trial.trial, true);
-  assert.match(await readFile(envFile, "utf8"), /MODELDOCK_NATIVE_MERGE=0/);
-  assert.equal(instance.services.config.nativeMerge, false, "trial keeps the in-memory switch too");
 });
 
 test("onboarding endpoint prefills, completes, and persists the flag across mode switches", async (t) => {
@@ -476,7 +447,7 @@ test("onboarding endpoint prefills, completes, and persists the flag across mode
   await fetch(`${instance.base}/api/config/mode`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mode: "trial" }),
+    body: JSON.stringify({ mode: "on" }),
   });
   await fetch(`${instance.base}/api/config/mode`, {
     method: "POST",
@@ -484,7 +455,7 @@ test("onboarding endpoint prefills, completes, and persists the flag across mode
     body: JSON.stringify({ mode: "off" }),
   });
   const survived = await (await fetch(`${instance.base}/api/onboarding`)).json();
-  assert.equal(survived.onboarded, true, "trial/off mode switches do not reset the onboarding flag");
+  assert.equal(survived.onboarded, true, "on/off mode switches do not reset the onboarding flag");
 });
 
 test("a just-saved OpenCode token is visible to the wizard's onboarding check in the same session", async (t) => {

@@ -52,7 +52,7 @@ export function sanitizeEnvValue(value) {
 
 // One spelling of "on" and one of "off" for every boolean env var. These were
 // written out per flag and drifted: MODELDOCK_CUSTOM_MAIN accepted "true" while
-// MODELDOCK_TRIAL only accepted "1", and MODELDOCK_MEMORY honoured "no" while
+// MODELDOCK_MEMORY honoured "no" while
 // MODELDOCK_MD_MEMORY did not - so the same word switched one feature and was
 // silently ignored by the next.
 const TRUE_WORDS = new Set(["1", "true", "on", "yes"]);
@@ -374,10 +374,8 @@ export function loadConfig() {
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a
-  // bare response.completed). Trial is the fixed free pair and OFF has no native
-  // GPT to fall back on, so both keep the free vision model unless explicitly
-  // overridden via MODELDOCK_VISION_MODEL.
-  const trialMode = envOn("MODELDOCK_TRIAL");
+  // bare response.completed). OFF has no native GPT to fall back on, so it keeps
+  // the free vision model unless explicitly overridden via MODELDOCK_VISION_MODEL.
   // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
   // subscription so the picker never advertises models that 401 on request.
   // Defaults to the signed-in state when the env key is unset: a detected
@@ -388,7 +386,7 @@ export function loadConfig() {
     if (raw) return !["0", "false", "off"].includes(raw);
     return hasChatGptLogin(codexHome);
   })();
-  const defaultVisionModel = trialMode || !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
+  const defaultVisionModel = !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
   const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
   // "none" is the durable representation for a provider with no vision model.
   // An empty env value cannot represent this because it intentionally falls back
@@ -421,8 +419,8 @@ export function loadConfig() {
     opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
-    // Zen free tier (trial): the fixed free models route here instead of zen/go.
-    // Overridable so sandbox/CI can point trial at a mock upstream.
+    // Zen free tier: the free models route here instead of zen/go. Overridable
+    // so sandbox/CI can point free traffic at a mock upstream.
     zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
     goTokenSource: opencodeGoSource,
     tokens,
@@ -437,10 +435,6 @@ export function loadConfig() {
     mainModel,
     visionModel,
     visionFallbackModel,
-    // Trial mode: the fixed zen-free model pair (deepseek-v4-flash-free /
-    // mimo-v2.5-free) on the opencode-go profile with a free-only catalog and
-    // trial-specific upstream error copy. Managed by /api/config/mode.
-    trialMode,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).
