@@ -208,6 +208,14 @@ export function migrateEnvSecrets(file = envFileFor()) {
       return { file, migrated: 0, reason: "verify-failed", backup };
     }
   }
+  // The backup exists only as the rollback for the round-trip check above. Once
+  // the encrypted file verifies, it is a cleartext copy of every secret we just
+  // encrypted, so keeping it is worse than the migration it protected against.
+  try {
+    rmSync(backup, { force: true });
+  } catch {
+    // Best effort: a leftover backup is handled by pruneEnvBackups-like cleanup.
+  }
   return { file, migrated: plainSecrets.length, backup };
 }
 
