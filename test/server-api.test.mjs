@@ -597,7 +597,7 @@ test("DeepSeek-only onboarding selects a working DeepSeek main route with no vis
 
   const env = await readFile(envFile, "utf8");
   assert.match(env, /^MODELDOCK_PROFILE=deepseek-official$/m);
-  assert.match(env, /^MODELDOCK_MAIN_MODEL=deepseek-v4-flash@deepseek-official$/m);
+  assert.doesNotMatch(env, /^MODELDOCK_MAIN_MODEL=/m, "main model is derived per session, not persisted as an env slot");
   assert.match(env, /^MODELDOCK_VISION_MODEL=none$/m);
   // The routed DeepSeek selection lives in .env (the gateway's default route);
   // config.toml's top-level model stays a native slug so Codex can always

@@ -316,6 +316,20 @@ export function sessionIdsFrom(headers) {
   return { sessionId, threadId };
 }
 
+// The fallback for requests that carry no model id. Per session we remember the
+// last actual main request so a no-model continuation stays on the model the
+// user picked; until a session has seen one, the caller's bootstrap applies
+// (the native config default in the final design).
+function mainModelFor(services, sessionId) {
+  const bootstrap = services.mainModel || services.config?.mainModel || "";
+  return services.derivedFallback?.resolve?.(sessionId, bootstrap) ?? bootstrap;
+}
+
+function recordDerivedFallback(services, sessionId, route) {
+  if (!route || (route.reason !== "client_selected" && route.reason !== "default_main")) return;
+  services.derivedFallback?.record?.(sessionId, route.model);
+}
+
 // Threads created under codex-router (or our own pre-rewrite config) persist
 // merged-catalog ids of the form "<provider>/<model>". Left alone they would
 // look like native GPT slugs and get shipped to the ChatGPT backend, which
@@ -2351,7 +2365,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
-  const mainModel = services.mainModel || config.mainModel;
+  const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {
     mainModel,
@@ -2360,6 +2374,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  recordDerivedFallback(services, sessionId, route);
   // Custom/ollama backends must see the same adapted shape on the compact path
   // as on the main relay path: Codex's mid-history system/developer items
   // hoisted into a single leading system (or merged into instructions), the
@@ -2635,7 +2650,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (isCompactV2Request(payload)) {
     return relayCompaction(payload, res, services, { signal }, true);
   }
-  const mainModel = services.mainModel || config.mainModel;
+  const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
   const route = routeGatewayRequest(payload, {
     mainModel,
@@ -2644,6 +2659,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     knownModels,
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
+  recordDerivedFallback(services, sessionId, route);
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
   // Pro additionally needs the id, assistant-content, tool-history and stream

@@ -19,6 +19,7 @@ import { memoryStoreFor } from "./memory.mjs";
 import { CodexConfigSwitcher, SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
+import { createDerivedFallback } from "./derived-fallback.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
@@ -205,6 +206,16 @@ function anyProviderTokenConfigured(config) {
   return profileOptions().some((provider) => providerTokenConfigured(config, provider.id));
 }
 
+// Vision is cross-provider, but only across providers that can actually serve
+// requests once the new main provider is active. The old active profile can
+// remain enabled until the switch lands, so filter out providers that would
+// lose their "active" pass without a configured token.
+function visionOptionsAcrossProviders(config, providerId) {
+  return modelOptions(config, providerId).filter((model) =>
+    model.supportsVision && (model.provider === providerId || providerTokenConfigured(config, model.provider))
+  );
+}
+
 // Pick one complete route for ON mode. The current provider wins when it is
 // usable; otherwise the first configured provider becomes active. Main and
 // vision are selected from that same provider so a DeepSeek-only install does
@@ -229,12 +240,20 @@ function onModeSelection(services) {
     providerForModel(config, modelSelection.visionModel) === providerId
       && model.id === bareModelId(modelSelection.visionModel)
   ));
-  const vision = currentVision || visionModels[0] || null;
+  let vision = currentVision || visionModels[0] || null;
+  // Vision is deliberately cross-provider: a main provider with no vision model
+  // (e.g. DeepSeek Official) must not silently lose a vision model owned by
+  // another enabled provider.
+  if (!vision) {
+    vision = visionOptionsAcrossProviders(config, providerId)[0] || null;
+  }
   return {
     providerId,
     profile: profileById(providerId),
     mainModel: publishedSlugFor(providerId, main),
-    visionModel: vision ? publishedSlugFor(providerId, vision) : "",
+    visionModel: vision ? (vision.provider && vision.provider !== providerId
+      ? publishedSlugFor(vision.provider, vision)
+      : publishedSlugFor(providerId, vision)) : "",
   };
 }
 
@@ -893,6 +912,7 @@ export function createServices(config = loadConfig()) {
     stateDir: mutableConfig.mediaDir,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
+  const derivedFallback = createDerivedFallback();
   const services = {};
   const memoryStore = memoryStoreFor(mutableConfig);
   const upstreams = createUpstreams({
@@ -1035,7 +1055,7 @@ export function createServices(config = loadConfig()) {
     : path.join(os.homedir(), ".codex");
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
-    autostart, updater, routeAffinity, modelSelection, callerKey, nativeSlugs,
+    autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
@@ -1342,7 +1362,6 @@ export function createApp(services = createServices()) {
             services.modelSelection.visionModel = trialVision;
             const trialEnv = {
               MODELDOCK_TRIAL: "1",
-              MODELDOCK_MAIN_MODEL: trialMain,
               MODELDOCK_VISION_MODEL: trialVision,
             };
             if (nativeMerge !== undefined) trialEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
@@ -1353,7 +1372,6 @@ export function createApp(services = createServices()) {
             const onEnv = {
               MODELDOCK_TRIAL: "0",
               MODELDOCK_PROFILE: onSelection.providerId,
-              MODELDOCK_MAIN_MODEL: onSelection.mainModel,
               MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
             };
             if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
@@ -1428,9 +1446,6 @@ export function createApp(services = createServices()) {
       config.profileId = nextProvider;
       const profileModels = modelCatalogModels(config, config.profileId);
       if (!profileModels.some((entry) => entry.id === nextMain)) nextMain = profileModels[0]?.id || nextMain;
-      if (!profileModels.some((entry) => entry.id === nextVision && entry.supportsVision)) {
-        nextVision = profileModels.find((entry) => entry.supportsVision)?.id || "";
-      }
     }
     const options = modelOptions(config, config.profileId);
     const main = options.find((entry) => entry.id === nextMain);
@@ -1438,7 +1453,6 @@ export function createApp(services = createServices()) {
     if (!main || (nextVision && (!vision || !vision.supportsVision))) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be None or selected from a vision-capable model." } });
     services.modelSelection.mainModel = nextMain;
     services.modelSelection.visionModel = nextVision;
-    config.mainModel = nextMain;
     config.visionModel = nextVision;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
@@ -1613,7 +1627,6 @@ export function createApp(services = createServices()) {
       // merely adding an endpoint replace whatever the user was already running.
       // Only the un-toggle case still writes: a selection pointing at this model
       // must not dangle once the endpoint is no longer offered for that role.
-      if (!asMain && (config.mainModel || "") === qualified) updates.MODELDOCK_MAIN_MODEL = "";
       if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
       writeEnvFile(updates, config.envFile);
       config.customBaseUrl = updates.MODELDOCK_CUSTOM_BASE_URL;
@@ -1696,7 +1709,6 @@ export function createApp(services = createServices()) {
       // they pointed at an Ollama model.
       const updates = {};
       if (providerForModel(config, config.mainModel) === "ollama") {
-        updates.MODELDOCK_MAIN_MODEL = "";
         config.mainModel = "deepseek-v4-flash@opencode-go";
         services.modelSelection.mainModel = config.mainModel;
       }
