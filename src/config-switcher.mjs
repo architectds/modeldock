@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 
 // The dashboard writes this agent file into <codexHome>/agents. Codex reads that
@@ -31,6 +31,21 @@ function tomlString(value) {
 // fields live inside a sentinel block so detection and restore are exact.
 const MANAGED_BEGIN = /^\s*#\s*BEGIN\s+modeldock-managed\s*(?:#.*)?$/m;
 const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
+
+// Write a file atomically in the same directory so a crash mid-write leaves
+// either the old file or the new file, never a truncated middle state. Codex
+// reads config.toml at startup, so an in-place write that dies halfway is
+// exactly the failure that stops Codex from starting.
+async function atomicWrite(file, content) {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
+  await writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
+  try {
+    await rename(tmp, file);
+  } catch (error) {
+    await unlink(tmp).catch(() => {});
+    throw error;
+  }
+}
 // Routed slugs are always published as <model>@<provider>; native GPT slugs
 // never carry the separator. The top-level config.toml model must be a native
 // slug so Codex can start without the published catalog, so "@" is the whole
@@ -455,7 +470,7 @@ export class CodexConfigSwitcher {
     // regress). Abort before the disk write.
     assertConfigWriteSafe(managed);
     try {
-      await writeFile(this.configPath, managed, { encoding: "utf8", mode: 0o600 });
+      await atomicWrite(this.configPath, managed);
       await this.#writeState({
         version: 2,
         enabled: true,
@@ -477,7 +492,7 @@ export class CodexConfigSwitcher {
         managedHash: sha256(managed),
       });
     } catch (error) {
-      if (originalExisted) await writeFile(this.configPath, original, { encoding: "utf8", mode: 0o600 });
+      if (originalExisted) await atomicWrite(this.configPath, original);
       else await unlink(this.configPath).catch(() => {});
       throw error;
     }
@@ -504,8 +519,16 @@ export class CodexConfigSwitcher {
       if (routeActive && state.originalExisted) {
         const restored = sha256(current) === state.managedHash ? backup : mergeRestoredCodexConfig(current, backup);
         assertConfigWriteSafe(restored);
-        await writeFile(this.configPath, restored, { encoding: "utf8", mode: 0o600 });
+        await atomicWrite(this.configPath, restored);
       } else if (routeActive) await unlink(this.configPath);
+      else if (state.originalExisted && state.backupPath) {
+        // State says the managed route is active, but the file no longer carries
+        // it (a truncated/corrupt write or a manual edit). Restore the backup
+        // directly so Codex is not left with an empty or partial config.
+        const restored = await readFile(state.backupPath, "utf8");
+        assertConfigWriteSafe(restored);
+        await atomicWrite(this.configPath, restored);
+      }
       // Codex reads <codexHome>/agents at startup, so restoring config.toml is
       // not the whole of "Off": this file names a ModelDock slug under
       // model_provider = "openai", which resolves to the real OpenAI backend
@@ -528,7 +551,7 @@ export class CodexConfigSwitcher {
         restoredFromBackup: sha256(current) === state.managedHash,
       });
     } catch (error) {
-      await writeFile(this.configPath, current, { encoding: "utf8", mode: 0o600 });
+      await atomicWrite(this.configPath, current);
       throw error;
     }
     return this.status();

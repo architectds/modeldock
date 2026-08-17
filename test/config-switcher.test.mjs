@@ -400,3 +400,19 @@ test("enable and disable append audit entries to the config manifest", async (t)
   assert.ok(enabled.at <= disabled.at, "entries are append-ordered");
   assert.match(await readFile(configPath, "utf8"), /^model = "gpt-5.6-sol"/m, "disable restores the original config");
 });
+
+test("disable restores the original config after a truncated or corrupt managed write", async (t) => {
+  const cases = [
+    ["40% truncated", (managed) => managed.slice(0, Math.floor(managed.length * 0.4))],
+    ["empty file", () => ""],
+    ["managed header only", (managed) => managed.slice(0, 81)],
+  ];
+  for (const [label, take] of cases) {
+    const { configPath, switcher } = await fixture(t);
+    await switcher.enable();
+    const managed = await readFile(configPath, "utf8");
+    await writeFile(configPath, take(managed), "utf8");
+    await switcher.disable();
+    assert.equal(await readFile(configPath, "utf8"), originalConfig, `off restores the original after ${label}`);
+  }
+});

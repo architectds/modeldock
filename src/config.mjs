@@ -1,7 +1,7 @@
 import process from "node:process";
 import os from "node:os";
 import path from "node:path";
-import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
@@ -144,7 +144,14 @@ export function writeEnvFile(updates, file = envFileFor()) {
       }
     }
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, content, "utf8");
+    const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+    writeFileSync(tmp, content, "utf8");
+    try {
+      renameSync(tmp, file);
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch { /* keep the original error */ }
+      throw error;
+    }
     if (hasSecretUpdate) pruneEnvBackups(file);
     for (const [key, value] of Object.entries(updates)) {
       if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
