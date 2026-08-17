@@ -142,7 +142,9 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
             language: z.string().optional().describe("Optional language hint, e.g. zh-CN, en-US. Defaults to the installed Chinese recognizer."),
             output: z.string().optional().describe("Optional absolute file path for the intermediate WAV."),
           }),
-          annotations: { readOnlyHint: true, openWorldHint: false },
+          // Not read-only: sttTranscribe transcodes the input to a WAV with
+          // `ffmpeg -y`, at `output` when the caller supplies one.
+          annotations: { readOnlyHint: false, openWorldHint: false },
         },
         async (args) => {
           try {
