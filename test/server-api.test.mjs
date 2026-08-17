@@ -198,6 +198,52 @@ test("connecting Ollama publishes local models without changing the selected mai
   assert.equal(ollamaEntry.id, "qwen3.8-27b@ollama", "Ollama models publish as owner-qualified candidates");
 });
 
+test("switching the main provider keeps a vision model owned by another enabled provider", async (t) => {
+  const instance = await startApp({
+    tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+    mainModel: "gpt-5.6-luna@opencode-go",
+    visionModel: "kimi-k2.7-code@opencode-go",
+  });
+  t.after(instance.stop);
+
+  const switched = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider: "deepseek-official", mainModel: "deepseek-v4-flash@deepseek-official" }),
+  });
+
+  assert.equal(switched.status, 200);
+  const { selected } = await switched.json();
+  assert.equal(selected.mainModel, "deepseek-v4-flash@deepseek-official");
+  assert.equal(selected.visionModel, "kimi-k2.7-code@opencode-go");
+});
+
+test("enabling ON mode keeps a vision model owned by another enabled provider", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onmode-vision-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  await writeFile(path.join(codexHome, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
+  const instance = await startApp({
+    codexHome,
+    envFile: path.join(codexHome, "modeldock.env"),
+    profile: DEEPSEEK_OFFICIAL_PROFILE,
+    profileId: DEEPSEEK_OFFICIAL_PROFILE.id,
+    tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+    mainModel: "deepseek-v4-flash@deepseek-official",
+    visionModel: "kimi-k2.7-code@opencode-go",
+  });
+  t.after(instance.stop);
+
+  const enabled = await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "on" }),
+  });
+
+  assert.equal(enabled.status, 200);
+  assert.equal(instance.services.modelSelection.mainModel, "deepseek-v4-flash@deepseek-official");
+  assert.equal(instance.services.modelSelection.visionModel, "kimi-k2.7-code@opencode-go");
+});
+
 test("subagent API exposes routed + native options and persists the agent file", async (t) => {
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-subagent-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));
