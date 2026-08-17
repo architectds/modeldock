@@ -123,10 +123,18 @@ export function nativeModelSlugs(config) {
   return slugs;
 }
 
+// `codex --version` prints a banner - "codex-cli 0.145.0" - so the version is
+// the first dotted-numeric token, not the first token. Exported because it is
+// the only part of codexVersion() that is testable without a real binary.
+// Anything unrecognised becomes "", which callers must read as "unknown".
+export function parseCodexVersion(output) {
+  const match = /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?=\s|$)/.exec(String(output ?? "").trim());
+  return match ? match[1] : "";
+}
+
 async function codexVersion() {
   try {
-    const out = await runCodex(["--version"], 5_000);
-    return String(out || "").trim().split(/\s+/)[0] || "";
+    return parseCodexVersion(await runCodex(["--version"], 5_000));
   } catch {
     return "";
   }
