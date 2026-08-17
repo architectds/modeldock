@@ -963,7 +963,12 @@ restart_gateway() {
 }
 
 restore_native() {
-  if curl -fsS --max-time 3 -X POST "http://127.0.0.1:$PORT/api/config/disable" >/dev/null 2>&1; then
+  KEY_FILE="${MODELDOCK_STATE_DIR:-$ROOT}/caller-key"
+  KEY=""
+  if [ -f "$KEY_FILE" ]; then
+    KEY="$(tr -d '\r\n' < "$KEY_FILE")"
+  fi
+  if [ -n "$KEY" ] && curl -fsS --max-time 3 -X POST -H "x-modeldock-key: $KEY" "http://127.0.0.1:$PORT/api/config/disable" >/dev/null 2>&1; then
     echo "Codex native route restored through the running gateway."
     return
   fi

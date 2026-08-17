@@ -360,6 +360,22 @@ test("caller-key enforcement defaults to on: bare paths 401 without an explicit 
   await keyed.text();
 });
 
+test("mutating /api requires the caller key when enforcement is on", async (t) => {
+  const instance = await startApp({ goToken: null });
+  t.after(instance.stop);
+  process.env.MODELDOCK_REQUIRE_CALLER_KEY = "1";
+  t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
+  const headers = { "content-type": "application/json" };
+  const noKey = await fetch(`${instance.base}/api/models`, { method: "POST", headers, body: "{}" });
+  assert.equal(noKey.status, 401, "a no-Origin mutating /api call is refused without the caller key");
+  const withKey = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { ...headers, "x-modeldock-key": instance.services.callerKey },
+    body: "{}",
+  });
+  assert.equal(withKey.status, 200, "the caller key header passes the mutating guard");
+});
+
 test("zstd-encoded request bodies are decompressed before the relay", { skip: typeof (await import("node:zlib")).zstdCompressSync !== "function" }, async (t) => {
   const zlib = await import("node:zlib");
   let seenModel = null;

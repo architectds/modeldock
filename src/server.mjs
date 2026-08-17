@@ -516,7 +516,7 @@ async function probeSettingsToken(config, provider, token) {
   return probeCustomResponses({ baseUrl, apiKey: token, modelId: model });
 }
 
-function configMutationGuard(config) {
+function configMutationGuard(config, callerKey) {
   const allowedOrigins = new Set([
     `http://${urlHost(config.host)}:${config.port}`,
     `http://127.0.0.1:${config.port}`,
@@ -526,6 +526,16 @@ function configMutationGuard(config) {
     const origin = req.get("origin");
     if (origin && !allowedOrigins.has(origin)) {
       return res.status(403).json({ error: { type: "origin_not_allowed", message: "Config changes are allowed only from this local dashboard." } });
+    }
+    // Browsers always send Origin, so a local web page is covered above. A
+    // non-browser local caller (curl, scripts) sends no Origin; require the
+    // caller capability key when enforcement is on so the dashboard's same-origin
+    // path stays open while nothing unauthenticated can drive config writes.
+    if (!origin && isCallerKeyEnforced()) {
+      const supplied = req.get("x-modeldock-key") || "";
+      if (!callerKeyEqual(supplied, callerKey)) {
+        return res.status(401).json({ error: { type: "caller_key_required", message: "This config endpoint requires the caller key; pass x-modeldock-key." } });
+      }
     }
     if (!req.is("application/json")) {
       return res.status(415).json({ error: { type: "content_type_required", message: "Config changes require application/json." } });
@@ -1270,7 +1280,7 @@ export function createApp(services = createServices()) {
     trial: Boolean(config.trialMode),
   })));
 
-  const mutateConfig = configMutationGuard(config);
+  const mutateConfig = configMutationGuard(config, services.callerKey);
   let configMutationQueue = Promise.resolve();
   const configAction = (operation) => async (req, res) => {
     try {
