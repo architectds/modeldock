@@ -246,9 +246,13 @@ try {
 } finally {
   Stop-ProbeUpstream
   Stop-TestGateway
-  $runValue = reg.exe query $autostartKey /v $autostartName 2>$null
-  if ($LASTEXITCODE -eq 0) {
-    try { reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null } catch { }
+  try {
+    $null = reg.exe query $autostartKey /v $autostartName 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      try { reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null } catch { }
+    }
+  } catch {
+    # A missing autostart key is fine during cleanup; just leave it absent.
   }
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
