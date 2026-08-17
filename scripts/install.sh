@@ -437,24 +437,57 @@ if ($listener) {
   $ownerFile = Join-Path $stateDir "owner-$port.json"
   $forceTakeover = $args -contains "-Force"
   if (-not $forceTakeover) {
-    $owned = $false
+    # The listener command line is the ground truth: a listener that provably
+    # runs this install's gateway is ours no matter what the owner record says.
+    # The record can go stale (crash, manual start, a second instance dying
+    # with EADDRINUSE), and blocking the restart on that stale file leaves the
+    # old process serving forever. Windows can also return an empty command
+    # line for elevated processes, so when it is unreadable we fall back to the
+    # owner record matching this exact listener.
+    $listenerCommand = ""
     try {
-      if (-not (Test-Path -LiteralPath $ownerFile)) { throw "owner record is missing" }
-      $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json
+      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid" -ErrorAction Stop
+      $listenerCommand = [string]$processInfo.CommandLine
+    } catch {
+      # Treat an unreadable command line as unknown; the owner record decides.
+      $listenerCommand = ""
+    }
+    $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
+    $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
+    $listenerIsOurs = -not [string]::IsNullOrWhiteSpace($listenerCommand) -and
+        ($listenerCommand.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+         $listenerCommand.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+
+    $owner = $null
+    try {
+      if (Test-Path -LiteralPath $ownerFile) { $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json }
+    } catch {
+      # Missing or unreadable record; refusal below explains the state.
+    }
+
+    $recordMatchesListener = $false
+    if ($owner) {
       $ownerRoot = [System.IO.Path]::GetFullPath([string]$owner.root)
       $thisRoot = [System.IO.Path]::GetFullPath($root)
-      if ([int]$owner.pid -ne [int]$oldPid -or [int]$owner.port -ne $port -or $ownerRoot -ne $thisRoot) {
-        throw "owner record does not match this listener and install root"
+      $recordMatchesListener = [int]$owner.pid -eq [int]$oldPid -and [int]$owner.port -eq $port -and $ownerRoot -eq $thisRoot
+    }
+
+    if (-not $listenerIsOurs -and $recordMatchesListener -and [string]::IsNullOrWhiteSpace($listenerCommand)) {
+      Write-Status "WARNING: listener command line could not be read; trusting owner record PID $oldPid on port $port."
+      $listenerIsOurs = $true
+    }
+
+    if (-not $listenerIsOurs) {
+      if ($owner) {
+        $ownerAlive = $false
+        if (Get-Process -Id ([int]$owner.pid) -ErrorAction SilentlyContinue) { $ownerAlive = $true }
+        if ($ownerAlive -and [int]$owner.pid -ne [int]$oldPid) {
+          Write-Status "ERROR: refusing to stop PID $oldPid on port $port because port $port is recorded as owned by live PID $($owner.pid) (root: $($owner.root))."
+          Write-Status "Re-run with -Force to take the port over deliberately."
+          exit 2
+        }
       }
-      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid" -ErrorAction Stop
-      $commandLine = [string]$processInfo.CommandLine
-      $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
-      $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
-      $owned = $commandLine.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-          $commandLine.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
-      if (-not $owned) { throw "listener command does not run this ModelDock install" }
-    } catch {
-      Write-Status "ERROR: refusing to stop PID $oldPid on port $port because ownership could not be verified: $($_.Exception.Message)"
+      Write-Status "ERROR: refusing to stop PID $oldPid on port $port because ownership could not be verified: the listener is not a ModelDock gateway from this install and the owner record is missing or stale."
       Write-Status "Re-run with -Force to take the port over deliberately."
       exit 2
     }
