@@ -538,10 +538,6 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   //    fake OpenCode upstream that proves routing relays end to end.
   const asset = readFileSync(bundle);
   const bridgeAsset = readFileSync(bridge);
-  // The content-to-video skill is mirrored from GitHub raw one file at a time;
-  // serve the same files from the repo checkout so the installer's download
-  // loop is exercised end to end.
-  const skillRoot = path.join(repoRoot, "skills", "content-to-video");
   const assetServer = createServer((req, res) => {
     if (req.url === "/modeldock.mjs") {
       res.writeHead(200, {
@@ -564,20 +560,6 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
       // installer must decode it as text or the checksum lookup fails.
       res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(text);
-    } else if (req.url.startsWith("/skills/content-to-video/")) {
-      const rel = req.url.slice("/skills/content-to-video/".length).split("/");
-      const file = path.join(skillRoot, ...rel);
-      if (existsSync(file)) {
-        const data = readFileSync(file);
-        res.writeHead(200, {
-          "content-type": "application/octet-stream",
-          "content-length": data.length,
-        });
-        res.end(data);
-      } else {
-        res.writeHead(404, { "content-type": "text/plain" });
-        res.end("not found");
-      }
     } else {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
@@ -586,7 +568,6 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   const assetPort = await listen(assetServer);
   t.after(() => assetServer.close());
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
-  const skillBaseUrl = `http://127.0.0.1:${assetPort}/skills/content-to-video`;
   const fakeUpstream = await startFakeUpstream("modeldock-relay-ok");
   t.after(() => fakeUpstream.close());
 
@@ -626,7 +607,6 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`,
     MODELDOCK_SUMS_URL: `http://127.0.0.1:${assetPort}/SHA256SUMS`,
-    MODELDOCK_SKILL_BASE_URL: skillBaseUrl,
     MODELDOCK_CODEX_HOME: codexHome,
     MODELDOCK_PORT: String(appPort),
     MODELDOCK_SKIP_OPEN: "1",
@@ -684,23 +664,12 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     );
   }
   assert.equal(readFileSync(installedBundle).length, asset.length, "bundle byte-identical");
-  // The content-to-video skill should be mirrored into the Codex skills dir.
-  const installedSkill = path.join(codexHome, "skills", "content-to-video");
-  for (const rel of [
-    "SKILL.md",
-    "agents/openai.yaml",
-    "references/sound-design.md",
-    "scripts/classify.mjs",
-  ]) {
-    assert.ok(
-      existsSync(path.join(installedSkill, rel)),
-      `content-to-video skill file should be installed: ${rel}`,
-    );
-  }
+  // The content-to-video skill is not downloaded by the installer; the install
+  // must not create the skills dir it used to mirror into.
   assert.equal(
-    readFileSync(path.join(installedSkill, "SKILL.md"), "utf8"),
-    readFileSync(path.join(skillRoot, "SKILL.md"), "utf8"),
-    "installed SKILL.md should match the repo copy",
+    existsSync(path.join(codexHome, "skills", "content-to-video")),
+    false,
+    "the installer no longer downloads content-to-video",
   );
 
   // 5. The installer already started the gateway in the background on $port. Hit

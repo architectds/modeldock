@@ -1,8 +1,8 @@
 # Model Dock For Codex
 
 Keep everything in Codex - and add DeepSeek. Give DeepSeek eyes, ears, a
-voice, a web search, a memory, and the content-to-video skill. ModelDock
-focuses on one thing: making DeepSeek work natively inside Codex.
+voice, a web search, and a memory. ModelDock focuses on one thing: making
+DeepSeek work natively inside Codex.
 
 A thin local Responses bridge for OpenCode Go and DeepSeek official, with
 native GPT passthrough and live token, latency, and trace observability.
@@ -76,9 +76,9 @@ The installer checks Node.js >= 24, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Add at
 least one provider token in Settings: [OpenCode Go](https://opencode.ai/auth),
 DeepSeek official, or a configured custom Responses endpoint.
-It also installs the `content-to-video` skill into Codex's skills directory
-(`~/.codex/skills/content-to-video`), so the video capability is available as
-soon as Codex restarts.
+The `content-to-video` skill is not downloaded by the installer; copy
+`skills/content-to-video` into Codex's skills directory manually when you want
+the video capability.
 
 ## Connect Codex
 

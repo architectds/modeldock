@@ -56,7 +56,7 @@ function writeFakeMacTools(binDir) {
 
 // Env shared by the install.sh sandbox. `fakeBin` must already exist and be
 // executable on the POSIX side before install.sh runs.
-function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, skillBaseUrl, port }) {
+function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, port }) {
   return {
     MODELDOCK_ROOT: root,
     MODELDOCK_STATE_DIR: `${root}/.modeldock`,
@@ -64,7 +64,6 @@ function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUr
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: bridgeUrl,
     MODELDOCK_SUMS_URL: sumsUrl,
-    MODELDOCK_SKILL_BASE_URL: skillBaseUrl,
     MODELDOCK_CODEX_HOME: `${root}/codex-home`,
     MODELDOCK_SKIP_OPEN: "1",
     MODELDOCK_PORT: String(port),
@@ -82,7 +81,6 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
 
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const bridge = readFileSync(path.join(repoRoot, "dist", "mcp-standalone.mjs"));
-  const skillRoot = path.join(repoRoot, "skills", "content-to-video");
   const assetServer = createServer((req, res) => {
     let data = null;
     if (req.url === "/modeldock.mjs") data = bundle;
@@ -92,11 +90,6 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
         `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
           `${createHash("sha256").update(bridge).digest("hex")}  mcp-standalone.mjs\n`,
       );
-    }
-    else if (req.url.startsWith("/skills/content-to-video/")) {
-      const rel = req.url.slice("/skills/content-to-video/".length).split("/");
-      const file = path.join(skillRoot, ...rel);
-      if (existsSync(file)) data = readFileSync(file);
     }
     if (!data) {
       res.writeHead(404);
@@ -118,7 +111,6 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
   const bridgeUrl = `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`;
   const sumsUrl = `http://127.0.0.1:${assetPort}/SHA256SUMS`;
-  const skillBaseUrl = `http://127.0.0.1:${assetPort}/skills/content-to-video`;
   const probe = createServer();
   const appPort = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
@@ -128,7 +120,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   let err = "";
   const env = isWindows
     ? undefined
-    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, skillBaseUrl, port: appPort }) };
+    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, port: appPort }) };
   if (isWindows) {
     // Drive install.sh from inside WSL: the sandbox dir is on the Windows side,
     // and the fake node/uname/launchctl shims live there too. The runner script
@@ -145,7 +137,6 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
       releaseUrl,
       bridgeUrl,
       sumsUrl,
-      skillBaseUrl,
       port: appPort,
     });
     const lines = [
@@ -202,7 +193,6 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
         releaseUrl,
         bridgeUrl,
         sumsUrl,
-        skillBaseUrl,
         port: appPort,
       }),
       MODELDOCK_RUNTIME_ONLY: "1",
@@ -271,11 +261,11 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   ]) {
     assert.ok(existsSync(file), `${path.basename(file)} should be laid out by the installer`);
   }
-  // The content-to-video skill should be mirrored into the Codex skills dir.
-  for (const rel of ["SKILL.md", "references/sound-design.md", "scripts/classify.mjs"]) {
-    assert.ok(
-      existsSync(path.join(installDir, "codex-home", "skills", "content-to-video", rel)),
-      `content-to-video skill file should be installed (${rel})`,
-    );
-  }
+  // The content-to-video skill is not mirrored by the installer anymore; only a
+  // manual copy from the repo supplies it, so the install must not create it.
+  assert.equal(
+    existsSync(path.join(installDir, "codex-home", "skills", "content-to-video")),
+    false,
+    "the installer no longer downloads content-to-video",
+  );
 });
