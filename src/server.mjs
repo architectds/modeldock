@@ -1623,8 +1623,8 @@ export function createApp(services = createServices()) {
       // not hijack the live selection. MODELDOCK_CUSTOM_MAIN/VISION above already
       // record that: CUSTOM_VISION drives supportsVision (so the model shows up in
       // the vision picker) and CUSTOM_MAIN is the boot fallback when no main model
-      // is configured. Overwriting MODELDOCK_MAIN_MODEL/VISION_MODEL here made
-      // merely adding an endpoint replace whatever the user was already running.
+      // is configured. Overwriting MODELDOCK_VISION_MODEL here made merely
+      // adding an endpoint replace whatever the user was already running.
       // Only the un-toggle case still writes: a selection pointing at this model
       // must not dangle once the endpoint is no longer offered for that role.
       if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";

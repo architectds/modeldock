@@ -357,9 +357,12 @@ export function loadConfig() {
   // local 27B as the default across every later restart, silently, including for
   // sessions that never wanted it. Worse, a local model then triggers the
   // small-context tool whitelist, which strips Codex down to 23 of its ~150
-  // tools. MODELDOCK_MAIN_MODEL remains the one way to set a default, and the
-  // Codex picker remains the way to choose per session.
-  const mainModel = modelRef(process.env.MODELDOCK_MAIN_MODEL || "deepseek-v4-flash");
+  // tools. The Codex picker remains the way to choose per session; the routing
+  // fallback is derived per session and bootstrapped from the native default.
+  // The routing fallback is derived per session and bootstrapped from the
+  // native config default (see gateway.mjs). This value is only a
+  // display/catalog default; MODELDOCK_MAIN_MODEL is no longer a slot.
+  const mainModel = modelRef("deepseek-v4-flash");
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a

@@ -318,11 +318,19 @@ export function sessionIdsFrom(headers) {
 
 // The fallback for requests that carry no model id. Per session we remember the
 // last actual main request so a no-model continuation stays on the model the
-// user picked; until a session has seen one, the caller's bootstrap applies
-// (the native config default in the final design).
+// user picked. Before a session has seen one, the current selected main model
+// applies (e.g. what ON mode selected); only when there is no routed selection
+// does the native config default apply, so a fresh session behaves exactly as
+// Codex would without ModelDock.
+const NATIVE_DEFAULT_MODEL = "gpt-5.6-sol";
 function mainModelFor(services, sessionId) {
-  const bootstrap = services.mainModel || services.config?.mainModel || "";
-  return services.derivedFallback?.resolve?.(sessionId, bootstrap) ?? bootstrap;
+  const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
+  if (sessionModel) return sessionModel;
+  const selected = services.mainModel || services.config?.mainModel || "";
+  // A routed selection is provider-qualified or a known legacy bare id; a bare
+  // native slug (gpt-5.6-sol) is not published in the routed catalog.
+  if (selected && (selected.includes("@") || services.knownModels?.has?.(selected))) return selected;
+  return NATIVE_DEFAULT_MODEL;
 }
 
 function recordDerivedFallback(services, sessionId, route) {
@@ -2660,6 +2668,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
   });
   recordDerivedFallback(services, sessionId, route);
+  // A no-model request can fall back to the native default (gpt-5.6-sol) until
+  // the session has seen a routed main request. That model must reach the
+  // ChatGPT backend like any other native slug, not the external upstream.
+  const routedNative = !payload.model
+    && (services.nativeSlugs?.has?.(route.model) || route.model === NATIVE_DEFAULT_MODEL);
+  if (routedNative) {
+    return relayNativeResponses({ ...payload, model: route.model }, res, services, { signal });
+  }
 
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
   // Pro additionally needs the id, assistant-content, tool-history and stream
