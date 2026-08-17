@@ -246,6 +246,9 @@ try {
 } finally {
   Stop-ProbeUpstream
   Stop-TestGateway
-  reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null
+  $runValue = reg.exe query $autostartKey /v $autostartName 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    try { reg.exe delete $autostartKey /v $autostartName /f 2>$null | Out-Null } catch { }
+  }
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
