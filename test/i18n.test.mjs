@@ -11,7 +11,7 @@ const source = readFileSync(
   "utf8",
 );
 
-const LOCALES = ["I18N_EN", "I18N_ZH", "I18N_JA", "I18N_FR", "I18N_ES"];
+const LOCALES = ["I18N_EN", "I18N_ZH", "I18N_JA"];
 
 function keysOf(locale) {
   const start = source.indexOf(`const ${locale} = {`);

@@ -47,10 +47,10 @@
         </div>
         <div class="control-defaults" aria-label="API Bridge defaults">
           <div>
-            <span data-i18n="defaults.provider">Provider</span>
+            <span data-i18n="defaults.main">Model Available</span>
             <div class="select-pair">
-              <span id="main-provider-display" class="model-static">—</span>
-              <span id="main-model-display-name" class="model-static">—</span>
+              <select id="main-provider-select" class="model-select" aria-label="Model provider"></select>
+              <select id="main-model-select" class="model-select" aria-label="Model"></select>
             </div>
           </div>
           <div>
@@ -242,8 +242,6 @@
             <option value="en" data-i18n="lang.en">English</option>
             <option value="zh" data-i18n="lang.zh">简体中文</option>
             <option value="ja" data-i18n="lang.ja">日本語</option>
-            <option value="fr" data-i18n="lang.fr">Français</option>
-            <option value="es" data-i18n="lang.es">Español</option>
           </select>
         </label>
         <div class="field field-switch">

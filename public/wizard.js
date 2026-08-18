@@ -361,7 +361,7 @@
     },
   };
 
-  const SUPPORTED = ["en", "zh", "ja", "fr", "es"];
+  const SUPPORTED = ["en", "zh", "ja"];
   // The wizard follows the dashboard's interface language (i18n.js stores it in
   // localStorage["modeldock-lang"]), falling back to the browser preference the
   // same way i18n.js does, so switching the dashboard language switches the

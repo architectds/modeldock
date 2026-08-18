@@ -10,9 +10,7 @@ native GPT passthrough and live token, latency, and trace observability.
 <p align="center">
   English ·
   <a href="#中文">中文</a> ·
-  <a href="#日本語">日本語</a> ·
-  <a href="#français">Français</a> ·
-  <a href="#español">Español</a>
+  <a href="#日本語">日本語</a>
 </p>
 
 <p align="center">
@@ -143,8 +141,8 @@ wrapper: `sh scripts/mcp-call.sh <command> <args>`. The injected base
 instructions already tell the model to switch to the shell fallback when an MCP
 call fails, so you normally do not have to repeat it.
 
-**Language** - the dashboard speaks English, 简体中文, 日本語, Français,
-Español. Change it anytime under Settings -> Interface language.
+**Language** - the dashboard speaks English, 简体中文, and 日本語. Change it
+anytime under Settings -> Interface language.
 
 **Autostart & updates** - Model Dock starts hidden at every login by default;
 flip the Autostart toggle in Settings to change that. A green Update button
@@ -296,7 +294,7 @@ provider 的模型以及你 Codex 账号中的原生 GPT 模型。
 **语音** - 打开仪表盘的 TTS / STT 磁贴并启用 TTS 或 STT，`speak` 和 `hear`
 工具即可供模型使用。
 
-**界面语言** - 仪表盘支持 English、简体中文、日本語、Français、Español，
+**界面语言** - 仪表盘支持 English、简体中文、日本語，
 可在设置 -> 界面语言中随时切换。
 
 **开机自启与更新** - Model Dock 默认在每次登录时隐藏启动；可在设置中
@@ -437,8 +435,7 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 **音声** - ダッシュボードの TTS / STT タイルで有効にすると、`speak` と
 `hear` ツールがモデルから使えます。
 
-**言語** - ダッシュボードは English、简体中文、日本語、Français、Español
-に対応。設定 -> インターフェース言語でいつでも変更できます。
+**言語** - ダッシュボードは English、简体中文、日本語 に対応。設定 -> インターフェース言語でいつでも変更できます。
 
 **自動起動と更新** - Model Dock はデフォルトでログイン時に隠れて起動します。
 設定の Autostart スイッチで変更できます。新バージョンがあると緑の更新
@@ -485,314 +482,6 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\un
 ```
 
 macOS / Linux：
-
-```sh
-sh ~/.modeldock/scripts/uninstall.sh
-```
-
----
-
-## Français
-
-Donnez à DeepSeek des yeux, des oreilles, une voix et un accès au web - via un
-mince pont Responses vers OpenCode Go et l'API officielle DeepSeek.
-
-DeepSeek V4 Flash est rapide et économique, mais il ne voit pas, ne parle pas,
-n'écoute pas, et l'endpoint Responses d'OpenCode Go par lequel il passe n'a pas
-de recherche intégrée (l'endpoint officiel DeepSeek en a une). Model Dock For
-Codex ajoute ces cinq capacités comme outils, sans réécrire l'historique de
-conversation :
-
-- **Voir** - collez une image dans Codex et la requête est routée vers le modèle
-  de vision choisi dans les réglages, ou laissez le modèle appeler
-  `vision_inspect` sur une capture ou un fichier.
-- **Parler** - l'outil `speak` transforme un texte en fichier audio local.
-- **Écouter** - l'outil `hear` transcrit un fichier audio en texte.
-- **Chercher** - l'outil `web_search_exa` interroge le web via Exa.
-- **Se souvenir** - `store_memory`, `recall_memory` et `learn` offrent au modèle
-  une mémoire légère entre sessions : stocker des décisions, les rappeler plus
-  tard ou ingérer des notes et documents en masse. C'est activé par défaut :
-  définissez `MODELDOCK_MEMORY=0` dans `~/.modeldock/.env` et redémarrez pour
-  le désactiver.
-- **Générer** - l'outil `image_gen` crée des images IA via le backend ChatGPT
-  de Codex (nécessite un compte Codex avec ChatGPT).
-- **Exécuter en local** — Ollama et les endpoints Responses personnalisés
-  connectent vos propres modèles à Codex. Lorsqu'un modèle local est détecté,
-  l'utilisation de Codex est automatiquement optimisée pour correspondre à ses
-  spécifications — le mode de compression CPU s'active aussitôt.
-
-Le pont relaie le flux Responses sans bufferiser ni resynthétiser le SSE. Ses
-seules réécritures sont chirurgicales et documentées : les lignes d'outils
-orphelines coupées par une compaction sont supprimées ou ré-appariées, et la
-compaction distante est synthétisée pour les modèles routés qui ne parlent pas
-le protocole natif. Les boucles d'outils multi-tours, le streaming et la
-compaction fonctionnent comme sur le canal natif.
-
-### Installation
-
-Windows :
-
-```
-$installer = Join-Path $env:TEMP "modeldock-install.ps1"
-Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
-powershell -NoProfile -ExecutionPolicy Bypass -File $installer
-```
-
-macOS :
-
-```
-curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
-```
-
-L'installeur vérifie Node.js >= 24, télécharge Model Dock For Codex dans
-`~/.modeldock`, le démarre en arrière-plan et ouvre le tableau de bord. Ajoutez
-au moins un fournisseur dans les réglages : [OpenCode Go](https://opencode.ai/auth),
-DeepSeek officiel, un endpoint Responses personnalisé, ou connectez Ollama pour
-les modèles locaux.
-
-### Connecter Codex
-
-1. L'installeur a déjà ouvert **http://127.0.0.1:4097** (au premier lancement,
-   la boîte de dialogue des réglages s'affiche pour coller votre jeton). Sinon,
-   ouvrez cette adresse dans votre navigateur.
-2. Activez l'interrupteur « Utiliser d'autres API dans Codex » sur la page.
-3. Quittez et redémarrez complètement Codex, puis confirmez sur la bannière
-   « J'ai redémarré Codex ».
-4. Choisissez un modèle Model Dock dans le sélecteur de Codex (le modèle par
-   défaut est déjà sélectionné ; les modèles GPT natifs sont aussi listés).
-
-### Usage quotidien
-
-**Sélecteur de modèle** - changez le modèle principal dans le sélecteur de Codex
-(en bas à droite). Model Dock affiche le fournisseur et le modèle actifs en
-lecture seule sur le tableau de bord.
-
-**Modèle de vision** - choisissez le modèle de vision sur le tableau de bord. Il
-est utilisé pour les images collées et les appels `vision_inspect`. Le sélecteur
-liste les modèles vision de tous les fournisseurs actifs, vous permettant par
-exemple d'associer un modèle principal DeepSeek à un modèle de vision MiMo.
-Changer le fournisseur principal conserve votre sélection vision si elle reste
-accessible.
-
-**Fournisseurs** - quatre fournisseurs sont pris en charge : **OpenCode Go**
-(`OPENCODE_GO_TOKEN`, inclut des modèles gratuits), **DeepSeek officiel**
-(`DEEPSEEK_API_KEY`, avec recherche web intégrée), **Personnalisé** (tout
-endpoint compatible Responses, configuré dans les réglages) et **Ollama**
-(modèles locaux, connecté depuis les réglages). Chaque id de modèle porte un
-suffixe fournisseur — par exemple `deepseek-v4-flash@deepseek-official` — qui
-sélectionne l'amont. Les modèles GPT natifs restent dans le sélecteur de Codex ;
-ModelDock n'accède jamais aux identifiants OpenAI.
-
-**Sous-agent** - choisissez un modèle dédié au rôle de sous-agent depuis le
-tableau de bord. Le sélecteur inclut les modèles de tous les fournisseurs actifs
-ainsi que les modèles GPT natifs de votre compte Codex.
-
-**Parole** - ouvrez la tuile TTS / STT sur le tableau de bord et activez TTS ou
-STT. Les outils `speak` et `hear` deviennent disponibles.
-
-**Langue** - le tableau de bord parle English, 简体中文, 日本語, Français,
-Español. Changez-la dans Réglages -> Langue de l'interface.
-
-**Démarrage auto & mises à jour** - Model Dock démarre en caché à chaque
-connexion par défaut ; le commutateur Autostart se trouve dans Réglages.
-Un bouton vert apparaît quand une nouvelle version est prête - un clic
-télécharge, redémarre et recharge.
-
-### Récupération manuelle
-
-Si la passerelle est injoignable, utilisez le petit menu de récupération fourni
-avec l'installation. Il propose exactement deux actions :
-
-Windows :
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
-```
-
-macOS ou Linux :
-
-```sh
-sh ~/.modeldock/scripts/recover.sh
-```
-
-1. **Redémarrer la passerelle ModelDock** arrête uniquement la passerelle
-   appartenant à cette installation, la redémarre et attend `/healthz`.
-2. **Restaurer la route native Codex** demande d'abord à la passerelle
-   d'arrêter sa route. Si la passerelle est arrêtée, il restaure directement la
-   dernière sauvegarde vérifiée de `config.toml` et marque Codex pour
-   redémarrage. La configuration actuelle est enregistrée sous
-   `.native-recovery-*.bak` avant le remplacement.
-
-Après toute modification de configuration, quittez complètement Codex et
-redémarrez-le. Le menu de récupération ne supprime ni ModelDock ni les
-sauvegardes.
-
-### Désinstallation
-
-Supprime ModelDock en conservant vos données : arrête uniquement la passerelle
-appartenant à cette installation, retire l'entrée de démarrage automatique,
-efface l'état d'installation (la mémoire et les sauvegardes de configuration
-Codex sont conservées) et supprime le journal de la passerelle.
-
-Windows :
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
-```
-
-macOS ou Linux :
-
-```sh
-sh ~/.modeldock/scripts/uninstall.sh
-```
-
----
-
-## Español
-
-Dale a DeepSeek ojos, oídos, voz y acceso a la web - mediante un puente fino de
-Responses hacia OpenCode Go y la API oficial de DeepSeek.
-
-DeepSeek V4 Flash es rápido y barato, pero no ve, no habla, no escucha y el
-endpoint Responses de OpenCode Go por el que pasa no tiene búsqueda integrada
-(el endpoint oficial de DeepSeek sí la tiene). Model Dock For Codex añade estas
-cinco capacidades como herramientas, sin reescribir el historial de la
-conversación:
-
-- **Ver** - pega una imagen en Codex y la solicitud se enruta al modelo de
-  visión que elegiste en Ajustes, o deja que el modelo llame a
-  `vision_inspect` sobre una captura o archivo.
-- **Hablar** - la herramienta `speak` convierte texto en un archivo de audio
-  local.
-- **Escuchar** - la herramienta `hear` transcribe un archivo de audio a texto.
-- **Buscar** - la herramienta `web_search_exa` consulta la web mediante Exa.
-- **Recordar** - `store_memory`, `recall_memory` y `learn` dan al modelo una
-  memoria ligera entre sesiones: guarda decisiones, recupéralas más tarde o
-  ingiere notas y documentos en masa. Está activada por defecto: define
-  `MODELDOCK_MEMORY=0` en `~/.modeldock/.env` y reinicia para desactivarla.
-- **Generar** - la herramienta `image_gen` crea imágenes IA a través del backend
-  ChatGPT de Codex (requiere cuenta Codex con ChatGPT).
-- **Ejecutar local** — Ollama y endpoints Responses personalizados conectan tus
-  propios modelos a Codex. Cuando se detecta un modelo local, el uso de Codex
-  se optimiza automáticamente para adaptarse a sus especificaciones — el modo de
-  compresión de CPU se activa de inmediato.
-
-El puente retransmite el flujo Responses sin almacenar ni resintetizar SSE. Sus
-únicas reescrituras son quirúrgicas y documentadas: las filas de herramientas
-huérfanas que una compactación puede separar se eliminan o se vuelven a
-emparejar, y la compactación remota se sintetiza para los modelos enrutados que
-no hablan el protocolo nativo. Los bucles de herramientas multi-turno, el
-streaming y la compactación funcionan como en el canal nativo.
-
-### Instalación
-
-Windows:
-
-```
-$installer = Join-Path $env:TEMP "modeldock-install.ps1"
-Invoke-WebRequest -UseBasicParsing "https://github.com/architectds/modeldock/releases/latest/download/install.ps1" -OutFile $installer
-powershell -NoProfile -ExecutionPolicy Bypass -File $installer
-```
-
-macOS:
-
-```
-curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.sh | sh
-```
-
-El instalador verifica Node.js >= 24, descarga Model Dock For Codex en
-`~/.modeldock`, lo inicia en segundo plano y abre el panel. Añade al menos un
-proveedor en Ajustes: [OpenCode Go](https://opencode.ai/auth), DeepSeek oficial,
-un endpoint Responses personalizado, o conecta Ollama para modelos locales.
-
-### Conectar Codex
-
-1. El instalador ya abrió **http://127.0.0.1:4097** (en el primer arranque
-   aparece el diálogo de Ajustes para pegar tu token). Si no, ábrelo en tu
-   navegador.
-2. Activa el interruptor «Usar otras API en Codex» de la página.
-3. Cierra y reinicia Codex por completo y confirma en el aviso
-   «He reiniciado Codex».
-4. Elige un modelo Model Dock en el selector de Codex (el modelo predeterminado
-   ya está seleccionado; los modelos GPT nativos también aparecen).
-
-### Uso diario
-
-**Selector de modelo** - cambia el modelo principal en el selector de Codex
-(abajo a la derecha). Model Dock muestra el proveedor y el modelo activos en
-solo lectura en el panel.
-
-**Modelo de visión** - elige el modelo de visión en el panel. Se usa para
-imágenes pegadas y llamadas `vision_inspect`. El selector lista los modelos con
-capacidad de visión de todos los proveedores activos, por lo que puedes combinar
-un modelo principal DeepSeek con un modelo de visión MiMo. Cambiar el proveedor
-principal conserva tu selección de visión si sigue siendo accesible.
-
-**Proveedores** - cuatro proveedores compatibles: **OpenCode Go**
-(`OPENCODE_GO_TOKEN`, incluye modelos gratuitos), **DeepSeek oficial**
-(`DEEPSEEK_API_KEY`, búsqueda web integrada), **Personalizado** (cualquier
-endpoint Responses, configurado en Ajustes) y **Ollama** (modelos locales,
-conectado desde Ajustes). Cada id de modelo lleva un sufijo de proveedor — por
-ejemplo `deepseek-v4-flash@deepseek-official` — que selecciona el upstream. Los
-modelos GPT nativos permanecen en el selector de Codex; ModelDock nunca accede
-a las credenciales de OpenAI.
-
-**Subagente** - elige un modelo dedicado al rol de subagente desde el panel. El
-selector incluye modelos de todos los proveedores activos más los modelos GPT
-nativos de tu cuenta Codex.
-
-**Voz** - abre la tarjeta TTS / STT en el panel y activa TTS o STT. Las
-herramientas `speak` y `hear` quedan disponibles.
-
-**Idioma** - el panel habla English, 简体中文, 日本語, Français, Español.
-Cámbialo en Ajustes -> Idioma de la interfaz.
-
-**Autostart y actualizaciones** - Model Dock se inicia oculto en cada inicio de
-sesión por defecto; el interruptor Autostart está en Ajustes. Aparece un botón
-verde cuando hay una nueva versión - un clic descarga, reinicia y recarga.
-
-### Recuperación manual
-
-Si la puerta de enlace no es accesible, usa el pequeño menú de recuperación
-incluido en la instalación. Tiene exactamente dos acciones:
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\recover.ps1"
-```
-
-macOS o Linux:
-
-```sh
-sh ~/.modeldock/scripts/recover.sh
-```
-
-1. **Reiniciar la puerta de enlace de ModelDock** detiene solo la puerta de
-   enlace de esta instalación, la reinicia y espera a `/healthz`.
-2. **Restaurar la ruta nativa de Codex** primero pide a la puerta de enlace
-   que desactive su ruta. Si está detenida, restaura directamente la última
-   copia de seguridad verificada de `config.toml` y marca Codex para reinicio.
-   La configuración actual se guarda como `.native-recovery-*.bak` antes del
-   reemplazo.
-
-Tras cualquier cambio de configuración, sal por completo de Codex y reinícialo.
-El menú de recuperación no elimina ModelDock ni las copias de seguridad.
-
-### Desinstalación
-
-Elimina ModelDock conservando tus datos: detiene solo la puerta de enlace que
-pertenece a esta instalación, quita la entrada de inicio automático, limpia el
-estado de instalación (se conservan la memoria y las copias de seguridad de la
-configuración de Codex) y elimina el registro de la puerta de enlace.
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.modeldock\scripts\uninstall.ps1"
-```
-
-macOS o Linux:
 
 ```sh
 sh ~/.modeldock/scripts/uninstall.sh
