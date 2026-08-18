@@ -71,6 +71,16 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   }
 });
 
+test("baseInstructionsFor puts the subagent task in spawn_agent, not an empty fork plus send_message", () => {
+  const text = baseInstructionsFor(configStub());
+  const vision = baseInstructionsFor(configStub(), { supportsVision: true });
+  for (const instructions of [text, vision]) {
+    assert.match(instructions, /complete task in spawn_agent/i);
+    assert.match(instructions, /send_message is only for a worker that is already running/);
+    assert.doesNotMatch(instructions, /fork_turns="none"/);
+  }
+});
+
 test("baseInstructionsFor takes the vision capability explicitly, not from mainModel", () => {
   const text = baseInstructionsFor(configStub());
   const vision = baseInstructionsFor(configStub(), { supportsVision: true });

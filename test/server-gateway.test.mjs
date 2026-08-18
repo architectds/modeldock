@@ -649,3 +649,41 @@ test("gateway: captures zen free 200+empty output as a quota error on both wires
   const paidBody = await paid.json();
   assert.deepEqual(paidBody.output, []);
 });
+
+test("gateway frames sparse parallel send_message streams over HTTP", async (t) => {
+  const upstream = createServer((_req, res) => {
+    res.setHeader("content-type", "text/event-stream");
+    res.end([
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call_1","type":"function_call","name":"send_message","call_id":"call_1","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"message\\":\\"verify herdr\\"}"}\n\n',
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"call_2","type":"function_call","name":"send_message","call_id":"call_2","arguments":""}}\n\n',
+      'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"message\\":\\"verify db.sqlite\\"}"}\n\n',
+      'data: {"type":"response.completed","response":{"id":"resp_http","model":"deepseek-v4-flash"}}\n\n',
+    ].join(""));
+  });
+  const port = await listen(upstream);
+  t.after(() => upstream.close());
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "deepseek-v4-flash",
+      stream: true,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "verify in parallel" }] }],
+      tools: [{ type: "function", name: "send_message", parameters: { type: "object", properties: { message: { type: "string" } } } }],
+    }),
+  });
+  assert.equal(response.status, 200);
+  const events = (await response.text())
+    .split(/\r?\n\r?\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5).trim() || "null")))
+    .filter(Boolean);
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.deepEqual(completed.response.output.map((item) => item.arguments), [
+    '{"message":"verify herdr"}',
+    '{"message":"verify db.sqlite"}',
+  ]);
+});
