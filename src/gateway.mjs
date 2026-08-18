@@ -810,7 +810,11 @@ function nativeRelayModel(services) {
   // reaches the native backend), so it is the preferred relay when native.
   const subagentModel = services.subagentModel;
   if (subagentModel && services.nativeSlugs?.has?.(subagentModel)) return subagentModel;
-  for (const slug of services.nativeSlugs || []) return slug;
+  // Fall back to the last native slug in catalog order; any native member can
+  // open the channel, and the last one is a stable, deterministic pick.
+  let fallback = null;
+  for (const slug of services.nativeSlugs || []) fallback = slug;
+  if (fallback) return fallback;
   return null;
 }
 

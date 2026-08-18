@@ -3336,11 +3336,11 @@ test("relayOpaqueCollaboration falls back past a routed subagent model to a nati
     ]}];
     const services = {
       subagentModel: "gpt-5.6-luna@opencode-go",
-      nativeSlugs: new Set(["gpt-5.6-sol"]),
+      nativeSlugs: new Set(["gpt-5.6-sol", "gpt-5.6-terra"]),
       incomingHeaders: {},
     };
     await relayOpaqueCollaboration(input, services);
-    assert.equal(calls[0].model, "gpt-5.6-sol", "a routed subagent alias is never used; a native slug is");
+    assert.equal(calls[0].model, "gpt-5.6-terra", "a routed subagent alias is never used; the last native slug is");
   } finally {
     globalThis.fetch = originalFetch;
   }
