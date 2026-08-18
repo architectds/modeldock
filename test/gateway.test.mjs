@@ -2497,6 +2497,52 @@ test("relayResponses intercepts a v2 compact request and synthesizes a compactio
   }
 });
 
+test("relayCompaction keeps the main model when recent history still carries an image", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("compact ok");
+  };
+  try {
+    const result = await relayCompaction(
+      {
+        model: "deepseek-v4-flash@opencode-go",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [
+            { type: "input_text", text: "see screenshot" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        knownModels: new Set(["deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        visionModel: "gpt-5.6-luna@opencode-go",
+      },
+      {},
+      true,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "deepseek-v4-flash@opencode-go", "compact must not escalate to the vision model");
+    assert.equal(result.route.reason, "compact_summarize");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].model, "deepseek-v4-flash", "the upstream summarize call stays on the main model");
+    assert.ok(
+      calls[0].input.every((item) => !item.content?.some?.((part) => part.type === "input_image")),
+      "compact summarize rewrites images to text refs instead of shipping pixels",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayCompaction applies the Pro duplicate-call repair before summarizing", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
