@@ -71,6 +71,18 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   }
 });
 
+test("baseInstructionsFor matches Codex v2 spawn_agent args that text models can see", () => {
+  const text = baseInstructionsFor(configStub());
+  const vision = baseInstructionsFor(configStub(), { supportsVision: true });
+  for (const instructions of [text, vision]) {
+    assert.match(instructions, /spawn_agent's `message`/);
+    assert.match(instructions, /followup_task/);
+    assert.match(instructions, /omit fork_turns or use "all"/i);
+    assert.doesNotMatch(instructions, /spawn_agent's prompt/);
+    assert.match(instructions, /fork_turns="none" delivers NEW_TASK/);
+  }
+});
+
 test("baseInstructionsFor takes the vision capability explicitly, not from mainModel", () => {
   const text = baseInstructionsFor(configStub());
   const vision = baseInstructionsFor(configStub(), { supportsVision: true });

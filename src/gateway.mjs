@@ -11,6 +11,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
+import { historicalImageSpawnHint, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -786,7 +787,7 @@ function attachProExecutionGuidance(input) {
 
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
-  return dropUnpairedToolItems(input)
+  const rewritten = dropUnpairedToolItems(input)
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
@@ -797,6 +798,7 @@ export function normalizeGatewayInput(input) {
         content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
       };
     });
+  return promoteCollaborationNewTask(rewritten);
 }
 
 // Codex emits its built-in tools as custom_tool_call / local_shell_call items
@@ -1184,7 +1186,7 @@ export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImag
       }
       return {
         type: "input_text",
-        text: `[Image attachment ${ref}. Its visual contents were handled in a prior turn. To re-inspect it, use vision_inspect with image_ref "${ref}", or spawn a vision subagent (agent_type="modeldock_subagent", fork_turns="none") to analyze it.]`,
+        text: historicalImageSpawnHint(ref),
       };
     });
     return changed ? { ...item, content } : item;
@@ -1419,7 +1421,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
   return { bytes, interrupted };
 }
 
-// opencode's thinking-model stream (deepseek-v4-pro today) does not honor the
+// opencode's thinking-model stream (and any peer that copies that wire) does not honor the
 // Responses item/part lifecycle the way Codex expects. Text turns arrive as a
 // bare response.output_text.delta with no item context; tool turns arrive as an
 // output_item.added(function_call) followed by function_call_arguments.delta
@@ -2915,10 +2917,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
-      const bareId = bareModelId(route.model);
-      // opencode's pro translation emits a bare-delta stream; the official
-      // DeepSeek route is a standard Responses implementation and stays native.
-      const piped = normalizedPayload.stream === true && bareId === "deepseek-v4-pro" && target.provider === "opencode-go"
+      // Codex points openai_base_url at this gate, so every picker model
+      // (Go, Official, Z.AI, Kimi, custom) arrives here. The pipe inspects the
+      // SSE shape: a sparse/bare tool stream is re-framed; a full Responses
+      // lifecycle passes through event-for-event. Do not key this on provider.
+      const piped = normalizedPayload.stream === true
         ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
