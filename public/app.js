@@ -420,12 +420,15 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
   const plotW = width - pad * 2;
   const plotH = height - pad * 2;
   const n = history.length;
-  cacheWavePoints = [];
+  // Clear in place, never reassign: attachAreaWaveHover holds this array by
+  // reference for its hit-test, and a reassignment would strand it on the old
+  // empty array - the cache wave's hover silently never fires.
+  cacheWavePoints.length = 0;
   const xFor = (index) => pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
   const yFor = (value) => pad + plotH - Math.min(1, Math.max(0, value)) * plotH;
 
   // Gridlines (3 horizontal ticks on the fixed 0-100% scale).
-  ctx.strokeStyle = "rgba(80,183,255,0.08)";
+  ctx.strokeStyle = rgba(WAVE_BLUE, 0.08);
   ctx.lineWidth = 1;
   for (let i = 1; i <= 3; i += 1) {
     const y = pad + (plotH / 3) * i;
@@ -439,8 +442,8 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
 
   // Area fill under the curve.
   const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
-  gradient.addColorStop(0, "rgba(80,183,255,0.35)");
-  gradient.addColorStop(1, "rgba(80,183,255,0)");
+  gradient.addColorStop(0, rgba(WAVE_BLUE, 0.35));
+  gradient.addColorStop(1, rgba(WAVE_BLUE, 0));
   ctx.beginPath();
   ctx.moveTo(pad, pad + plotH);
   history.forEach((point, index) => {
@@ -462,9 +465,9 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
-  ctx.strokeStyle = "rgba(80,183,255,0.9)";
+  ctx.strokeStyle = rgba(WAVE_BLUE, 0.9);
   ctx.lineWidth = 2;
-  ctx.shadowColor = "rgba(80,183,255,0.5)";
+  ctx.shadowColor = rgba(WAVE_BLUE, 0.5);
   ctx.shadowBlur = 8;
   ctx.stroke();
   ctx.shadowBlur = 0;
@@ -472,7 +475,7 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
   // Hover guide: vertical rule + highlighted sample.
   if (hoverIndex >= 0 && cacheWavePoints[hoverIndex]) {
     const p = cacheWavePoints[hoverIndex];
-    ctx.strokeStyle = "rgba(80,183,255,0.55)";
+    ctx.strokeStyle = rgba(WAVE_BLUE, 0.55);
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -482,7 +485,7 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
     ctx.setLineDash([]);
     ctx.beginPath();
     ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "#50b7ff";
+    ctx.fillStyle = WAVE_BLUE;
     ctx.fill();
     ctx.beginPath();
     ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
@@ -499,7 +502,7 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
     const py = yFor(history[peakIndex].v);
     ctx.beginPath();
     ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = "#50b7ff";
+    ctx.fillStyle = WAVE_BLUE;
     ctx.fill();
   }
 }
