@@ -805,8 +805,11 @@ function nativeRelayModel(services) {
   // collaboration channel - so the model must be a native bare slug. A routed
   // alias like gpt-5.6-luna@opencode-go is never selected: it is not a member
   // of nativeSlugs, and the fallback below only ever picks from that set.
-  const vision = services.config?.visionModel;
-  if (vision && services.nativeSlugs?.has?.(vision)) return vision;
+  // Align with the subagent model resolution: modeldock_subagent's `model` is
+  // the user's explicit choice (gpt-5.6-luna with model_provider "openai"
+  // reaches the native backend), so it is the preferred relay when native.
+  const subagentModel = services.subagentModel;
+  if (subagentModel && services.nativeSlugs?.has?.(subagentModel)) return subagentModel;
   for (const slug of services.nativeSlugs || []) return slug;
   return null;
 }

@@ -1055,6 +1055,10 @@ export function createServices(config = loadConfig()) {
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
+    // The configured subagent model (modeldock_subagent's `model`). It is the
+    // user's explicit choice and can be a native bare slug (model_provider
+    // "openai"), which is exactly what the collaboration relay needs.
+    subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),

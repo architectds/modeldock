@@ -3240,7 +3240,7 @@ test("relayOpaqueCollaboration relays an opaque payload through a native model a
       ]},
     ];
     const services = {
-      config: { visionModel: "gpt-5.6-luna" },
+      subagentModel: "gpt-5.6-luna",
       nativeSlugs: new Set(["gpt-5.6-luna", "gpt-5.6-sol"]),
       incomingHeaders: {},
     };
@@ -3248,7 +3248,7 @@ test("relayOpaqueCollaboration relays an opaque payload through a native model a
     assert.equal(out[0].content[1].type, "input_text", "the opaque part becomes plaintext");
     assert.ok(out[0].content[1].text.includes("VERIFIED"), "plaintext payload survives the relay");
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].model, "gpt-5.6-luna", "the relay uses the native vision slug");
+    assert.equal(calls[0].model, "gpt-5.6-luna", "the relay uses the native subagent model");
     assert.equal(calls[0].tools[0].name, "relay_external_agent_payload");
     assert.equal(calls[0].tool_choice.name, "relay_external_agent_payload");
     assert.equal(calls[0].stream, true);
@@ -3270,7 +3270,7 @@ test("relayOpaqueCollaboration caches the decrypted payload per encrypted blob",
     );
   };
   try {
-    const services = { config: { visionModel: "gpt-5.6-luna" }, nativeSlugs: new Set(["gpt-5.6-luna"]), incomingHeaders: {} };
+    const services = { subagentModel: "gpt-5.6-luna", nativeSlugs: new Set(["gpt-5.6-luna"]), incomingHeaders: {} };
     const item = { type: "agent_message", content: [
       { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
       { type: "encrypted_content", encrypted_content: "gAAAAAsame_blob" },
@@ -3292,7 +3292,7 @@ test("relayOpaqueCollaboration fails closed without a native model", async () =>
       { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
       { type: "encrypted_content", encrypted_content: "gAAAAAnative_gone" },
     ]}];
-    const out = await relayOpaqueCollaboration(input, { config: {}, nativeSlugs: new Set(), incomingHeaders: {} });
+    const out = await relayOpaqueCollaboration(input, { subagentModel: "", nativeSlugs: new Set(), incomingHeaders: {} });
     assert.equal(out, input, "with no native model the item stays opaque and no relay is attempted");
     assert.equal(fetches, 0);
   } finally {
@@ -3309,9 +3309,38 @@ test("relayOpaqueCollaboration rejects when the native relay fails", async () =>
       { type: "encrypted_content", encrypted_content: "gAAAAAnative_fail" },
     ]}];
     await assert.rejects(
-      relayOpaqueCollaboration(input, { config: { visionModel: "gpt-5.6-luna" }, nativeSlugs: new Set(["gpt-5.6-luna"]), incomingHeaders: {} }),
+      relayOpaqueCollaboration(input, { subagentModel: "gpt-5.6-luna", nativeSlugs: new Set(["gpt-5.6-luna"]), incomingHeaders: {} }),
       /Collaboration relay failed: HTTP 401/,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayOpaqueCollaboration falls back past a routed subagent model to a native slug", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return new Response(
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"c1","type":"function_call","name":"relay_external_agent_payload","call_id":"c1","arguments":""}}\n\n' +
+      'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"payload\\":\\"fallback task\\"}"}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  try {
+    // The subagent is a routed alias (not in nativeSlugs) - never a relay target.
+    const input = [{ type: "agent_message", content: [
+      { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+      { type: "encrypted_content", encrypted_content: "gAAAAArouted_subagent" },
+    ]}];
+    const services = {
+      subagentModel: "gpt-5.6-luna@opencode-go",
+      nativeSlugs: new Set(["gpt-5.6-sol"]),
+      incomingHeaders: {},
+    };
+    await relayOpaqueCollaboration(input, services);
+    assert.equal(calls[0].model, "gpt-5.6-sol", "a routed subagent alias is never used; a native slug is");
   } finally {
     globalThis.fetch = originalFetch;
   }
