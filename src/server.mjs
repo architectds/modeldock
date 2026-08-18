@@ -167,7 +167,28 @@ function modelOptions(config, profileId) {
     if (all.some((existing) => existing.id === resolved)) continue;
     all.push({ ...withTierLabel(known), id: resolved, provider: owner });
   }
-  return all;
+  return appendNativeModels(all, config);
+}
+
+// One published model set, shared by every picker: the routed profiles plus
+// the native GPT catalog while signed in. Without a sign-in the native backend
+// would 401 on every call, so native models stay out (every picker fails
+// closed). input_modalities carries vision support, so the vision picker's
+// supportsVision filter picks the right native entries.
+function appendNativeModels(options, config) {
+  if (!hasChatGptLogin(config.codexHome)) return options;
+  for (const model of readNativeCatalog(config)?.models || []) {
+    if (typeof model?.slug !== "string" || !model.slug) continue;
+    if (options.some((entry) => entry.id === model.slug)) continue;
+    options.push({
+      id: model.slug,
+      label: model.display_name || model.slug,
+      provider: "openai",
+      native: true,
+      supportsVision: Array.isArray(model.input_modalities) && model.input_modalities.includes("image"),
+    });
+  }
+  return options;
 }
 
 function modelCatalogModels(config, profileId) {
@@ -262,6 +283,11 @@ function modelsPayload(services) {
   const selected = services.modelSelection;
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
+  // Native vision models are only published while signed in; without their
+  // provider in the list the vision picker can see the models but never pick
+  // one. The native provider is not a routed profile, so it is appended here
+  // rather than in providerOptions (which would leak it into non-vision lists).
+  if (visionOptions.some((model) => model.provider === "openai")) visionProviders.push(NATIVE_PROVIDER);
   return {
     selected,
     options,
@@ -296,30 +322,19 @@ function modelProviderOf(options, modelId) {
 const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
 // One spelling, shared with the disable() path that has to remove it.
 const SUBAGENT_FILE_NAME = SUBAGENT_AGENT_FILE;
-const SUBAGENT_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
+// The built-in native ChatGPT provider, shared by the subagent and vision
+// pickers: one spelling, one label, everywhere it is offered.
+const NATIVE_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
 
 function subagentModelOptions(config) {
-  const options = modelOptions(config, config.profileId);
-  // Native GPT slugs are only reachable while signed in. Without a sign-in,
-  // fail silently: never offer native models (and never write a subagent agent
-  // file pointing at one) that would 401 on every spawn.
-  if (!hasChatGptLogin(config.codexHome)) return options;
-  for (const model of readNativeCatalog(config)?.models || []) {
-    if (typeof model?.slug !== "string" || !model.slug) continue;
-    if (options.some((entry) => entry.id === model.slug)) continue;
-    options.push({
-      id: model.slug,
-      label: model.display_name || model.slug,
-      provider: SUBAGENT_PROVIDER.id,
-      native: true,
-    });
-  }
-  return options;
+  // The published model set already includes native GPT slugs while signed in
+  // (modelOptions -> appendNativeModels); the subagent picker is that same set.
+  return modelOptions(config, config.profileId);
 }
 
 function subagentProviders(config) {
   const providers = providerOptions(config).map((entry) => ({ id: entry.id, label: entry.label }));
-  if (hasChatGptLogin(config.codexHome)) providers.push(SUBAGENT_PROVIDER);
+  if (hasChatGptLogin(config.codexHome)) providers.push(NATIVE_PROVIDER);
   return providers;
 }
 
@@ -368,7 +383,7 @@ function subagentPayload(services) {
     selected: selectedEntry ? selected : (options[0]?.id || SUBAGENT_DEFAULT_MODEL),
     options,
     providers: subagentProviders(services.config),
-    selectedProvider: selectedEntry?.provider || options[0]?.provider || SUBAGENT_PROVIDER.id,
+    selectedProvider: selectedEntry?.provider || options[0]?.provider || NATIVE_PROVIDER.id,
   };
 }
 
@@ -1409,7 +1424,11 @@ export function createApp(services = createServices()) {
     // Resolve a bare id to its published form first: the options list is fully
     // owner-qualified, so a legacy/dashboard submission of "kimi-k2.5" must match
     // the "kimi-k2.5@opencode-go" entry instead of 400ing on an exact-id lookup.
-    const qualify = (id) => publishedSlugFor(config.profileId, id);
+    // A bare id that is already a published entry must stay as-is: native GPT
+    // slugs live bare in the merged set (gpt-5.6-luna, provider openai), and
+    // qualifying them through the active profile would mislabel them as routed.
+    const currentOptions = modelOptions(config, config.profileId);
+    const qualify = (id) => (currentOptions.some((entry) => entry.id === id) ? id : publishedSlugFor(config.profileId, id));
     let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
     let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
     const nextProvider = req.body?.provider;

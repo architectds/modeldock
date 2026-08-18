@@ -715,7 +715,7 @@ test("subagent picker offers the native provider once signed in", async (t) => {
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   const authPath = path.join(instance.services.config.codexHome, "auth.json");
@@ -729,4 +729,77 @@ test("subagent picker offers the native provider once signed in", async (t) => {
     status.subagent.options.some((entry) => entry.native && entry.id === "gpt-5.6-luna"),
     "with a sign-in native models are selectable",
   );
+});
+
+test("vision picker offers native models once signed in, like subagent", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    "utf8",
+  );
+  await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  const visionLuna = status.models.options?.find((entry) => entry.id === "gpt-5.6-luna");
+  assert.ok(visionLuna, "the native vision model appears in the vision picker");
+  assert.equal(visionLuna.provider, "openai");
+  assert.equal(visionLuna.native, true);
+  assert.equal(visionLuna.supportsVision, true);
+  assert.ok(status.models.visionProviders.some((provider) => provider.id === "openai"), "the native provider appears for vision");
+});
+
+test("signing out hides native models from the vision picker too", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    "utf8",
+  );
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.ok(
+    !status.models.options?.some((entry) => entry.native),
+    "without a sign-in no native model is offered for vision",
+  );
+  assert.ok(!status.models.visionProviders.some((provider) => provider.id === "openai"), "no native vision provider without sign-in");
+});
+
+test("POST /api/models accepts a native vision model once signed in", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    "utf8",
+  );
+  await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  const response = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ visionModel: "gpt-5.6-luna" }),
+  });
+  assert.equal(response.status, 200, "native vision selection must not 400");
+  const body = await response.json();
+  assert.equal(body.selected?.visionModel, "gpt-5.6-luna");
+});
+
+test("POST /api/models accepts a native main model once signed in", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    "utf8",
+  );
+  await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  const response = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mainModel: "gpt-5.6-luna" }),
+  });
+  assert.equal(response.status, 200, "native main selection must not 400");
+  const body = await response.json();
+  assert.equal(body.selected?.mainModel, "gpt-5.6-luna");
+  assert.equal(body.selectedProvider, "openai", "the native main model is reported under the native provider");
 });

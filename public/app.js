@@ -781,6 +781,9 @@ let lastModelData = null;
 // The vision provider the user picked in the dropdown, when it differs from the
 // one the server reports. Cleared once the saved selection catches up.
 let visionProviderOverride = "";
+// The main provider the user picked in the dropdown, when it differs from the
+// one the server reports. Cleared once the saved selection catches up.
+let mainProviderOverride = "";
 
 function renderModelOptions(data) {
   const models = data.models;
@@ -798,16 +801,31 @@ function renderModelOptions(data) {
   const selectedProvider = models.selectedProvider || "other";
   const visionProviders = models.visionProviders || providers;
   const selectedVisionProvider = models.selectedVisionProvider || "";
-  const providerLabel = providers.find((provider) => provider.id === selectedProvider)?.label || selectedProvider;
-  const mainModelLabel = models.options.find((model) => model.id === selected.mainModel)?.label || selected.mainModel;
-  const providerDisplay = $("main-provider-display");
-  const modelDisplay = $("main-model-display-name");
-  if (providerDisplay) providerDisplay.textContent = providerLabel;
-  if (modelDisplay) modelDisplay.textContent = mainModelLabel;
-  const mainModelStatic = document.querySelector(".model-static");
-  if (mainModelStatic) mainModelStatic.classList.toggle("busy", modelBusy);
-  if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
-  if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
+  const mainProviderSelect = $("main-provider-select");
+  const mainModelSelect = $("main-model-select");
+  if (mainProviderSelect && mainModelSelect) {
+    // The main picker publishes every provider that owns an option in the
+    // merged set - the routed profiles plus the native ChatGPT provider once
+    // signed in. Deriving the list from the options keeps it in lockstep with
+    // what is actually selectable below.
+    const owned = new Set((models.options || []).map((model) => model.provider));
+    const mainProviders = providers.filter((provider) => owned.has(provider.id));
+    if (owned.has("openai") && !mainProviders.some((provider) => provider.id === "openai")) {
+      mainProviders.push({ id: "openai", label: "ChatGPT (native)" });
+    }
+    const wantedProvider = (mainProviderOverride && mainProviders.some((provider) => provider.id === mainProviderOverride))
+      ? mainProviderOverride
+      : selectedProvider;
+    const provider = fillSelect(mainProviderSelect, mainProviders, {
+      value: wantedProvider,
+      disabled: !mainProviders.length || modelBusy,
+    });
+    const mainModels = (models.options || []).filter((model) => model.provider === provider);
+    fillSelect(mainModelSelect, mainModels, {
+      value: selected.mainModel,
+      disabled: !mainModels.length || modelBusy,
+    });
+  }
   const visionProviderSelect = $("vision-provider-select");
   if (visionProviderSelect) {
     // Honour a provider the user just picked (visionProviderOverride) over the
@@ -882,6 +900,32 @@ async function setModels() {
     if (!response.ok) throw new Error(body.error?.message || `Model update ${response.status}`);
     // The saved selection now carries the provider; stop overriding the dropdown.
     visionProviderOverride = "";
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    modelBusy = false;
+    poll().catch(() => {});
+  }
+}
+
+async function saveMainModel() {
+  modelBusy = true;
+  $("main-model-select").disabled = true;
+  $("main-provider-select").disabled = true;
+  try {
+    const body = { mainModel: $("main-model-select").value };
+    // A native slug needs no profile switch: the native provider is not a
+    // routed profile, and the slug alone tells the gateway to pass through.
+    const provider = $("main-provider-select").value;
+    if (provider && provider !== "openai") body.provider = provider;
+    const response = await fetch("/api/models", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error?.message || `Model update ${response.status}`);
+    mainProviderOverride = "";
   } catch (error) {
     window.alert(error.message);
   } finally {
@@ -1131,6 +1175,16 @@ $("vision-provider-select").addEventListener("change", () => {
   // current value in its filter, so a forced re-render lists the right models.
   if (!lastModelData) return;
   visionProviderOverride = $("vision-provider-select").value;
+  lastModelSignature = "";
+  renderModelOptions(lastModelData);
+});
+
+$("main-model-select").addEventListener("change", saveMainModel);
+$("main-provider-select").addEventListener("change", () => {
+  // Same contract as the vision pair: switching the provider re-renders the
+  // model list for it, and only picking a model persists the pair.
+  if (!lastModelData) return;
+  mainProviderOverride = $("main-provider-select").value;
   lastModelSignature = "";
   renderModelOptions(lastModelData);
 });
