@@ -10,8 +10,8 @@
 
 import json, math, os, subprocess
 
-FF = r"C:\Users\Chen Bao\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.2-full_build\bin\ffmpeg.exe"
-BASE = r"D:\projects\voxel\modeldock"
+FF = os.environ.get("FFMPEG_PATH") or "ffmpeg"
+BASE = os.environ.get("MODELDOCK_FILM_DIR") or os.getcwd()
 SHOTS = os.path.join(BASE, "shots")
 ASSETS = os.path.join(BASE, "assets")
 AUDIO = os.path.join(ASSETS, "audio")

@@ -760,8 +760,9 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   // back from the marker to that opening quote so dirname sees a real path.
   const bakedRestartPath = baked.slice(baked.lastIndexOf('"', bakedIndex) + 1, bakedIndex + marker.length);
   const bakedRoot = path.dirname(path.dirname(bakedRestartPath));
-  // Ancestor directories may render as 8.3 short names (CHENBA~1 for "Chen Bao"),
-  // but the mkdtemp install dir's own name is stable, so compare basenames.
+  // Ancestor directories may render as 8.3 short names (CHENBA~1 for
+  // "chenbao"), but the mkdtemp install dir's own name is stable, so compare
+  // basenames.
   assert.equal(path.basename(bakedRoot), path.basename(installDir), "restart path should point inside the install root");
 
   // 7. Second start: stop the install-time gateway and bring it up again through

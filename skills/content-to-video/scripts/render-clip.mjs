@@ -5,16 +5,20 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 
 const req = createRequire(import.meta.url);
-const pw = req(
-  "C:/Users/Chen Bao/.codex/visualizations/2026/08/05/019fcfa7-a20c-7cc3-88de-fdd2ed787377/node_modules/playwright-core"
-);
-const FF = "C:/Users/Chen Bao/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin/ffmpeg.exe";
+const pwPath = process.env.PLAYWRIGHT_CORE_PATH
+  || (() => { try { return req.resolve("playwright-core"); } catch { return null; } })();
+if (!pwPath) {
+  console.error("playwright-core not found: set PLAYWRIGHT_CORE_PATH or install it");
+  process.exit(1);
+}
+const pw = req(pwPath);
+const FF = process.env.FFMPEG_PATH || "ffmpeg";
 
 const [scene, out, durArg] = process.argv.slice(2);
 if (!scene || !out) { console.error("usage: node render-clip.mjs <scene> <out.mp4> [duration]"); process.exit(1); }
 const FPS = 25;
 const DUR = durArg ? Number(durArg) : 12.6;
-const tmp = "D:/projects/voxel/modeldock/tts/clip";
+const tmp = process.env.MODELDOCK_CLIP_DIR || path.join(process.cwd(), "clip");
 fs.mkdirSync(tmp, { recursive: true });
 
 const browser = await pw.chromium.launch({

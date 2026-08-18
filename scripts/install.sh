@@ -572,7 +572,7 @@ if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\serv
 
 try {
   # Quote both paths: an installed layout under a home dir with a space
-  # (e.g. "C:\Users\Chen Bao\.modeldock") would otherwise be split by node's
+  # (e.g. "C:\Users\<user>\.modeldock") would otherwise be split by node's
   # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
   # the >> redirection so stdout and stderr share the same log file as the
   # start-hidden launcher (and the "check modeldock.log" guidance).

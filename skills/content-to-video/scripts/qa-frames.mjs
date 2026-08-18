@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 
-const FF = "C:/Users/Chen Bao/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin/ffmpeg.exe";
+const FF = process.env.FFMPEG_PATH || "ffmpeg";
 const [video, outdir, shotStartsArg, fadeArg] = process.argv.slice(2);
 if (!video || !outdir) {
   console.error("usage: node qa-frames.mjs <video> <outdir> [shotStarts=csv] [fade]");

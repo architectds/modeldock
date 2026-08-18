@@ -7,12 +7,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const req = createRequire(import.meta.url);
-const pw = req(
-  "C:/Users/Chen Bao/.codex/visualizations/2026/08/05/019fcfa7-a20c-7cc3-88de-fdd2ed787377/node_modules/playwright-core"
-);
-const FF = "C:/Users/Chen Bao/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-8.1.2-full_build/bin/ffmpeg.exe";
+const pwPath = process.env.PLAYWRIGHT_CORE_PATH
+  || (() => { try { return req.resolve("playwright-core"); } catch { return null; } })();
+if (!pwPath) {
+  console.error("playwright-core not found: set PLAYWRIGHT_CORE_PATH or install it");
+  process.exit(1);
+}
+const pw = req(pwPath);
+const FF = process.env.FFMPEG_PATH || "ffmpeg";
 const BASE = "http://127.0.0.1:8090/modeldock/scene3d/";
-const OUT = "D:/projects/voxel/modeldock/tts/preview";
+const OUT = process.env.MODELDOCK_PREVIEW_OUT || path.join(process.cwd(), "preview");
 mkdirSync(OUT, { recursive: true });
 
 const fracs = [0.3, 0.55, 0.8];
