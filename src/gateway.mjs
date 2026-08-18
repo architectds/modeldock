@@ -2397,14 +2397,18 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
-  const visionModel = services.visionModel || config.visionModel;
-  const route = routeGatewayRequest(payload, {
-    mainModel,
-    visionModel,
-    affinity: routeAffinity,
-    knownModels,
-    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
-  });
+  // Compact is a text handoff for the coding model. Vision escalation is for
+  // pasted-image chat turns, not for summarizing a tool/reasoning history.
+  const compactModel = (
+    requestedModel
+    && knownModels?.has(requestedModel)
+    && !modelEntryFor(config, requestedModel)?.supportsVision
+  ) ? requestedModel : mainModel;
+  const route = {
+    model: compactModel,
+    reason: "compact_summarize",
+    directVision: false,
+  };
   recordDerivedFallback(services, sessionId, route);
   // Custom/ollama backends must see the same adapted shape on the compact path
   // as on the main relay path: Codex's mid-history system/developer items
@@ -2431,7 +2435,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         rewriteHistoricalImages(
           normalizedInput,
           mediaStore,
-          { preserveCurrentImages: route.directVision },
+          { preserveCurrentImages: false },
         ),
         modelEntryFor(config, route.model)?.imageUrlShape,
       ),
