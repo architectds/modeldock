@@ -10,7 +10,7 @@ test("SUBAGENT_SPAWN_RULE names the real v2 args and forbids analysis-only none-
 });
 
 test("promoteCollaborationNewTask copies analysis-channel NEW_TASK into a user message", () => {
-  const payload = "撤销 A1：删掉注入的 TUI 目录。工作目录 /Users/me/projects/zcode-mobile。";
+  const payload = "\u64A4\u9500 A1\uFF1A\u5220\u6389\u6CE8\u5165\u7684 TUI \u76EE\u5F55\u3002\u5DE5\u4F5C\u76EE\u5F55 /Users/me/projects/zcode-mobile\u3002";
   const input = [
     {
       type: "reasoning",
