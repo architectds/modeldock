@@ -257,6 +257,9 @@ test("subagent API exposes routed + native options and persists the agent file",
       { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol" },
     ],
   }), "utf8");
+  // The native provider is only offered while signed in; this scenario is the
+  // signed-in case, so plant a Codex sign-in file in the isolated codexHome.
+  await writeFile(path.join(codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
   const instance = await startApp({ codexHome, nativeCatalogFile });
   t.after(instance.stop);
 

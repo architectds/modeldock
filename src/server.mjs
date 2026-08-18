@@ -26,6 +26,7 @@ import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -299,6 +300,10 @@ const SUBAGENT_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
 
 function subagentModelOptions(config) {
   const options = modelOptions(config, config.profileId);
+  // Native GPT slugs are only reachable while signed in. Without a sign-in,
+  // fail silently: never offer native models (and never write a subagent agent
+  // file pointing at one) that would 401 on every spawn.
+  if (!hasChatGptLogin(config.codexHome)) return options;
   for (const model of readNativeCatalog(config)?.models || []) {
     if (typeof model?.slug !== "string" || !model.slug) continue;
     if (options.some((entry) => entry.id === model.slug)) continue;
@@ -313,7 +318,9 @@ function subagentModelOptions(config) {
 }
 
 function subagentProviders(config) {
-  return [...providerOptions(config).map((entry) => ({ id: entry.id, label: entry.label })), SUBAGENT_PROVIDER];
+  const providers = providerOptions(config).map((entry) => ({ id: entry.id, label: entry.label }));
+  if (hasChatGptLogin(config.codexHome)) providers.push(SUBAGENT_PROVIDER);
+  return providers;
 }
 
 function subagentAgentFilePath(config) {

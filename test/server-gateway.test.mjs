@@ -48,6 +48,7 @@ async function startApp(configOverrides = {}) {
   config.summariesFile = path.join(dir, "summaries.json");
   config.codexCatalogFile = path.join(dir, "codex-model-catalog.json");
   config.nativeCatalogFile = path.join(dir, "native-catalog.json");
+  config.codexHome = dir;
   const services = createServices(config);
   const { app } = createApp(services);
   const server = app.listen(0, "127.0.0.1");
@@ -686,4 +687,46 @@ test("gateway frames sparse parallel send_message streams over HTTP", async (t) 
     '{"message":"verify herdr"}',
     '{"message":"verify db.sqlite"}',
   ]);
+});
+
+test("subagent picker hides the native provider without a sign-in", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  // A native catalog exists (models are published) but there is no sign-in:
+  // the picker must still fail silently and offer no native provider.
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" }] }),
+    "utf8",
+  );
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.ok(
+    !status.subagent.providers.some((provider) => provider.id === "openai"),
+    "without sign-in the subagent picker must not offer the native provider",
+  );
+  assert.ok(
+    !status.subagent.options.some((entry) => entry.native),
+    "without sign-in no native model is selectable as subagent",
+  );
+});
+
+test("subagent picker offers the native provider once signed in", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" }] }),
+    "utf8",
+  );
+  const authPath = path.join(instance.services.config.codexHome, "auth.json");
+  await writeFile(authPath, JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.ok(
+    status.subagent.providers.some((provider) => provider.id === "openai"),
+    "with a sign-in the native provider appears",
+  );
+  assert.ok(
+    status.subagent.options.some((entry) => entry.native && entry.id === "gpt-5.6-luna"),
+    "with a sign-in native models are selectable",
+  );
 });
