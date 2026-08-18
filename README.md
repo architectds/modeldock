@@ -51,10 +51,10 @@ without rewriting the conversation history:
   with ffmpeg, and QA every frame. Audio assets are not bundled; download from
   the [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
   when a project needs sound.
-- **Run local** — Ollama and custom Responses endpoints bring your own models
-  into Codex. Per-backend adaptations — context window scaling, reasoning level
-  mapping — apply automatically. Zstandard-compressed request bodies from Codex
-  are decompressed transparently (native on Node 24, pure-JS fallback otherwise).
+- **Run local** — Ollama and custom Responses endpoints connect your own models
+  to Codex. Codex usage is automatically optimized to fit your local model's
+  specifications — CPU compression mode activates as soon as a local model is
+  detected.
 
 The bridge is a thin local gateway: the Responses stream passes through
 untouched, and multi-turn tool loops, streaming, and long-session compaction
@@ -238,9 +238,8 @@ DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话�
 - **搜索** - `web_search_exa` 工具通过 Exa 查询网络。
 - **记住** - `store_memory`、`recall_memory` 和 `learn` 给模型一份轻量跨会话记忆：存储决策、随时检索，或批量导入笔记和文档。此功能默认开启；如需关闭，在 `~/.modeldock/.env` 中设置 `MODELDOCK_MEMORY=0` 并重启即可。
 - **生成图片** - `image_gen` 工具通过 Codex 的 ChatGPT 后端创建 AI 图像（需要 Codex 绑定 ChatGPT 账号）。
-- **本地运行** — Ollama 和自定义 Responses 端点将本地模型接入 Codex。上下文窗口
-  缩放、推理等级映射等适配自动生效。Codex 发来的 Zstandard 压缩请求体透明解压
-  （Node 24 原生支持，旧版运行时自动降级为纯 JS 实现）。
+- **本地运行** — Ollama 和自定义 Responses 端点将你的本地模型接入 Codex。检测到
+  本地模型后，Codex 的用量会自动适配其规格，CPU 压缩模式同步开启。
 
 桥接层是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生通道一致。
 
@@ -369,9 +368,8 @@ Codex はこれら 5 つをツールとして追加し、会話履歴は書き�
 - **生成** - `image_gen` ツールが Codex の ChatGPT バックエンド経由で AI 画像を
   生成します（Codex の ChatGPT サインインが必要です）。
 - **ローカル実行** — Ollama とカスタム Responses エンドポイントで自分のモデルを
-  Codex に接続できます。コンテキストウィンドウのスケーリングや推論レベルのマッピング
-  などのバックエンド別適応が自動で適用されます。Codex からの Zstandard 圧縮リクエスト
-  ボディは透過的に解凍されます（Node 24 ではネイティブ、旧バージョンでは純 JS）。
+  Codex に接続できます。ローカルモデルが検出されると、Codex の使用量がモデルの仕様に
+  合わせて自動的に最適化され、CPU 圧縮モードが有効になります。
 
 ブリッジは Responses ストリームをバッファリングも再合成もせずそのまま転送
 します。書き換えは文書化された最小限のものだけです：コンパクトタスクが
@@ -519,11 +517,9 @@ conversation :
 - **Générer** - l'outil `image_gen` crée des images IA via le backend ChatGPT
   de Codex (nécessite un compte Codex avec ChatGPT).
 - **Exécuter en local** — Ollama et les endpoints Responses personnalisés
-  connectent vos modèles locaux dans Codex. Les adaptations par backend —
-  ajustement de la fenêtre de contexte, mapping des niveaux de raisonnement —
-  s'appliquent automatiquement. Les corps de requête compressés en Zstandard
-  envoyés par Codex sont décompressés de façon transparente (natif sous Node 24,
-  fallback pur JS sinon).
+  connectent vos propres modèles à Codex. Lorsqu'un modèle local est détecté,
+  l'utilisation de Codex est automatiquement optimisée pour correspondre à ses
+  spécifications — le mode de compression CPU s'active aussitôt.
 
 Le pont relaie le flux Responses sans bufferiser ni resynthétiser le SSE. Ses
 seules réécritures sont chirurgicales et documentées : les lignes d'outils
@@ -677,10 +673,9 @@ conversación:
 - **Generar** - la herramienta `image_gen` crea imágenes IA a través del backend
   ChatGPT de Codex (requiere cuenta Codex con ChatGPT).
 - **Ejecutar local** — Ollama y endpoints Responses personalizados conectan tus
-  modelos locales en Codex. Las adaptaciones por backend — escala de ventana de
-  contexto, mapeo de niveles de razonamiento — se aplican automáticamente. Los
-  cuerpos de solicitud comprimidos en Zstandard que envía Codex se descomprimen
-  de forma transparente (nativo en Node 24, fallback puro JS en versiones anteriores).
+  propios modelos a Codex. Cuando se detecta un modelo local, el uso de Codex
+  se optimiza automáticamente para adaptarse a sus especificaciones — el modo de
+  compresión de CPU se activa de inmediato.
 
 El puente retransmite el flujo Responses sin almacenar ni resintetizar SSE. Sus
 únicas reescrituras son quirúrgicas y documentadas: las filas de herramientas
