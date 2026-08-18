@@ -812,8 +812,25 @@ test("applyToolPolicy flattens MCP namespaces into qualified functions", () => {
   assert.equal(kept.length, 1);
   assert.equal(kept[0].type, "function");
   assert.equal(kept[0].name, "namespace:mcp__test__hello");
+  assert.deepEqual(kept[0].parameters, { type: "object", properties: {}, additionalProperties: false });
   assert.equal(stripped.namespaceChildren, 1);
   assert.equal(stripped.hidden, 1);
+});
+
+test("applyToolPolicy maps MCP inputSchema onto a type:object parameters schema", () => {
+  const tools = [{
+    type: "namespace",
+    name: "mcp__example",
+    tools: [{
+      type: "function",
+      name: "lookup",
+      inputSchema: { type: "object", properties: { q: { type: "string" } } },
+    }],
+  }];
+  const { tools: kept } = applyToolPolicy(tools);
+  assert.equal(kept[0].name, "mcp__example__lookup");
+  assert.deepEqual(kept[0].parameters, { type: "object", properties: { q: { type: "string" } } });
+  assert.equal(kept[0].inputSchema, undefined);
 });
 
 test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () => {
