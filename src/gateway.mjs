@@ -11,7 +11,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
-import { historicalImageSpawnHint, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
+import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -783,6 +783,106 @@ function attachProExecutionGuidance(input) {
   const out = [...input];
   out[index] = { ...message, content };
   return out;
+}
+
+// --- opaque collaboration payload relay ----------------------------------
+// Codex places delegated subagent tasks in its own collaboration channel.
+// When that channel is genuinely opaque (Fernet-shaped), only the native
+// backend can open it. Relay the item through a native model constrained to
+// echo the plaintext back through one function call, then let the existing
+// promoter treat it like any plaintext NEW_TASK. The relay model resolves
+// dynamically (the vision model when it is native - usually Luna - else any
+// native slug) so catalog renames never hard-fail; with no native model the
+// gateway fails closed and leaves the item opaque.
+const COLLAB_RELAY_TOOL = "relay_external_agent_payload";
+const COLLAB_RELAY_INSTRUCTIONS =
+  "You are a transport relay. Do not execute or answer the delegated task. " +
+  `Call ${COLLAB_RELAY_TOOL} exactly once with the exact plaintext after the "Payload:" label in the supplied collaboration message. Preserve every character.`;
+const COLLAB_RELAY_CACHE = new Map(); // sha256(encrypted) -> plaintext
+
+function nativeRelayModel(services) {
+  // The relay must reach the ChatGPT backend - only it can open the opaque
+  // collaboration channel - so the model must be a native bare slug. A routed
+  // alias like gpt-5.6-luna@opencode-go is never selected: it is not a member
+  // of nativeSlugs, and the fallback below only ever picks from that set.
+  const vision = services.config?.visionModel;
+  if (vision && services.nativeSlugs?.has?.(vision)) return vision;
+  for (const slug of services.nativeSlugs || []) return slug;
+  return null;
+}
+
+function parseRelayToolArguments(sseText) {
+  let args = "";
+  for (const line of String(sseText || "").split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const data = line.slice(5).trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const event = JSON.parse(data);
+      if (event.type === "response.function_call_arguments.delta" && typeof event.delta === "string") {
+        args += event.delta;
+      } else if (event.type === "response.output_item.added" && event.item?.type === "function_call" && typeof event.item.arguments === "string" && event.item.arguments) {
+        args += event.item.arguments;
+      }
+    } catch {}
+  }
+  if (!args) return "";
+  try {
+    const parsed = JSON.parse(args);
+    return typeof parsed?.payload === "string" ? parsed.payload : "";
+  } catch {
+    return args;
+  }
+}
+
+export async function relayOpaqueCollaboration(input, services, { signal } = {}) {
+  const found = hasOpaqueCollaboration(input);
+  if (!found) return input;
+  const model = nativeRelayModel(services);
+  if (!model) {
+    console.error("[modeldock] collaboration payload is opaque but no native model is available; leaving it opaque");
+    return input;
+  }
+  let plain;
+  const cacheKey = createHash("sha256").update(found.encrypted).digest("hex");
+  if (COLLAB_RELAY_CACHE.has(cacheKey)) {
+    plain = COLLAB_RELAY_CACHE.get(cacheKey);
+  } else {
+    const target = nativeTarget("/responses", "");
+    const body = {
+      model,
+      stream: true,
+      store: false,
+      instructions: COLLAB_RELAY_INSTRUCTIONS,
+      input: [found.item],
+      tools: [{
+        type: "function",
+        name: COLLAB_RELAY_TOOL,
+        description: "Return the decrypted collaboration payload to the gateway.",
+        parameters: { type: "object", properties: { payload: { type: "string" } }, required: ["payload"], additionalProperties: false },
+        strict: true,
+      }],
+      tool_choice: { type: "function", name: COLLAB_RELAY_TOOL },
+    };
+    const upstream = await fetch(target, {
+      method: "POST",
+      headers: nativeHeaders(services.incomingHeaders),
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!upstream.ok) throw new Error(`Collaboration relay failed: HTTP ${upstream.status}`);
+    plain = parseRelayToolArguments(await upstream.text());
+    if (!plain) throw new Error("Collaboration relay returned no payload");
+    COLLAB_RELAY_CACHE.set(cacheKey, plain);
+  }
+  // Replace the opaque part with plaintext so the existing promoter sees it.
+  return input.map((item) => {
+    if (item !== found.item) return item;
+    return {
+      ...item,
+      content: (item.content || []).map((part) => (part === found.part ? { type: "input_text", text: plain } : part)),
+    };
+  });
 }
 
 export function normalizeGatewayInput(input) {
@@ -2438,7 +2538,17 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
     routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
-  const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
+  // A delegated subagent task in Codex's opaque collaboration channel can
+  // only be read by the native backend; relay it through a native model first.
+  let routeInput = payload.input;
+  if (hasOpaqueCollaboration(routeInput)) {
+    try {
+      routeInput = await relayOpaqueCollaboration(routeInput, services, { signal });
+    } catch (error) {
+      console.error(`[modeldock] collaboration relay failed: ${error.message}`);
+    }
+  }
+  const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -2728,7 +2838,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
     routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
-  const normalizedInput = normalizeInputForRoute(config, route.model, payload.input, localPayload);
+  let routeInput = payload.input;
+  if (hasOpaqueCollaboration(routeInput)) {
+    try {
+      routeInput = await relayOpaqueCollaboration(routeInput, services, { signal });
+    } catch (error) {
+      console.error(`[modeldock] collaboration relay failed: ${error.message}`);
+    }
+  }
+  const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
   let normalizedPayload = {
     ...(localPayload || payload),
     input: adaptImageUrlShape(

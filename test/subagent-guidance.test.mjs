@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { promoteCollaborationNewTask, SUBAGENT_SPAWN_RULE } from "../src/subagent-guidance.mjs";
+import { promoteCollaborationNewTask, SUBAGENT_SPAWN_RULE, hasOpaqueCollaboration } from "../src/subagent-guidance.mjs";
 
 test("SUBAGENT_SPAWN_RULE names the real v2 args and forbids analysis-only none-forks", () => {
   assert.match(SUBAGENT_SPAWN_RULE, /spawn_agent's `message`/);
@@ -87,4 +87,45 @@ test("promoteCollaborationNewTask does not treat opaque Fernet blobs as a task",
     },
   ];
   assert.equal(promoteCollaborationNewTask(input), input);
+});
+
+test("hasOpaqueCollaboration finds Fernet-shaped NEW_TASK payloads", () => {
+  const found = hasOpaqueCollaboration([
+    { type: "agent_message", content: [
+      { type: "input_text", text: "Message Type: NEW_TASK\nTask name: /root/x\nPayload:\n" },
+      { type: "encrypted_content", encrypted_content: "gAAAAAopaque_blob_9de2" },
+    ]},
+  ]);
+  assert.ok(found, "an opaque collaboration payload is detected");
+  assert.equal(found.encrypted, "gAAAAAopaque_blob_9de2");
+  assert.equal(found.part.type, "encrypted_content");
+});
+
+test("hasOpaqueCollaboration ignores plaintext and non-collaboration items", () => {
+  assert.equal(
+    hasOpaqueCollaboration([
+      { type: "agent_message", content: [
+        { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+        { type: "encrypted_content", encrypted_content: "plaintext-ish-not-fernet" },
+      ]},
+    ]),
+    null,
+    "plaintext encrypted_content is not an opaque relay target",
+  );
+  assert.equal(
+    hasOpaqueCollaboration([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+    ]),
+    null,
+    "ordinary messages are ignored",
+  );
+  assert.ok(
+    hasOpaqueCollaboration([
+      { type: "agent_message", content: [
+        { type: "input_text", text: "Message Type: MESSAGE\nPayload:\n" },
+        { type: "encrypted_content", encrypted_content: "gAAAAAnot_a_task" },
+      ]},
+    ]),
+    "every collaboration message type is a relay candidate, not just NEW_TASK",
+  );
 });

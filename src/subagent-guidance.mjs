@@ -64,6 +64,27 @@ function isPluginWrapperUser(item) {
   return text.includes("<recommended_plugins>") || text.includes("<app-context>");
 }
 
+// A delegated collaboration payload whose body sits in a genuinely opaque
+// (Fernet-shaped) part. Only the native backend can open it; the gateway
+// relays it through a native model to recover the plaintext before promotion.
+export function hasOpaqueCollaboration(input) {
+  if (!Array.isArray(input)) return null;
+  for (const item of input) {
+    if (!Array.isArray(item?.content)) continue;
+    const visible = item.content
+      .filter((part) => ["input_text", "text"].includes(part?.type) && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("");
+    if (!/Message Type:\s*(?:NEW_TASK|MESSAGE|FOLLOWUP_TASK|FINAL_ANSWER)\b[\s\S]*\nPayload:\s*$/i.test(visible)) continue;
+    for (const part of item.content) {
+      if (part?.type === "encrypted_content" && typeof part.encrypted_content === "string" && isOpaqueEncryptedContent(part.encrypted_content)) {
+        return { item, part, encrypted: part.encrypted_content };
+      }
+    }
+  }
+  return null;
+}
+
 export function promoteCollaborationNewTask(input) {
   if (!Array.isArray(input)) return input;
   let payload = "";
