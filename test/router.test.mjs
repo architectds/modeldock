@@ -65,7 +65,36 @@ test("a tool-call-only assistant turn ends the turn; a stale image behind it doe
   assert.equal(route.model, "deepseek-v4-flash");
 });
 
-test("a genuinely new image after a tool-call turn still routes to vision", () => {
+test("a compaction item ends the turn; a stale image behind it does not re-trigger vision", () => {
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "look" }, { type: "input_image", image_url: "data:image/jpeg;base64,AA==" }] },
+      { type: "compaction", id: "cmp_1", encrypted_content: "kcr1:e30=" },
+      { role: "user", content: [{ type: "input_text", text: "continue" }] },
+    ],
+  }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: new Set(["deepseek-v4-flash"]) });
+  assert.notEqual(route.reason, "current_turn_image", "a stale image behind compaction must not re-trigger vision");
+  assert.equal(route.model, "deepseek-v4-flash");
+});
+
+test("a genuinely new image after compaction still routes to vision", () => {
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash",
+    input: [
+      { role: "user", content: [{ type: "input_text", text: "start" }] },
+      { type: "compaction", id: "cmp_1", encrypted_content: "kcr1:e30=" },
+      { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,BB==" }] },
+    ],
+  }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: new Set(["deepseek-v4-flash"]) });
+  assert.equal(route.reason, "current_turn_image");
+  assert.equal(route.model, "gpt-5.6-luna");
+});
+
+test("a new image during an agentic tool loop stays on the text model", () => {
+  // Pasted-image escalation is for ordinary chat. Once the payload already has
+  // tool/reasoning items, the coding model stays in charge and inspects via
+  // vision_inspect instead of shipping the whole history to the vision model.
   const route = routeResponsesRequest({
     model: "deepseek-v4-flash",
     input: [
@@ -75,8 +104,9 @@ test("a genuinely new image after a tool-call turn still routes to vision", () =
       { role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,BB==" }] },
     ],
   }, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: new Set(["deepseek-v4-flash"]) });
-  assert.equal(route.reason, "current_turn_image");
-  assert.equal(route.model, "gpt-5.6-luna");
+  assert.notEqual(route.reason, "current_turn_image");
+  assert.equal(route.model, "deepseek-v4-flash");
+  assert.equal(route.directVision, false);
 });
 
 test("does not treat Codex developer instructions about image support as user visual intent", () => {

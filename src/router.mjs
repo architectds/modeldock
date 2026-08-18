@@ -14,7 +14,12 @@ export function isAssistantMarker(item) {
   if (item.role === "assistant") return true;
   return item.type === "function_call"
     || item.type === "custom_tool_call"
-    || item.type === "reasoning";
+    || item.type === "reasoning"
+    // Compact replaces the assistant/tool loop with a checkpoint item. Codex
+    // then keeps older user messages (screenshots included) in the replayed
+    // history. If compaction is not a boundary, lastMarker stays -1 and those
+    // leftover images look like the current turn forever.
+    || item.type === "compaction";
 }
 
 function currentTurnItems(input) {
@@ -32,6 +37,22 @@ function parts(item) {
 
 function hasImage(items) {
   return items.some((item) => parts(item).some((part) => part?.type === "input_image" && typeof part.image_url === "string"));
+}
+
+// An agentic Responses payload already has tool/reasoning items. Escalating that
+// whole history onto the vision model is not how "see" works: pasted-image chat
+// can swap models, but a coding loop must stay on the text model and inspect
+// via vision_inspect. Presence of agent items is the test, not payload length.
+const AGENTIC_ITEM_TYPES = new Set([
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "reasoning",
+]);
+
+export function isAgenticHistory(input) {
+  return inputItems(input).some((item) => AGENTIC_ITEM_TYPES.has(item?.type));
 }
 
 function continuationCallIds(items) {
@@ -101,7 +122,7 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   if (source?.model === visionModel && source?.model !== mainModel) {
     return { model: visionModel, reason: "vision_model_requested", directVision: true };
   }
-  if (hasImage(current)) {
+  if (hasImage(current) && !isAgenticHistory(source?.input)) {
     if (mainModelSupportsVision) {
       return { model: mainModel, reason: "current_turn_image", directVision: true };
     }
