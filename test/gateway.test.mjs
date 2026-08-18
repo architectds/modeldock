@@ -134,6 +134,38 @@ test("normalizeGatewayInput removes compaction triggers and expands compaction s
   assert.equal(normalized[1].content[0].text, "earlier context");
 });
 
+test("normalizeGatewayInput promotes collaboration NEW_TASK out of reasoning", () => {
+  const payload = "read changes-audit.md and revert A4/A5/A7 only";
+  const normalized = normalizeGatewayInput([
+    {
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text: `Message Type: NEW_TASK\nTask name: /root/revert_herdr\nPayload:\n${payload}` }],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>\nCanva\n" }] },
+  ]);
+  assert.equal(normalized.at(-1).role, "user");
+  assert.equal(normalized.at(-1).content[0].text, payload);
+});
+
+test("normalizeGatewayInput promotes the live split NEW_TASK agent_message shape", () => {
+  const payload = "Write the exact token VERIFIED-SUBAGENT-TASK-9de2 into RESULT.txt";
+  const normalized = normalizeGatewayInput([
+    {
+      type: "agent_message",
+      content: [
+        {
+          type: "input_text",
+          text: "Message Type: NEW_TASK\nTask name: /root/verify_subagent_delivery\nSender: /root\nPayload:\n",
+        },
+        { type: "encrypted_content", encrypted_content: payload },
+      ],
+    },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>\nCanva\n" }] },
+  ]);
+  assert.equal(normalized.at(-1).role, "user");
+  assert.equal(normalized.at(-1).content[0].text, payload);
+});
+
 test("compaction summaries round-trip through the kcr1 payload", () => {
   const encoded = encodeCompactionSummary("keep this handoff");
   assert.match(encoded, /^kcr1:/);
@@ -743,8 +775,9 @@ test("rewriteHistoricalImages replaces all images with refs by default", () => {
   assert.equal(rewritten[0].content[1].type, "input_text");
   assert.equal(rewritten[2].content[1].type, "input_text", "current-turn image is also replaced by default");
   assert.equal(rewritten[1], input[1], "assistant history is untouched");
-  assert.doesNotMatch(rewritten[0].content[1].text, /fork_turns="none"/);
-  assert.match(rewritten[0].content[1].text, /complete (task|question) in spawn_agent/i);
+  assert.match(rewritten[0].content[1].text, /spawn_agent's message/);
+  assert.match(rewritten[0].content[1].text, /omit fork_turns or use "all"/i);
+  assert.doesNotMatch(rewritten[0].content[1].text, /spawn_agent's prompt/);
 });
 
 test("rewriteHistoricalImages preserves current images when requested", () => {

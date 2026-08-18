@@ -11,7 +11,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
-import { historicalImageSpawnHint } from "./subagent-guidance.mjs";
+import { historicalImageSpawnHint, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -787,7 +787,7 @@ function attachProExecutionGuidance(input) {
 
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
-  return dropUnpairedToolItems(input)
+  const rewritten = dropUnpairedToolItems(input)
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
@@ -798,6 +798,7 @@ export function normalizeGatewayInput(input) {
         content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
       };
     });
+  return promoteCollaborationNewTask(rewritten);
 }
 
 // Codex emits its built-in tools as custom_tool_call / local_shell_call items

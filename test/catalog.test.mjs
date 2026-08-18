@@ -71,13 +71,15 @@ test("baseInstructionsFor includes the vision and restart guidance", () => {
   }
 });
 
-test("baseInstructionsFor puts the subagent task in spawn_agent, not an empty fork plus send_message", () => {
+test("baseInstructionsFor matches Codex v2 spawn_agent args that text models can see", () => {
   const text = baseInstructionsFor(configStub());
   const vision = baseInstructionsFor(configStub(), { supportsVision: true });
   for (const instructions of [text, vision]) {
-    assert.match(instructions, /complete task in spawn_agent/i);
-    assert.match(instructions, /send_message is only for a worker that is already running/);
-    assert.doesNotMatch(instructions, /fork_turns="none"/);
+    assert.match(instructions, /spawn_agent's `message`/);
+    assert.match(instructions, /followup_task/);
+    assert.match(instructions, /omit fork_turns or use "all"/i);
+    assert.doesNotMatch(instructions, /spawn_agent's prompt/);
+    assert.match(instructions, /fork_turns="none" delivers NEW_TASK/);
   }
 });
 
