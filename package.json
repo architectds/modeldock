@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node scripts/build-if-stale.mjs && node dist/modeldock.mjs",
     "dev": "node --watch src/server.mjs",
-    "pretest": "node scripts/cleanup-sandbox.mjs && node scripts/sync-installer-helpers.mjs --check && node scripts/build.mjs",
+    "pretest": "node scripts/cleanup-sandbox.mjs && node scripts/sync-installer-helpers.mjs --check && node scripts/check-internal-docs.mjs && node scripts/build.mjs",
     "test": "node --import ./test/preload-env.mjs --test test/*.test.mjs",
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",

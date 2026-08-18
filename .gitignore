@@ -31,7 +31,9 @@ voxel/
 # Release build output
 dist/
 
-# Internal docs: kept locally, not published
+# Internal docs: kept locally, NEVER published. These carry private strategy and
+# business-model decisions. Do not remove these entries; scripts/check-internal-docs.mjs
+# fails `pretest` if any of them ever gets tracked.
 AGENTS.md
 architecture.md
 
