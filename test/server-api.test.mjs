@@ -820,6 +820,31 @@ test("WebSocket upgrades are declined with 426 so Codex falls back to HTTP", asy
   assert.equal(health.status, 200);
 });
 
+test("stop() returns while an idle client connection is still open", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-stop-hang-"));
+  const instance = await startServer({
+    ...baseConfig(),
+    port: 0,
+    autostartDefault: false,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    nativeCatalogFile: path.join(dir, "native-catalog.json"),
+  });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const port = instance.server.address().port;
+  const socket = net.connect(port, "127.0.0.1");
+  t.after(() => socket.destroy());
+  await new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  const started = Date.now();
+  await Promise.race([
+    instance.stop(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("stop() hung on an open connection")), 2000)),
+  ]);
+  assert.ok(Date.now() - started < 2000, "SIGTERM/stop must not wait forever for Codex keep-alives");
+});
+
 function fakeAutostart({ enabled = false, fail = false } = {}) {
   const calls = [];
   return {
