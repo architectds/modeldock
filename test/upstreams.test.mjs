@@ -423,3 +423,117 @@ test("inspectVision reports a combined failure message when every image is bad",
     "when every image is unreadable the call fails loudly with each reason",
   );
 });
+
+// A model offered under "ChatGPT (native)" is published as a bare slug, while its
+// routed twin carries an owner suffix (gpt-5.6-luna@opencode-go). That is the same
+// signal isNativeModel uses in gateway.mjs, so the vision harness must read it the
+// same way: a native pick belongs on the ChatGPT backend under the Codex sign-in,
+// not on the default profile's endpoint and token.
+test("a native vision model is sent to the ChatGPT backend on the Codex sign-in", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-vision-native-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pngPath = path.join(dir, "shot.png");
+  writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-vision-home-"));
+  t.after(() => rmSync(codexHome, { recursive: true, force: true }));
+  writeFileSync(
+    path.join(codexHome, "auth.json"),
+    JSON.stringify({ tokens: { access_token: "chatgpt-token", account_id: "acct-9" } }),
+    "utf8",
+  );
+
+  let called = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    called = { url: String(url), headers: options.headers, body: JSON.parse(options.body) };
+    return new Response(
+      JSON.stringify({ id: "resp_v", output: [{ type: "message", content: [{ type: "output_text", text: "a chart" }] }] }),
+      { status: 200 },
+    );
+  };
+
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      codexHome,
+      // Only an OpenCode Go credential exists; a native call must not use it.
+      tokens: { "opencode-go": "go-token" },
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "gpt-5.6-terra",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 }),
+    visionCache: new (await import("../src/vision-cache.mjs")).createVisionCache(),
+    getNativeSlugs: () => new Set(["gpt-5.6-terra"]),
+  });
+  try {
+    const result = await upstreams.inspectVision({ path: pngPath, question: "What does it show?" });
+    assert.equal(result.answer, "a chart");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(called.url, "https://chatgpt.com/backend-api/codex/responses", "native vision uses the ChatGPT backend");
+  assert.equal(called.headers.Authorization, "Bearer chatgpt-token", "billed to the Codex sign-in, not the Go token");
+  assert.equal(called.headers["chatgpt-account-id"], "acct-9", "the native account header rides along");
+  assert.equal(called.body.model, "gpt-5.6-terra");
+  assert.equal(called.body.input[0].content[1].type, "input_image", "the native leg speaks the Responses wire");
+});
+
+test("an owner-qualified twin of a native slug stays on its routed camp", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-vision-routed-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pngPath = path.join(dir, "shot.png");
+  writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
+
+  let called = null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    called = { url: String(url), headers: options.headers };
+    return new Response(
+      JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "a chart" } }] }),
+      { status: 200 },
+    );
+  };
+
+  const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
+  const upstreams = createUpstreams({
+    config: {
+      exaMcpUrl: "https://mcp.exa.ai/mcp",
+      exaApiKey: "",
+      tokens: { "opencode-go": "go-token" },
+      goBaseUrl: "https://go.example.com/v1",
+      visionTimeoutMs: 90_000,
+      visionModel: "gpt-5.6-luna@opencode-go",
+      visionFallbackModel: "minimax-m3",
+    },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 }),
+    visionCache: new (await import("../src/vision-cache.mjs")).createVisionCache(),
+    // The bare slug is native; the qualified one in use here must not match it.
+    getNativeSlugs: () => new Set(["gpt-5.6-luna"]),
+  });
+  try {
+    await upstreams.inspectVision({ path: pngPath, question: "What does it show?" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.ok(called.url.startsWith("https://go.example.com/v1/"), "the qualified twin stays on OpenCode Go");
+  assert.equal(called.headers.Authorization, "Bearer go-token");
+  assert.equal(called.headers["chatgpt-account-id"], undefined, "routed calls carry no native account header");
+});
+
+test("the @openai suffix does not route: it is a picker label, not an owner", async () => {
+  const { providerForModel, tokenFor } = await import("../src/profiles.mjs");
+  const config = { profileId: "opencode-go", tokens: { "opencode-go": "go-token" } };
+  // Native-ness is carried by nativeSlugs, not by a suffix: PROFILES has no
+  // "openai" entry, so both forms resolve to the default profile here.
+  assert.equal(providerForModel(config, "gpt-5.6-terra"), "opencode-go");
+  assert.equal(providerForModel(config, "gpt-5.6-terra@openai"), "opencode-go");
+  assert.equal(tokenFor(config, "gpt-5.6-terra@openai"), "go-token");
+});

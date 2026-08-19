@@ -54,9 +54,13 @@ export function parseMcpTextResult(body) {
 // auth file and posts to the same native images endpoint the built-in tool
 // uses; the returned PNG is saved to a local file and its path returned so the
 // model can surface it in the conversation.
-const NATIVE_IMAGE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+// The ChatGPT backend behind a Codex sign-in, shared by native image generation
+// and native vision. Mirrors NATIVE_BASE in gateway.mjs, which relayNativeResponses
+// uses for the main relay; the two must name the same host or a native model would
+// answer on the relay and 404 in the harness.
+const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
 
-export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache }) {
+export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache, getNativeSlugs = () => null }) {
   async function generateImage(args) {
     const model = String(args.model || "gpt-image-1");
     const size = String(args.size || "1024x1024");
@@ -70,7 +74,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
           `No ChatGPT session token in ${auth.file}; sign in to the Codex app so native image generation can use your subscription.`,
         );
       }
-      const response = await fetch(`${NATIVE_IMAGE_BASE}/images/generations`, {
+      const response = await fetch(`${NATIVE_BASE}/images/generations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -193,7 +197,14 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code"]);
   const ZEN_FREE_BASE = `${(config.zenBaseUrl || "https://opencode.ai/zen/v1").replace(/\/+$/, "")}/chat/completions`;
 
+  function isNativeVisionModel(model) {
+    // The raw slug decides, never bareModelId: the "@provider" suffix is exactly
+    // what distinguishes the routed twin from the native entry of one model.
+    return Boolean(getNativeSlugs()?.has?.(model));
+  }
+
   function visionEndpointFor(model) {
+    if (isNativeVisionModel(model)) return { url: `${NATIVE_BASE}/responses`, style: "responses", native: true };
     const provider = providerForModel(config, model);
     if (provider === "custom") {
       const base = (config.customBaseUrl || "").replace(/\/+$/, "");
@@ -210,9 +221,15 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   }
 
   async function callVisionModel(model, images, prompt) {
-    const token = tokenFor(config, model);
-    if (!token) throw new Error(`No token configured for provider of ${model}`);
-    const { url, style } = visionEndpointFor(model);
+    // Resolve the endpoint first: it decides which credential the call needs.
+    const { url, style, native } = visionEndpointFor(model);
+    const nativeAuth = native ? readCodexAuth(config.codexHome || path.join(os.homedir(), ".codex")) : null;
+    const token = native ? nativeAuth.accessToken : tokenFor(config, model);
+    if (!token) {
+      throw new Error(native
+        ? `No ChatGPT session token in ${nativeAuth.file}; sign in to the Codex app to use ${bareModelId(model)} for vision.`
+        : `No token configured for provider of ${model}`);
+    }
     // Send the bare id upstream; the @provider suffix is a routing address for this
     // gate, never part of the model name an upstream API knows.
     const common = { model: bareModelId(model), max_output_tokens: 4_096, stream: false };
@@ -232,6 +249,9 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
+        // The native backend bills the turn to this account; routed providers
+        // have no such header and must not receive one.
+        ...(nativeAuth?.accountId ? { "chatgpt-account-id": nativeAuth.accountId } : {}),
       },
       body: JSON.stringify(common),
       signal: AbortSignal.timeout(config.visionTimeoutMs),
