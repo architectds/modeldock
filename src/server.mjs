@@ -1637,20 +1637,12 @@ export function createApp(services = createServices()) {
       config.customVision = Boolean(asVision);
       config.tokens.custom = apiKey;
       applyCustomProfile(config);
-      // A selection must not outlive what it points at. Re-adding an endpoint
-      // under a different model id retires the old one, and vision can be
-      // switched off outright - either way the pointer has to go rather than
-      // dangle. This asks whether the model is still published instead of
-      // asking whether a flag was ticked, which is the same question for vision
-      // and the only sensible one for main now that publishing is all "main"
-      // ever meant.
-      const published = new Set((profileById("custom").availableModels || []).map((entry) => entry.id));
-      const stale = (selection) => selection?.endsWith(`${PROVIDER_SEPARATOR}custom`) && !published.has(bareModelId(selection));
-      if (stale(config.mainModel)) {
-        config.mainModel = "";
-        services.modelSelection.mainModel = "";
-      }
-      if (stale(config.visionModel) || (!asVision && config.visionModel === qualified)) {
+      // Only vision is cleaned up here. The main model is not a setting - it
+      // records whatever Codex last routed with (see relayGatewayRequest), so a
+      // reference to a retired model is corrected by the next request and reset
+      // by a restart. Vision is a stored preference and has to be let go of
+      // explicitly when the endpoint stops offering it.
+      if (!asVision && config.visionModel === qualified) {
         config.visionModel = "";
         services.modelSelection.visionModel = "";
       }
