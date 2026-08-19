@@ -1432,45 +1432,74 @@ async function renderLocalEngines() {
         ? engine.models.join(", ")
         : t("local.noModels");
       item.append(head, models);
-      // Ollama keeps its own connect control above; the OpenAI-dialect engines
-      // are connected from here, keyless, because they are on this machine.
-      if (engine.engine === "llamacpp" || engine.engine === "vllm") {
+      // Ollama keeps its own connect control above; llama.cpp and vLLM are
+      // connected from here, keyless, because they are on this machine. A bare
+      // OpenAI-compatible server is listed but not offered: it has no profile to
+      // attach to, and the API page already takes an endpoint with a key.
+      if (engine.connected) item.classList.add("is-connected");
+      if (engine.offline) item.classList.add("is-offline");
+      if (engine.connected || engine.connectable) {
         const row = document.createElement("div");
         row.className = "custom-row local-engine-actions";
-        const vision = document.createElement("label");
-        vision.className = "chip-toggle";
-        const visionBox = document.createElement("input");
-        visionBox.type = "checkbox";
-        const visionText = document.createElement("span");
-        visionText.textContent = t("local.vision");
-        vision.append(visionBox, visionText);
-        const connect = document.createElement("button");
-        connect.type = "button";
-        connect.className = "custom-action primary";
-        connect.textContent = t("local.connect");
         const status = document.createElement("span");
         status.className = "custom-status";
-        connect.addEventListener("click", async () => {
-          connect.disabled = true;
-          status.textContent = t("local.connecting");
+        const act = document.createElement("button");
+        act.type = "button";
+
+        const run = async (path, body, pending) => {
+          act.disabled = true;
+          status.textContent = t(pending);
           try {
-            const reply = await fetch("/api/local/connect", {
+            const reply = await fetch(path, {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ engine: engine.engine, baseUrl: engine.baseUrl, asVision: visionBox.checked }),
+              body: JSON.stringify(body),
             });
-            const body = await reply.json();
-            if (!reply.ok) throw new Error(body.error?.message || `Connect ${reply.status}`);
-            status.textContent = t("local.connected", { count: body.models?.length ?? 0 });
+            const payload = await reply.json();
+            if (!reply.ok) throw new Error(payload.error?.message || `${path} ${reply.status}`);
+            // Re-render rather than patch this row: the engine has moved between
+            // connected and not, and that changes the whole row, not one label.
+            await renderLocalEngines();
             poll().catch(() => {});
+            pollConfig().catch(() => {});
           } catch (error) {
             status.textContent = error.message;
-          } finally {
-            connect.disabled = false;
+            act.disabled = false;
           }
-        });
-        row.append(vision, connect, status);
+        };
+
+        if (engine.connected) {
+          status.textContent = engine.offline
+            ? t("local.offline", { count: engine.connectedModels })
+            : t("local.connected", { count: engine.connectedModels });
+          act.className = "custom-action";
+          act.textContent = t("local.disconnect");
+          act.addEventListener("click", () => run("/api/local/disconnect", { engine: engine.engine }, "local.disconnecting"));
+          row.append(act, status);
+        } else {
+          const vision = document.createElement("label");
+          vision.className = "chip-toggle";
+          const visionBox = document.createElement("input");
+          visionBox.type = "checkbox";
+          const visionText = document.createElement("span");
+          visionText.textContent = t("local.vision");
+          vision.append(visionBox, visionText);
+          act.className = "custom-action primary";
+          act.textContent = t("local.connect");
+          act.addEventListener("click", () => run(
+            "/api/local/connect",
+            { engine: engine.engine, baseUrl: engine.baseUrl, asVision: visionBox.checked },
+            "local.connecting",
+          ));
+          row.append(vision, act, status);
+        }
         item.append(row);
+      } else {
+        // Discovered, not offerable. Saying why beats an unexplained missing button.
+        const hint = document.createElement("p");
+        hint.className = "custom-hint";
+        hint.textContent = t("local.useApiPage");
+        item.append(hint);
       }
       list.append(item);
     }

@@ -6,13 +6,22 @@ import {
   LocalEngineError,
   assertLocalBase,
   discoverLocalEngines,
+  CONNECTABLE_ENGINES,
   engineFromProbes,
   probeLocalEngine,
 } from "../src/local-engines.mjs";
+import { allProfiles } from "../src/profiles.mjs";
 
 test("engineFromProbes names the engine from the response, not the port", () => {
   assert.equal(engineFromProbes({ tags: { models: [{ name: "qwen3:8b" }] } }), "ollama");
-  assert.equal(engineFromProbes({ props: { default_generation_settings: {} } }), "llama.cpp");
+  assert.equal(engineFromProbes({ props: { default_generation_settings: {} } }), "llamacpp");
+  // vLLM is only distinguishable from any other OpenAI-compatible server by
+  // /version. Without that probe it was reported as "openai", which no route
+  // accepted, so vLLM could be found and never connected.
+  assert.equal(
+    engineFromProbes({ version: { version: "0.11.0" }, models: { data: [{ id: "Qwen/Qwen3-8B" }] } }),
+    "vllm",
+  );
   assert.equal(engineFromProbes({ models: { data: [{ id: "m" }] } }), "openai");
   assert.equal(engineFromProbes({}), "");
   assert.equal(engineFromProbes(), "");
@@ -23,7 +32,7 @@ test("a llama.cpp server on any port is still llama.cpp", () => {
   // it wins even when /v1/models answers too.
   assert.equal(
     engineFromProbes({ props: { slots_idle: 4 }, models: { data: [{ id: "local" }] } }),
-    "llama.cpp",
+    "llamacpp",
   );
 });
 
@@ -69,8 +78,8 @@ test("discoverLocalEngines returns only what answered", async () => {
     "8080/v1/models": { data: [{ id: "qwen3-27b" }] },
   });
   const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
-  assert.deepEqual(found.map((f) => f.engine), ["ollama", "llama.cpp"]);
-  assert.deepEqual(found.find((f) => f.engine === "llama.cpp").models, ["qwen3-27b"]);
+  assert.deepEqual(found.map((f) => f.engine), ["ollama", "llamacpp"]);
+  assert.deepEqual(found.find((f) => f.engine === "llamacpp").models, ["qwen3-27b"]);
 });
 
 test("the snapshot keys engines instead of giving each one a file", async (t) => {
@@ -128,4 +137,48 @@ test("llama.cpp and vLLM are separate providers so both can be live", async () =
   assert.ok(ids.includes("llamacpp") && ids.includes("vllm"));
   applyLocalEngineProfile("llamacpp", null);
   applyLocalEngineProfile("vllm", null);
+});
+
+// The defect this guards against shipped once and made the whole feature
+// unreachable: discovery answered "llama.cpp" and "openai" while the connect
+// route, the snapshot key, and the profile ids all spoke "llamacpp" and
+// "vllm". Every layer was individually correct and nothing could be connected.
+// Names crossing a boundary are only right relative to each other, so the
+// check has to span the boundary too.
+test("every engine discovery calls connectable is one the gateway can attach", async () => {
+  const fetchImpl = async (url) => {
+    const reply = (body) => ({ ok: true, json: async () => body });
+    if (url === "http://127.0.0.1:8080/props") return reply({ slots_idle: 2 });
+    if (url === "http://127.0.0.1:8080/v1/models") return reply({ data: [{ id: "qwen3-30b" }] });
+    if (url === "http://127.0.0.1:8000/version") return reply({ version: "0.11.0" });
+    if (url === "http://127.0.0.1:8000/v1/models") return reply({ data: [{ id: "Qwen/Qwen3-8B" }] });
+    return { ok: false, json: async () => ({}) };
+  };
+
+  const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
+  assert.deepEqual(found.map((f) => f.engine), ["llamacpp", "vllm"], "both engines are found and named");
+
+  for (const engine of found) {
+    assert.equal(engine.connectable, true, `${engine.engine} is offered`);
+    assert.ok(
+      CONNECTABLE_ENGINES.includes(engine.engine),
+      `${engine.engine} is a name the connect route accepts`,
+    );
+    assert.ok(
+      allProfiles().some((profile) => profile.id === engine.engine),
+      `${engine.engine} has a profile to publish its models through`,
+    );
+  }
+});
+
+test("a bare OpenAI-compatible server is found but not offered a Connect button", async () => {
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:8000/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const [found] = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
+  // It has no profile to attach to, and the API page already takes an endpoint
+  // with a key. Offering a button that could only fail would be worse.
+  assert.equal(found.engine, "openai");
+  assert.equal(found.connectable, false);
 });

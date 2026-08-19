@@ -33,7 +33,7 @@ import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
-import { readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -1768,7 +1768,7 @@ export function createApp(services = createServices()) {
     // from their sources before stamping what is left of the overrides on.
     applyCustomProfile(config);
     const localSnapshot = readLocalEnginesSnapshot() || {};
-    for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+    for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
     // Native models are appended to the published set rather than living in a
     // profile, so the pass below cannot reach them; they read this instead.
     // Without it the edit returned 200 and changed nothing for them.
@@ -1820,7 +1820,30 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/local/discover", async (req, res) => {
     try {
-      return res.json({ engines: await discoverLocalEngines({}) });
+      const live = await discoverLocalEngines({});
+      const saved = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath()) || {};
+      const engines = live.map((engine) => ({
+        ...engine,
+        connected: Boolean(saved[engine.engine]),
+        connectedModels: saved[engine.engine]?.models?.length || 0,
+      }));
+      // An engine that was connected and has since been stopped still belongs on
+      // the page. Dropping it would leave a profile published against a server
+      // that is gone, with no control anywhere to take it back down.
+      for (const [engine, snapshot] of Object.entries(saved)) {
+        if (engines.some((found) => found.engine === engine)) continue;
+        engines.push({
+          engine,
+          label: LOCAL_ENGINE_LABELS[engine] || engine,
+          baseUrl: snapshot.baseUrl || "",
+          models: (snapshot.models || []).map((model) => model.id),
+          connectable: CONNECTABLE_ENGINES.includes(engine),
+          connected: true,
+          connectedModels: snapshot.models?.length || 0,
+          offline: true,
+        });
+      }
+      return res.json({ engines });
     } catch (error) {
       return res.status(500).json({ error: { type: "discover_failed", message: error.message } });
     }
@@ -1831,7 +1854,7 @@ export function createApp(services = createServices()) {
   app.post("/api/local/connect", mutateConfig, async (req, res) => {
     const { engine, baseUrl, asVision } = req.body || {};
     try {
-      if (engine !== "llamacpp" && engine !== "vllm") {
+      if (!CONNECTABLE_ENGINES.includes(engine)) {
         throw new LocalEngineError("engine", `Unknown local engine: ${engine}`);
       }
       const base = assertLocalBase(baseUrl);
@@ -1855,6 +1878,7 @@ export function createApp(services = createServices()) {
       };
       writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
       applyLocalEngineProfile(engine, snapshot);
+      services.writeCatalogFile?.();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
       return res.json({ engine, baseUrl: base, models: snapshot.models });
     } catch (error) {
@@ -1866,11 +1890,12 @@ export function createApp(services = createServices()) {
 
   app.post("/api/local/disconnect", mutateConfig, async (req, res) => {
     const { engine } = req.body || {};
-    if (engine !== "llamacpp" && engine !== "vllm") {
+    if (!CONNECTABLE_ENGINES.includes(engine)) {
       return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
     }
     clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
     applyLocalEngineProfile(engine, null);
+    services.writeCatalogFile?.();
     recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
     return res.json({ engine, models: [] });
   });

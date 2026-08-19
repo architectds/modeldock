@@ -30,19 +30,35 @@ const LOCAL_CANDIDATES = [
   { port: 8000, hint: "vllm" },
 ];
 
-const ENGINE_LABELS = {
+// The engines this gateway can attach a profile to. Ollama is absent because
+// it connects through its own older route and snapshot. Kept in one place so
+// the discovery, the route, and the page cannot drift into disagreeing about
+// which engines are offerable - which is exactly how this feature shipped
+// unreachable the first time.
+export const CONNECTABLE_ENGINES = ["llamacpp", "vllm"];
+
+export const ENGINE_LABELS = {
   ollama: "Ollama",
-  "llama.cpp": "llama.cpp",
+  llamacpp: "llama.cpp",
   vllm: "vLLM",
   openai: "OpenAI-compatible",
 };
 
-// Pure: given what each probe returned, name the engine. Order matters - the
-// /props hit is what separates llama.cpp from every other OpenAI-compatible
-// server, so it is checked before the generic /v1/models shape.
-export function engineFromProbes({ tags, props, models } = {}) {
+// Pure: given what each probe returned, name the engine. The names are the
+// ids used everywhere else - the provider suffix, the snapshot key, the
+// connect route - because a second vocabulary here is a bug waiting to be
+// written, and once was: discovery said "llama.cpp" while the route only
+// accepted "llamacpp", so nothing could ever be connected.
+//
+// Order is by how specific the evidence is. /props is llama.cpp's own and no
+// one else serves it. /version is vLLM's; without it vLLM is just another
+// OpenAI-compatible server, which is what it used to be reported as.
+export function engineFromProbes({ tags, props, version, models } = {}) {
   if (tags && Array.isArray(tags.models)) return "ollama";
-  if (props && typeof props === "object" && !Array.isArray(props)) return "llama.cpp";
+  if (props && typeof props === "object" && !Array.isArray(props)) return "llamacpp";
+  if (version && typeof version.version === "string" && models && Array.isArray(models.data)) {
+    return "vllm";
+  }
   if (models && Array.isArray(models.data)) return "openai";
   return "";
 }
@@ -86,17 +102,28 @@ async function probeJson(fetchImpl, url, timeoutMs) {
 // ports are empty on most machines, and reporting that is noise.
 export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 800 } = {}) {
   const base = `http://127.0.0.1:${port}`;
-  const [tags, props, models] = await Promise.all([
+  const [tags, props, version, models] = await Promise.all([
     probeJson(fetchImpl, `${base}/api/tags`, timeoutMs),
     probeJson(fetchImpl, `${base}/props`, timeoutMs),
+    probeJson(fetchImpl, `${base}/version`, timeoutMs),
     probeJson(fetchImpl, `${base}/v1/models`, timeoutMs),
   ]);
-  const engine = engineFromProbes({ tags, props, models });
+  const engine = engineFromProbes({ tags, props, version, models });
   if (!engine) return null;
   const modelIds = engine === "ollama"
     ? (tags.models || []).map((m) => m?.name).filter(Boolean)
     : (models?.data || []).map((m) => m?.id).filter(Boolean);
-  return { engine, label: ENGINE_LABELS[engine] || engine, baseUrl: base, port, models: modelIds };
+  return {
+    engine,
+    label: ENGINE_LABELS[engine] || engine,
+    baseUrl: base,
+    port,
+    models: modelIds,
+    // A bare OpenAI-compatible server is discovered but not connectable here:
+    // it has no profile to attach to, and the API page already takes an
+    // arbitrary endpoint with a key.
+    connectable: CONNECTABLE_ENGINES.includes(engine),
+  };
 }
 
 export async function discoverLocalEngines({ fetchImpl = fetch, timeoutMs = 800, candidates = LOCAL_CANDIDATES } = {}) {

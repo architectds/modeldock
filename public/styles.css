@@ -682,6 +682,10 @@ body { padding-left: 88px; }
 .local-engine-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .local-engine-models { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .local-engine-actions { margin-top: 9px; align-items: center; }
+/* Connected is the state worth seeing at a glance in a list of several. The
+   border carries it so the row still reads as a row. */
+.local-engine.is-connected { border-color: var(--blue); }
+.local-engine.is-offline { border-color: var(--amber); }
 
 /* Model roster: one ranked table, provider as a column. */
 .roster-panel { max-width: none; }
