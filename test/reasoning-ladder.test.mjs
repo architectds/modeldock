@@ -139,8 +139,10 @@ test("a native model's context window can be corrected like any other", async ()
     const shipped = mergeNativeCatalog(base, { ...configStub(), nativeCatalogFile: file });
     const before = shipped.models.find((m) => m.slug === "gpt-5.6-sol");
     assert.equal(before.context_window, 272_000, "the native catalog's own figure is the default");
-    assert.equal(before.auto_compact_token_limit, Math.floor(272_000 * 0.8),
-      "and it carries the compaction limit every other entry has");
+    // No auto_compact_token_limit is imposed: Codex ships
+    // effective_context_window_percent with its own models and compacts on that.
+    assert.equal(before.auto_compact_token_limit, undefined,
+      "the native compaction basis is left alone");
 
     const corrected = mergeNativeCatalog(base, {
       ...configStub(),
@@ -150,8 +152,8 @@ test("a native model's context window can be corrected like any other", async ()
     const after = corrected.models.find((m) => m.slug === "gpt-5.6-sol");
     assert.equal(after.context_window, 128_000, "the correction reaches the file Codex reads");
     assert.equal(after.max_context_window, 128_000);
-    assert.equal(after.auto_compact_token_limit, Math.floor(128_000 * 0.8),
-      "and compaction follows it rather than the window that was replaced");
+    assert.equal(after.auto_compact_token_limit, undefined,
+      "a correction replaces the window and nothing else");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

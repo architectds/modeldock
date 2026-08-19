@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { AUTO_COMPACT_PERCENT, bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
+import { bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
@@ -233,10 +233,9 @@ function orderCatalogByProvider(models) {
 // whoever hit that wall knows more than either table does. Without this the
 // edit on the Models page returned 200 and changed nothing for exactly the
 // models a user is most likely to want to correct.
-//
-// The auto-compact limit is computed here for the same reason it is computed
-// for every other entry: without it Codex compacts a native model on its own
-// default rather than at the window this file declares.
+// Only the window is replaced. Codex ships effective_context_window_percent
+// with its own models and compacts on that; imposing our percentage would be
+// overriding something that was never wrong.
 function nativeEntryForCatalog(model, overrides = {}) {
   const override = Number(overrides?.[model?.slug]) || 0;
   const contextWindow = override || Number(model?.context_window) || 0;
@@ -249,7 +248,6 @@ function nativeEntryForCatalog(model, overrides = {}) {
     ...(contextWindow ? {
       context_window: contextWindow,
       max_context_window: contextWindow,
-      auto_compact_token_limit: Math.floor(contextWindow * AUTO_COMPACT_PERCENT),
     } : {}),
   };
 }
