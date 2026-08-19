@@ -109,3 +109,50 @@ test("the cross-provider list carries the ladder, not just the window", () => {
     "what the entry declares is what the catalog publishes",
   );
 });
+
+test("a native model's context window can be corrected like any other", async () => {
+  // Native models are appended to the published set rather than living in a
+  // profile, so the override pass that stamps profiles could never reach them:
+  // the edit returned 200, said a restart was needed, and changed neither the
+  // page nor the file Codex reads. They are also the models most likely to need
+  // it, because a host can cap one below what its own catalog states.
+  const { mergeNativeCatalog } = await import("../src/catalog.mjs");
+  const native = {
+    captured_with: "0.148.0",
+    models: [{
+      slug: "gpt-5.6-sol",
+      display_name: "Sol",
+      visibility: "list",
+      context_window: 272_000,
+      supported_reasoning_levels: [{ effort: "low" }],
+      default_reasoning_level: "low",
+    }],
+  };
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const osMod = await import("node:os");
+  const pathMod = await import("node:path");
+  const dir = mkdtempSync(pathMod.join(osMod.tmpdir(), "modeldock-native-ctx-"));
+  const file = pathMod.join(dir, "native.json");
+  writeFileSync(file, JSON.stringify(native), "utf8");
+  try {
+    const base = { models: [] };
+    const shipped = mergeNativeCatalog(base, { ...configStub(), nativeCatalogFile: file });
+    const before = shipped.models.find((m) => m.slug === "gpt-5.6-sol");
+    assert.equal(before.context_window, 272_000, "the native catalog's own figure is the default");
+    assert.equal(before.auto_compact_token_limit, Math.floor(272_000 * 0.8),
+      "and it carries the compaction limit every other entry has");
+
+    const corrected = mergeNativeCatalog(base, {
+      ...configStub(),
+      nativeCatalogFile: file,
+      contextOverrides: { "gpt-5.6-sol": 128_000 },
+    });
+    const after = corrected.models.find((m) => m.slug === "gpt-5.6-sol");
+    assert.equal(after.context_window, 128_000, "the correction reaches the file Codex reads");
+    assert.equal(after.max_context_window, 128_000);
+    assert.equal(after.auto_compact_token_limit, Math.floor(128_000 * 0.8),
+      "and compaction follows it rather than the window that was replaced");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

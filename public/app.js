@@ -1273,8 +1273,13 @@ function rosterRow(entry, rank) {
   // measurement of what this endpoint serves. The two can differ, and whoever
   // hits the wall knows better than the table does - so the cell says where
   // its number came from and lets that number be corrected.
+  //
+  // Committing on blur was wrong twice over: nothing said the number was
+  // editable until you clicked it, and once you had typed, looking away saved
+  // it. A change now waits behind a Save button on its own row, and saving
+  // says plainly that Codex has to restart before it means anything.
   const context = document.createElement("td");
-  context.className = "roster-num";
+  context.className = "roster-num roster-context-cell";
   const contextField = document.createElement("input");
   contextField.type = "text";
   contextField.className = "roster-context";
@@ -1286,12 +1291,27 @@ function rosterRow(entry, rank) {
     if (entry.contextSource !== "measured") contextField.classList.add("roster-claimed");
     if (entry.contextSource === "user") contextField.classList.add("roster-edited");
   }
-  const commitContext = async () => {
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "roster-save";
+  save.textContent = t("roster.save");
+  save.hidden = true;
+  const parse = () => {
     const raw = contextField.value.trim();
     // An emptied field means "forget my correction", not "set it to zero".
-    const next = raw === "" ? null : Number(raw.replace(/[,_s]/g, ""));
-    if (next !== null && !Number.isFinite(next)) { contextField.value = String(entry.contextWindow || ""); return; }
-    if (next === entry.contextWindow) return;
+    if (raw === "") return null;
+    const value = Number(raw.replace(/[,_\s]/g, ""));
+    return Number.isFinite(value) ? value : undefined;
+  };
+  const syncSave = () => {
+    const next = parse();
+    save.hidden = next === undefined || next === (entry.contextWindow || null);
+  };
+  contextField.addEventListener("input", syncSave);
+  save.addEventListener("click", async () => {
+    const next = parse();
+    if (next === undefined) return;
+    save.disabled = true;
     contextField.disabled = true;
     try {
       const response = await fetch("/api/models/context", {
@@ -1301,21 +1321,29 @@ function rosterRow(entry, rank) {
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message || `Context ${response.status}`);
+      // Said plainly, because the file is rewritten immediately but Codex has
+      // already cached what it read: nothing changes until it restarts.
+      window.alert(t("roster.savedRestart", { model: entry.label }));
       await renderModelRoster();
       pollConfig().catch(() => {});
     } catch (error) {
       window.alert(error.message);
       contextField.value = String(entry.contextWindow || "");
+      syncSave();
     } finally {
+      save.disabled = false;
       contextField.disabled = false;
     }
-  };
-  contextField.addEventListener("blur", () => { commitContext().catch(() => {}); });
-  contextField.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") contextField.blur();
-    if (event.key === "Escape") { contextField.value = String(entry.contextWindow || ""); contextField.blur(); }
   });
-  context.append(contextField);
+  contextField.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !save.hidden) save.click();
+    if (event.key === "Escape") {
+      contextField.value = String(entry.contextWindow || "");
+      syncSave();
+      contextField.blur();
+    }
+  });
+  context.append(contextField, save);
   row.append(context);
   // Yes or no, not a tier: the column answers whether images can be sent at
   // all, and a tier beside a request count reads as a quality score.

@@ -346,6 +346,11 @@ export function loadConfig() {
   // read as a migration path: an install that predates the list keeps working
   // and its endpoint becomes the first entry.
   const customEndpoints = readCustomEndpoints();
+  // Native models are appended to the published set rather than living in a
+  // profile, so the stamping pass at the end cannot reach them; the catalog and
+  // the pickers read this map instead. Without it, editing a native model's
+  // window returned 200 and changed neither the page nor the file Codex reads.
+  const contextOverrides = readContextOverrides();
   const customBaseUrl = customEndpoints[0]?.baseUrl || normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
   const customApiKey = customEndpoints[0]?.apiKey || process.env.MODELDOCK_CUSTOM_API_KEY || "";
   const customModel = customEndpoints[0]?.modelId || String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
@@ -432,6 +437,7 @@ export function loadConfig() {
     goTokenSource: opencodeGoSource,
     tokens,
     customEndpoints,
+    contextOverrides,
     customBaseUrl,
     customApiKey,
     customModel,
@@ -493,7 +499,7 @@ export function loadConfig() {
   for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
-  applyContextOverrides(allProfiles(), readContextOverrides(), { publishedSlugFor });
+  applyContextOverrides(allProfiles(), contextOverrides, { publishedSlugFor });
   return config;
 }
 

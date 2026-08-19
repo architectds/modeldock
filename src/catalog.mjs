@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
+import { AUTO_COMPACT_PERCENT, bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
@@ -136,7 +136,7 @@ export function mergeNativeCatalog(catalog, config) {
     model?.slug
     && model.visibility === "list"
     && !published.has(model.slug)
-  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model, allowed)));
+  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model, allowed), config?.contextOverrides));
   if (!extra.length) return catalog;
   return { ...catalog, models: [...(catalog.models || []), ...extra] };
 }
@@ -227,9 +227,31 @@ function orderCatalogByProvider(models) {
 // picker name gets the same "Provider - Model" shape the curated catalog uses,
 // so the App list reads "OpenAI - GPT-5.5" instead of a bare "GPT-5.5".
 // `provider: "openai"` tags them for the provider-grouped ordering above.
-function nativeEntryForCatalog(model) {
-  if (typeof model.display_name !== "string") return { ...model, provider: "openai" };
-  return { ...model, display_name: `OpenAI - ${model.display_name}`, provider: "openai" };
+// A native entry passes through what Codex's own catalog declares, which is the
+// right default - that catalog is authoritative for its own models. A user
+// override still wins: a host can cap a model below what its maker states, and
+// whoever hit that wall knows more than either table does. Without this the
+// edit on the Models page returned 200 and changed nothing for exactly the
+// models a user is most likely to want to correct.
+//
+// The auto-compact limit is computed here for the same reason it is computed
+// for every other entry: without it Codex compacts a native model on its own
+// default rather than at the window this file declares.
+function nativeEntryForCatalog(model, overrides = {}) {
+  const override = Number(overrides?.[model?.slug]) || 0;
+  const contextWindow = override || Number(model?.context_window) || 0;
+  const named = typeof model.display_name === "string"
+    ? { ...model, display_name: `OpenAI - ${model.display_name}` }
+    : { ...model };
+  return {
+    ...named,
+    provider: "openai",
+    ...(contextWindow ? {
+      context_window: contextWindow,
+      max_context_window: contextWindow,
+      auto_compact_token_limit: Math.floor(contextWindow * AUTO_COMPACT_PERCENT),
+    } : {}),
+  };
 }
 
 export function enabledProvidersFor(config) {

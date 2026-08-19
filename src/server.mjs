@@ -193,8 +193,13 @@ function appendNativeModels(options, config) {
       supportsVision: Array.isArray(model.input_modalities) && model.input_modalities.includes("image"),
       // The native catalog states its own window; dropping it here left these
       // models inheriting our 250,000 fallback while Codex used the real one.
-      contextWindow: Number(model.context_window) || undefined,
-      contextSource: Number(model.context_window) > 0 ? "native" : "",
+      // Same override the catalog file honours, so the page and the file
+      // cannot disagree about a number the page lets you edit.
+      contextWindow: Number(config.contextOverrides?.[model.slug])
+        || Number(model.context_window) || undefined,
+      contextSource: config.contextOverrides?.[model.slug]
+        ? "user"
+        : (Number(model.context_window) > 0 ? "native" : ""),
     });
   }
   return options;
@@ -1764,6 +1769,10 @@ export function createApp(services = createServices()) {
     applyCustomProfile(config);
     const localSnapshot = readLocalEnginesSnapshot() || {};
     for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+    // Native models are appended to the published set rather than living in a
+    // profile, so the pass below cannot reach them; they read this instead.
+    // Without it the edit returned 200 and changed nothing for them.
+    config.contextOverrides = overrides;
     applyContextOverrides(allProfiles(), overrides, { publishedSlugFor });
     services.writeCatalogFile?.();
     // The override is on disk and in the profiles by now. If marking the
