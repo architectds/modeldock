@@ -693,6 +693,8 @@ body { padding-left: 88px; }
 .roster-table tr:last-child td { border-bottom: 0; }
 .roster-rank { display: inline-block; min-width: 22px; color: var(--muted); font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .roster-provider { color: var(--muted); }
+/* Vendor claim rather than measurement: dotted underline, tooltip says so. */
+.roster-claimed { text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
 .roster-num { text-align: right; font-variant-numeric: tabular-nums; }
 /* Published but never called: worth listing, not worth reading first. */
 .roster-unused td { color: var(--muted); }

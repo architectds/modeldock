@@ -189,12 +189,24 @@ test("every profile compacts at 80% of the model context window", () => {
 test("the effective context window is the one the catalog publishes", async () => {
   const { effectiveContextWindow, OPENCODE_GO_PROFILE } = await import("../src/profiles.mjs");
   const declared = OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === "deepseek-v4-flash");
-  const inherited = OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === "kimi-k2.7-code");
   assert.equal(effectiveContextWindow(declared), 1_000_000, "an override is reported as written");
-  // Most entries leave contextWindow unset and inherit the default. Reading the
-  // raw field instead reported zero for all of them, which is how the Models
-  // page came to show a dash for every model but two.
-  assert.ok(inherited.contextWindow === undefined, "this entry declares no window");
-  assert.equal(effectiveContextWindow(inherited), 250_000);
+  // Synthetic rather than a real entry: the first version of this test pinned
+  // kimi-k2.7-code as the model that declared nothing, and it broke the hour
+  // the catalog gave that model a window. What is being tested is the
+  // fallback, not which entries happen to need it.
+  assert.equal(effectiveContextWindow({ id: "no-window" }), 250_000);
   assert.equal(effectiveContextWindow(undefined), 250_000, "a missing entry still has a window");
+});
+
+test("every published model carries a window and says where it came from", async () => {
+  const { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } = await import("../src/profiles.mjs");
+  // The gate declares a context window to Codex for every model it publishes.
+  // Leaving one to the default is a silent guess, and a guess that reads as a
+  // fact is how glm-5 came to be advertised at 250K when its maker says 200K.
+  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
+    for (const model of profile.availableModels.filter((m) => (m.status || "available") === "available")) {
+      assert.ok(model.contextWindow > 0, `${model.id} publishes no context window`);
+      assert.ok(["vendor", "measured"].includes(model.contextSource), `${model.id} does not say where its window came from`);
+    }
+  }
 });

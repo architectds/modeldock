@@ -1269,7 +1269,17 @@ function rosterRow(entry, rank) {
   }
   row.append(name);
   row.append(rosterCell(entry.providerLabel, "roster-provider"));
-  row.append(rosterCell(entry.contextWindow ? number(entry.contextWindow) : "-", "roster-num"));
+  // A published window is the model maker's claim about the base model, not a
+  // measurement of what this endpoint serves - the two can differ, so the cell
+  // says which it is rather than letting a claim pass as a fact.
+  const context = document.createElement("td");
+  context.className = "roster-num";
+  context.textContent = entry.contextWindow ? number(entry.contextWindow) : "-";
+  if (entry.contextSource) {
+    context.title = t(`roster.context.${entry.contextSource}`);
+    if (entry.contextSource !== "measured") context.classList.add("roster-claimed");
+  }
+  row.append(context);
   // A tier is more use than a checkmark when the column exists to choose
   // between two models that both say yes.
   row.append(rosterCell(entry.supportsVision ? (entry.visionTier || t("roster.yes")) : "-"));

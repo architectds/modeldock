@@ -1700,6 +1700,10 @@ export function createApp(services = createServices()) {
           supportsVision: Boolean(model.supportsVision),
           visionTier: model.visionTier || "",
           contextWindow: effectiveContextWindow(model),
+          // vendor: the model maker's published figure. measured: verified
+          // against the endpoint. Absent: our conservative default, which is a
+          // guess and should not be read as a fact about the model.
+          contextSource: model.contextSource || "",
           free: Boolean(model.free),
           speedTier: model.speedTier || "",
           quota5h: model.quota5h || 0,

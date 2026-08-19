@@ -41,6 +41,8 @@ function englishKeys() {
 const DYNAMIC = [
   { prefix: "switch.", suffixes: ["off", "on"], site: 'app.js: t("switch." + mode)' },
   // The roster header row is built from ROSTER_COLUMNS, so no literal key exists.
+  // app.js: t(`roster.context.${entry.contextSource}`)
+  { prefix: "roster.context.", suffixes: ["vendor", "measured"], site: "app.js: t(`roster.context.${entry.contextSource}`)" },
   { prefix: "roster.", suffixes: ["model", "provider", "context", "vision", "requests", "tps", "cache"], site: "app.js: t(`roster.${column}`)" },
 ];
 
