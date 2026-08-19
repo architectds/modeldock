@@ -361,11 +361,49 @@ const OLLAMA_PROFILE = {
   },
 };
 
+// llama.cpp and vLLM are the same profile with different names: both speak the
+// OpenAI dialect over loopback and neither takes a key. Ollama is separate
+// because its dialect is not - it lists models at /api/tags, not /v1/models.
+//
+// They are distinct providers rather than one "local" slot so a machine can run
+// more than one at a time: a small model under Ollama and a tuned 27B under
+// llama-server is the case this exists for, and one slot would force a choice.
+function localEngineProfile(id, label, defaultBaseUrl, compHash) {
+  const profile = {
+    id,
+    label,
+    baseUrl: defaultBaseUrl,
+    tokenEnvName: "",
+    blockedToolTypes: new Set([]),
+    hiddenToolNames: new Set([]),
+    availableModels: [],
+    modelCatalog({ mainModel, baseInstructions }) {
+      return modelCatalogDefaults({
+        profileId: id,
+        mainModel,
+        displayName: label,
+        description: `Local ${label} models through the ModelDock Responses gate.`,
+        compHash,
+        inputModalities: ["text", "image"],
+        supportsSearchTool: false,
+        baseInstructions,
+        availableModels: profile.availableModels,
+      });
+    },
+  };
+  return profile;
+}
+
+const LLAMACPP_PROFILE = localEngineProfile("llamacpp", "llama.cpp (local)", "http://127.0.0.1:8080", "modeldock-llamacpp-v1");
+const VLLM_PROFILE = localEngineProfile("vllm", "vLLM (local)", "http://127.0.0.1:8000", "modeldock-vllm-v1");
+
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
   ollama: OLLAMA_PROFILE,
+  llamacpp: LLAMACPP_PROFILE,
+  vllm: VLLM_PROFILE,
 };
 
 export function profileById(id) {
@@ -429,6 +467,30 @@ export function applyOllamaProfile(config, snapshot) {
   return OLLAMA_PROFILE;
 }
 
+// Fill a local engine profile from its connection snapshot, so the catalog and
+// per-model routing publish local models across restarts without re-contacting
+// the engine. Only two facts survive the trip: whether the model takes images,
+// and how much context it advertises.
+export function applyLocalEngineProfile(engineId, snapshot) {
+  const profile = PROFILES[engineId];
+  if (!profile) return null;
+  if (snapshot?.baseUrl) profile.baseUrl = snapshot.baseUrl;
+  profile.availableModels = Array.isArray(snapshot?.models)
+    ? snapshot.models
+        .filter((model) => model?.id)
+        .map((model) => ({
+          id: model.id,
+          upstreamId: model.upstreamId || model.id,
+          label: model.label || model.id,
+          endpoint: "responses",
+          supportsVision: Boolean(model.supportsVision),
+          contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
+          ownerQualified: true,
+          status: model.status || "available",
+        }))
+    : [];
+  return profile;
+}
 // Resolve which provider owns a model id. The currently active profile wins, then any
 // profile whose curated catalog lists the model. Used to route per-model upstream calls
 // (main model on DeepSeek, vision on OpenCode Go) to the right base URL and token.
@@ -502,4 +564,4 @@ export function tokenFor(config, model) {
   return config?.tokens?.[provider] || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, LLAMACPP_PROFILE, VLLM_PROFILE };

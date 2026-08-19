@@ -681,3 +681,4 @@ body { padding-left: 88px; }
 .local-engine-head { display: flex; align-items: baseline; gap: 10px; }
 .local-engine-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .local-engine-models { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.local-engine-actions { margin-top: 9px; align-items: center; }

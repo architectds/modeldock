@@ -72,3 +72,60 @@ test("discoverLocalEngines returns only what answered", async () => {
   assert.deepEqual(found.map((f) => f.engine), ["ollama", "llama.cpp"]);
   assert.deepEqual(found.find((f) => f.engine === "llama.cpp").models, ["qwen3-27b"]);
 });
+
+test("the snapshot keys engines instead of giving each one a file", async (t) => {
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { readLocalEnginesSnapshot, writeLocalEngineSnapshot, clearLocalEngineSnapshot } =
+    await import("../src/local-engines.mjs");
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "local-snap-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "local-engines.json");
+
+  assert.equal(readLocalEnginesSnapshot(file), null, "absent file reads as nothing");
+
+  writeLocalEngineSnapshot(file, "llamacpp", { baseUrl: "http://127.0.0.1:8080", models: [{ id: "a" }] });
+  writeLocalEngineSnapshot(file, "vllm", { baseUrl: "http://127.0.0.1:8000", models: [{ id: "b" }] });
+  assert.deepEqual(Object.keys(readLocalEnginesSnapshot(file)).sort(), ["llamacpp", "vllm"]);
+
+  // Disconnecting one engine must not disturb the other.
+  clearLocalEngineSnapshot(file, "llamacpp");
+  const left = readLocalEnginesSnapshot(file);
+  assert.deepEqual(Object.keys(left), ["vllm"]);
+  assert.equal(left.vllm.models[0].id, "b");
+
+  clearLocalEngineSnapshot(file, "vllm");
+  assert.equal(readLocalEnginesSnapshot(file), null, "the last engine takes the file with it");
+});
+
+test("applyLocalEngineProfile publishes vision and context, and nothing else", async () => {
+  const { applyLocalEngineProfile, profileById } = await import("../src/profiles.mjs");
+
+  const profile = applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:8080",
+    models: [{ id: "qwen3-27b", supportsVision: true, contextWindow: 32768 }],
+  });
+  assert.equal(profile.id, "llamacpp");
+  assert.equal(profile.baseUrl, "http://127.0.0.1:8080");
+  const [model] = profile.availableModels;
+  assert.equal(model.id, "qwen3-27b");
+  assert.equal(model.supportsVision, true);
+  assert.ok(model.contextWindow > 0, "the advertised window survives");
+  assert.equal(model.ownerQualified, true, "local ids always carry their provider");
+
+  // Disconnecting empties the profile rather than leaving stale models behind.
+  applyLocalEngineProfile("llamacpp", null);
+  assert.deepEqual(profileById("llamacpp").availableModels, []);
+});
+
+test("llama.cpp and vLLM are separate providers so both can be live", async () => {
+  const { applyLocalEngineProfile, profileOptions } = await import("../src/profiles.mjs");
+  applyLocalEngineProfile("llamacpp", { models: [{ id: "a" }] });
+  applyLocalEngineProfile("vllm", { models: [{ id: "b" }] });
+  const ids = profileOptions().map((p) => p.id);
+  assert.ok(ids.includes("llamacpp") && ids.includes("vllm"));
+  applyLocalEngineProfile("llamacpp", null);
+  applyLocalEngineProfile("vllm", null);
+});

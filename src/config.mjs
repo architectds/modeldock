@@ -2,9 +2,10 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
+import { readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
@@ -487,6 +488,10 @@ export function loadConfig() {
   // Populate the ollama profile from the connection snapshot so local models stay
   // published across restarts without re-contacting Ollama.
   applyOllamaProfile(config, ollamaSnapshot);
+  // Same contract for the keyless OpenAI-dialect engines: republish what the
+  // last connect saw, without probing a machine that may be offline now.
+  const localSnapshot = readLocalEnginesSnapshot() || {};
+  for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   return config;
 }
 

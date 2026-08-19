@@ -1270,6 +1270,46 @@ async function renderLocalEngines() {
         ? engine.models.join(", ")
         : t("local.noModels");
       item.append(head, models);
+      // Ollama keeps its own connect control above; the OpenAI-dialect engines
+      // are connected from here, keyless, because they are on this machine.
+      if (engine.engine === "llamacpp" || engine.engine === "vllm") {
+        const row = document.createElement("div");
+        row.className = "custom-row local-engine-actions";
+        const vision = document.createElement("label");
+        vision.className = "chip-toggle";
+        const visionBox = document.createElement("input");
+        visionBox.type = "checkbox";
+        const visionText = document.createElement("span");
+        visionText.textContent = t("local.vision");
+        vision.append(visionBox, visionText);
+        const connect = document.createElement("button");
+        connect.type = "button";
+        connect.className = "custom-action primary";
+        connect.textContent = t("local.connect");
+        const status = document.createElement("span");
+        status.className = "custom-status";
+        connect.addEventListener("click", async () => {
+          connect.disabled = true;
+          status.textContent = t("local.connecting");
+          try {
+            const reply = await fetch("/api/local/connect", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ engine: engine.engine, baseUrl: engine.baseUrl, asVision: visionBox.checked }),
+            });
+            const body = await reply.json();
+            if (!reply.ok) throw new Error(body.error?.message || `Connect ${reply.status}`);
+            status.textContent = t("local.connected", { count: body.models?.length ?? 0 });
+            poll().catch(() => {});
+          } catch (error) {
+            status.textContent = error.message;
+          } finally {
+            connect.disabled = false;
+          }
+        });
+        row.append(vision, connect, status);
+        item.append(row);
+      }
       list.append(item);
     }
     if (note) note.textContent = engines.length ? "" : t("local.none");

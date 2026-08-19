@@ -25,11 +25,11 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
-import { discoverLocalEngines } from "./local-engines.mjs";
+import { LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -209,8 +209,11 @@ function enabledProviders(config) {
   const active = config.profileId || "opencode-go";
   return all.filter((entry) => {
     if (entry.id === active) return true;
-    // Ollama needs no credential; a connected profile is publishable.
-    if (entry.id === "ollama") return Boolean(profileById("ollama").availableModels?.length);
+    // A keyless engine has no credential to check, so "connected" is the only
+    // test that means anything: it publishes once it has models. Naming Ollama
+    // here would have needed a new line per local engine.
+    const profile = profileById(entry.id);
+    if (!profile?.tokenEnvName) return Boolean(profile?.availableModels?.length);
     const token = config.tokens?.[entry.id];
     return Boolean(token);
   });
@@ -1679,6 +1682,55 @@ export function createApp(services = createServices()) {
     } catch (error) {
       return res.status(500).json({ error: { type: "discover_failed", message: error.message } });
     }
+  });
+  // Connect a keyless local engine. assertLocalBase is the whole security
+  // story: skipping the API key is only safe because the address cannot leave
+  // this machine, so the two are one check rather than two.
+  app.post("/api/local/connect", mutateConfig, async (req, res) => {
+    const { engine, baseUrl, asVision } = req.body || {};
+    try {
+      if (engine !== "llamacpp" && engine !== "vllm") {
+        throw new LocalEngineError("engine", `Unknown local engine: ${engine}`);
+      }
+      const base = assertLocalBase(baseUrl);
+      const listed = await listEndpointModels({ baseUrl: base, apiKey: "" });
+      if (!listed.models.length) {
+        throw new LocalEngineError("models", "The engine reported no models. Load one, then reconnect.");
+      }
+      // Prove the Responses dialect before persisting, so a server that only
+      // speaks /v1/chat/completions fails the connect instead of every later turn.
+      await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
+      const snapshot = {
+        baseUrl: base,
+        connectedAt: new Date().toISOString(),
+        models: listed.models.map((model) => ({
+          id: model.id,
+          upstreamId: model.id,
+          label: model.id,
+          supportsVision: Boolean(asVision),
+          contextWindow: model.contextWindow,
+        })),
+      };
+      writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
+      applyLocalEngineProfile(engine, snapshot);
+      recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
+      return res.json({ engine, baseUrl: base, models: snapshot.models });
+    } catch (error) {
+      recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
+      const status = error instanceof LocalEngineError ? 400 : 502;
+      return res.status(status).json({ error: { type: error.code || "local_connect_failed", message: error.message } });
+    }
+  });
+
+  app.post("/api/local/disconnect", mutateConfig, async (req, res) => {
+    const { engine } = req.body || {};
+    if (engine !== "llamacpp" && engine !== "vllm") {
+      return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
+    }
+    clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
+    applyLocalEngineProfile(engine, null);
+    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
+    return res.json({ engine, models: [] });
   });
   app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
     const { baseUrl } = req.body || {};

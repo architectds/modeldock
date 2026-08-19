@@ -9,7 +9,10 @@
 // Identification comes from the response, not the port: llama-server and vLLM
 // both speak the OpenAI dialect and either can be moved to the other's port,
 // so a port alone would mislabel them.
+import path from "node:path";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isLoopbackHost } from "./loopback.mjs";
+import { stateFile } from "./state-dir.mjs";
 
 export class LocalEngineError extends Error {
   constructor(code, message) {
@@ -101,4 +104,50 @@ export async function discoverLocalEngines({ fetchImpl = fetch, timeoutMs = 800,
     candidates.map((candidate) => probeLocalEngine(candidate.port, { fetchImpl, timeoutMs })),
   );
   return found.filter(Boolean);
+}
+
+// One file keyed by engine rather than a file per engine: a fourth engine then
+// costs a key, not a new path to remember, back up, and clean up. Ollama keeps
+// its own snapshot - it predates this and renaming it would strand anyone
+// mid-upgrade for no gain.
+export function localEnginesSnapshotPath() {
+  return stateFile("local-engines.json");
+}
+
+export function readLocalEnginesSnapshot(file = localEnginesSnapshotPath()) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeLocalEngineSnapshot(file, engine, snapshot) {
+  const all = readLocalEnginesSnapshot(file) || {};
+  all[engine] = snapshot;
+  mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
+  renameSync(tmp, file);
+  return file;
+}
+
+export function clearLocalEngineSnapshot(file, engine) {
+  const all = readLocalEnginesSnapshot(file);
+  if (!all || !(engine in all)) return file;
+  delete all[engine];
+  try {
+    if (Object.keys(all).length === 0) {
+      rmSync(file, { force: true });
+      return file;
+    }
+    mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
+    renameSync(tmp, file);
+  } catch {
+    // Best effort: a stale entry is only honoured while it still parses.
+  }
+  return file;
 }

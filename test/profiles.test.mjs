@@ -37,7 +37,10 @@ test("exposes every registered profile through the registry", () => {
 
 test("lists all profiles as selectable options", () => {
   const options = profileOptions();
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama"]);
+  // llamacpp and vllm are registered even before anything connects: a keyless
+  // engine is filtered out of the picker by having no models (enabledProviders),
+  // not by being absent from the registry, which still has to validate its id.
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama", "llamacpp", "vllm"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
 });
 
