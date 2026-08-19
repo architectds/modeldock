@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
+import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
 
@@ -222,11 +222,11 @@ test("catalogFor publishes the free models alongside the paid ones", () => {
   assert.ok(slugs.includes("mimo-v2.5-free@opencode-go"));
 });
 
-test("mergeNativeCatalog caps native reasoning levels to the published enum", () => {
+test("mergeNativeCatalog caps native reasoning levels for an old Codex capture", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
-    captured_with: "0.1.0",
+    captured_with: "0.130.0",
     models: [{
       slug: "gpt-5.6-sol",
       display_name: "GPT-5.6-Sol",
@@ -248,13 +248,92 @@ test("mergeNativeCatalog caps native reasoning levels to the published enum", ()
     assert.deepEqual(
       entry.supported_reasoning_levels.map((level) => level.effort),
       ["low", "high"],
-      "max/ultra are filtered to the enum the installed CLI accepts",
+      "pre-0.138 captures withhold max and ultra so the catalog stays parseable",
     );
-    assert.equal(entry.default_reasoning_level, "low", "default clamps to an allowed effort");
+    assert.equal(entry.default_reasoning_level, "high", "default clamps to the top surviving rung");
     assert.equal(entry.supports_reasoning_summaries, true, "required field is defaulted for older CLI parsers");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("mergeNativeCatalog keeps max but withholds ultra on a 0.138-0.143 capture", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.140.0",
+    models: [{
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+      visibility: "list",
+      priority: 1,
+      default_reasoning_level: "max",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Low" },
+        { effort: "high", description: "High" },
+        { effort: "max", description: "Max" },
+        { effort: "ultra", description: "Ultra" },
+      ],
+    }],
+  }), "utf8");
+  try {
+    const entry = mergeNativeCatalog(catalogFor(configStub()), { ...configStub(), nativeCatalogFile: file })
+      .models.find((model) => model.slug === "gpt-5.6-sol");
+    assert.ok(entry, "native entry is published");
+    assert.deepEqual(
+      entry.supported_reasoning_levels.map((level) => level.effort),
+      ["low", "high", "max"],
+      "0.138+ keeps max while ultra waits for 0.144",
+    );
+    assert.equal(entry.default_reasoning_level, "max");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mergeNativeCatalog publishes native max and ultra on a current capture", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
+  const file = path.join(dir, "native-catalog.json");
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.145.0",
+    models: [{
+      slug: "gpt-5.6-sol",
+      display_name: "GPT-5.6-Sol",
+      visibility: "list",
+      priority: 1,
+      default_reasoning_level: "max",
+      supported_reasoning_levels: [
+        { effort: "low", description: "Low" },
+        { effort: "high", description: "High" },
+        { effort: "max", description: "Max" },
+        { effort: "ultra", description: "Ultra" },
+      ],
+    }],
+  }), "utf8");
+  try {
+    const entry = mergeNativeCatalog(catalogFor(configStub()), { ...configStub(), nativeCatalogFile: file })
+      .models.find((model) => model.slug === "gpt-5.6-sol");
+    assert.ok(entry, "native entry is published");
+    assert.deepEqual(
+      entry.supported_reasoning_levels.map((level) => level.effort),
+      ["low", "high", "max", "ultra"],
+      "current captures publish the full native ladder",
+    );
+    assert.equal(entry.default_reasoning_level, "max");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("allowedEffortsFor gates max at 0.138 and ultra at 0.144", () => {
+  assert.ok(!allowedEffortsFor("0.137.9").has("max"));
+  assert.ok(!allowedEffortsFor("0.137.9").has("ultra"));
+  assert.ok(!allowedEffortsFor("0.138.0-alpha.1").has("max"), "a prerelease sorts below its release");
+  assert.ok(allowedEffortsFor("0.138.0").has("max"));
+  assert.ok(!allowedEffortsFor("0.138.0").has("ultra"));
+  assert.ok(!allowedEffortsFor("0.143.9").has("ultra"));
+  assert.ok(allowedEffortsFor("0.144.0").has("ultra"));
+  assert.ok(allowedEffortsFor("0.145.0").has("ultra"));
 });
 
 test("catalogFor groups models by provider label with sequential priorities", () => {

@@ -130,31 +130,60 @@ export function catalogFor(config) {
 export function mergeNativeCatalog(catalog, config) {
   const native = readNativeCatalog(config);
   if (!native?.models?.length) return catalog;
+  const allowed = allowedEffortsFor(native.captured_with);
   const published = new Set((catalog.models || []).map((entry) => entry?.slug));
   const extra = native.models.filter((model) => (
     model?.slug
     && model.visibility === "list"
     && !published.has(model.slug)
-  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model)));
+  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model, allowed)));
   if (!extra.length) return catalog;
   return { ...catalog, models: [...(catalog.models || []), ...extra] };
 }
 
-// The Codex CLI (0.130.x) rejects reasoning efforts above `xhigh` when parsing
-// model_catalog_json, but newer bundled native catalogs advertise `max` and
-// `ultra`. Filter merged native entries down to the enum every published Codex
-// build accepts so both the App picker and CLI tooling parse the file.
-const ALLOWED_REASONING_LEVELS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+// Codex releases before 0.138.0 parse reasoning_effort as a CLOSED serde enum
+// whose variants stop at `xhigh`. A single `max` anywhere in model_catalog_json
+// makes those builds exit 1 and publish NO models. 0.138.0 switched to an open
+// enum that accepts `max`. Bundled native catalogs started advertising `ultra`
+// around 0.144/0.145; gate it separately so 0.138-0.143 clients keep `max`
+// without a picker rung older stacks may still reject upstream.
+const BASE_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const MAX_EFFORT_MIN_VERSION = "0.138.0";
+const ULTRA_EFFORT_MIN_VERSION = "0.144.0";
 
-function sanitizeNativeReasoningLevels(model) {
+export function allowedEffortsFor(codexVersion) {
+  const levels = new Set(BASE_REASONING_LEVELS);
+  if (versionAtLeast(codexVersion, MAX_EFFORT_MIN_VERSION)) levels.add("max");
+  if (versionAtLeast(codexVersion, ULTRA_EFFORT_MIN_VERSION)) levels.add("ultra");
+  return levels;
+}
+
+function versionAtLeast(version, minimum) {
+  const parse = (value) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(-.*)?$/.exec(String(value ?? "").trim());
+    return match && {
+      parts: [Number(match[1]), Number(match[2]), Number(match[3])],
+      prerelease: Boolean(match[4]),
+    };
+  };
+  const actual = parse(version);
+  const floor = parse(minimum);
+  if (!actual || !floor) return false;
+  for (let i = 0; i < 3; i += 1) {
+    if (actual.parts[i] !== floor.parts[i]) return actual.parts[i] > floor.parts[i];
+  }
+  return !actual.prerelease;
+}
+
+function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null)) {
   if (!model || typeof model !== "object") return model;
   const levels = Array.isArray(model.supported_reasoning_levels)
-    ? model.supported_reasoning_levels.filter((level) => ALLOWED_REASONING_LEVELS.has(level?.effort))
+    ? model.supported_reasoning_levels.filter((level) => allowed.has(level?.effort))
     : model.supported_reasoning_levels;
-  const defaultLevel = ALLOWED_REASONING_LEVELS.has(model.default_reasoning_level)
+  const defaultLevel = allowed.has(model.default_reasoning_level)
     ? model.default_reasoning_level
     : Array.isArray(levels) && levels.length > 0
-      ? levels[0].effort
+      ? levels[levels.length - 1].effort
       : "medium";
   return {
     ...model,
