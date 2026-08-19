@@ -139,3 +139,24 @@ test("a model that only ever failed reports no rate rather than a wrong one", ()
   assert.equal(row.requests, 1);
   assert.equal(row.successRate, 0);
 });
+
+test("throughput ignores a rate no model achieves", () => {
+  // Nine days of real metering carried 897 events that were not generation:
+  // a stubbed fetch answering in 3ms still routes, still records, and still
+  // claims tokens. deepseek-v4-flash@deepseek-official read 1,214 tok/s on the
+  // Models page - arithmetic over 613 tokens and 505 milliseconds.
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-18T01:00:00.000Z", { outputTokens: 22, durationMs: 4 }),
+    event("2026-08-18T02:00:00.000Z", { outputTokens: 100, durationMs: 2000 }),
+  ], { now: "2026-08-18T03:00:00.000Z" });
+  const row = rollupTotals(rollup)["deepseek-v4-flash@opencode-go"];
+  assert.equal(row.requests, 2, "both still count as traffic");
+  assert.equal(row.tps, 50, "only the one that could have been generated sets the rate");
+});
+
+test("a slow request is never mistaken for an implausible one", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-18T01:00:00.000Z", { outputTokens: 800, durationMs: 4000 }),
+  ], { now: "2026-08-18T02:00:00.000Z" });
+  assert.equal(rollupTotals(rollup)["deepseek-v4-flash@opencode-go"].tps, 200);
+});

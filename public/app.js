@@ -1317,9 +1317,9 @@ function rosterRow(entry, rank) {
   });
   context.append(contextField);
   row.append(context);
-  // A tier is more use than a checkmark when the column exists to choose
-  // between two models that both say yes.
-  row.append(rosterCell(entry.supportsVision ? (entry.visionTier || t("roster.yes")) : "-"));
+  // Yes or no, not a tier: the column answers whether images can be sent at
+  // all, and a tier beside a request count reads as a quality score.
+  row.append(rosterCell(t(entry.supportsVision ? "roster.yes" : "roster.no")));
   const usage = entry.usage;
   row.append(rosterCell(usage ? number(usage.requests) : "-", "roster-num"));
   row.append(rosterCell(usage && usage.tps ? usage.tps.toFixed(1) : "-", "roster-num"));

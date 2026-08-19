@@ -1,7 +1,7 @@
 // Interface translation dictionaries. UTF-8: this file is the one place where
 // non-ASCII text is expected, so translations read as themselves rather than as escapes.
 const I18N_EN = {
-  "app.subtitle": "Eyes, ears, a voice, web search, and memory for DeepSeek inside Codex - plus native GPT passthrough.",
+  "app.subtitle": "Eyes, ears, a voice, web search, and memory for DeepSeek, Qwen, and local models inside Codex - plus native GPT passthrough.",
   "autostart.off": "Off",
   "autostart.on": "On",
   "autostart.titleOff": "Start at login: off",
@@ -76,6 +76,7 @@ const I18N_EN = {
   "roster.empty": "No provider is connected yet.",
   "roster.free": "free",
   "roster.model": "Model",
+  "roster.no": "No",
   "roster.provider": "Provider",
   "roster.requests": "Requests",
   "roster.summary": "{used} of {total} published models used in the last 30 days",
@@ -194,7 +195,7 @@ const I18N_EN = {
 };
 
 const I18N_ZH = {
-  "app.subtitle": "在 Codex 里给 DeepSeek 装上眼睛、耳朵、声音、网络搜索和记忆——还支持原生 GPT 透传。",
+  "app.subtitle": "在 Codex 里给 DeepSeek、Qwen 和本地模型装上眼睛、耳朵、声音、网络搜索和记忆——还支持原生 GPT 透传。",
   "autostart.off": "关",
   "autostart.on": "开",
   "autostart.titleOff": "登录时启动：关",
@@ -269,6 +270,7 @@ const I18N_ZH = {
   "roster.empty": "还没有连接任何 provider。",
   "roster.free": "免费",
   "roster.model": "模型",
+  "roster.no": "不支持",
   "roster.provider": "Provider",
   "roster.requests": "请求数",
   "roster.summary": "近 30 天内 {total} 个已发布模型中用过 {used} 个",
@@ -387,7 +389,7 @@ const I18N_ZH = {
 };
 
 const I18N_JA = {
-  "app.subtitle": "Codex 内で DeepSeek に目、耳、音声、ウェブ検索、メモリを - ネイティブ GPT パススルーも。",
+  "app.subtitle": "Codex 内で DeepSeek・Qwen・ローカルモデルに目、耳、音声、ウェブ検索、メモリを - ネイティブ GPT パススルーも。",
   "autostart.off": "オフ",
   "autostart.on": "オン",
   "autostart.titleOff": "ログイン時に起動: オフ",
@@ -462,6 +464,7 @@ const I18N_JA = {
   "roster.empty": "接続済みのプロバイダーがありません。",
   "roster.free": "無料",
   "roster.model": "モデル",
+  "roster.no": "非対応",
   "roster.provider": "プロバイダー",
   "roster.requests": "リクエスト数",
   "roster.summary": "直近 30 日間で公開中の {total} モデル中 {used} を使用",

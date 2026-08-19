@@ -15,6 +15,14 @@ import path from "node:path";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { stateFile } from "./state-dir.mjs";
 
+// No model decodes this fast. A request that claims to have produced tokens
+// far above it did not generate them - a canned reply from a stub, a replay,
+// or a cached response returned whole. Counting those put
+// deepseek-v4-flash@deepseek-official at 1,214 tok/s, which is arithmetic over
+// 613 tokens and 505 milliseconds, not a rate anything achieved. The request
+// still counts as traffic; only the throughput measure ignores it.
+const MAX_PLAUSIBLE_TPS = 400;
+
 export const ROLLUP_DAYS = 30;
 // Bumped when a bucket gains a field: readRollup discards an older shape
 // rather than reporting zero for a metric the old buckets never recorded.
@@ -71,7 +79,10 @@ function addEvent(bucket, event) {
   // Throughput is measured over the requests that produced tokens. A 500 that
   // spent two seconds and wrote nothing is a failure, not slow generation, and
   // counting its time drags the rate of every model that ever errors.
-  if (ok) {
+  const outTokens = Number(event.outputTokens) || 0;
+  const ms = Number(event.durationMs) || 0;
+  const plausible = ms > 0 && outTokens / (ms / 1000) <= MAX_PLAUSIBLE_TPS;
+  if (ok && plausible) {
     entry.okOut += Number(event.outputTokens) || 0;
     entry.okMs += Number(event.durationMs) || 0;
   }

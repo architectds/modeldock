@@ -15,7 +15,20 @@ import path from "node:path";
 //
 // `home` is an explicit HOME directory (the state dir is its .modeldock child),
 // which keeps unit tests hermetic even when the variable is set around them.
+// node --test sets NODE_TEST_CONTEXT in every test process. Honouring it here
+// makes the redirect a property of being a test rather than of being launched
+// through the npm script: `node --test test/one.test.mjs` used to write real
+// state, and the only thing standing between a test run and the user's live
+// install was remembering which command to type.
+function testStateDir() {
+  if (!process.env.NODE_TEST_CONTEXT) return "";
+  if (process.env.MODELDOCK_STATE_DIR) return "";
+  return path.join(os.tmpdir(), `modeldock-test-state-${process.pid}`);
+}
+
 export function stateDir({ home } = {}) {
+  const isolated = testStateDir();
+  if (isolated && home === undefined) return isolated;
   if (home !== undefined) return path.join(home, ".modeldock");
   if (process.env.MODELDOCK_STATE_DIR) return path.resolve(process.env.MODELDOCK_STATE_DIR);
   return path.join(os.homedir(), ".modeldock");
