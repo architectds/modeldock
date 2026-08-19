@@ -531,12 +531,11 @@ function initI18n() {
 
 function applyStaticI18n() {
   document.querySelectorAll("[data-i18n]").forEach((node) => { node.textContent = t(node.dataset.i18n); });
-  // Icon-only controls (the left rail) have no text node: their tooltip and
-  // accessible name both come from the key, so they stay in sync.
+  // Rail labels wrap or clip at 88px, so the tooltip carries the full string.
+  // The visible label is the accessible name; setting aria-label here too
+  // would just shadow it with the same text.
   document.querySelectorAll("[data-i18n-title]").forEach((node) => {
-    const text = t(node.dataset.i18nTitle);
-    node.title = text;
-    node.setAttribute("aria-label", text);
+    node.title = t(node.dataset.i18nTitle);
   });
 }
 

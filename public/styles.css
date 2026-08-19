@@ -644,11 +644,17 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
 
 /* Left rail navigation. Fixed to the viewport so .shell keeps its own
    centering; body reserves the width so nothing sits underneath. */
-body { padding-left: 64px; }
-.rail { position: fixed; left: 0; top: 0; bottom: 0; width: 64px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 0; background: var(--panel); border-right: 1px solid var(--line); }
+body { padding-left: 88px; }
+.rail { position: fixed; left: 0; top: 0; bottom: 0; width: 88px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 0; background: var(--panel); border-right: 1px solid var(--line); }
 .rail-brand { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 14px; border-radius: 12px; }
 .rail-brand img { width: 26px; height: 26px; }
-.rail-link { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; color: var(--muted); text-decoration: none; transition: color .15s, background .15s; }
+/* Icon over label: API, Local Hosts, and Models are semantically adjacent,
+   and no glyph tells them apart - the label is what disambiguates them. */
+.rail-link { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 72px; padding: 9px 4px 8px; border-radius: 11px; color: var(--muted); text-decoration: none; text-align: center; transition: color .15s, background .15s; }
+/* Reserve two lines in every language: Japanese wraps where English does not
+   (サブスクリプション vs Subscriptions), and a rail whose items change
+   height when the language changes reads as broken. */
+.rail-label { min-height: 2.5em; font-size: 10px; line-height: 1.25; letter-spacing: .01em; }
 .rail-link svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .rail-link:hover { color: var(--text); background: var(--panel-2); }
 .rail-link.is-active { color: var(--blue); background: rgba(80,183,255,.12); }
