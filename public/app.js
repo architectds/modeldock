@@ -1864,7 +1864,7 @@ if (langSelect) {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "mcp"];
+const VIEWS = ["dashboard", "subscriptions", "api", "local", "models"];
 
 function routeToView(name) {
   const view = VIEWS.includes(name) ? name : VIEWS[0];
