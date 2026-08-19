@@ -135,7 +135,28 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   const instructions = "base";
   const goCatalog = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: instructions });
   const officialCatalog = DEEPSEEK_OFFICIAL_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: instructions });
-  assert.ok(goCatalog.models.length >= 1, "catalog includes the main model plus every available model");
+  // The old assertion here was "length >= 1" carrying the message "catalog
+  // includes the main model plus every available model". It verified neither
+  // half, and the claim was not even true: entries marked status "unavailable"
+  // are skipped, so the catalog is the usable subset, not all of availableModels.
+  const catalogIds = new Set(goCatalog.models.map((model) => model.slug.replace(/@.*$/, "")));
+  const usable = OPENCODE_GO_PROFILE.availableModels.filter((model) => model.status !== "unavailable");
+  const unavailable = OPENCODE_GO_PROFILE.availableModels.filter((model) => model.status === "unavailable");
+  assert.deepEqual(
+    usable.map((model) => model.id).filter((id) => !catalogIds.has(id)),
+    [],
+    "every model not marked unavailable is published",
+  );
+  assert.deepEqual(
+    unavailable.map((model) => model.id).filter((id) => catalogIds.has(id)),
+    [],
+    "a model marked unavailable is never published",
+  );
+  assert.equal(
+    goCatalog.models.every((model) => model.slug.includes("@")),
+    true,
+    "every published slug names its owner, so a label can never disagree with the route",
+  );
   assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(goCatalog.models[0].supports_search_tool, false);
@@ -164,3 +185,16 @@ test("every profile compacts at 80% of the model context window", () => {
   }
 });
 
+
+test("the effective context window is the one the catalog publishes", async () => {
+  const { effectiveContextWindow, OPENCODE_GO_PROFILE } = await import("../src/profiles.mjs");
+  const declared = OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === "deepseek-v4-flash");
+  const inherited = OPENCODE_GO_PROFILE.availableModels.find((m) => m.id === "kimi-k2.7-code");
+  assert.equal(effectiveContextWindow(declared), 1_000_000, "an override is reported as written");
+  // Most entries leave contextWindow unset and inherit the default. Reading the
+  // raw field instead reported zero for all of them, which is how the Models
+  // page came to show a dash for every model but two.
+  assert.ok(inherited.contextWindow === undefined, "this entry declares no window");
+  assert.equal(effectiveContextWindow(inherited), 250_000);
+  assert.equal(effectiveContextWindow(undefined), 250_000, "a missing entry still has a window");
+});

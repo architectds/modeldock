@@ -25,7 +25,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
@@ -1699,7 +1699,7 @@ export function createApp(services = createServices()) {
           label: model.label || model.id,
           supportsVision: Boolean(model.supportsVision),
           visionTier: model.visionTier || "",
-          contextWindow: model.contextWindow || 0,
+          contextWindow: effectiveContextWindow(model),
           free: Boolean(model.free),
           speedTier: model.speedTier || "",
           quota5h: model.quota5h || 0,

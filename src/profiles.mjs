@@ -554,6 +554,14 @@ export function modelEntryFor(config, model) {
   return current?.availableModels?.find((entry) => entry.id === bare) || null;
 }
 
+// The window a model actually runs with. Most catalog entries leave
+// contextWindow unset and inherit CONTEXT_WINDOW - the catalog has always
+// applied that fallback (see modelCatalogDefaults), so anything reporting a
+// model's context has to apply it too or it under-reports every model that
+// did not need an override.
+export function effectiveContextWindow(model) {
+  return Number(model?.contextWindow) > 0 ? Number(model.contextWindow) : CONTEXT_WINDOW;
+}
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
   // Ollama needs no credential; a connected profile is always ready. The sentinel
