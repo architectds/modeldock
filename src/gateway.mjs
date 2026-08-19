@@ -11,6 +11,7 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
+import { customEndpointFor } from "./custom-endpoints.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
@@ -111,7 +112,11 @@ export const LOCAL_TOOL_ALLOWLIST = new Set([
 export function isLocalBackend(config, model) {
   const provider = providerForModel(config, model);
   if (provider !== "custom" && provider !== "ollama") return false;
-  const baseUrl = provider === "ollama" ? config.ollamaBaseUrl : config.customBaseUrl;
+  const baseUrl = provider === "ollama"
+    ? config.ollamaBaseUrl
+    // Each custom model can sit on a different host, so ask which endpoint
+    // serves this model rather than assuming there is only ever one.
+    : (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl);
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -1468,11 +1473,12 @@ export function upstreamTargetFor(config, model) {
   const provider = providerForModel(config, model);
   const upstreamModel = bareModelId(model);
   if (provider === "custom") {
+    const endpoint = customEndpointFor(config.customEndpoints, model);
     return {
       provider,
       model: upstreamModel,
-      url: `${(config.customBaseUrl || "").replace(/\/+$/, "")}/responses`,
-      token: config.tokens?.["custom"] || config.customApiKey || "",
+      url: `${(endpoint?.baseUrl || config.customBaseUrl || "").replace(/\/+$/, "")}/responses`,
+      token: endpoint?.apiKey || config.tokens?.["custom"] || config.customApiKey || "",
     };
   }
   if (provider === "deepseek-official") {

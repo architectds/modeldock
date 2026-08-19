@@ -68,6 +68,9 @@ async function startApp(configOverrides = {}) {
   }
   const services = createServices(config);
   const { app } = createApp(services);
+  // Isolate the endpoint list too: a test that writes the real one would
+  // publish a fake model into the running gateway.
+  services.customEndpointsFile = path.join(path.dirname(config.summariesFile), "custom-endpoints.json");
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -1021,23 +1024,25 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     const onboarding = await (await fetch(`${instance.base}/api/onboarding`)).json();
     assert.equal(onboarding.anyTokenConfigured, true, "a usable custom token unlocks ON mode too");
 
-    // Persisted to the isolated env file.
-    const env = await readFile(envFile, "utf8");
-    assert.match(env, /MODELDOCK_CUSTOM_BASE_URL=https:\/\/vendor\.example\/v1/);
+    // Persisted to the endpoint list, not to .env. A flat key=value store
+    // cannot hold a list: deleting the third of five entries there means
+    // rewriting four keys and hoping nothing reads a half-updated file.
+    const listed = await (await fetch(`${instance.base}/api/custom/endpoints`)).json();
+    assert.equal(listed.endpoints.length, 1);
+    assert.equal(listed.endpoints[0].modelId, "vendor/model-x");
+    assert.equal(listed.endpoints[0].baseUrl, "https://vendor.example/v1");
+    assert.equal(listed.endpoints[0].apiKeyConfigured, true, "the key is held, not returned");
+    assert.ok(!JSON.stringify(listed).includes("sk-test"), "a key must never leave the machine in a response");
+
+    const stored = JSON.parse(await readFile(instance.services.customEndpointsFile, "utf8"));
     if (dpapiSupported()) {
-      // On Windows the custom key is DPAPI-encrypted like every other token.
-      assert.match(env, /MODELDOCK_CUSTOM_API_KEY=dpapi:/);
-      assert.doesNotMatch(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+      // The key keeps the DPAPI protection it had in .env; moving out of that
+      // file must not mean moving out of encryption.
+      assert.match(stored[0].apiKey, /^dpapi:/);
+      assert.ok(!stored[0].apiKey.includes("sk-test"));
     } else {
-      assert.match(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
+      assert.equal(stored[0].apiKey, "sk-test");
     }
-    assert.match(env, /MODELDOCK_CUSTOM_MODEL=vendor\/model-x/);
-    // MODELDOCK_CUSTOM_MAIN is not written any more: publishing a model is the
-    // whole of what it claimed to control, so there was nothing for it to say.
-    assert.doesNotMatch(env, /MODELDOCK_CUSTOM_MAIN=/);
-    // Adding an endpoint records what it may be used for; it must not take over
-    // the live selection, so the running main model is left alone.
-    assert.doesNotMatch(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);
 
     // Published to the catalog under the Custom provider.
     const catalog = await (await fetch(`${instance.base}/v1/models`)).json();

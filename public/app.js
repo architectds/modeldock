@@ -1452,6 +1452,70 @@ async function renderLocalEngines() {
 }
 
 $("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(() => {}); });
+// --- Configured endpoints (API page) ---
+//
+// One record per model rather than one slot: a self-hosted vLLM alongside a
+// third-party API is an ordinary setup, and the slot this replaced silently
+// overwrote the first endpoint when a second was added.
+async function renderEndpointList() {
+  const host = $("endpoint-list");
+  const note = $("endpoint-list-note");
+  if (!host) return;
+  try {
+    const response = await fetch("/api/custom/endpoints", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Endpoints ${response.status}`);
+    const endpoints = data.endpoints || [];
+    host.innerHTML = "";
+    for (const endpoint of endpoints) {
+      const item = document.createElement("li");
+      item.className = "endpoint-row";
+      const head = document.createElement("div");
+      head.className = "endpoint-head";
+      const name = document.createElement("strong");
+      name.textContent = endpoint.modelId;
+      const where = document.createElement("span");
+      where.className = "endpoint-base";
+      where.textContent = endpoint.baseUrl;
+      head.append(name, where);
+      const facts = document.createElement("p");
+      facts.className = "endpoint-facts";
+      const bits = [];
+      if (endpoint.contextWindow) bits.push(`${number(endpoint.contextWindow)} ${t("roster.context")}`);
+      if (endpoint.supportsVision) bits.push(t("roster.vision"));
+      bits.push(t(endpoint.apiKeyConfigured ? "endpoints.keySet" : "endpoints.keyMissing"));
+      facts.textContent = bits.join(" \u00b7 ");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "custom-action endpoint-remove";
+      remove.textContent = t("endpoints.remove");
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        try {
+          const reply = await fetch("/api/custom/remove", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ modelId: endpoint.modelId }),
+          });
+          const body = await reply.json();
+          if (!reply.ok) throw new Error(body.error?.message || `Remove ${reply.status}`);
+          await renderEndpointList();
+          renderModelRoster().catch(() => {});
+          poll().catch(() => {});
+        } catch (error) {
+          window.alert(error.message);
+          remove.disabled = false;
+        }
+      });
+      item.append(head, facts, remove);
+      host.append(item);
+    }
+    if (note) note.textContent = endpoints.length ? "" : t("endpoints.empty");
+  } catch (error) {
+    if (note) note.textContent = error.message;
+  }
+}
+
 // --- Custom model add section ---
 const customEndpointInput = $("custom-endpoint");
 const customApiKeyInput = $("custom-api-key");
@@ -1714,6 +1778,8 @@ if (customAddBtn) {
       // provider immediately.
       poll().catch(() => {});
       pollConfig().catch(() => {});
+      renderEndpointList().catch(() => {});
+      renderModelRoster().catch(() => {});
     } catch (error) {
       customShow(customErrorText(error.code) || error.message, true);
     } finally {
@@ -1841,11 +1907,24 @@ $("session-select")?.addEventListener("change", (event) => {
 });
 
 // Language selector: re-apply static text and refresh dynamic text in place.
+// Every step is isolated. A language change is not all-or-nothing: one
+// renderer throwing used to take the rest of the page with it, silently,
+// because they ran in sequence with nothing between them. Rows built in
+// script carry no data-i18n, so applyStaticI18n cannot reach their labels -
+// the pages that build rows have to redraw them by hand.
 function refreshDynamicText() {
-  applyStaticI18n();
-  if (typeof applyPresetToggleLabel === "function") applyPresetToggleLabel();
-  if (typeof lastData !== "undefined" && lastData) render(lastData);
-  pollConfig().catch(() => {});
+  const steps = [
+    () => applyStaticI18n(),
+    () => { if (typeof applyPresetToggleLabel === "function") applyPresetToggleLabel(); },
+    () => { if (typeof lastData !== "undefined" && lastData) render(lastData); },
+    () => pollConfig().catch(() => {}),
+    () => renderEndpointList().catch(() => {}),
+    () => renderModelRoster().catch(() => {}),
+    () => renderLocalEngines().catch(() => {}),
+  ];
+  for (const step of steps) {
+    try { step(); } catch { /* one broken panel must not freeze the language */ }
+  }
 }
 
 const langSelect = $("settings-lang");
@@ -1889,6 +1968,7 @@ currentView();
 loadSettings().catch(() => {});
 renderLocalEngines().catch(() => {});
 renderModelRoster().catch(() => {});
+renderEndpointList().catch(() => {});
 
 initI18n();
 // After initI18n, not before: it resolves the stored/browser language, so reading it

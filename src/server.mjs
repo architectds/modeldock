@@ -28,6 +28,7 @@ import { RouteAffinity } from "./router.mjs";
 import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
+import { CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
@@ -498,6 +499,15 @@ function settingsPayload(services) {
       model: config.customModel || "",
       apiKeyConfigured: Boolean(config.tokens?.["custom"]),
       asVision: Boolean(config.customVision),
+      // The whole list, so the API page renders every endpoint rather than
+      // the first one. Keys never leave the machine: only whether one is set.
+      endpoints: (config.customEndpoints || []).map((entry) => ({
+        modelId: entry.modelId,
+        baseUrl: entry.baseUrl,
+        contextWindow: entry.contextWindow,
+        supportsVision: entry.supportsVision,
+        apiKeyConfigured: Boolean(entry.apiKey),
+      })),
     },
     ollama: {
       baseUrl: config.ollamaBaseUrl || OLLAMA_DEFAULT_BASE,
@@ -620,7 +630,7 @@ const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
 
 function upstreamBaseForModel(config, model) {
   const provider = providerForModel(config, model);
-  if (provider === "custom") return (config.customBaseUrl || "").replace(/\/$/, "");
+  if (provider === "custom") return (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl || "").replace(/\/$/, "");
   if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
   if (provider === "ollama") return (config.ollamaBaseUrl || profileById("ollama").baseUrl).replace(/\/$/, "");
   const upstream = bareModelId(model);
@@ -1606,8 +1616,50 @@ export function createApp(services = createServices()) {
     }
   });
 
+  // The endpoint list. One record per model, because routing resolves an
+  // endpoint from the model name a request arrives with - two endpoints
+  // offering the same model id would leave the second unreachable, so the
+  // second is refused rather than published as a lie.
+  const endpointsFile = () => services.customEndpointsFile || customEndpointsPath();
+
+  // Republish from disk after any change, so the catalog, the pickers and the
+  // routing tables all move together instead of drifting until a restart.
+  const republishEndpoints = () => {
+    config.customEndpoints = readCustomEndpoints(endpointsFile());
+    // The first entry mirrors into the single-value fields the settings
+    // payload and the legacy readers still use, so a change to the list is
+    // visible everywhere at once rather than after a restart.
+    const first = config.customEndpoints[0] || null;
+    config.customBaseUrl = first?.baseUrl || "";
+    config.customModel = first?.modelId || "";
+    config.customApiKey = first?.apiKey || "";
+    config.customContextWindow = first?.contextWindow || 0;
+    config.customVision = Boolean(first?.supportsVision);
+    config.tokens = { ...(config.tokens || {}) };
+    if (first?.apiKey) config.tokens.custom = first.apiKey;
+    else delete config.tokens.custom;
+    applyCustomProfile(config);
+    services.writeCatalogFile?.();
+    return config.customEndpoints;
+  };
+
+  app.get("/api/custom/endpoints", (req, res) => {
+    // Keys never leave the machine: the list reports whether one is set, not
+    // what it is.
+    const endpoints = readCustomEndpoints(endpointsFile()).map((entry) => ({
+      modelId: entry.modelId,
+      baseUrl: entry.baseUrl,
+      label: entry.label,
+      contextWindow: entry.contextWindow,
+      supportsVision: entry.supportsVision,
+      apiKeyConfigured: Boolean(entry.apiKey),
+      addedAt: entry.addedAt,
+    }));
+    return res.json({ endpoints });
+  });
+
   app.post("/api/custom/add", mutateConfig, async (req, res) => {
-    const { baseUrl, apiKey, modelId, asVision } = req.body || {};
+    const { baseUrl, apiKey, modelId, asVision, label } = req.body || {};
     try {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
@@ -1617,55 +1669,55 @@ export function createApp(services = createServices()) {
       // match the real backend instead of the 250K custom fallback.
       const listed = await listEndpointModels({ baseUrl, apiKey });
       const advertisedContext = listed.models.find((m) => m.id === model)?.contextWindow || 0;
-      const qualified = `${model}${PROVIDER_SEPARATOR}custom`;
-      const updates = {
-        MODELDOCK_CUSTOM_BASE_URL: normalizeBaseUrl(baseUrl),
-        MODELDOCK_CUSTOM_API_KEY: apiKey,
-        MODELDOCK_CUSTOM_MODEL: model,
-        MODELDOCK_CUSTOM_CONTEXT_WINDOW: advertisedContext ? String(advertisedContext) : "",
-        MODELDOCK_CUSTOM_VISION: asVision ? "1" : "0",
-      };
-      // Adding an endpoint publishes its model; it does not select it. There is
-      // no "as main" flag because publishing already is that - the Codex picker
-      // does the choosing. CUSTOM_VISION stays because vision is a capability
-      // claim, not a selection, and it is what puts the model in the vision
-      // picker at all.
-      // Only the un-toggle case still writes: a selection pointing at this model
-      // must not dangle once the endpoint is no longer offered for that role.
-      if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
-      writeEnvFile(updates, config.envFile);
-      config.customBaseUrl = updates.MODELDOCK_CUSTOM_BASE_URL;
-      config.customApiKey = apiKey;
-      config.customModel = model;
-      config.customContextWindow = advertisedContext;
-      config.customVision = Boolean(asVision);
-      config.tokens.custom = apiKey;
-      applyCustomProfile(config);
-      // Only vision is cleaned up here. The main model is not a setting - it
-      // records whatever Codex last routed with (see relayGatewayRequest), so a
-      // reference to a retired model is corrected by the next request and reset
-      // by a restart. Vision is a stored preference and has to be let go of
-      // explicitly when the endpoint stops offering it.
-      if (!asVision && config.visionModel === qualified) {
-        config.visionModel = "";
-        services.modelSelection.visionModel = "";
-      }
-      // Rewrite the catalog file so the Codex picker sees the model immediately
-      // instead of waiting for the next hourly refresh.
-      services.writeCatalogFile?.();
-      recordConfigAction(metrics, "custom_add", { ok: true, model });
+      const next = addCustomEndpoint(readCustomEndpoints(endpointsFile()), {
+        modelId: model,
+        baseUrl: normalizeBaseUrl(baseUrl),
+        apiKey,
+        label,
+        contextWindow: advertisedContext,
+        supportsVision: Boolean(asVision),
+      });
+      writeCustomEndpoints(endpointsFile(), next);
+      const endpoints = republishEndpoints();
+      recordConfigAction(metrics, "custom_endpoint_add", { ok: true });
       return res.json({
         ok: true,
         model,
-        usage: probe.usage,
-        endpoint: probe.endpoint,
         responsesUrl: probe.responsesUrl,
+        endpoints: endpoints.map((entry) => ({ modelId: entry.modelId, baseUrl: entry.baseUrl })),
         settings: settingsPayload(services),
       });
     } catch (error) {
-      recordConfigAction(metrics, "custom_add", { ok: false, error: error.message });
+      recordConfigAction(metrics, "custom_endpoint_add", { ok: false, error: error.message });
+      if (error instanceof CustomEndpointsError) {
+        return res.status(400).json({ error: { type: error.code, message: error.message } });
+      }
       return res.status(400).json(customErrorPayload(error));
     }
+  });
+
+  app.post("/api/custom/remove", mutateConfig, async (req, res) => {
+    const model = String(req.body?.modelId || "").trim();
+    if (!model) {
+      return res.status(400).json({ error: { type: "model", message: "A model id is required." } });
+    }
+    const before = readCustomEndpoints(endpointsFile());
+    const next = removeCustomEndpoint(before, model);
+    if (next.length === before.length) {
+      return res.status(404).json({ error: { type: "model", message: `No endpoint serves ${model}.` } });
+    }
+    writeCustomEndpoints(endpointsFile(), next);
+    republishEndpoints();
+    // A selection cannot outlive the endpoint that served it. Vision is a
+    // stored preference, so it has to be let go of explicitly; the main model
+    // records what Codex routed with and corrects itself on the next request.
+    const qualified = `${model}${PROVIDER_SEPARATOR}custom`;
+    if (config.visionModel === qualified) {
+      config.visionModel = "";
+      services.modelSelection.visionModel = "";
+    }
+    recordConfigAction(metrics, "custom_endpoint_remove", { ok: true });
+    return res.json({ removed: model, endpoints: next.map((entry) => ({ modelId: entry.modelId, baseUrl: entry.baseUrl })) });
   });
 
   // Dashboard "Ollama (local)" flow: one click lists every chat-capable local

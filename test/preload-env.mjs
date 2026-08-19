@@ -21,3 +21,7 @@ import path from "node:path";
 const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-test-events-"));
 process.env.MODELDOCK_SETTINGS_EVENTS_FILE ||= path.join(dir, "settings-events.jsonl");
 process.env.MODELDOCK_USAGE_EVENTS_FILE ||= path.join(dir, "usage-events.jsonl");
+// The endpoint list belongs here for the same reason: loadConfig() reads it
+// directly, so isolating the services object is not enough - a test that adds
+// an endpoint writes the running gateway's real list without it.
+process.env.MODELDOCK_CUSTOM_ENDPOINTS_FILE ||= path.join(dir, "custom-endpoints.json");

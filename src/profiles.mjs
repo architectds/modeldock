@@ -1,5 +1,6 @@
 
 import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
+import { customEndpointFor } from "./custom-endpoints.mjs";
 
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
@@ -424,27 +425,40 @@ export function profileOptions() {
 // treat the configured endpoint/model like any other provider. Called at config
 // load and after the dashboard Add flow writes new values.
 export function applyCustomProfile(config) {
-  const model = String(config.customModel || "").trim();
-  const baseUrl = String(config.customBaseUrl || "").trim().replace(/\/+$/, "");
-  const contextWindow = Number(config.customContextWindow) > 0 ? Number(config.customContextWindow) : undefined;
-  const advertisedContextWindow = localContextWindow(contextWindow);
-  CUSTOM_PROFILE.baseUrl = baseUrl;
-  CUSTOM_PROFILE.availableModels = model && baseUrl
+  // Every configured endpoint publishes its model. The profile keeps the
+  // first one's baseUrl for callers that ask the profile rather than the
+  // model; per-model routing goes through customEndpointFor.
+  const endpoints = Array.isArray(config?.customEndpoints) ? config.customEndpoints : [];
+  const legacyModel = String(config?.customModel || "").trim();
+  const legacyBase = String(config?.customBaseUrl || "").trim().replace(/\/+$/, "");
+  const legacy = legacyModel && legacyBase
     ? [{
-        id: model,
-        label: model,
-        endpoint: "responses",
+        modelId: legacyModel,
+        baseUrl: legacyBase,
+        contextWindow: Number(config.customContextWindow) > 0 ? Number(config.customContextWindow) : 0,
         supportsVision: Boolean(config.customVision),
-        ...(advertisedContextWindow ? { contextWindow: advertisedContextWindow } : {}),
-        supportedReasoningLevels: LOCAL_REASONING_LEVELS,
-        defaultReasoningLevel: "xhigh",
-        // Always owner-qualified so the published slug carries @custom: the
-        // picker groups it under "Custom" and routing never mistakes it for an
-        // opencode-go model with the same bare id.
-        ownerQualified: true,
-        status: "available",
       }]
     : [];
+  const published = endpoints.length ? endpoints : legacy;
+  CUSTOM_PROFILE.baseUrl = published[0]?.baseUrl || "";
+  CUSTOM_PROFILE.availableModels = published.map((entry) => {
+    const advertised = localContextWindow(entry.contextWindow || undefined);
+    return {
+      id: entry.modelId,
+      label: entry.modelId,
+      endpoint: "responses",
+      supportsVision: Boolean(entry.supportsVision),
+      ...(advertised ? { contextWindow: advertised } : {}),
+      ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
+      supportedReasoningLevels: LOCAL_REASONING_LEVELS,
+      defaultReasoningLevel: "xhigh",
+      // Always owner-qualified so the published slug carries @custom: the
+      // picker groups it under Custom and routing never mistakes it for an
+      // opencode-go model with the same bare id.
+      ownerQualified: true,
+      status: "available",
+    };
+  });
   return CUSTOM_PROFILE;
 }
 

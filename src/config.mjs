@@ -7,6 +7,7 @@ import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
+import { readCustomEndpoints } from "./custom-endpoints.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
@@ -341,9 +342,13 @@ export function loadConfig() {
   const deepseekToken = rawDeepseekToken && !isPlaceholderToken(rawDeepseekToken) ? rawDeepseekToken : "";
   // Custom endpoint (dashboard "Custom model" section): a user-configured
   // Responses provider. Empty until the Add flow writes these keys into .env.
-  const customBaseUrl = normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
-  const customApiKey = process.env.MODELDOCK_CUSTOM_API_KEY || "";
-  const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
+  // The list is the source of truth. The single MODELDOCK_CUSTOM_* slot is
+  // read as a migration path: an install that predates the list keeps working
+  // and its endpoint becomes the first entry.
+  const customEndpoints = readCustomEndpoints();
+  const customBaseUrl = customEndpoints[0]?.baseUrl || normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
+  const customApiKey = customEndpoints[0]?.apiKey || process.env.MODELDOCK_CUSTOM_API_KEY || "";
+  const customModel = customEndpoints[0]?.modelId || String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
   const customVision = envOn("MODELDOCK_CUSTOM_VISION");
   // Advertised context window of the custom endpoint model (e.g. 32768 for a
   // local 32K llama.cpp serve). Written by the Add flow from /v1/models
@@ -426,6 +431,7 @@ export function loadConfig() {
     zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
     goTokenSource: opencodeGoSource,
     tokens,
+    customEndpoints,
     customBaseUrl,
     customApiKey,
     customModel,

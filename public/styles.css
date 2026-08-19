@@ -707,3 +707,12 @@ body { padding-left: 88px; }
 .roster-unused td { color: var(--muted); }
 .roster-unused .roster-rank { opacity: .5; }
 .roster-tag { border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; color: var(--green); font-size: 10px; }
+
+
+/* Configured endpoints: a list, because there can be more than one. */
+.endpoint-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.endpoint-row { position: relative; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
+.endpoint-head { display: flex; align-items: baseline; gap: 10px; }
+.endpoint-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.endpoint-facts { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.endpoint-remove { position: absolute; top: 10px; right: 12px; }

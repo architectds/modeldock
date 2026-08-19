@@ -4,6 +4,7 @@ import { visionCacheKey, visionEvidenceCache } from "./vision-cache.mjs";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readCodexAuth } from "./codex-auth.mjs";
+import { customEndpointFor } from "./custom-endpoints.mjs";
 import os from "node:os";
 import path from "node:path";
 function upstreamUrl(baseUrl, path) {
@@ -207,7 +208,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     if (isNativeVisionModel(model)) return { url: `${NATIVE_BASE}/responses`, style: "responses", native: true };
     const provider = providerForModel(config, model);
     if (provider === "custom") {
-      const base = (config.customBaseUrl || "").replace(/\/+$/, "");
+      const base = (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl || "").replace(/\/+$/, "");
       if (base) return { url: `${base}/responses`, style: "responses" };
     }
     if (provider === "deepseek-official") return { url: upstreamUrl(config.deepseekBaseUrl || profileById("deepseek-official").baseUrl, "responses"), style: "responses" };
