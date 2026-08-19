@@ -190,6 +190,10 @@ function appendNativeModels(options, config) {
       provider: "openai",
       native: true,
       supportsVision: Array.isArray(model.input_modalities) && model.input_modalities.includes("image"),
+      // The native catalog states its own window; dropping it here left these
+      // models inheriting our 250,000 fallback while Codex used the real one.
+      contextWindow: Number(model.context_window) || undefined,
+      contextSource: Number(model.context_window) > 0 ? "native" : "",
     });
   }
   return options;
@@ -1725,33 +1729,32 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/models/roster", (req, res) => {
     const totals = rollupTotals(readRollup(services.usageRollupFile || usageRollupPath()));
-    const providers = enabledProviders(config);
-    const models = [];
-    for (const entry of providers) {
-      const profile = profileById(entry.id);
-      for (const model of profile.availableModels || []) {
-        if (model.status && model.status !== "available") continue;
-        const id = publishedSlugFor(entry.id, model.id);
-        models.push({
-          id,
-          model: model.id,
-          provider: entry.id,
-          providerLabel: entry.label,
-          label: model.label || model.id,
-          supportsVision: Boolean(model.supportsVision),
-          visionTier: model.visionTier || "",
-          contextWindow: effectiveContextWindow(model),
-          // vendor: the model maker's published figure. measured: verified
-          // against the endpoint. Absent: our conservative default, which is a
-          // guess and should not be read as a fact about the model.
-          contextSource: model.contextSource || "",
-          free: Boolean(model.free),
-          speedTier: model.speedTier || "",
-          quota5h: model.quota5h || 0,
-          usage: totals[id] || null,
-        });
-      }
-    }
+    // The same published set every picker reads. Walking the profiles instead
+    // skipped the native GPT models, which are appended to the set rather than
+    // living in a profile - so the page was missing the models with the most
+    // traffic on a signed-in machine.
+    const providerLabels = new Map(providerOptions(config).map((entry) => [entry.id, entry.label]));
+    providerLabels.set(NATIVE_PROVIDER.id, NATIVE_PROVIDER.label);
+    const models = modelOptions(config, config.profileId)
+      .filter((entry) => !entry.status || entry.status === "available")
+      .map((entry) => ({
+        id: entry.id,
+        model: bareModelId(entry.id),
+        provider: entry.provider,
+        providerLabel: providerLabels.get(entry.provider) || entry.provider,
+        label: entry.label || entry.id,
+        supportsVision: Boolean(entry.supportsVision),
+        visionTier: entry.visionTier || "",
+        contextWindow: effectiveContextWindow(entry),
+        // vendor: the model maker's published figure. native: the Codex
+        // catalog's own. measured: verified against the endpoint. user: set
+        // here. Absent means our conservative default, which is a guess.
+        contextSource: entry.contextSource || "",
+        free: Boolean(entry.free),
+        speedTier: entry.speedTier || "",
+        quota5h: entry.quota5h || 0,
+        usage: totals[entry.id] || null,
+      }));
     return res.json({ windowDays: 30, models });
   });
   app.get("/api/local/discover", async (req, res) => {
