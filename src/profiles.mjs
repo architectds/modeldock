@@ -410,6 +410,12 @@ export function profileById(id) {
   return PROFILES[id] || OPENCODE_GO_PROFILE;
 }
 
+// Every registered profile, for passes that have to touch all of them
+// (the context-window overrides) rather than one by id.
+export function allProfiles() {
+  return Object.values(PROFILES);
+}
+
 export function profileOptions() {
   return Object.values(PROFILES).map((profile) => ({ id: profile.id, label: profile.label }));
 }

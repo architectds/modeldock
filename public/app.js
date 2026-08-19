@@ -1270,15 +1270,52 @@ function rosterRow(entry, rank) {
   row.append(name);
   row.append(rosterCell(entry.providerLabel, "roster-provider"));
   // A published window is the model maker's claim about the base model, not a
-  // measurement of what this endpoint serves - the two can differ, so the cell
-  // says which it is rather than letting a claim pass as a fact.
+  // measurement of what this endpoint serves. The two can differ, and whoever
+  // hits the wall knows better than the table does - so the cell says where
+  // its number came from and lets that number be corrected.
   const context = document.createElement("td");
   context.className = "roster-num";
-  context.textContent = entry.contextWindow ? number(entry.contextWindow) : "-";
+  const contextField = document.createElement("input");
+  contextField.type = "text";
+  contextField.className = "roster-context";
+  contextField.inputMode = "numeric";
+  contextField.value = entry.contextWindow ? String(entry.contextWindow) : "";
+  contextField.setAttribute("aria-label", t("roster.context"));
   if (entry.contextSource) {
-    context.title = t(`roster.context.${entry.contextSource}`);
-    if (entry.contextSource !== "measured") context.classList.add("roster-claimed");
+    contextField.title = t(`roster.context.${entry.contextSource}`);
+    if (entry.contextSource !== "measured") contextField.classList.add("roster-claimed");
+    if (entry.contextSource === "user") contextField.classList.add("roster-edited");
   }
+  const commitContext = async () => {
+    const raw = contextField.value.trim();
+    // An emptied field means "forget my correction", not "set it to zero".
+    const next = raw === "" ? null : Number(raw.replace(/[,_s]/g, ""));
+    if (next !== null && !Number.isFinite(next)) { contextField.value = String(entry.contextWindow || ""); return; }
+    if (next === entry.contextWindow) return;
+    contextField.disabled = true;
+    try {
+      const response = await fetch("/api/models/context", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: entry.id, contextWindow: next }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message || `Context ${response.status}`);
+      await renderModelRoster();
+      pollConfig().catch(() => {});
+    } catch (error) {
+      window.alert(error.message);
+      contextField.value = String(entry.contextWindow || "");
+    } finally {
+      contextField.disabled = false;
+    }
+  };
+  contextField.addEventListener("blur", () => { commitContext().catch(() => {}); });
+  contextField.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") contextField.blur();
+    if (event.key === "Escape") { contextField.value = String(entry.contextWindow || ""); contextField.blur(); }
+  });
+  context.append(contextField);
   row.append(context);
   // A tier is more use than a checkmark when the column exists to choose
   // between two models that both say yes.
@@ -1326,7 +1363,7 @@ async function renderModelRoster() {
     host.append(table);
     if (note) {
       note.textContent = rows.length
-        ? t("roster.summary", { used, total: rows.length })
+        ? `${t("roster.summary", { used, total: rows.length })} ${t("roster.contextHint")}`
         : t("roster.empty");
     }
   } catch (error) {

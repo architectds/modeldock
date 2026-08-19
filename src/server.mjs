@@ -25,13 +25,14 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
+import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
-import { LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -1682,6 +1683,51 @@ export function createApp(services = createServices()) {
   // entry cannot tell you - how much it was used, and how it performed. Usage
   // is read from the folded rollup, never from the event log, so the page load
   // costs a small JSON read no matter how much traffic the gateway has served.
+  // Correct a context window. Whoever hit the 400 knows more than the catalog
+  // does, so the number is editable without waiting for a release. Sending null
+  // clears the override and restores whatever the catalog ships.
+  //
+  // Codex reads model_catalog_json on its own schedule and caches what it read,
+  // so rewriting the file is not enough on its own - the change lands on the
+  // next Codex restart, which is what restartRequired tells the dashboard to say.
+  app.post("/api/models/context", mutateConfig, async (req, res) => {
+    const { id, contextWindow } = req.body || {};
+    const slug = String(id || "").trim();
+    if (!slug) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "A model id is required." } });
+    }
+    const file = services.contextOverridesFile || contextOverridesPath();
+    const overrides = readContextOverrides(file);
+    if (contextWindow === null) {
+      delete overrides[slug];
+    } else {
+      const check = validateContextWindow(contextWindow);
+      if (!check.ok) {
+        return res.status(400).json({ error: { type: "invalid_context_window", message: check.message } });
+      }
+      overrides[slug] = check.value;
+    }
+    writeContextOverrides(file, overrides);
+    // Clearing has to start from the shipped catalog, so rebuild the profiles
+    // from their sources before stamping what is left of the overrides on.
+    applyCustomProfile(config);
+    const localSnapshot = readLocalEnginesSnapshot() || {};
+    for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+    applyContextOverrides(allProfiles(), overrides, { publishedSlugFor });
+    services.writeCatalogFile?.();
+    // The override is on disk and in the profiles by now. If marking the
+    // restart fails, the edit still happened - reporting it as rejected would
+    // send the user back to change a value that already changed.
+    let restartRequired = true;
+    try {
+      await services.configSwitcher.markRestartRequired();
+    } catch (error) {
+      restartRequired = false;
+      recordConfigAction(metrics, "context_window_update", { ok: false, error: error.message });
+    }
+    if (restartRequired) recordConfigAction(metrics, "context_window_update", { ok: true });
+    return res.json({ id: slug, contextWindow: overrides[slug] ?? null, restartRequired });
+  });
   app.get("/api/models/roster", (req, res) => {
     const totals = rollupTotals(readRollup(services.usageRollupFile || usageRollupPath()));
     const providers = enabledProviders(config);

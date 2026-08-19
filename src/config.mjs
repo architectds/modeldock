@@ -2,10 +2,11 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { readLocalEnginesSnapshot } from "./local-engines.mjs";
+import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
@@ -492,6 +493,9 @@ export function loadConfig() {
   // last connect saw, without probing a machine that may be offline now.
   const localSnapshot = readLocalEnginesSnapshot() || {};
   for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+  // Last, so a user correction wins over the shipped catalog and over
+  // whatever a local engine just reported about itself.
+  applyContextOverrides(allProfiles(), readContextOverrides(), { publishedSlugFor });
   return config;
 }
 
