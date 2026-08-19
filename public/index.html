@@ -271,6 +271,14 @@
         <section class="panel page-panel">
           <p class="eyebrow" data-i18n="nav.local">Local engines</p>
           <h2 data-i18n="page.localTitle">Local engines</h2>
+      <div class="field" id="local-discovery">
+        <div class="field-head">
+          <span data-i18n="local.detected">Detected on this machine</span>
+          <button id="local-rescan" type="button" class="custom-action" data-i18n="local.rescan">Rescan</button>
+        </div>
+        <ul id="local-engine-list" class="local-engine-list"></ul>
+        <p id="local-discovery-note" class="custom-hint" aria-live="polite"></p>
+      </div>
       <div class="field" id="ollama-section">
         <div class="field-head">
           <span data-i18n="ollama.title">Ollama Configuration</span>

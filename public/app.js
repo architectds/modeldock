@@ -1237,6 +1237,48 @@ async function openSettings() {
   }
 }
 
+// --- Local engine discovery (Local Hosts) ---
+//
+// Read-only: it reports what is already listening so the user does not have to
+// know a port number. Connecting still goes through the flow that owns the
+// engine, which is why nothing here writes.
+async function renderLocalEngines() {
+  const list = $("local-engine-list");
+  const note = $("local-discovery-note");
+  if (!list) return;
+  list.innerHTML = "";
+  if (note) note.textContent = t("local.scanning");
+  try {
+    const response = await fetch("/api/local/discover", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Discover ${response.status}`);
+    const engines = data.engines || [];
+    for (const engine of engines) {
+      const item = document.createElement("li");
+      item.className = "local-engine";
+      const head = document.createElement("div");
+      head.className = "local-engine-head";
+      const name = document.createElement("strong");
+      name.textContent = engine.label;
+      const where = document.createElement("span");
+      where.className = "local-engine-base";
+      where.textContent = engine.baseUrl;
+      head.append(name, where);
+      const models = document.createElement("p");
+      models.className = "local-engine-models";
+      models.textContent = engine.models?.length
+        ? engine.models.join(", ")
+        : t("local.noModels");
+      item.append(head, models);
+      list.append(item);
+    }
+    if (note) note.textContent = engines.length ? "" : t("local.none");
+  } catch (error) {
+    if (note) note.textContent = error.message;
+  }
+}
+
+$("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(() => {}); });
 // --- Custom model add section ---
 const customEndpointInput = $("custom-endpoint");
 const customApiKeyInput = $("custom-api-key");
@@ -1675,6 +1717,7 @@ currentView();
 // The settings pages render from /api/settings, so fetch it once at startup
 // rather than waiting for a dialog nobody has to open any more.
 loadSettings().catch(() => {});
+renderLocalEngines().catch(() => {});
 
 initI18n();
 // After initI18n, not before: it resolves the stored/browser language, so reading it

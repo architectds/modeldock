@@ -674,3 +674,10 @@ body { padding-left: 88px; }
 .page-panel h2 { margin: 6px 0 18px; }
 .page-panel .field + .field, .page-panel .field + .custom-add, .page-panel .custom-add + .field { margin-top: 16px; }
 .page-panel .settings-actions { margin-top: 20px; }
+
+/* Discovered local engines. */
+.local-engine-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.local-engine { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
+.local-engine-head { display: flex; align-items: baseline; gap: 10px; }
+.local-engine-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.local-engine-models { margin: 6px 0 0; color: var(--muted); font-size: 12px; }

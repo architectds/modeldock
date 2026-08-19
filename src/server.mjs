@@ -29,6 +29,7 @@ import { PROVIDER_SEPARATOR, applyCustomProfile, applyOllamaProfile, bareModelId
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
+import { discoverLocalEngines } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -942,6 +943,10 @@ export function createServices(config = loadConfig()) {
     mediaStore,
     memoryStore,
     getVisionModel: () => modelSelection.visionModel,
+    // A getter, not the Set: nativeSlugs is built below (the native catalog is
+    // read after upstreams exists) and is cleared and refilled in place on every
+    // catalog refresh, so upstreams must read it per call, not capture it once.
+    getNativeSlugs: () => nativeSlugs,
   });
   let memoryTimer = null;
   if (memoryStore) {
@@ -1663,6 +1668,18 @@ export function createApp(services = createServices()) {
   // and publishes the models as one more provider option. Reconnect refreshes;
   // restart restores the snapshot. Connecting never rewrites the main or vision
   // model: Ollama stays a candidate provider and the user picks it explicitly.
+  // Read-only: report which engines are already listening on this machine so
+  // Local Hosts can offer them instead of asking the user to type a port. It
+  // persists nothing - connecting still goes through the flow that owns the
+  // engine (Ollama has its own; the OpenAI-compatible ones share the custom
+  // endpoint slot).
+  app.get("/api/local/discover", async (req, res) => {
+    try {
+      return res.json({ engines: await discoverLocalEngines({}) });
+    } catch (error) {
+      return res.status(500).json({ error: { type: "discover_failed", message: error.message } });
+    }
+  });
   app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
     const { baseUrl } = req.body || {};
     try {
