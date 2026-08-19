@@ -106,13 +106,16 @@ test("recordResponseUsage accumulates tokens and bytes", () => {
   assert.equal(metrics.responses.outputTokens, 20);
 });
 
-test("recordVisionModel counts per model and fallback", () => {
+// There is no fallback counter any more: a vision call goes to the model that
+// was selected and fails as itself, so the only thing to count is which model
+// answered.
+test("recordVisionModel counts calls per model", () => {
   const metrics = makeMetrics();
-  metrics.recordVisionModel("gpt-5.6-luna", false);
-  metrics.recordVisionModel("gpt-5.6-luna", false);
-  metrics.recordVisionModel("kimi-k2.5", true);
+  metrics.recordVisionModel("gpt-5.6-luna");
+  metrics.recordVisionModel("gpt-5.6-luna");
+  metrics.recordVisionModel("kimi-k2.5");
   assert.deepEqual(metrics.vision.byModel, { "gpt-5.6-luna": 2, "kimi-k2.5": 1 });
-  assert.equal(metrics.vision.fallback, 1);
+  assert.equal(metrics.vision.fallback, undefined);
 });
 
 test("snapshot shape and average latency", async () => {

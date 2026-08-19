@@ -681,7 +681,6 @@ function render(data) {
   set("cfg-vision", data.config.visionModel || t("models.none"));
   const visionDd = $("cfg-vision");
   if (visionDd) visionDd.title = data.config.visionUpstreamUrl ? t("runtime.via", { url: data.config.visionUpstreamUrl }) : "";
-  set("cfg-fallback", data.config.visionFallbackModel);
   set("cfg-exa", data.config.exaMcpUrl);
   const runtime = data.runtime || {};
   set("cfg-node", runtime.nodeVersion || "n/a");

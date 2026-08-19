@@ -221,3 +221,64 @@ test("a local vision model's image never leaves this machine", async () => {
   applyOllamaProfile({}, null);
   applyLocalEngineProfile("vllm", null);
 });
+
+// Choosing a vision model is a decision, and a failure must not quietly undo
+// it. A hard-coded minimax-m3@opencode-go used to be tried whenever the chosen
+// model failed, so picking a local vision model did not keep the image on the
+// machine: a local engine that simply was not running sent the picture to
+// opencode.ai and returned an answer, with nothing in the reply to say so.
+test("a failing vision model fails, rather than being replaced by a remote one", async () => {
+  const { createUpstreams } = await import("../src/upstreams.mjs");
+  const { Metrics } = await import("../src/metrics.mjs");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+
+  applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [{ id: "llava-7b", upstreamId: "llava:7b", label: "llava:7b", supportsVision: true }],
+  });
+
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-vision-nofallback-"));
+  const image = path.join(dir, "private.png");
+  writeFileSync(image, Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    "base64",
+  ));
+
+  const model = "llava-7b@ollama";
+  const upstreams = createUpstreams({
+    config: {
+      ollamaBaseUrl: "http://127.0.0.1:11434",
+      goBaseUrl: "https://opencode.ai/zen/go/v1",
+      tokens: { "opencode-go": "sk-go" },
+      visionModel: model,
+      visionTimeoutMs: 30_000,
+    },
+    metrics: new Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined, put: (v) => ({ ref: "r", dataUrl: v, value: v }), maxBytes: 10_000_000 },
+    getVisionModel: () => model,
+  });
+
+  const hosts = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    hosts.push(new URL(String(url)).hostname);
+    // The local engine is not running.
+    throw new Error("connect ECONNREFUSED 127.0.0.1:11434");
+  };
+  let raised = null;
+  try {
+    await upstreams.inspectVision({ path: image, question: "what is on my screen" });
+  } catch (error) {
+    raised = error;
+  } finally {
+    globalThis.fetch = original;
+  }
+
+  assert.deepEqual(hosts, ["127.0.0.1"], "exactly one attempt, and it stayed local");
+  assert.ok(raised, "the failure reaches the caller instead of being absorbed");
+  assert.match(raised.message, /ECONNREFUSED/, "and it says what actually went wrong");
+
+  applyOllamaProfile({}, null);
+});

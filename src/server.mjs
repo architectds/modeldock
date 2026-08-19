@@ -162,7 +162,7 @@ function modelOptions(config, profileId) {
   // its real owner is enabled and actually catalogs that model; assigning a
   // stale OpenCode fallback to the active DeepSeek profile would manufacture a
   // vision route that DeepSeek does not provide.
-  for (const id of [config.mainModel, config.visionModel, config.visionFallbackModel]) {
+  for (const id of [config.mainModel, config.visionModel]) {
     if (!id) continue;
     const owner = providerForModel(config, id);
     if (!enabledProviders(config).some((provider) => provider.id === owner)) continue;
@@ -543,7 +543,6 @@ function settingsPayload(services) {
     models: {
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
-      visionFallbackModel: config.visionFallbackModel || "",
     },
     autostart: {
       supported: Boolean(autostart?.supported?.()),

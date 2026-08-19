@@ -494,8 +494,15 @@ test("an owner-qualified twin of a native slug stays on its routed camp", async 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     called = { url: String(url), headers: options.headers };
+    // gpt-5.6-luna speaks Responses, so the stub answers in that shape. It used
+    // to answer in the chat shape, which made this call fail and left the
+    // assertion reading the fallback attempt instead - green for the wrong
+    // reason, and only visible once the fallback was removed.
     return new Response(
-      JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "a chart" } }] }),
+      JSON.stringify({
+        id: "resp_v",
+        output: [{ type: "message", content: [{ type: "output_text", text: "a chart" }] }],
+      }),
       { status: 200 },
     );
   };
@@ -509,7 +516,6 @@ test("an owner-qualified twin of a native slug stays on its routed camp", async 
       goBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "gpt-5.6-luna@opencode-go",
-      visionFallbackModel: "minimax-m3",
     },
     metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
     mediaStore: new MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 }),

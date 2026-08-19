@@ -29,7 +29,7 @@ export class Metrics extends EventEmitter {
       toolContinuations: 0,
     };
     this.web = emptyBucket();
-    this.vision = { ...emptyBucket(), fallback: 0, byModel: {} };
+    this.vision = { ...emptyBucket(), byModel: {} };
     this.memory = emptyBucket();
     this.recent = [];
   }
@@ -97,9 +97,8 @@ export class Metrics extends EventEmitter {
     }
   }
 
-  recordVisionModel(model, fallbackUsed) {
+  recordVisionModel(model) {
     this.vision.byModel[model] = (this.vision.byModel[model] || 0) + 1;
-    if (fallbackUsed) this.vision.fallback += 1;
   }
 
   snapshot(extra = {}) {

@@ -336,35 +336,45 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       VISION_EVIDENCE_INSTRUCTIONS,
       `Question: ${question || "(none - transcribe the image)"}`,
     ].join("\n");
-    const models = [...new Set([getVisionModel(), config.visionFallbackModel].filter(Boolean))];
-    const failures = [];
+    // One model: the one that was selected. There used to be a silent second
+    // attempt against a hard-coded minimax-m3@opencode-go whenever the chosen
+    // model failed, which meant picking a local vision model did not keep the
+    // image on the machine - a local engine that was simply not running sent
+    // the picture to opencode.ai and returned an answer, with nothing in the
+    // reply to say so. Choosing a model is a decision; overriding it quietly
+    // on failure takes the decision back.
+    const model = getVisionModel();
     const note = skipped.length ? { skippedImages: skipped } : {};
-
-    for (let index = 0; index < models.length; index += 1) {
-      const model = models[index];
-      const cacheKey = visionCacheKey({ images: images.map((item) => item.imageUrl), prompt, model });
-      const cached = visionCache.get(cacheKey);
-      if (cached !== undefined) {
-        metrics.recordVisionModel(model, false);
-        finish({ ok: true, model, fallbackUsed: false, inputImages: images.length, skipped: skipped.length, cached: true });
-        return { model, fallbackUsed: false, mode, imageRefs: refs, answer: cached, cached: true, ...note };
-      }
-      try {
-        const result = await callVisionModel(model, images, prompt);
-        const answer = result.answer.slice(0, VISION_EVIDENCE_MAX_CHARS);
-        const fallbackUsed = index > 0;
-        visionCache.set(cacheKey, answer);
-        metrics.recordVisionModel(model, fallbackUsed);
-        finish({ ok: true, model, fallbackUsed, inputImages: images.length, skipped: skipped.length, cached: false });
-        return { model, fallbackUsed, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
-      } catch (error) {
-        failures.push(`${model}: ${error.message}`);
-      }
+    if (!model) {
+      const message = "No vision model is selected.";
+      finish({ ok: false, error: message });
+      throw new Error(message);
     }
 
-    const message = failures.join(" | ");
-    finish({ ok: false, error: message });
-    throw new Error(message);
+    const cacheKey = visionCacheKey({ images: images.map((item) => item.imageUrl), prompt, model });
+    const cached = visionCache.get(cacheKey);
+    if (cached !== undefined) {
+      metrics.recordVisionModel(model);
+      finish({ ok: true, model, inputImages: images.length, skipped: skipped.length, cached: true });
+      return { model, mode, imageRefs: refs, answer: cached, cached: true, ...note };
+    }
+
+    let result;
+    try {
+      result = await callVisionModel(model, images, prompt);
+    } catch (error) {
+      // The failure is reported as itself. A local engine that is not running
+      // should read as a local engine that is not running.
+      const message = `${model}: ${error.message}`;
+      finish({ ok: false, error: message });
+      throw new Error(message);
+    }
+
+    const answer = result.answer.slice(0, VISION_EVIDENCE_MAX_CHARS);
+    visionCache.set(cacheKey, answer);
+    metrics.recordVisionModel(model);
+    finish({ ok: true, model, inputImages: images.length, skipped: skipped.length, cached: false });
+    return { model, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
   }
 
   return { searchWeb, inspectVision, generateImage, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };

@@ -406,7 +406,6 @@ export function loadConfig() {
   const visionModel = configuredVision.toLowerCase() === "none"
     ? ""
     : modelRef(configuredVision || (customVision && customSlug ? customSlug : defaultVisionModel));
-  const visionFallbackModel = modelRef(process.env.MODELDOCK_VISION_FALLBACK_MODEL || "minimax-m3");
 
   const debug = {
     enabled: envOn("MODELDOCK_DEBUG"),
@@ -447,7 +446,6 @@ export function loadConfig() {
     ollamaSnapshotFile,
     mainModel,
     visionModel,
-    visionFallbackModel,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).
@@ -512,7 +510,6 @@ export function publicConfig(config) {
     deepseekBaseUrl: config.deepseekBaseUrl,
     mainModel: config.mainModel,
     visionModel: config.visionModel,
-    visionFallbackModel: config.visionFallbackModel,
     exaMcpUrl: config.exaMcpUrl,
     // Provider tokens live in one place: the per-provider map. goToken was the
     // pre-multi-provider single field and is gone; readers must use tokens.
