@@ -167,3 +167,61 @@ http.createServer((req, res) => {
   }
   assert.ok(existsSync(started), "the fake gateway should record its pid after the rebuild");
 });
+
+// Regression: the stop phase used to run under the script-wide
+// $ErrorActionPreference = "Stop", so a Stop-Process failure aborted the script
+// before it ever reached Start-Process. The updater spawns this script with
+// stdio discarded, so that surfaced only as a dashboard spinner that ran its
+// full 120s timeout. A refusal must now name the reason and leave the old
+// gateway serving rather than dying silently between stop and start.
+test("restart.ps1 reports an unstoppable gateway instead of exiting silently", async (t) => {
+  if (process.platform !== "win32") {
+    t.skip("restart.ps1 is Windows-only");
+    return;
+  }
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-restart-denied-"));
+  const stateDir = path.join(root, ".state");
+  mkdirSync(path.join(root, "scripts"), { recursive: true });
+  mkdirSync(path.join(root, "dist"), { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  const port = await reservePort();
+  const server = createServer((req, res) => {
+    res.writeHead(req.url === "/healthz" ? 200 : 404);
+    res.end("{}");
+  });
+  await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+  });
+  writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
+  writeFileSync(
+    path.join(root, "scripts", "restart.ps1"),
+    readFileSync(path.join(repoRoot, "scripts", "restart.ps1")),
+    "utf8",
+  );
+  writeFileSync(path.join(root, "dist", "modeldock.mjs"), "// never started\n", "utf8");
+  // The listener is this test process, which is neither a gateway from this
+  // install nor the recorded owner, so the guard refuses without -Force.
+  const restart = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "scripts", "restart.ps1")], {
+    env: {
+      ...process.env,
+      MODELDOCK_PORT: String(port),
+      MODELDOCK_STATE_DIR: stateDir,
+      MODELDOCK_NODE_PATH: process.execPath,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  restart.stdout.on("data", (chunk) => { output += chunk; });
+  restart.stderr.on("data", (chunk) => { output += chunk; });
+  const code = await new Promise((resolve) => restart.on("exit", resolve));
+
+  assert.notEqual(code, 0, "a refused restart must exit non-zero");
+  assert.match(output, /refusing to stop/i, "the refusal states why it stopped");
+  // The decisive part: the old listener is still answering. A silent abort
+  // between stop and start is what left users with no gateway at all.
+  const response = await fetch(`http://127.0.0.1:${port}/healthz`);
+  assert.equal(response.ok, true, "the existing listener must survive a refused restart");
+});

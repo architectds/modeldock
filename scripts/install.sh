@@ -420,6 +420,10 @@ if (Test-Path $envFile) {
   }
 }
 
+# Set once this run has taken the old listener down; the messages below use it
+# to distinguish "nothing changed" from "the gateway is down and stayed down".
+$stoppedGateway = $false
+
 $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
   $oldPid = $listener.OwningProcess
@@ -495,12 +499,44 @@ if ($listener) {
   }
   Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
-    Stop-Process -Id $oldPid -Force
+    # Stop-Process is the one step that can strand the machine with no gateway,
+    # so it never runs under the script-wide "Stop" preference. An elevated
+    # gateway (Codex's Windows sandbox runs elevated) denies access to a
+    # non-elevated restart, and that terminating error used to abort the script
+    # before the Start-Process below: the old listener stopped or not, no new
+    # one started. The updater spawns this script with stdio discarded, so the
+    # dashboard just spun "restarting..." for its full 120s timeout with no
+    # reason to show. Name the failure instead.
+    try {
+      Stop-Process -Id $oldPid -Force -ErrorAction Stop
+    } catch {
+      $stopError = $_.Exception.Message
+      if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
+        # Still alive, so the port stays held and a second gateway could only
+        # fail with EADDRINUSE. Leaving the old one serving is the safe state.
+        if ($stopError -match "Access is denied") {
+          Write-Status "ERROR: cannot stop PID $oldPid on port ${port}: access is denied."
+          Write-Status "The running gateway is elevated, so a non-elevated restart cannot replace it."
+          Write-Status "Re-run this script as administrator:"
+          Write-Status "  Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$PSCommandPath','-Force'"
+        } else {
+          Write-Status "ERROR: cannot stop PID $oldPid on port ${port}: $stopError"
+        }
+        Write-Status "The old gateway is still serving on port $port; no new instance was started."
+        exit 3
+      }
+      # Gone despite the error (it exited on its own, or only the status read
+      # failed). The port is free, so carry on to the start below.
+      Write-Status "restart.ps1: Stop-Process reported '$stopError' but PID $oldPid is gone; continuing"
+    }
   } else {
     # The gateway (e.g. the updater process) may have exited between the port
     # probe and here; that is not a failure, just start fresh below.
     Write-Status "restart.ps1: PID $oldPid already exited; continuing"
   }
+  # From here the old listener is down and this script owes the machine a
+  # running gateway: every later failure path must say so out loud.
+  $stoppedGateway = $true
   for ($i = 0; $i -lt 20; $i += 1) {
     Start-Sleep -Milliseconds 250
     if (-not (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) { break }
@@ -543,6 +579,9 @@ if (-not $nodeExe) {
 if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source }
 if (-not $nodeExe) {
   Write-Status "ERROR: node.exe not found; install Node 24+ or re-run the ModelDock installer"
+  if ($stoppedGateway) {
+    Write-Status "The old gateway was stopped and none could be started: port $port is now DOWN."
+  }
   exit 1
 }
 
@@ -553,12 +592,19 @@ if (-not $nodeExe) {
 # makes dist newer than src, so this is a no-op for real installs and never
 # clobbers an update. A failed rebuild is loud but not fatal: the gateway still
 # starts on the best bundle available and the log records exactly what ran.
-$buildIfStale = Join-Path $root "scripts\build-if-stale.mjs"
-if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path -LiteralPath $buildIfStale)) {
-  & $nodeExe $buildIfStale
-  if ($LASTEXITCODE -ne 0) {
-    Write-Status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+# Wrapped: with the old listener already stopped, a throw from any probe in
+# here would skip the Start-Process below and leave the port dead. A stale
+# bundle is a far smaller problem than no gateway, so failures only warn.
+try {
+  $buildIfStale = Join-Path $root "scripts\build-if-stale.mjs"
+  if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path -LiteralPath $buildIfStale)) {
+    & $nodeExe $buildIfStale
+    if ($LASTEXITCODE -ne 0) {
+      Write-Status "WARNING: source is newer than dist/modeldock.mjs but the rebuild failed; starting anyway (run npm run build to refresh the bundle before trusting local results)."
+    }
   }
+} catch {
+  Write-Status "WARNING: bundle staleness check failed: $($_.Exception.Message); starting on the existing bundle."
 }
 
 # Prefer the built bundle, falling back to the source entry in a git checkout.
@@ -579,6 +625,11 @@ try {
   Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
+  if ($stoppedGateway) {
+    Write-Status "The old gateway was stopped and the replacement did not start: port $port is now DOWN."
+    Write-Status "Start it manually:"
+    Write-Status "  powershell -NoProfile -ExecutionPolicy Bypass -File '$PSCommandPath' -Force"
+  }
   exit 1
 }
 Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
