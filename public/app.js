@@ -1321,9 +1321,10 @@ function rosterRow(entry, rank) {
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message || `Context ${response.status}`);
-      // Said plainly, because the file is rewritten immediately but Codex has
-      // already cached what it read: nothing changes until it restarts.
-      window.alert(t("roster.savedRestart", { model: entry.label }));
+      // No dialog: the row re-renders as edited and the restart banner at the
+      // top of the page is already driven by the same restartRequired flag this
+      // route sets. A modal on top of a banner says the same thing twice, and
+      // the modal is the one that interrupts.
       await renderModelRoster();
       pollConfig().catch(() => {});
     } catch (error) {
