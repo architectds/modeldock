@@ -1,11 +1,13 @@
 # Model Dock For Codex
 
-Keep everything in Codex - and add DeepSeek. Give DeepSeek eyes, ears, a
-voice, a web search, and a memory. ModelDock focuses on one thing: making
-DeepSeek work natively inside Codex.
+Keep everything in Codex - and add the models it does not ship with. Give
+DeepSeek, Qwen, or a model running on your own machine eyes, ears, a voice, a
+web search, and a memory, without leaving Codex.
 
-A thin local Responses bridge for OpenCode Go and DeepSeek official, with
-native GPT passthrough and live token, latency, and trace observability.
+A thin local Responses bridge for OpenCode Go, DeepSeek official, and local
+engines - Ollama, llama.cpp, and vLLM are detected on loopback, and any other
+OpenAI-compatible endpoint can be added by URL - with native GPT passthrough
+and live token, latency, and trace observability.
 
 <p align="center">
   English ·
@@ -29,7 +31,8 @@ native GPT passthrough and live token, latency, and trace observability.
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
 the OpenCode Go Responses endpoint it runs through has no hosted search (the
-DeepSeek official endpoint does). Model Dock For Codex adds these as tools,
+DeepSeek official endpoint does). A Qwen or any other model you host yourself
+has the same gaps. Model Dock For Codex adds these as tools,
 without rewriting the conversation history:
 
 - **See** - paste an image into Codex and the request is routed to the vision
@@ -220,13 +223,15 @@ legal, financial, or professional advice.
 
 ## 中文
 
-在 Codex 里给 DeepSeek 装上眼睛、耳朵、声音、网络搜索和记忆——通过一个
-轻量本地 Responses 桥接层连接 OpenCode Go 与 DeepSeek 官方 API，支持原生
-GPT 透传，并带实时 token、延迟与调用链路观测。
+在 Codex 里给 DeepSeek、Qwen 以及跑在你自己机器上的模型装上眼睛、耳朵、
+声音、网络搜索和记忆——通过一个轻量本地 Responses 桥接层连接 OpenCode Go、
+DeepSeek 官方 API 和本地引擎（自动探测环回地址上的 Ollama、llama.cpp、
+vLLM，其它 OpenAI 兼容端点也可按 URL 添加），支持原生 GPT 透传，并带实时
+token、延迟与调用链路观测。
 
 DeepSeek V4 Flash 又快又便宜，但它看不见、听不到、不会说话，Responses
 端点也没有内置搜索——确切地说，它所经过的 OpenCode Go Responses 端点没有
-内置搜索（DeepSeek 官方端点有）。Model Dock For Codex 以工具的形式补全这些能力，并附带轻量跨会话记忆，
+内置搜索（DeepSeek 官方端点有）。自己部署的 Qwen 或其它本地模型同样如此。Model Dock For Codex 以工具的形式补全这些能力，并附带轻量跨会话记忆，
 且不改写对话历史：
 
 - **看图** - 把图片粘贴进 Codex，请求会自动路由到你在设置中选择的视觉模型；
@@ -345,12 +350,15 @@ sh ~/.modeldock/scripts/uninstall.sh
 
 ## 日本語
 
-DeepSeek に目、耳、声、そしてウェブ検索を - 薄い Responses ブリッジ経由で
-OpenCode Go と DeepSeek 公式 API をつなぎます。
+DeepSeek・Qwen・手元のマシンで動くモデルに目、耳、声、そしてウェブ検索を -
+薄い Responses ブリッジ経由で OpenCode Go、DeepSeek 公式 API、そしてローカル
+エンジン（ループバック上の Ollama・llama.cpp・vLLM を自動検出、他の
+OpenAI 互換エンドポイントも URL で追加可能）をつなぎます。
 
 DeepSeek V4 Flash は速くて安い一方、画像を見られず、話せず、聞けず、
 それが経由する OpenCode Go の Responses エンドポイントには検索機能も
-ありません（DeepSeek 公式エンドポイントにはあります）。Model Dock For
+ありません（DeepSeek 公式エンドポイントにはあります）。自分で動かす Qwen
+などのローカルモデルも同じです。Model Dock For
 Codex はこれら 5 つをツールとして追加し、会話履歴は書き換えません：
 
 - **見る** - 画像を Codex に貼り付けると、リクエストは設定で選択した
