@@ -1,3 +1,4 @@
+import { profileById } from "./profiles.mjs";
 // Provider token validation at the write boundary (settings API). Providers
 // reject malformed keys at request time with confusing errors, so the shape is
 // checked before anything reaches the .env - DeepSeek setup-script semantics
@@ -11,9 +12,14 @@ export function validateProviderToken(provider, value) {
   if (/[\s"']/.test(raw)) {
     return { ok: false, error: "The token must not contain quotes or spaces." };
   }
-  if (provider === "deepseek-official" && !raw.startsWith("sk-")) {
-    return { ok: false, error: "A DeepSeek API key must start with sk- (create one at https://platform.deepseek.com/api_keys)." };
+  // Asked of the provider rather than listed here: a new keyed endpoint
+  // brings its own key format, and this file should not have to learn it.
+  const profile = profileById(provider);
+  if (profile?.tokenPattern && !profile.tokenPattern.test(raw)) {
+    return { ok: false, error: profile.tokenHint || `A ${profile.label} key does not look right.` };
   }
+  // Exa is a search provider, not a model provider: it has no profile, so its
+  // shape stays here.
   if (provider === "exa" && !/^exa_[A-Za-z0-9_-]+$/.test(raw)) {
     return { ok: false, error: "An Exa API key must look like exa_<token>." };
   }

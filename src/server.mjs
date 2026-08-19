@@ -25,7 +25,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { isLocalProvider, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
@@ -558,9 +558,7 @@ function settingsPayload(services) {
 // surface as a 401 wall after the next restart.
 async function probeSettingsToken(config, provider, token) {
   const profile = profileById(provider);
-  const baseUrl = provider === "deepseek-official"
-    ? (config.deepseekBaseUrl || profile.baseUrl)
-    : (config.opencodeBaseUrl || config.goBaseUrl || profile.baseUrl);
+  const baseUrl = profile.baseUrlFor(config, profile.availableModels?.[0]?.id || "");
   const model = profile.availableModels?.[0]?.id || config.mainModel;
   return probeCustomResponses({ baseUrl, apiKey: token, modelId: model });
 }
@@ -646,15 +644,11 @@ function recordConfigAction(metrics, operation, result) {
 
 const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
 
+// The dashboard's view of the same question the relay asks. It had its own
+// if-chain and disagreed with the relay about Ollama, so the address shown
+// was not the address used.
 function upstreamBaseForModel(config, model) {
-  const provider = providerForModel(config, model);
-  if (provider === "custom") return (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl || "").replace(/\/$/, "");
-  if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
-  if (provider === "ollama") return (config.ollamaBaseUrl || profileById("ollama").baseUrl).replace(/\/$/, "");
-  if (isLocalProvider(provider)) return (profileById(provider).baseUrl || "").replace(/\/$/, "");
-  const upstream = bareModelId(model);
-  if (upstream && (upstream.endsWith("-free") || upstream === "big-pickle")) return ZEN_FREE_BASE;
-  return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
+  return profileById(providerForModel(config, model)).baseUrlFor(config, model);
 }
 
 export function codexModelCatalog(config) {
@@ -698,7 +692,9 @@ const VISION_PROBE_IMAGE = inlineDashboardPng
 
 function visionProbeUrlAndBody(modelId, config, imageUrl) {
   const provider = providerForModel(config, modelId);
-  const base = (provider === "deepseek-official" ? profileById("deepseek-official").baseUrl : config.goBaseUrl).replace(/\/$/, "");
+  // Was deepseek-or-OpenCode only, so probing a custom or local vision model
+  // sent its image to OpenCode Go.
+  const base = profileById(provider).baseUrlFor(config, modelId);
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(config, modelId)}` };
   const upstream = bareModelId(modelId);
   if (["gpt-5.6-luna", "grok-4.5"].includes(upstream)) {

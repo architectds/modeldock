@@ -204,21 +204,23 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     return Boolean(getNativeSlugs()?.has?.(model));
   }
 
+  // Which dialect a vision call speaks is an OpenCode-side fact and stays
+  // here; where it is sent is the provider's, and asking the profile is what
+  // stops a local vision model from having its image posted to opencode.ai -
+  // this had no case for ollama, llamacpp or vllm at all.
   function visionEndpointFor(model) {
     if (isNativeVisionModel(model)) return { url: `${NATIVE_BASE}/responses`, style: "responses", native: true };
     const provider = providerForModel(config, model);
-    if (provider === "custom") {
-      const base = (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl || "").replace(/\/+$/, "");
-      if (base) return { url: `${base}/responses`, style: "responses" };
-    }
-    if (provider === "deepseek-official") return { url: upstreamUrl(config.deepseekBaseUrl || profileById("deepseek-official").baseUrl, "responses"), style: "responses" };
-    const opencodeBase = config.opencodeBaseUrl || config.goBaseUrl;
-    // The selected model may be the published slug (gpt-5.6-luna@opencode-go); the
-    // endpoint tables key on the bare id the upstream actually serves.
+    const base = profileById(provider).baseUrlFor(config, model);
+    // Every provider in the registry other than OpenCode Go speaks Responses.
+    // An empty base means nothing is configured for this model, so fall
+    // through rather than build a URL with no host.
+    if (provider !== "opencode-go" && base) return { url: `${base}/responses`, style: "responses" };
+    const goBase = profileById("opencode-go").baseUrlFor(config, model);
     const upstream = bareModelId(model);
-    if (upstream.endsWith("-free") || upstream === "big-pickle") return { url: ZEN_FREE_BASE, style: "chat" };
-    if (RESPONSES_MODELS.has(upstream)) return { url: upstreamUrl(opencodeBase, "responses"), style: "responses" };
-    return { url: upstreamUrl(opencodeBase, "chat/completions"), style: "chat" };
+    if (upstream.endsWith("-free") || upstream === "big-pickle") return { url: `${goBase}/chat/completions`, style: "chat" };
+    if (RESPONSES_MODELS.has(upstream)) return { url: `${goBase}/responses`, style: "responses" };
+    return { url: `${goBase}/chat/completions`, style: "chat" };
   }
 
   async function callVisionModel(model, images, prompt) {

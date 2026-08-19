@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { bareModelId, isLocalProvider, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
+import { bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -111,14 +111,12 @@ export const LOCAL_TOOL_ALLOWLIST = new Set([
 // relayCompaction before widening this function's role again.
 export function isLocalBackend(config, model) {
   const provider = providerForModel(config, model);
-  if (provider !== "custom" && !isLocalProvider(provider)) return false;
-  const baseUrl = provider === "ollama"
-    ? config.ollamaBaseUrl
-    : isLocalProvider(provider)
-      ? profileById(provider).baseUrl
-      // Each custom model can sit on a different host, so ask which endpoint
-      // serves this model rather than assuming there is only ever one.
-      : (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl);
+  const profile = profileById(provider);
+  // A local engine says so about itself. A custom endpoint cannot: the same
+  // provider serves both a laptop and a datacentre, so its address decides.
+  if (profile.local) return true;
+  if (provider !== "custom") return false;
+  const baseUrl = profile.baseUrlFor(config, model);
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -1471,65 +1469,13 @@ export function restoreNamespaceOutput(output, namespaces) {
 // Resolve the upstream for a model. The owning provider decides the base URL and
 // token; the wire is always Responses. The @provider suffix is stripped before
 // the id reaches the upstream.
+// Where a request goes and what credential it carries. The answer belongs to
+// the provider, so this asks it. The chain of if (provider === ...) that used
+// to live here was a second registry maintained by hand, and llamacpp and
+// vllm were missing from it while having perfectly good profiles - so they
+// fell through to OpenCode Go carrying the OpenCode token.
 export function upstreamTargetFor(config, model) {
-  const provider = providerForModel(config, model);
-  const upstreamModel = bareModelId(model);
-  if (provider === "custom") {
-    const endpoint = customEndpointFor(config.customEndpoints, model);
-    return {
-      provider,
-      model: upstreamModel,
-      url: `${(endpoint?.baseUrl || config.customBaseUrl || "").replace(/\/+$/, "")}/responses`,
-      token: endpoint?.apiKey || config.tokens?.["custom"] || config.customApiKey || "",
-    };
-  }
-  if (provider === "deepseek-official") {
-    return {
-      provider,
-      model: upstreamModel,
-      url: `${(config.deepseekBaseUrl || "https://api.deepseek.com").replace(/\/+$/, "")}/responses`,
-      token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
-    };
-  }
-  if (provider === "llamacpp" || provider === "vllm") {
-    return {
-      provider,
-      model: upstreamModel,
-      url: `${(profileById(provider).baseUrl || "").replace(/\/+$/, "")}/responses`,
-      token: "",
-      // Keyless by construction: the address is loopback-only, which is the
-      // whole reason no credential is required. The tokenless gate below
-      // must not 503 it.
-      tokenRequired: false,
-    };
-  }
-  if (provider === "ollama") {
-    // The published id is colon-free but Ollama only serves the original tag
-    // (a model tag may contain a colon that the slug cannot carry), so the
-    // wire id comes from the profile entry.
-    const entry = modelEntryFor(config, model);
-    return {
-      provider,
-      model: entry?.upstreamId || upstreamModel,
-      url: `${normalizeOllamaBase(config.ollamaBaseUrl || "http://127.0.0.1:11434")}/v1/responses`,
-      token: "",
-      // Ollama needs no credential; the tokenless gate below must not 503 it.
-      tokenRequired: false,
-    };
-  }
-  const entry = modelEntryFor(config, upstreamModel);
-  const baseUrl = entry?.zen
-    ? (config.zenBaseUrl || "https://opencode.ai/zen/v1")
-    : (config.opencodeBaseUrl || config.goBaseUrl || "https://opencode.ai/zen/go/v1");
-  return {
-    provider: "opencode-go",
-    model: upstreamModel,
-    url: `${baseUrl.replace(/\/+$/, "")}/responses`,
-    token: config.tokens?.["opencode-go"] || "",
-    // Zen free tier: failure copy should carry free-tier guidance instead of the
-    // generic hint (see error-translation.mjs FREE_HINTS).
-    free: Boolean(entry?.free),
-  };
+  return profileById(providerForModel(config, model)).target(config, model);
 }
 
 export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision }) {
@@ -2688,7 +2634,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // history carried a mid-history system item.
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
-    routedProvider === "custom" || isLocalProvider(routedProvider) ? normalizeLocalPayload(payload) : null;
+    profileById(routedProvider).normalizesPayload ? normalizeLocalPayload(payload) : null;
   // A delegated subagent task in Codex's opaque collaboration channel can
   // only be read by the native backend; relay it through a native model first.
   let routeInput = payload.input;
@@ -2988,7 +2934,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // repairs; official and custom routes keep the generic path.
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
-    routedProvider === "custom" || isLocalProvider(routedProvider) ? normalizeLocalPayload(payload) : null;
+    profileById(routedProvider).normalizesPayload ? normalizeLocalPayload(payload) : null;
   let routeInput = payload.input;
   if (hasOpaqueCollaboration(routeInput)) {
     try {
@@ -3014,7 +2960,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
   // closest accepted value, and drop anything else so local routes never trip
   // the template validator.
-  if (routedProvider === "custom" || isLocalProvider(routedProvider)) {
+  if (profileById(routedProvider).normalizesPayload) {
     normalizedPayload = {
       ...normalizedPayload,
       reasoning: normalizeLocalReasoning(normalizedPayload).reasoning,

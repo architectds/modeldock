@@ -433,6 +433,134 @@ const PROFILES = {
   vllm: VLLM_PROFILE,
 };
 
+// Everything a provider needs to answer about itself lives on the provider.
+//
+// This used to be five separate if-chains - in upstreamTargetFor, in
+// upstreamBaseForModel, in visionEndpointFor, and in two probe helpers - each
+// naming providers by hand. They disagreed: three of them had no case for a
+// local engine, so a llama.cpp model resolved to opencode.ai, and a local
+// vision model still sends its image there today. The table below is the only
+// registry; a provider that is in it is reachable by construction, and adding
+// one is adding an entry rather than remembering five call sites.
+const trimBase = (value) => String(value || "").replace(/\/+$/, "");
+
+// Defaults that fit a plain keyed HTTPS provider. A profile overrides only
+// what genuinely differs for it, so the difference is what you read.
+function defineRouting(profile, overrides = {}) {
+  profile.keyless = Boolean(overrides.keyless);
+  profile.local = Boolean(overrides.local);
+  // An OpenAI-compatible server that did not write the Responses spec: llama.cpp,
+  // vLLM, Ollama, and whatever a user points a custom endpoint at. They reject
+  // payload shapes the first-party endpoints accept, so the relay normalises
+  // before sending. Declared rather than inferred, because a hosted provider
+  // could need it too and a local one might not.
+  profile.normalizesPayload = Boolean(overrides.normalizesPayload);
+  // The shape a provider's own keys take, checked at the write boundary so a
+  // malformed key cannot reach the .env and resurface as a 401 wall after a
+  // restart. Absent means the provider publishes no documented shape.
+  profile.tokenPattern = overrides.tokenPattern || null;
+  profile.tokenHint = overrides.tokenHint || "";
+  profile.baseUrlFor = overrides.baseUrlFor
+    || ((config) => trimBase(config?.[`${profile.id}BaseUrl`] || profile.baseUrl));
+  profile.target = overrides.target
+    || ((config, model) => ({
+      provider: profile.id,
+      model: bareModelId(model),
+      url: `${profile.baseUrlFor(config, model)}/responses`,
+      token: profile.keyless ? "" : (config?.tokens?.[profile.id] || ""),
+      // A keyless provider must not be 503'd by the tokenless gate: it has no
+      // credential to present, which is a property of the provider and not a
+      // configuration mistake.
+      ...(profile.keyless ? { tokenRequired: false } : {}),
+    }));
+  return profile;
+}
+
+defineRouting(OPENCODE_GO_PROFILE, {
+  // Zen free-tier models are served by a different host than the paid Go
+  // endpoint, under the same account and the same token.
+  baseUrlFor(config, model) {
+    const entry = modelEntryFor(config, bareModelId(model));
+    // The name test is a fallback for a Zen model that is not in the catalog:
+    // big-pickle is reachable but unregistered, so entry is undefined for it.
+    const upstream = bareModelId(model);
+    const zen = entry?.zen || upstream.endsWith("-free") || upstream === "big-pickle";
+    return zen
+      ? trimBase(config?.zenBaseUrl || "https://opencode.ai/zen/v1")
+      : trimBase(config?.opencodeBaseUrl || config?.goBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
+  },
+  target(config, model) {
+    const upstream = bareModelId(model);
+    const entry = modelEntryFor(config, upstream);
+    return {
+      provider: "opencode-go",
+      model: upstream,
+      url: `${OPENCODE_GO_PROFILE.baseUrlFor(config, model)}/responses`,
+      token: config?.tokens?.["opencode-go"] || "",
+      // Zen free tier: failure copy should carry free-tier guidance instead of
+      // the generic hint (see error-translation.mjs FREE_HINTS).
+      free: Boolean(entry?.free),
+    };
+  },
+});
+
+defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
+  tokenPattern: /^sk-/,
+  tokenHint: "A DeepSeek API key must start with sk- (create one at https://platform.deepseek.com/api_keys).",
+  baseUrlFor: (config) => trimBase(config?.deepseekBaseUrl || DEEPSEEK_OFFICIAL_PROFILE.baseUrl),
+  target: (config, model) => ({
+    provider: "deepseek-official",
+    model: bareModelId(model),
+    url: `${DEEPSEEK_OFFICIAL_PROFILE.baseUrlFor(config)}/responses`,
+    token: config?.tokens?.["deepseek-official"] || config?.deepseekToken || "",
+  }),
+});
+
+defineRouting(CUSTOM_PROFILE, {
+  normalizesPayload: true,
+  // One profile, many endpoints: each model can sit on a different host with
+  // its own key, so the lookup is per model rather than per provider. Nothing
+  // outside this profile needs to know that.
+  baseUrlFor: (config, model) => trimBase(
+    customEndpointFor(config?.customEndpoints, model)?.baseUrl || config?.customBaseUrl || "",
+  ),
+  target: (config, model) => {
+    const endpoint = customEndpointFor(config?.customEndpoints, model);
+    return {
+      provider: "custom",
+      model: bareModelId(model),
+      url: `${CUSTOM_PROFILE.baseUrlFor(config, model)}/responses`,
+      token: endpoint?.apiKey || config?.tokens?.custom || config?.customApiKey || "",
+    };
+  },
+});
+
+defineRouting(OLLAMA_PROFILE, {
+  normalizesPayload: true,
+  keyless: true,
+  local: true,
+  // Ollama serves the OpenAI dialect under /v1 while its own API sits at the
+  // root, so the routed base is not the address the user configured.
+  baseUrlFor: (config) => `${normalizeOllamaBase(config?.ollamaBaseUrl || OLLAMA_DEFAULT_BASE)}/v1`,
+  target: (config, model) => ({
+    provider: "ollama",
+    // The published id is colon-free but Ollama only serves the original tag
+    // (a tag may contain a colon the slug cannot carry), so the wire id comes
+    // from the profile entry.
+    model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
+    url: `${OLLAMA_PROFILE.baseUrlFor(config)}/responses`,
+    token: "",
+    tokenRequired: false,
+  }),
+});
+
+// llama.cpp and vLLM need no override at all: their base is whatever the
+// connect snapshot wrote onto the profile, and they are keyless because the
+// address is loopback-only. That the defaults fit them exactly is the point -
+// the next OpenAI-dialect engine should also need nothing but two flags.
+defineRouting(LLAMACPP_PROFILE, { keyless: true, local: true, normalizesPayload: true, baseUrlFor: (config) => trimBase(LLAMACPP_PROFILE.baseUrl) });
+defineRouting(VLLM_PROFILE, { keyless: true, local: true, normalizesPayload: true, baseUrlFor: (config) => trimBase(VLLM_PROFILE.baseUrl) });
+
 export function profileById(id) {
   return PROFILES[id] || OPENCODE_GO_PROFILE;
 }
@@ -609,23 +737,14 @@ export function modelEntryFor(config, model) {
 export function effectiveContextWindow(model) {
   return Number(model?.contextWindow) > 0 ? Number(model.contextWindow) : CONTEXT_WINDOW;
 }
-// Keyless OpenAI-dialect servers running on this machine. Ollama has its own
-// wire quirks but shares every routing decision with the other two, so code
-// should branch on the set rather than on a growing chain of comparisons -
-// which is how llamacpp and vllm came to be absent from upstreamTargetFor and
-// were routed to OpenCode Go, with OpenCode's token, instead.
-export const LOCAL_PROVIDERS = new Set(["ollama", "llamacpp", "vllm"]);
-export function isLocalProvider(id) {
-  return LOCAL_PROVIDERS.has(String(id || ""));
-}
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
-  // Ollama needs no credential; a connected profile is always ready. The sentinel
-  // keeps healthz/readiness gates and the vision dev tooling honest.
-  if (isLocalProvider(provider)) {
-    return profileById(provider).availableModels?.length ? "local" : "";
-  }
+  const profile = profileById(provider);
+  // A keyless provider has no credential to look up; "local" is a sentinel
+  // that keeps the healthz and readiness gates honest about a connected
+  // engine being usable. Not connected means not ready, same as no token.
+  if (profile.keyless) return profile.availableModels?.length ? "local" : "";
   return config?.tokens?.[provider] || "";
 }
 
