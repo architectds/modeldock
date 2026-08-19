@@ -14,7 +14,7 @@ const USAGE_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "usage-events.js
 
 // Tests and packaging can redirect the metering file without touching the real
 // ~/.modeldock state (mirrors MODELDOCK_SETTINGS_EVENTS_FILE in settings-events.mjs).
-function usageEventsPath() {
+export function usageEventsPath() {
   return process.env.MODELDOCK_USAGE_EVENTS_FILE || USAGE_EVENTS_PATH;
 }
 

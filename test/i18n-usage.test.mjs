@@ -40,6 +40,8 @@ function englishKeys() {
 // app.js: `${t("switch.mode")} - ${t("switch." + mode)}`
 const DYNAMIC = [
   { prefix: "switch.", suffixes: ["off", "on"], site: 'app.js: t("switch." + mode)' },
+  // The roster header row is built from ROSTER_COLUMNS, so no literal key exists.
+  { prefix: "roster.", suffixes: ["model", "provider", "context", "vision", "requests", "tps", "cache"], site: "app.js: t(`roster.${column}`)" },
 ];
 
 test("every English translation key is referenced by the dashboard", () => {

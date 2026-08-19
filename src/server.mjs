@@ -29,6 +29,8 @@ import { PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyO
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
+import { usageEventsPath } from "./usage-events.mjs";
+import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
@@ -1676,6 +1678,37 @@ export function createApp(services = createServices()) {
   // persists nothing - connecting still goes through the flow that owns the
   // engine (Ollama has its own; the OpenAI-compatible ones share the custom
   // endpoint slot).
+  // The model roster: every published model with the two things a catalog
+  // entry cannot tell you - how much it was used, and how it performed. Usage
+  // is read from the folded rollup, never from the event log, so the page load
+  // costs a small JSON read no matter how much traffic the gateway has served.
+  app.get("/api/models/roster", (req, res) => {
+    const totals = rollupTotals(readRollup(services.usageRollupFile || usageRollupPath()));
+    const providers = enabledProviders(config);
+    const models = [];
+    for (const entry of providers) {
+      const profile = profileById(entry.id);
+      for (const model of profile.availableModels || []) {
+        if (model.status && model.status !== "available") continue;
+        const id = publishedSlugFor(entry.id, model.id);
+        models.push({
+          id,
+          model: model.id,
+          provider: entry.id,
+          providerLabel: entry.label,
+          label: model.label || model.id,
+          supportsVision: Boolean(model.supportsVision),
+          visionTier: model.visionTier || "",
+          contextWindow: model.contextWindow || 0,
+          free: Boolean(model.free),
+          speedTier: model.speedTier || "",
+          quota5h: model.quota5h || 0,
+          usage: totals[id] || null,
+        });
+      }
+    }
+    return res.json({ windowDays: 30, models });
+  });
   app.get("/api/local/discover", async (req, res) => {
     try {
       return res.json({ engines: await discoverLocalEngines({}) });
@@ -1881,6 +1914,22 @@ export async function initAutostartDefault(autostart, {
   }
 }
 
+// Fold the event log into the thirty-day rollup. Both files are read from the
+// top each time; a timestamp filter makes that idempotent, and at one fold per
+// ten minutes the saved milliseconds would not pay for offset bookkeeping.
+function foldUsageOnce(services) {
+  try {
+    const file = services.usageRollupFile || usageRollupPath();
+    const { rollup, folded } = foldUsageFile(readRollup(file), services.usageEventsFile || usageEventsPath());
+    if (folded) writeRollup(file, rollup);
+    return folded;
+  } catch {
+    // Reporting must never take the gateway down.
+    return 0;
+  }
+}
+
+export const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
 export async function startServer(config = loadConfig()) {
   const instance = createApp(createServices(config));
   // Tests opt out with autostartDefault: false so they never touch the real
@@ -1888,6 +1937,9 @@ export async function startServer(config = loadConfig()) {
   if (config.autostartDefault !== false) {
     initAutostartDefault(instance.services.autostart).catch(() => {});
   }
+  foldUsageOnce(instance.services);
+  const usageTimer = setInterval(() => foldUsageOnce(instance.services), USAGE_FOLD_INTERVAL_MS);
+  usageTimer.unref?.();
   const server = await new Promise((resolve, reject) => {
     const listener = instance.app.listen(config.port, config.host, () => resolve(listener));
     // Codex desktop first attempts a Responses WebSocket (ws://127.0.0.1:<port>/...

@@ -1237,6 +1237,92 @@ async function openSettings() {
   }
 }
 
+// --- Model roster (Models page) ---
+//
+// One ranked list, not a table per provider: the first question is "what am I
+// actually running", and grouping answers "what could I run from here"
+// instead. Provider is a column because a model id is provider plus name and
+// the same name serves from two of them.
+const ROSTER_COLUMNS = ["model", "provider", "context", "vision", "requests", "tps", "cache"];
+
+function rosterCell(text, className) {
+  const cell = document.createElement("td");
+  if (className) cell.className = className;
+  cell.textContent = text;
+  return cell;
+}
+
+function rosterRow(entry, rank) {
+  const row = document.createElement("tr");
+  const name = document.createElement("td");
+  const position = document.createElement("span");
+  position.className = "roster-rank";
+  position.textContent = rank;
+  const label = document.createElement("strong");
+  label.textContent = entry.label;
+  name.append(position, label);
+  if (entry.free) {
+    const tag = document.createElement("span");
+    tag.className = "roster-tag";
+    tag.textContent = t("roster.free");
+    name.append(" ", tag);
+  }
+  row.append(name);
+  row.append(rosterCell(entry.providerLabel, "roster-provider"));
+  row.append(rosterCell(entry.contextWindow ? number(entry.contextWindow) : "-", "roster-num"));
+  // A tier is more use than a checkmark when the column exists to choose
+  // between two models that both say yes.
+  row.append(rosterCell(entry.supportsVision ? (entry.visionTier || t("roster.yes")) : "-"));
+  const usage = entry.usage;
+  row.append(rosterCell(usage ? number(usage.requests) : "-", "roster-num"));
+  row.append(rosterCell(usage && usage.tps ? usage.tps.toFixed(1) : "-", "roster-num"));
+  row.append(rosterCell(usage && usage.in ? `${Math.round(usage.cacheRate * 100)}%` : "-", "roster-num"));
+  if (!usage) row.classList.add("roster-unused");
+  return row;
+}
+
+async function renderModelRoster() {
+  const host = $("roster-groups");
+  const note = $("roster-note");
+  if (!host) return;
+  try {
+    const response = await fetch("/api/models/roster", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Roster ${response.status}`);
+    const rows = [...(data.models || [])];
+    // Requests first, then output tokens: two models called the same number of
+    // times are not equally used if one of them wrote ten times as much.
+    rows.sort((a, b) =>
+      (b.usage?.requests || 0) - (a.usage?.requests || 0)
+      || (b.usage?.out || 0) - (a.usage?.out || 0)
+      || a.label.localeCompare(b.label));
+    host.innerHTML = "";
+    const table = document.createElement("table");
+    table.className = "roster-table";
+    const head = document.createElement("tr");
+    for (const column of ROSTER_COLUMNS) {
+      const cell = document.createElement("th");
+      cell.textContent = t(`roster.${column}`);
+      head.append(cell);
+    }
+    const body = document.createElement("tbody");
+    body.append(head);
+    let used = 0;
+    rows.forEach((entry, index) => {
+      if (entry.usage) used += 1;
+      body.append(rosterRow(entry, String(index + 1)));
+    });
+    table.append(body);
+    host.append(table);
+    if (note) {
+      note.textContent = rows.length
+        ? t("roster.summary", { used, total: rows.length })
+        : t("roster.empty");
+    }
+  } catch (error) {
+    if (note) note.textContent = error.message;
+  }
+}
 // --- Local engine discovery (Local Hosts) ---
 //
 // Read-only: it reports what is already listening so the user does not have to
@@ -1731,7 +1817,7 @@ if (langSelect) {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "memory", "mcp"];
+const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "mcp"];
 
 function routeToView(name) {
   const view = VIEWS.includes(name) ? name : VIEWS[0];
@@ -1758,6 +1844,7 @@ currentView();
 // rather than waiting for a dialog nobody has to open any more.
 loadSettings().catch(() => {});
 renderLocalEngines().catch(() => {});
+renderModelRoster().catch(() => {});
 
 initI18n();
 // After initI18n, not before: it resolves the stored/browser language, so reading it
