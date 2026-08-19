@@ -14,6 +14,12 @@ const AUTO_COMPACT_TOKEN_LIMIT = Math.floor(CONTEXT_WINDOW * AUTO_COMPACT_PERCEN
 
 export { CONTEXT_WINDOW, AUTO_COMPACT_PERCENT, AUTO_COMPACT_TOKEN_LIMIT };
 
+// Measured 2026-08-19 by sending an unknown effort and reading the enum the
+// upstream names back: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`,
+// `max`. Identical on both endpoints - OpenCode Go proxies the same provider
+// and returns the same error ("Error from provider (Console Go)"), so the Go
+// copies of these models carry the same ladder rather than the general tier.
+// ultra is refused by both.
 const DEEPSEEK_REASONING_LEVELS = [
   { effort: "none", description: "No reasoning; direct responses only" },
   { effort: "minimal", description: "Barely any reasoning; fastest replies" },
@@ -21,12 +27,26 @@ const DEEPSEEK_REASONING_LEVELS = [
   { effort: "medium", description: "Balanced reasoning for typical work" },
   { effort: "high", description: "Deeper reasoning for complex work" },
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
+  { effort: "max", description: "Maximum reasoning depth" },
 ];
 
 // llama.cpp chat template accepts exactly these reasoning efforts
 // (verified in the GGUF template: 'xhigh', 'medium', 'low'; "high" raises).
 // Advertised for custom/Ollama local backends so the Codex picker only offers
 // values the template accepts.
+// The ladder a model gets when nothing better is known. Not a measurement -
+// no upstream publishes its accepted efforts (OpenCode Go's /v1/models returns
+// id, object, created and owned_by, nothing more), and an unsupported effort is
+// usually ignored rather than refused, so probing proves little. Four rungs is
+// the shape almost every model actually offers; a model whose real ladder is
+// known states it on its own entry and never reaches this.
+const GENERAL_REASONING_LEVELS = [
+  { effort: "low", description: "Fast responses with lighter reasoning" },
+  { effort: "medium", description: "Balanced reasoning for typical work" },
+  { effort: "high", description: "Deeper reasoning for complex work" },
+  { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
+];
+
 const LOCAL_REASONING_LEVELS = [
   { effort: "low", description: "Fast responses with lighter reasoning" },
   { effort: "medium", description: "Balanced reasoning for typical work" },
@@ -109,7 +129,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = [ { effort: "low", description: "Fast responses with lighter reasoning" }, { effort: "high", description: "Deeper reasoning for complex work" }, { effort: "xhigh", description: "Extra-deep reasoning for hard problems" } ], availableModels = [] }) {
+function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = GENERAL_REASONING_LEVELS, availableModels = [] }) {
   // The main entry is owner-qualified like every other published entry, even when
   // the caller passed a bare reference (a legacy .env or a test fixture).
   const qualifiedMain = publishedSlugFor(profileId, mainModel);
@@ -158,6 +178,12 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         supportsVision: Boolean(model.supportsVision),
         providerLabel: entry.label,
         contextWindow: model.contextWindow || CONTEXT_WINDOW,
+        // Carried, not defaulted: a model that states its own rungs has
+        // them measured or published, and the active profile's ladder is
+        // not a fact about somebody else's model.
+        supportedReasoningLevels: model.supportedReasoningLevels,
+        defaultReasoningLevel: model.defaultReasoningLevel,
+        reasoningSource: model.reasoningSource || "",
       });
     }
   }
@@ -202,7 +228,7 @@ const OPENCODE_GO_PROFILE = {
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.
@@ -210,7 +236,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
@@ -284,8 +310,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
   ],
 
   modelCatalog({ mainModel, baseInstructions }) {
@@ -452,6 +478,7 @@ export function applyCustomProfile(config) {
       ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
       supportedReasoningLevels: LOCAL_REASONING_LEVELS,
       defaultReasoningLevel: "xhigh",
+      reasoningSource: "measured",
       // Always owner-qualified so the published slug carries @custom: the
       // picker groups it under Custom and routing never mistakes it for an
       // opencode-go model with the same bare id.

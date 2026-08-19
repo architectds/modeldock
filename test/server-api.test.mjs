@@ -317,7 +317,11 @@ test("models endpoint serves the local Codex catalog", async (t) => {
   const body = await response.json();
   assert.equal(body.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(body.models[0].supports_parallel_tool_calls, false);
-  assert.deepEqual(body.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
+  // deepseek-v4-flash on Go carries the ladder measured on both endpoints, not
+  // the general tier. The old expectation here was the placeholder that the
+  // cross-provider list handed out because it dropped the model's own
+  // declaration on the way through - the assertion encoded the bug.
+  assert.deepEqual(body.models[0].supported_reasoning_levels.map((level) => level.effort), ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.match(body.models[0].base_instructions, /coding agent/);
 });
 

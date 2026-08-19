@@ -160,14 +160,21 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(goCatalog.models[0].slug, "deepseek-v4-flash@opencode-go");
   assert.equal(goCatalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(goCatalog.models[0].supports_search_tool, false);
-  assert.equal(goCatalog.models[0].default_reasoning_level, "high");
-  assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["low", "high", "xhigh"]);
+  // deepseek-v4-flash on Go carries the ladder measured on both endpoints, not
+  // the general tier. The old expectation here was the placeholder that the
+  // cross-provider list handed out because it dropped the model's own
+  // declaration on the way through - the assertion encoded the bug.
+  assert.equal(goCatalog.models[0].default_reasoning_level, "medium");
+  assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
   assert.equal(officialCatalog.models[0].supports_search_tool, false);
   assert.equal(officialCatalog.models[0].default_reasoning_level, "medium", "DeepSeek official defaults to medium thinking");
   assert.deepEqual(
     officialCatalog.models[0].supported_reasoning_levels.map((level) => level.effort),
-    ["none", "minimal", "low", "medium", "high", "xhigh"],
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    // max was in the comment beside the ladder but not in the ladder. The
+    // upstream settled it on 2026-08-19: handed an unknown effort it answers
+    // "expected one of none, minimal, low, medium, high, xhigh, max".
     "DeepSeek official accepts its full reasoning effort ladder",
   );
   assert.notEqual(goCatalog.models[0].comp_hash, officialCatalog.models[0].comp_hash);
