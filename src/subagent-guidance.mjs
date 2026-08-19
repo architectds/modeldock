@@ -28,7 +28,7 @@ function isOpaqueEncryptedContent(value) {
   return typeof value === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(value);
 }
 
-export function newTaskPayloadFromText(text) {
+function newTaskPayloadFromText(text) {
   const match = String(text || "").match(NEW_TASK_RE);
   return match ? match[1].trim() : "";
 }

@@ -19,7 +19,7 @@ export const ROLLUP_DAYS = 30;
 // Bumped when a bucket gains a field: readRollup discards an older shape
 // rather than reporting zero for a metric the old buckets never recorded.
 // The window refills from the event log, which still holds about nine days.
-export const ROLLUP_VERSION = 2;
+const ROLLUP_VERSION = 2;
 
 export function usageRollupPath() {
   return stateFile("usage-rollup.json");

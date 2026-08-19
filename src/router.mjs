@@ -51,7 +51,7 @@ const AGENTIC_ITEM_TYPES = new Set([
   "reasoning",
 ]);
 
-export function isAgenticHistory(input) {
+function isAgenticHistory(input) {
   return inputItems(input).some((item) => AGENTIC_ITEM_TYPES.has(item?.type));
 }
 

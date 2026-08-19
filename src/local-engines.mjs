@@ -24,13 +24,13 @@ export class LocalEngineError extends Error {
 
 // Ollama is listed first because it is the only one with a dedicated connect
 // path; the rest share the keyless OpenAI-compatible route.
-export const LOCAL_CANDIDATES = [
+const LOCAL_CANDIDATES = [
   { port: 11434, hint: "ollama" },
   { port: 8080, hint: "llama.cpp" },
   { port: 8000, hint: "vllm" },
 ];
 
-export const ENGINE_LABELS = {
+const ENGINE_LABELS = {
   ollama: "Ollama",
   "llama.cpp": "llama.cpp",
   vllm: "vLLM",

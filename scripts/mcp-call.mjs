@@ -14,6 +14,7 @@
 //   node scripts/mcp-call.mjs hear <file>
 //   node scripts/mcp-call.mjs recall <query> [scope_dir] [limit]
 //   node scripts/mcp-call.mjs store <content> [scope_dir] [kind]
+//   node scripts/mcp-call.mjs learn <path> [scope_dir]
 //
 // This file is self-contained ON PURPOSE: it is shipped to installed layouts
 // (via install.sh) that have no src/ directory at all, so it must not import
@@ -151,6 +152,12 @@ if (command === "tools") {
   args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
   if (rest[2]) args.kind = rest[2];
   console.log(JSON.stringify(await callMcpTool("store_memory", args), null, 2));
+} else if (command === "learn") {
+  // Same scope contract as recall and store: an explicit scope wins, then the
+  // pinned one, then wherever the shell is.
+  const args = { path: rest[0] };
+  args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
+  console.log(JSON.stringify(await callMcpTool("learn", args), null, 2));
 } else if (command === "vision") {
   const args = { path: rest[0], question: rest[1] };
   if (rest[2]) args.mode = rest[2];
@@ -168,7 +175,7 @@ if (command === "tools") {
 } else if (command === "hear") {
   console.log(await callMcpTool("hear", { file: rest[0] }));
 } else {
-  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|speak|hear|recall|store> ...");
+  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|speak|hear|recall|store|learn> ...");
   process.exitCode = 2;
 }
 
@@ -181,6 +188,7 @@ function exampleFor(toolName) {
     hear: "hear <file>",
     recall_memory: 'recall "query" [scope_dir]',
     store_memory: 'store "content" [scope_dir] [kind]',
+    learn: "learn <path> [scope_dir]",
   };
   return examples[toolName] || `${toolName} <args>`;
 }

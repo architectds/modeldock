@@ -1977,7 +1977,7 @@ function foldUsageOnce(services) {
   }
 }
 
-export const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
+const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
 export async function startServer(config = loadConfig()) {
   const instance = createApp(createServices(config));
   // Tests opt out with autostartDefault: false so they never touch the real
