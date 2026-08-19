@@ -162,7 +162,10 @@ h2 { margin: 0; font-size: 17px; }
   pointer-events: none;
   white-space: nowrap;
   padding: 4px 8px;
-  border: 1px solid rgba(247,185,85,.45);
+  /* Follows the card it belongs to. This was a fixed gold, which only ever
+     matched the amber card - the other three drew a blue, violet, or green
+     line and then labelled it in gold. */
+  border: 1px solid color-mix(in srgb, var(--accent, var(--amber)) 45%, transparent);
   border-radius: 7px;
   background: rgba(8,16,24,.92);
   color: var(--text);
@@ -170,7 +173,7 @@ h2 { margin: 0; font-size: 17px; }
   box-shadow: 0 4px 14px rgba(0,0,0,.35);
   z-index: 5;
 }
-.wave-tooltip b { color: var(--amber); font-size: 12px; }
+.wave-tooltip b { color: var(--accent, var(--amber)); font-size: 12px; }
 .wave-tooltip small { display: block; color: var(--muted); margin-top: 1px; }
 
 .lower-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(330px, .65fr); gap: 14px; margin-top: 14px; }
