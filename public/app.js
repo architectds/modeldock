@@ -1189,31 +1189,47 @@ let settingsPrompted = false;
 function maybePromptSettings(config) {
   if (settingsPrompted) return;
   settingsPrompted = true;
+  // ?settings=1 is hardcoded into every installer already shipped, so it has
+  // to keep landing where the token goes - which is the Subscriptions page
+  // now, not the dialog.
   const openRequested = new URLSearchParams(location.search).get("settings") === "1";
   if (openRequested || (config && !config.tokenConfigured)) {
-    openSettings();
+    location.hash = "#subscriptions";
   }
+}
+
+// Tokens, the custom endpoint, and the local engines live on their own pages
+// now, so their fields have to be filled whether or not the settings dialog is
+// ever opened. Autostart is the only part of it left.
+async function loadSettings() {
+  const response = await fetch("/api/settings", { cache: "no-store" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
+  const go = (data.providers || []).find((p) => p.id === "opencode-go");
+  const ds = (data.providers || []).find((p) => p.id === "deepseek-official");
+  const goInput = $("settings-go-token");
+  const dsInput = $("settings-deepseek-token");
+  if (goInput && dsInput) {
+    // Never echo a stored token back into the field: the placeholder reports
+    // whether one is set, and submitting an empty field leaves it alone.
+    goInput.value = "";
+    dsInput.value = "";
+    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
+    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
+  }
+  const status = $("settings-status");
+  if (status) status.textContent = "";
+  renderAutostart(data);
+  renderCustomSection(data.custom);
+  renderOllamaSection(data.ollama);
+  return data;
 }
 
 async function openSettings() {
   const dialog = $("settings-dialog");
   if (!dialog) return;
   try {
-    const response = await fetch("/api/settings", { cache: "no-store" });
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
-    const go = (data.providers || []).find((p) => p.id === "opencode-go");
-    const ds = (data.providers || []).find((p) => p.id === "deepseek-official");
-    const goInput = $("settings-go-token");
-    const dsInput = $("settings-deepseek-token");
-    goInput.value = "";
-    dsInput.value = "";
-    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
-    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
-    $("settings-status").textContent = "";
-    renderAutostart(data);
-    renderCustomSection(data.custom);
-    renderOllamaSection(data.ollama);
+    await loadSettings();
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   } catch (error) {
@@ -1655,6 +1671,10 @@ function currentView() {
 
 window.addEventListener("hashchange", currentView);
 currentView();
+
+// The settings pages render from /api/settings, so fetch it once at startup
+// rather than waiting for a dialog nobody has to open any more.
+loadSettings().catch(() => {});
 
 initI18n();
 // After initI18n, not before: it resolves the stored/browser language, so reading it

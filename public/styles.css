@@ -667,3 +667,10 @@ body { padding-left: 88px; }
 .view-stub { padding: 28px 26px; }
 .view-stub h2 { margin: 6px 0 10px; }
 .view-stub-note { margin: 0; color: var(--muted); font-size: 13px; }
+
+/* Settings that used to sit in the dialog now render as full pages, so they
+   need the padding the dialog card gave them. */
+.page-panel { padding: 26px 26px 24px; max-width: 760px; }
+.page-panel h2 { margin: 6px 0 18px; }
+.page-panel .field + .field, .page-panel .field + .custom-add, .page-panel .custom-add + .field { margin-top: 16px; }
+.page-panel .settings-actions { margin-top: 20px; }

@@ -200,26 +200,88 @@
       </div>
 
       <div class="view" data-view="subscriptions">
-        <section class="panel view-stub">
-          <p class="eyebrow" data-i18n="nav.subscriptions">Subscriptions</p>
-          <h2 data-i18n="nav.subscriptions">Subscriptions</h2>
-          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        <section class="panel page-panel">
+          <p class="eyebrow" data-i18n="nav.subscriptions">Provider tokens</p>
+          <h2 data-i18n="page.subscriptionsTitle">Provider tokens</h2>
+      <label class="field">
+        <div class="field-head">
+          <span data-i18n="settings.goLabel">OpenCode Go token</span>
+          <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+        </div>
+        <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      </label>
+      <label class="field">
+        <div class="field-head">
+          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+        </div>
+        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      </label>
+        <div class="settings-actions">
+          <span id="settings-status" aria-live="polite"></span>
+          <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
+        </div>
         </section>
       </div>
 
       <div class="view" data-view="api">
-        <section class="panel view-stub">
-          <p class="eyebrow" data-i18n="nav.api">API</p>
-          <h2 data-i18n="nav.api">API</h2>
-          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        <section class="panel page-panel">
+          <p class="eyebrow" data-i18n="nav.api">Custom endpoint</p>
+          <h2 data-i18n="page.apiTitle">Custom endpoint</h2>
+      <details id="custom-add" class="custom-add">
+        <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
+        <div class="custom-add-body">
+          <label class="field">
+            <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
+            <div class="custom-row">
+              <div class="endpoint-combo">
+                <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" aria-label="Endpoint (base URL)" />
+                <button id="custom-endpoint-presets" type="button" class="combo-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="Preset endpoints" title="Preset endpoints">&#9662;</button>
+                <ul id="custom-endpoint-menu" class="combo-menu" role="listbox" aria-label="Preset endpoints" hidden></ul>
+              </div>
+              <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
+            </div>
+            <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
+          </label>
+          <label class="field">
+            <div class="field-head"><span data-i18n="custom.model">Model</span></div>
+            <div class="custom-row">
+              <select id="custom-model-select" class="custom-model-select" aria-label="Model" disabled></select>
+              <div class="custom-toggles" role="group" aria-label="Custom model roles">
+                <label class="chip-toggle"><input id="custom-as-main" type="checkbox" /><span data-i18n="custom.main">Main model</span></label>
+                <label class="chip-toggle"><input id="custom-as-vision" type="checkbox" /><span data-i18n="custom.vision">Vision model</span></label>
+              </div>
+            </div>
+          </label>
+          <label class="field">
+            <div class="field-head"><span data-i18n="custom.apiKey">API key</span></div>
+            <div class="custom-row">
+              <input id="custom-api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+              <button id="custom-add-btn" type="button" class="custom-action primary" data-i18n="custom.add">Add</button>
+            </div>
+          </label>
+          <p id="custom-status" class="custom-status" aria-live="polite" hidden></p>
+          <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
+        </div>
+      </details>
         </section>
       </div>
 
       <div class="view" data-view="local">
-        <section class="panel view-stub">
-          <p class="eyebrow" data-i18n="nav.local">Local Hosts</p>
-          <h2 data-i18n="nav.local">Local Hosts</h2>
-          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        <section class="panel page-panel">
+          <p class="eyebrow" data-i18n="nav.local">Local engines</p>
+          <h2 data-i18n="page.localTitle">Local engines</h2>
+      <div class="field" id="ollama-section">
+        <div class="field-head">
+          <span data-i18n="ollama.title">Ollama Configuration</span>
+          <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" data-i18n="ollama.download">No Ollama, download here</a>
+        </div>
+        <div class="custom-row">
+          <button id="ollama-connect" type="button" class="custom-action primary" data-i18n="ollama.connect">Connect and Save</button>
+          <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
+        </div>
+        <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
+      </div>
         </section>
       </div>
 
@@ -256,67 +318,6 @@
         </div>
         <label class="field">
           <div class="field-head">
-            <span data-i18n="settings.goLabel">OpenCode Go token</span>
-            <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-          </div>
-          <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-        </label>
-        <label class="field">
-          <div class="field-head">
-            <span data-i18n="settings.dsLabel">DeepSeek API key</span>
-            <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-          </div>
-          <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-        </label>
-        <div class="field" id="ollama-section">
-          <div class="field-head">
-            <span data-i18n="ollama.title">Ollama Configuration</span>
-            <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" data-i18n="ollama.download">No Ollama, download here</a>
-          </div>
-          <div class="custom-row">
-            <button id="ollama-connect" type="button" class="custom-action primary" data-i18n="ollama.connect">Connect and Save</button>
-            <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
-          </div>
-          <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
-        </div>
-        <details id="custom-add" class="custom-add">
-          <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
-          <div class="custom-add-body">
-            <label class="field">
-              <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
-              <div class="custom-row">
-                <div class="endpoint-combo">
-                  <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" aria-label="Endpoint (base URL)" />
-                  <button id="custom-endpoint-presets" type="button" class="combo-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="Preset endpoints" title="Preset endpoints">&#9662;</button>
-                  <ul id="custom-endpoint-menu" class="combo-menu" role="listbox" aria-label="Preset endpoints" hidden></ul>
-                </div>
-                <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
-              </div>
-              <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
-            </label>
-            <label class="field">
-              <div class="field-head"><span data-i18n="custom.model">Model</span></div>
-              <div class="custom-row">
-                <select id="custom-model-select" class="custom-model-select" aria-label="Model" disabled></select>
-                <div class="custom-toggles" role="group" aria-label="Custom model roles">
-                  <label class="chip-toggle"><input id="custom-as-main" type="checkbox" /><span data-i18n="custom.main">Main model</span></label>
-                  <label class="chip-toggle"><input id="custom-as-vision" type="checkbox" /><span data-i18n="custom.vision">Vision model</span></label>
-                </div>
-              </div>
-            </label>
-            <label class="field">
-              <div class="field-head"><span data-i18n="custom.apiKey">API key</span></div>
-              <div class="custom-row">
-                <input id="custom-api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-                <button id="custom-add-btn" type="button" class="custom-action primary" data-i18n="custom.add">Add</button>
-              </div>
-            </label>
-            <p id="custom-status" class="custom-status" aria-live="polite" hidden></p>
-            <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
-          </div>
-        </details>
-        <label class="field">
-          <div class="field-head">
             <span data-i18n="settings.language">Interface language</span>
           </div>
           <select id="settings-lang" class="lang-select" aria-label="Interface language">
@@ -338,8 +339,6 @@
         </div>
         <div class="settings-actions">
           <button id="settings-wizard" type="button" class="settings-wizard-link"></button>
-          <span id="settings-status" aria-live="polite"></span>
-          <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
         </div>
       </div>
     </dialog>
