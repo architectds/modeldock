@@ -641,3 +641,23 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
 .mini-button { appearance: none; border: 1px solid var(--line, #233747); background: var(--panel-2, #132331); color: var(--text, #ecf4f8); font: 600 11px ui-monospace, monospace; padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .mini-button:hover:not(:disabled) { border-color: var(--blue, #50b7ff); }
 .mini-button:disabled { opacity: .5; cursor: default; }
+
+/* Left rail navigation. Fixed to the viewport so .shell keeps its own
+   centering; body reserves the width so nothing sits underneath. */
+body { padding-left: 64px; }
+.rail { position: fixed; left: 0; top: 0; bottom: 0; width: 64px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 0; background: var(--panel); border-right: 1px solid var(--line); }
+.rail-brand { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 14px; border-radius: 12px; }
+.rail-brand img { width: 26px; height: 26px; }
+.rail-link { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; color: var(--muted); text-decoration: none; transition: color .15s, background .15s; }
+.rail-link svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.rail-link:hover { color: var(--text); background: var(--panel-2); }
+.rail-link.is-active { color: var(--blue); background: rgba(80,183,255,.12); }
+.rail-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* Only the routed view is in the document flow; the rest stay mounted so
+   their state and event wiring survive navigation. */
+.view { display: none; }
+.view.is-active { display: block; }
+.view-stub { padding: 28px 26px; }
+.view-stub h2 { margin: 6px 0 10px; }
+.view-stub-note { margin: 0; color: var(--muted); font-size: 13px; }

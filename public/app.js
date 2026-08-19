@@ -1678,6 +1678,34 @@ if (langSelect) {
   });
 }
 
+
+// Hash routing across the left rail. Views stay mounted and are toggled with a
+// class, so the SSE stream, poll timers, and every listener registered below
+// survive navigation - a per-page reload would tear all of that down and
+// rebuild it on every click.
+const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "memory", "mcp"];
+
+function routeToView(name) {
+  const view = VIEWS.includes(name) ? name : VIEWS[0];
+  for (const node of document.querySelectorAll("[data-view]")) {
+    node.classList.toggle("is-active", node.dataset.view === view);
+  }
+  for (const link of document.querySelectorAll("[data-rail]")) {
+    const active = link.dataset.rail === view;
+    link.classList.toggle("is-active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  return view;
+}
+
+function currentView() {
+  return routeToView((location.hash || "").replace(/^#/, ""));
+}
+
+window.addEventListener("hashchange", currentView);
+currentView();
+
 initI18n();
 // After initI18n, not before: it resolves the stored/browser language, so reading it
 // earlier would leave the picker on "English" while the page renders in another one.

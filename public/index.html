@@ -8,6 +8,30 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <nav class="rail" aria-label="Sections">
+      <a class="rail-brand" href="#dashboard" aria-label="Model Dock"><img src="/assets/icon.png" alt="" /></a>
+      <a class="rail-link" href="#dashboard" data-rail="dashboard" data-i18n-title="nav.dashboard" title="Dashboard" aria-label="Dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" /></svg>
+      </a>
+      <a class="rail-link" href="#subscriptions" data-rail="subscriptions" data-i18n-title="nav.subscriptions" title="Subscriptions" aria-label="Subscriptions">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v10H3zM3 11h18M7 15h4" /></svg>
+      </a>
+      <a class="rail-link" href="#api" data-rail="api" data-i18n-title="nav.api" title="API" aria-label="API">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M15 7l5 5-5 5" /></svg>
+      </a>
+      <a class="rail-link" href="#local" data-rail="local" data-i18n-title="nav.local" title="Local Hosts" aria-label="Local Hosts">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01" /></svg>
+      </a>
+      <a class="rail-link" href="#models" data-rail="models" data-i18n-title="nav.models" title="Models" aria-label="Models">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5-8 4.5-8-4.5zM4 12l8 4.5 8-4.5M4 16.5 12 21l8-4.5" /></svg>
+      </a>
+      <a class="rail-link" href="#memory" data-rail="memory" data-i18n-title="nav.memory" title="Memory" aria-label="Memory">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7" /></svg>
+      </a>
+      <a class="rail-link" href="#mcp" data-rail="mcp" data-i18n-title="nav.mcp" title="MCP Tools" aria-label="MCP Tools">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 8 4 4-4 4M13 16h5" /></svg>
+      </a>
+    </nav>
     <main class="shell">
       <header class="topbar">
         <div>
@@ -25,6 +49,7 @@
         </div>
       </header>
 
+      <div class="view is-active" data-view="dashboard">
       <section class="route-card">
         <div class="route-node codex"><span>01</span><strong data-i18n="route.codex">Codex</strong><small data-i18n="route.codexSmall">Responses client</small></div>
         <div class="route-line"><i></i><em>/v1/responses</em></div>
@@ -165,6 +190,55 @@
           <div class="security-note"><span data-i18n="security.local">LOCAL</span><p data-i18n="security.note">Loopback-only. Prompts, images and bearer tokens are never rendered here.</p></div>
         </aside>
       </section>
+      </div>
+
+      <div class="view" data-view="subscriptions">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.subscriptions">Subscriptions</p>
+          <h2 data-i18n="nav.subscriptions">Subscriptions</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
+
+      <div class="view" data-view="api">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.api">API</p>
+          <h2 data-i18n="nav.api">API</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
+
+      <div class="view" data-view="local">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.local">Local Hosts</p>
+          <h2 data-i18n="nav.local">Local Hosts</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
+
+      <div class="view" data-view="models">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.models">Models</p>
+          <h2 data-i18n="nav.models">Models</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
+
+      <div class="view" data-view="memory">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.memory">Memory</p>
+          <h2 data-i18n="nav.memory">Memory</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
+
+      <div class="view" data-view="mcp">
+        <section class="panel view-stub">
+          <p class="eyebrow" data-i18n="nav.mcp">MCP Tools</p>
+          <h2 data-i18n="nav.mcp">MCP Tools</h2>
+          <p class="view-stub-note" data-i18n="nav.pending">This page is being built on the left_navigation branch.</p>
+        </section>
+      </div>
     </main>
 
     <dialog id="settings-dialog" class="settings-dialog">

@@ -82,6 +82,14 @@ const I18N_EN = {
   "settings.saving": "Saving...",
   "settings.title": "Connection",
   "settings.customTitle": "Custom model",
+  "nav.dashboard": "Dashboard",
+  "nav.subscriptions": "Subscriptions",
+  "nav.api": "API",
+  "nav.local": "Local Hosts",
+  "nav.models": "Models",
+  "nav.memory": "Memory",
+  "nav.mcp": "MCP Tools",
+  "nav.pending": "This page is being built on the left_navigation branch.",
   "ollama.title": "Ollama Configuration",
   "ollama.download": "No Ollama, download here",
   "ollama.connect": "Connect and Save",
@@ -236,6 +244,14 @@ const I18N_ZH = {
   "settings.saving": "保存中...",
   "settings.title": "连接",
   "settings.customTitle": "自定义模型",
+  "nav.dashboard": "仪表盘",
+  "nav.subscriptions": "订阅",
+  "nav.api": "API",
+  "nav.local": "本地主机",
+  "nav.models": "模型",
+  "nav.memory": "记忆",
+  "nav.mcp": "MCP 工具",
+  "nav.pending": "此页面正在 left_navigation 分支上开发。",
   "ollama.title": "Ollama 配置",
   "ollama.download": "没有 Ollama？点此下载",
   "ollama.connect": "连接并保存",
@@ -390,6 +406,14 @@ const I18N_JA = {
   "settings.saving": "保存中...",
   "settings.title": "接続",
   "settings.customTitle": "カスタムモデル",
+  "nav.dashboard": "ダッシュボード",
+  "nav.subscriptions": "サブスクリプション",
+  "nav.api": "API",
+  "nav.local": "ローカルホスト",
+  "nav.models": "モデル",
+  "nav.memory": "メモリ",
+  "nav.mcp": "MCP ツール",
+  "nav.pending": "このページは left_navigation ブランチで開発中です。",
   "ollama.title": "Ollama 設定",
   "ollama.download": "Ollama 未導入？ダウンロード",
   "ollama.connect": "接続して保存",
@@ -507,6 +531,13 @@ function initI18n() {
 
 function applyStaticI18n() {
   document.querySelectorAll("[data-i18n]").forEach((node) => { node.textContent = t(node.dataset.i18n); });
+  // Icon-only controls (the left rail) have no text node: their tooltip and
+  // accessible name both come from the key, so they stay in sync.
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
+    const text = t(node.dataset.i18nTitle);
+    node.title = text;
+    node.setAttribute("aria-label", text);
+  });
 }
 
 export { t, getLang, setLang, supportedLangs, initI18n, applyStaticI18n };

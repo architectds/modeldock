@@ -1,6 +1,6 @@
 // Every translation key has to be reachable from the dashboard.
 //
-// The parity test next door asserts all five locales carry the same key set, so
+// The parity test next door asserts all three locales carry the same key set, so
 // a key added in English is translated everywhere. Nothing asserted a key was
 // still *used*, so removals left their translations behind: warn.noToken and
 // warn.noTokenHint outlived the code that read them by long enough that deleting
@@ -55,7 +55,7 @@ test("every English translation key is referenced by the dashboard", () => {
   assert.deepEqual(
     unused,
     [],
-    "these keys have no reference in app.js, wizard.js or index.html - delete them from all five locales, "
+    "these keys have no reference in app.js, wizard.js or index.html - delete them from all three locales, "
     + "or add the runtime-built ones to DYNAMIC above",
   );
 });

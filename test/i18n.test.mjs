@@ -31,7 +31,7 @@ function keysOf(locale) {
 test("every locale carries the full English key set", () => {
   // A missing key falls back to English silently (i18n.js: table[key] ?? I18N_EN[key]),
   // so an untranslated string reaches the user as English with nothing failing.
-  // models.none and runtime.migration were missing from all four non-English
+  // models.none and runtime.migration were missing from all two non-English
   // locales this way. Compare the sets instead of trusting the fallback.
   const english = keysOf("I18N_EN");
   assert.ok(english.size > 100, "the English table should be populated");
