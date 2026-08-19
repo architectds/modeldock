@@ -784,7 +784,14 @@ test("POST /api/models accepts a native vision model once signed in", async (t) 
   assert.equal(body.selected?.visionModel, "gpt-5.6-luna");
 });
 
-test("POST /api/models accepts a native main model once signed in", async (t) => {
+// The native entry and its routed twin coexist under different ids: the curated
+// catalog publishes gpt-5.6-luna owner-qualified, while appendNativeModels adds
+// the bare slug because the dedupe compares ids, not bare ids. Worth pinning,
+// because the vision picker then shows one model twice under two providers, and
+// only the qualified one names the camp that will actually serve it (see
+// "a native-only vision model is routed to the OpenCode Go camp" in
+// test/upstreams.test.mjs).
+test("a signed-in vision picker lists the native slug alongside its routed twin", async (t) => {
   const instance = await startApp({});
   t.after(instance.stop);
   await writeFile(
@@ -793,13 +800,15 @@ test("POST /api/models accepts a native main model once signed in", async (t) =>
     "utf8",
   );
   await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
-  const response = await fetch(`${instance.base}/api/models`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mainModel: "gpt-5.6-luna" }),
-  });
-  assert.equal(response.status, 200, "native main selection must not 400");
-  const body = await response.json();
-  assert.equal(body.selected?.mainModel, "gpt-5.6-luna");
-  assert.equal(body.selectedProvider, "openai", "the native main model is reported under the native provider");
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  const entries = (status.models.options || []).filter((entry) => entry.id === "gpt-5.6-luna" || entry.id === "gpt-5.6-luna@opencode-go");
+
+  const native = entries.find((entry) => entry.native);
+  const routed = entries.find((entry) => !entry.native);
+  assert.ok(native, "the native catalog contributes a bare-slug entry");
+  assert.equal(native.id, "gpt-5.6-luna", "the native entry is published bare");
+  assert.equal(native.provider, "openai");
+  assert.ok(routed, "the curated catalog still offers the same model for the Go camp");
+  assert.equal(routed.provider, "opencode-go");
+  assert.notEqual(native.id, routed.id, "the two entries are only distinguishable by the owner suffix");
 });
