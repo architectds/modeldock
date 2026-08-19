@@ -1201,6 +1201,8 @@ function maybePromptSettings(config) {
 // Tokens, the custom endpoint, and the local engines live on their own pages
 // now, so their fields have to be filled whether or not the settings dialog is
 // ever opened. Autostart is the only part of it left.
+let lastSettings = null;
+
 async function loadSettings() {
   const response = await fetch("/api/settings", { cache: "no-store" });
   const data = await response.json();
@@ -1222,6 +1224,8 @@ async function loadSettings() {
   renderAutostart(data);
   renderCustomSection(data.custom);
   renderOllamaSection(data.ollama);
+  for (const [engine, render] of Object.entries(renderLocalSections)) render(data.local?.[engine]);
+  lastSettings = data;
   return data;
 }
 
@@ -1432,75 +1436,24 @@ async function renderLocalEngines() {
         ? engine.models.join(", ")
         : t("local.noModels");
       item.append(head, models);
-      // Ollama keeps its own connect control above; llama.cpp and vLLM are
-      // connected from here, keyless, because they are on this machine. A bare
-      // OpenAI-compatible server is listed but not offered: it has no profile to
-      // attach to, and the API page already takes an endpoint with a key.
-      if (engine.connected) item.classList.add("is-connected");
-      if (engine.offline) item.classList.add("is-offline");
-      if (engine.connected || engine.connectable) {
-        const row = document.createElement("div");
-        row.className = "custom-row local-engine-actions";
-        const status = document.createElement("span");
-        status.className = "custom-status";
-        const act = document.createElement("button");
-        act.type = "button";
-
-        const run = async (path, body, pending) => {
-          act.disabled = true;
-          status.textContent = t(pending);
-          try {
-            const reply = await fetch(path, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify(body),
-            });
-            const payload = await reply.json();
-            if (!reply.ok) throw new Error(payload.error?.message || `${path} ${reply.status}`);
-            // Re-render rather than patch this row: the engine has moved between
-            // connected and not, and that changes the whole row, not one label.
-            await renderLocalEngines();
-            poll().catch(() => {});
-            pollConfig().catch(() => {});
-          } catch (error) {
-            status.textContent = error.message;
-            act.disabled = false;
-          }
-        };
-
-        if (engine.connected) {
-          status.textContent = engine.offline
-            ? t("local.offline", { count: engine.connectedModels })
-            : t("local.connected", { count: engine.connectedModels });
-          act.className = "custom-action";
-          act.textContent = t("local.disconnect");
-          act.addEventListener("click", () => run("/api/local/disconnect", { engine: engine.engine }, "local.disconnecting"));
-          row.append(act, status);
-        } else {
-          const vision = document.createElement("label");
-          vision.className = "chip-toggle";
-          const visionBox = document.createElement("input");
-          visionBox.type = "checkbox";
-          const visionText = document.createElement("span");
-          visionText.textContent = t("local.vision");
-          vision.append(visionBox, visionText);
-          act.className = "custom-action primary";
-          act.textContent = t("local.connect");
-          act.addEventListener("click", () => run(
-            "/api/local/connect",
-            { engine: engine.engine, baseUrl: engine.baseUrl, asVision: visionBox.checked },
-            "local.connecting",
-          ));
-          row.append(vision, act, status);
-        }
-        item.append(row);
+      // A scan result, not a control. Every engine connects from its own
+      // section below, so this list stays one shape for all three.
+      const state = document.createElement("p");
+      state.className = "local-engine-state";
+      if (!engine.connectable && engine.engine !== "ollama") {
+        // Discovered, but there is no profile to attach it to. The API page
+        // takes an arbitrary endpoint with a key, which is what this needs.
+        state.textContent = t("local.useApiPage");
+      } else if (engine.connected && engine.offline) {
+        item.classList.add("is-connected", "is-offline");
+        state.textContent = t("local.offline", { count: engine.connectedModels });
+      } else if (engine.connected) {
+        item.classList.add("is-connected");
+        state.textContent = t("local.connected", { count: engine.connectedModels });
       } else {
-        // Discovered, not offerable. Saying why beats an unexplained missing button.
-        const hint = document.createElement("p");
-        hint.className = "custom-hint";
-        hint.textContent = t("local.useApiPage");
-        item.append(hint);
+        state.textContent = t("local.notConnected");
       }
+      item.append(state);
       list.append(item);
     }
     if (note) note.textContent = engines.length ? "" : t("local.none");
@@ -1905,6 +1858,86 @@ if (ollamaConnectBtn) {
   });
 }
 
+// --- llama.cpp and vLLM (local) connect sections ---
+//
+// One function for both: they differ only in which engine id they post and
+// which elements they own. Writing it twice would be two places to fix the
+// next time the connect contract moves.
+function wireLocalSection(engine) {
+  const connectBtn = $(`${engine}-connect`);
+  const disconnectBtn = $(`${engine}-disconnect`);
+  const status = $(`${engine}-status`);
+  const errorLine = $(`${engine}-error`);
+  const visionBox = $(`${engine}-vision`);
+  if (!connectBtn) return () => {};
+
+  const show = (text, isError) => {
+    if (status) {
+      status.hidden = !text || Boolean(isError);
+      status.textContent = isError ? "" : text || "";
+    }
+    if (errorLine) {
+      errorLine.hidden = !(text && isError);
+      errorLine.textContent = isError ? text : "";
+    }
+  };
+
+  // Connect stays visible while connected so a reload after loading another
+  // model republishes the list; disconnect is what takes the profile down.
+  const render = (state) => {
+    const connected = Boolean(state?.connected && state.models?.length);
+    if (disconnectBtn) disconnectBtn.hidden = !connected;
+    if (visionBox) visionBox.checked = Boolean(state?.models?.some((model) => model.supportsVision));
+    connectBtn.textContent = t(connected ? "local.reconnect" : "local.connect");
+    show(connected ? t("local.connected", { count: state.models.length }) : "", false);
+  };
+
+  const run = async (path, body, pendingKey) => {
+    connectBtn.disabled = true;
+    if (disconnectBtn) disconnectBtn.disabled = true;
+    show("", false);
+    const previous = connectBtn.textContent;
+    connectBtn.textContent = t(pendingKey);
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || `Connect ${response.status}`);
+      render(payload.settings?.local?.[engine]);
+      poll().catch(() => {});
+      pollConfig().catch(() => {});
+      renderModelRoster().catch(() => {});
+      renderLocalEngines().catch(() => {});
+    } catch (error) {
+      connectBtn.textContent = previous;
+      show(error.message, true);
+    } finally {
+      connectBtn.disabled = false;
+      if (disconnectBtn) disconnectBtn.disabled = false;
+    }
+  };
+
+  connectBtn.addEventListener("click", () => run(
+    "/api/local/connect",
+    { engine, asVision: Boolean(visionBox?.checked) },
+    "local.connecting",
+  ));
+  disconnectBtn?.addEventListener("click", () => run(
+    "/api/local/disconnect",
+    { engine },
+    "local.disconnecting",
+  ));
+  return render;
+}
+
+const renderLocalSections = {
+  llamacpp: wireLocalSection("llamacpp"),
+  vllm: wireLocalSection("vllm"),
+};
+
 function closeSettings() {
   const dialog = $("settings-dialog");
   if (typeof dialog.close === "function") dialog.close();
@@ -1979,6 +2012,14 @@ function refreshDynamicText() {
     () => renderEndpointList().catch(() => {}),
     () => renderModelRoster().catch(() => {}),
     () => renderLocalEngines().catch(() => {}),
+    () => {
+      if (!lastSettings) return;
+      renderCustomSection(lastSettings.custom);
+      renderOllamaSection(lastSettings.ollama);
+      for (const [engine, render] of Object.entries(renderLocalSections)) {
+        render(lastSettings.local?.[engine]);
+      }
+    },
   ];
   for (const step of steps) {
     try { step(); } catch { /* one broken panel must not freeze the language */ }

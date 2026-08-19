@@ -286,6 +286,38 @@
         </div>
         <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
       </div>
+      <div class="field" id="llamacpp-section">
+        <div class="field-head">
+          <span data-i18n="llamacpp.title">llama.cpp Configuration</span>
+          <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer" data-i18n="llamacpp.download">No llama.cpp, get it here</a>
+        </div>
+        <div class="custom-row">
+          <label class="chip-toggle">
+            <input id="llamacpp-vision" type="checkbox" />
+            <span data-i18n="local.vision">Takes images</span>
+          </label>
+          <button id="llamacpp-connect" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
+          <button id="llamacpp-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+          <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
+        </div>
+        <p id="llamacpp-error" class="custom-error" aria-live="polite" hidden></p>
+      </div>
+      <div class="field" id="vllm-section">
+        <div class="field-head">
+          <span data-i18n="vllm.title">vLLM Configuration</span>
+          <a href="https://docs.vllm.ai/en/latest/getting_started/installation.html" target="_blank" rel="noopener noreferrer" data-i18n="vllm.download">No vLLM, get it here</a>
+        </div>
+        <div class="custom-row">
+          <label class="chip-toggle">
+            <input id="vllm-vision" type="checkbox" />
+            <span data-i18n="local.vision">Takes images</span>
+          </label>
+          <button id="vllm-connect" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
+          <button id="vllm-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+          <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
+        </div>
+        <p id="vllm-error" class="custom-error" aria-live="polite" hidden></p>
+      </div>
         </section>
       </div>
 

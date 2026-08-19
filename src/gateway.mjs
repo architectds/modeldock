@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { bareModelId, modelEntryFor, providerForModel } from "./profiles.mjs";
+import { bareModelId, isLocalProvider, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -111,12 +111,14 @@ export const LOCAL_TOOL_ALLOWLIST = new Set([
 // relayCompaction before widening this function's role again.
 export function isLocalBackend(config, model) {
   const provider = providerForModel(config, model);
-  if (provider !== "custom" && provider !== "ollama") return false;
+  if (provider !== "custom" && !isLocalProvider(provider)) return false;
   const baseUrl = provider === "ollama"
     ? config.ollamaBaseUrl
-    // Each custom model can sit on a different host, so ask which endpoint
-    // serves this model rather than assuming there is only ever one.
-    : (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl);
+    : isLocalProvider(provider)
+      ? profileById(provider).baseUrl
+      // Each custom model can sit on a different host, so ask which endpoint
+      // serves this model rather than assuming there is only ever one.
+      : (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl);
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -1489,6 +1491,18 @@ export function upstreamTargetFor(config, model) {
       token: config.tokens?.["deepseek-official"] || config.deepseekToken || "",
     };
   }
+  if (provider === "llamacpp" || provider === "vllm") {
+    return {
+      provider,
+      model: upstreamModel,
+      url: `${(profileById(provider).baseUrl || "").replace(/\/+$/, "")}/responses`,
+      token: "",
+      // Keyless by construction: the address is loopback-only, which is the
+      // whole reason no credential is required. The tokenless gate below
+      // must not 503 it.
+      tokenRequired: false,
+    };
+  }
   if (provider === "ollama") {
     // The published id is colon-free but Ollama only serves the original tag
     // (a model tag may contain a colon that the slug cannot carry), so the
@@ -2674,7 +2688,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // history carried a mid-history system item.
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
-    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
+    routedProvider === "custom" || isLocalProvider(routedProvider) ? normalizeLocalPayload(payload) : null;
   // A delegated subagent task in Codex's opaque collaboration channel can
   // only be read by the native backend; relay it through a native model first.
   let routeInput = payload.input;
@@ -2974,7 +2988,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // repairs; official and custom routes keep the generic path.
   const routedProvider = providerForModel(config, route.model);
   const localPayload =
-    routedProvider === "custom" || routedProvider === "ollama" ? normalizeLocalPayload(payload) : null;
+    routedProvider === "custom" || isLocalProvider(routedProvider) ? normalizeLocalPayload(payload) : null;
   let routeInput = payload.input;
   if (hasOpaqueCollaboration(routeInput)) {
     try {
@@ -3000,7 +3014,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
   // closest accepted value, and drop anything else so local routes never trip
   // the template validator.
-  if (routedProvider === "custom" || routedProvider === "ollama") {
+  if (routedProvider === "custom" || isLocalProvider(routedProvider)) {
     normalizedPayload = {
       ...normalizedPayload,
       reasoning: normalizeLocalReasoning(normalizedPayload).reasoning,

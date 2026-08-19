@@ -609,12 +609,22 @@ export function modelEntryFor(config, model) {
 export function effectiveContextWindow(model) {
   return Number(model?.contextWindow) > 0 ? Number(model.contextWindow) : CONTEXT_WINDOW;
 }
+// Keyless OpenAI-dialect servers running on this machine. Ollama has its own
+// wire quirks but shares every routing decision with the other two, so code
+// should branch on the set rather than on a growing chain of comparisons -
+// which is how llamacpp and vllm came to be absent from upstreamTargetFor and
+// were routed to OpenCode Go, with OpenCode's token, instead.
+export const LOCAL_PROVIDERS = new Set(["ollama", "llamacpp", "vllm"]);
+export function isLocalProvider(id) {
+  return LOCAL_PROVIDERS.has(String(id || ""));
+}
+
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
   // Ollama needs no credential; a connected profile is always ready. The sentinel
   // keeps healthz/readiness gates and the vision dev tooling honest.
-  if (provider === "ollama") {
-    return profileById("ollama").availableModels?.length ? "local" : "";
+  if (isLocalProvider(provider)) {
+    return profileById(provider).availableModels?.length ? "local" : "";
   }
   return config?.tokens?.[provider] || "";
 }

@@ -25,7 +25,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { isLocalProvider, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
@@ -527,6 +527,19 @@ function settingsPayload(services) {
       mainModel: ollamaMain,
       visionModel: ollamaVision,
     },
+    local: Object.fromEntries(CONNECTABLE_ENGINES.map((id) => {
+      const profile = profileById(id);
+      return [id, {
+        baseUrl: profile.baseUrl,
+        connected: Boolean(profile.availableModels?.length),
+        models: (profile.availableModels || []).map((model) => ({
+          id: model.id,
+          label: model.label || model.id,
+          supportsVision: Boolean(model.supportsVision),
+          contextWindow: model.contextWindow || null,
+        })),
+      }];
+    })),
     models: {
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
@@ -638,6 +651,7 @@ function upstreamBaseForModel(config, model) {
   if (provider === "custom") return (customEndpointFor(config.customEndpoints, model)?.baseUrl || config.customBaseUrl || "").replace(/\/$/, "");
   if (provider === "deepseek-official") return (config.deepseekBaseUrl || profileById("deepseek-official").baseUrl).replace(/\/$/, "");
   if (provider === "ollama") return (config.ollamaBaseUrl || profileById("ollama").baseUrl).replace(/\/$/, "");
+  if (isLocalProvider(provider)) return (profileById(provider).baseUrl || "").replace(/\/$/, "");
   const upstream = bareModelId(model);
   if (upstream && (upstream.endsWith("-free") || upstream === "big-pickle")) return ZEN_FREE_BASE;
   return (config.opencodeBaseUrl || config.goBaseUrl).replace(/\/$/, "");
@@ -1857,7 +1871,7 @@ export function createApp(services = createServices()) {
       if (!CONNECTABLE_ENGINES.includes(engine)) {
         throw new LocalEngineError("engine", `Unknown local engine: ${engine}`);
       }
-      const base = assertLocalBase(baseUrl);
+      const base = normalizeBaseUrl(assertLocalBase(baseUrl || profileById(engine).baseUrl));
       const listed = await listEndpointModels({ baseUrl: base, apiKey: "" });
       if (!listed.models.length) {
         throw new LocalEngineError("models", "The engine reported no models. Load one, then reconnect.");
@@ -1880,7 +1894,7 @@ export function createApp(services = createServices()) {
       applyLocalEngineProfile(engine, snapshot);
       services.writeCatalogFile?.();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
-      return res.json({ engine, baseUrl: base, models: snapshot.models });
+      return res.json({ engine, baseUrl: base, models: snapshot.models, settings: settingsPayload(services) });
     } catch (error) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;
@@ -1897,7 +1911,7 @@ export function createApp(services = createServices()) {
     applyLocalEngineProfile(engine, null);
     services.writeCatalogFile?.();
     recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
-    return res.json({ engine, models: [] });
+    return res.json({ engine, models: [], settings: settingsPayload(services) });
   });
   app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
     const { baseUrl } = req.body || {};

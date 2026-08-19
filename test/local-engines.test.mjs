@@ -182,3 +182,63 @@ test("a bare OpenAI-compatible server is found but not offered a Connect button"
   assert.equal(found.engine, "openai");
   assert.equal(found.connectable, false);
 });
+
+// A connected local engine has to be reachable, not merely listed. Every layer
+// that decides where a request goes was written with a chain of provider
+// comparisons that named ollama and custom; llamacpp and vllm matched neither,
+// so they fell through to the OpenCode Go branch and would have been sent to
+// opencode.ai carrying the OpenCode token - a keyless local model leaking to a
+// remote host under someone else's credential. Routing is checked here rather
+// than in each branch because the bug was the absence of a branch.
+test("a connected local engine is routed to itself, keyless", async () => {
+  const { upstreamTargetFor, isLocalBackend } = await import("../src/gateway.mjs");
+  const { applyLocalEngineProfile, tokenFor } = await import("../src/profiles.mjs");
+
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:8080/v1",
+    models: [{ id: "qwen3-30b.gguf", upstreamId: "qwen3-30b.gguf" }],
+  });
+  applyLocalEngineProfile("vllm", {
+    baseUrl: "http://127.0.0.1:8000/v1",
+    models: [{ id: "Qwen/Qwen3-8B", upstreamId: "Qwen/Qwen3-8B" }],
+  });
+
+  const config = { tokens: { "opencode-go": "should-never-be-used" } };
+  const cases = [
+    ["qwen3-30b.gguf@llamacpp", "http://127.0.0.1:8080/v1/responses", "llamacpp"],
+    ["Qwen/Qwen3-8B@vllm", "http://127.0.0.1:8000/v1/responses", "vllm"],
+  ];
+  for (const [model, url, provider] of cases) {
+    const target = upstreamTargetFor(config, model);
+    assert.equal(target.url, url, `${model} goes to its own engine`);
+    assert.equal(target.provider, provider);
+    assert.equal(target.token, "", "no credential is sent to a loopback engine");
+    assert.equal(target.tokenRequired, false, "and the tokenless gate must not 503 it");
+    assert.equal(tokenFor(config, model), "local", "a connected engine reads as ready");
+    assert.equal(isLocalBackend(config, model), true, "local accommodations apply");
+  }
+
+  applyLocalEngineProfile("llamacpp", null);
+  applyLocalEngineProfile("vllm", null);
+});
+
+// The catalog is the file Codex actually reads. Publishing to the profile
+// without reaching this file left an engine connected in the dashboard and
+// absent from Codex, which is indistinguishable from not working.
+test("a connected local engine reaches the catalog Codex reads", async () => {
+  const { enabledProvidersFor } = await import("../src/catalog.mjs");
+  const { applyLocalEngineProfile } = await import("../src/profiles.mjs");
+
+  const config = { profileId: "opencode-go", tokens: {} };
+  assert.equal(enabledProvidersFor(config).has("vllm"), false, "nothing is published before a connection");
+
+  applyLocalEngineProfile("vllm", {
+    baseUrl: "http://127.0.0.1:8000/v1",
+    models: [{ id: "Qwen/Qwen3-8B", upstreamId: "Qwen/Qwen3-8B" }],
+  });
+  // The rule is "keyless and connected", not a list of engine names: naming
+  // them is what left these two out when they were added.
+  assert.equal(enabledProvidersFor(config).has("vllm"), true);
+
+  applyLocalEngineProfile("vllm", null);
+});

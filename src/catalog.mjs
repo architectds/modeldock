@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
@@ -258,9 +258,14 @@ export function enabledProvidersFor(config) {
   for (const [provider, token] of Object.entries(tokens)) {
     if (token) ids.add(provider);
   }
-  // Ollama needs no credential; its models are publishable as soon as a
-  // connection snapshot exists.
-  if (profileById("ollama").availableModels?.length) ids.add("ollama");
+  // A keyless engine has no credential to check, so "connected" is the only
+  // test that means anything: it publishes once it has models. This named
+  // Ollama alone, so llama.cpp and vLLM could be connected and still never
+  // reach the catalog file Codex reads. server.mjs applies the same rule.
+  for (const entry of allProfiles()) {
+    if (entry.tokenEnvName) continue;
+    if (entry.availableModels?.length) ids.add(entry.id);
+  }
   return ids;
 }
 
