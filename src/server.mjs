@@ -493,7 +493,6 @@ function settingsPayload(services) {
       baseUrl: config.customBaseUrl || "",
       model: config.customModel || "",
       apiKeyConfigured: Boolean(config.tokens?.["custom"]),
-      asMain: Boolean(config.customMain),
       asVision: Boolean(config.customVision),
     },
     ollama: {
@@ -1604,7 +1603,7 @@ export function createApp(services = createServices()) {
   });
 
   app.post("/api/custom/add", mutateConfig, async (req, res) => {
-    const { baseUrl, apiKey, modelId, asMain, asVision } = req.body || {};
+    const { baseUrl, apiKey, modelId, asVision } = req.body || {};
     try {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
@@ -1620,15 +1619,13 @@ export function createApp(services = createServices()) {
         MODELDOCK_CUSTOM_API_KEY: apiKey,
         MODELDOCK_CUSTOM_MODEL: model,
         MODELDOCK_CUSTOM_CONTEXT_WINDOW: advertisedContext ? String(advertisedContext) : "",
-        MODELDOCK_CUSTOM_MAIN: asMain ? "1" : "0",
         MODELDOCK_CUSTOM_VISION: asVision ? "1" : "0",
       };
-      // The Main/Vision toggles mark what this endpoint may be USED FOR - they do
-      // not hijack the live selection. MODELDOCK_CUSTOM_MAIN/VISION above already
-      // record that: CUSTOM_VISION drives supportsVision (so the model shows up in
-      // the vision picker) and CUSTOM_MAIN is the boot fallback when no main model
-      // is configured. Overwriting MODELDOCK_VISION_MODEL here made merely
-      // adding an endpoint replace whatever the user was already running.
+      // Adding an endpoint publishes its model; it does not select it. There is
+      // no "as main" flag because publishing already is that - the Codex picker
+      // does the choosing. CUSTOM_VISION stays because vision is a capability
+      // claim, not a selection, and it is what puts the model in the vision
+      // picker at all.
       // Only the un-toggle case still writes: a selection pointing at this model
       // must not dangle once the endpoint is no longer offered for that role.
       if (!asVision && (config.visionModel || "") === qualified) updates.MODELDOCK_VISION_MODEL = "";
@@ -1637,17 +1634,23 @@ export function createApp(services = createServices()) {
       config.customApiKey = apiKey;
       config.customModel = model;
       config.customContextWindow = advertisedContext;
-      config.customMain = Boolean(asMain);
       config.customVision = Boolean(asVision);
       config.tokens.custom = apiKey;
       applyCustomProfile(config);
-      // Mirror the un-toggle cleanup above into the live selection so a role this
-      // endpoint no longer fills does not keep pointing at it.
-      if (!asMain && config.mainModel === qualified) {
+      // A selection must not outlive what it points at. Re-adding an endpoint
+      // under a different model id retires the old one, and vision can be
+      // switched off outright - either way the pointer has to go rather than
+      // dangle. This asks whether the model is still published instead of
+      // asking whether a flag was ticked, which is the same question for vision
+      // and the only sensible one for main now that publishing is all "main"
+      // ever meant.
+      const published = new Set((profileById("custom").availableModels || []).map((entry) => entry.id));
+      const stale = (selection) => selection?.endsWith(`${PROVIDER_SEPARATOR}custom`) && !published.has(bareModelId(selection));
+      if (stale(config.mainModel)) {
         config.mainModel = "";
         services.modelSelection.mainModel = "";
       }
-      if (!asVision && config.visionModel === qualified) {
+      if (stale(config.visionModel) || (!asVision && config.visionModel === qualified)) {
         config.visionModel = "";
         services.modelSelection.visionModel = "";
       }

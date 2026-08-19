@@ -344,7 +344,6 @@ export function loadConfig() {
   const customBaseUrl = normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
   const customApiKey = process.env.MODELDOCK_CUSTOM_API_KEY || "";
   const customModel = String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
-  const customMain = envOn("MODELDOCK_CUSTOM_MAIN");
   const customVision = envOn("MODELDOCK_CUSTOM_VISION");
   // Advertised context window of the custom endpoint model (e.g. 32768 for a
   // local 32K llama.cpp serve). Written by the Add flow from /v1/models
@@ -368,17 +367,11 @@ export function loadConfig() {
     return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
   };
   const customSlug = customModel ? `${customModel}${PROVIDER_SEPARATOR}custom` : "";
-  // Connecting a backend publishes a model; it does not select one. A custom
-  // endpoint used to become the default main model the moment MODELDOCK_CUSTOM_MAIN
-  // was set, and that flag persists in .env - so ticking "as main" once left a
-  // local 27B as the default across every later restart, silently, including for
-  // sessions that never wanted it. Worse, a local model then triggers the
-  // small-context tool whitelist, which strips Codex down to 23 of its ~150
-  // tools. The Codex picker remains the way to choose per session; the routing
-  // fallback is derived per session and bootstrapped from the native default.
-  // The routing fallback is derived per session and bootstrapped from the
-  // native config default (see gateway.mjs). This value is only a
-  // display/catalog default; MODELDOCK_MAIN_MODEL is no longer a slot.
+  // Connecting a backend publishes a model; it does not select one. Publishing
+  // is the whole of what "can be the main model" means - the Codex picker
+  // chooses per session, and the routing fallback is derived per session and
+  // bootstrapped from the native config default (see gateway.mjs). This value
+  // is only a display/catalog default.
   const mainModel = modelRef("deepseek-v4-flash");
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
@@ -436,7 +429,6 @@ export function loadConfig() {
     customBaseUrl,
     customApiKey,
     customModel,
-    customMain,
     customVision,
     customContextWindow,
     ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),

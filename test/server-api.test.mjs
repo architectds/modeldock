@@ -1004,7 +1004,6 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
         baseUrl: "https://vendor.example/v1",
         apiKey: "sk-test",
         modelId: "vendor/model-x",
-        asMain: true,
         asVision: false,
       }),
     })).json();
@@ -1013,7 +1012,10 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     assert.equal(add.responsesUrl, "https://vendor.example/v1/responses");
     assert.equal(add.settings.custom.apiKeyConfigured, true);
     assert.equal(add.settings.custom.model, "vendor/model-x");
-    assert.equal(add.settings.custom.asMain, true);
+    // No asMain: adding an endpoint publishes its model and nothing more. The
+    // flag it replaced was write-only for months - stored, echoed back to a
+    // checkbox, and read by nothing that chose a model.
+    assert.equal(add.settings.custom.asMain, undefined);
     assert.equal(add.settings.tokenConfigured, true, "a usable custom token satisfies the shared settings gate");
 
     const onboarding = await (await fetch(`${instance.base}/api/onboarding`)).json();
@@ -1030,7 +1032,9 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
       assert.match(env, /MODELDOCK_CUSTOM_API_KEY=sk-test/);
     }
     assert.match(env, /MODELDOCK_CUSTOM_MODEL=vendor\/model-x/);
-    assert.match(env, /MODELDOCK_CUSTOM_MAIN=1/);
+    // MODELDOCK_CUSTOM_MAIN is not written any more: publishing a model is the
+    // whole of what it claimed to control, so there was nothing for it to say.
+    assert.doesNotMatch(env, /MODELDOCK_CUSTOM_MAIN=/);
     // Adding an endpoint records what it may be used for; it must not take over
     // the live selection, so the running main model is left alone.
     assert.doesNotMatch(env, /MODELDOCK_MAIN_MODEL=vendor\/model-x@custom/);
@@ -1069,7 +1073,6 @@ test("custom endpoint add rejects a failing probe with a classified error", asyn
         baseUrl: "https://vendor.example/v1",
         apiKey: "sk-bad",
         modelId: "vendor/model-x",
-        asMain: false,
         asVision: false,
       }),
     });

@@ -1456,7 +1456,6 @@ $("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(
 const customEndpointInput = $("custom-endpoint");
 const customApiKeyInput = $("custom-api-key");
 const customModelSelect = $("custom-model-select");
-const customAsMain = $("custom-as-main");
 const customAsVision = $("custom-as-vision");
 const customListModelsBtn = $("custom-list-models");
 const customAddBtn = $("custom-add-btn");
@@ -1513,7 +1512,6 @@ function renderCustomSection(custom) {
       disabled: !state.model,
     });
   }
-  if (customAsMain) customAsMain.checked = Boolean(state.asMain);
   if (customAsVision) customAsVision.checked = Boolean(state.asVision);
   if (customApiKeyInput) {
     customApiKeyInput.value = "";
@@ -1703,7 +1701,6 @@ if (customAddBtn) {
           baseUrl,
           apiKey,
           modelId,
-          asMain: Boolean(customAsMain?.checked),
           asVision: Boolean(customAsVision?.checked),
         }),
       });
