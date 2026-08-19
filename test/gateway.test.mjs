@@ -31,7 +31,10 @@ import {
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
+  LOCAL_TOOL_ALLOWLIST,
+  flattenNamespaceCalls,
   pipeNormalizedStream,
+  restoreNamespaceCall,
   redactBearer,
   relayCompaction,
   relayNativeImage,
@@ -879,8 +882,11 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
     { type: "function", name: "mcp__node_repl__js" },
     { type: "namespace", name: "mcp__sites", tools: [{ name: "deploy" }, { name: "create_site" }] },
   ];
+  // A namespace child is whitelisted by the flat name the model sees, not by
+  // its bare name: two servers can both expose "deploy", and the bare spelling
+  // would silently enable each of them.
   const { tools: kept, stripped } = applyToolPolicy(tools, {
-    allowToolNames: new Set(["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "deploy"]),
+    allowToolNames: new Set(["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "mcp__sites__deploy"]),
   });
   assert.deepEqual(
     kept.map((t) => t.name),
@@ -3344,4 +3350,163 @@ test("relayOpaqueCollaboration falls back past a routed subagent model to a nati
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("applyToolPolicy reports the namespace split for each flattened tool", () => {
+  const tools = [
+    // The live desktop CLI declares the namespace with its trailing separator
+    // ("mcp__modeldock__"); older transcripts carry the bare spelling. Both must
+    // flatten to the same two-separator name, never "mcp__modeldock____...".
+    { type: "namespace", name: "mcp__modeldock__", tools: [{ name: "web_search_exa", inputSchema: { type: "object", properties: {} } }] },
+    { type: "namespace", name: "mcp__codex_apps__github", tools: [{ name: "_search_repositories", inputSchema: { type: "object", properties: {} } }] },
+  ];
+  const { tools: kept, namespaces } = applyToolPolicy(tools);
+  assert.deepEqual(kept.map((tool) => tool.name), [
+    "mcp__modeldock__web_search_exa",
+    "mcp__codex_apps__github___search_repositories",
+  ]);
+  assert.deepEqual(namespaces.get("mcp__modeldock__web_search_exa"), { name: "web_search_exa", namespace: "mcp__modeldock__" });
+  assert.deepEqual(
+    applyToolPolicy([{ type: "namespace", name: "mcp__modeldock", tools: [{ name: "web_search_exa" }] }]).tools.map((t) => t.name),
+    ["mcp__modeldock__web_search_exa"],
+    "the bare namespace spelling produces the identical flat name",
+  );
+  // The tool name's own leading underscore is why the flat name cannot simply
+  // be split on "__" to recover the pair.
+  assert.deepEqual(namespaces.get("mcp__codex_apps__github___search_repositories"), {
+    name: "_search_repositories",
+    namespace: "mcp__codex_apps__github",
+  });
+});
+
+test("applyToolPolicy matches the local allowlist against the flat MCP name", () => {
+  // LOCAL_TOOL_ALLOWLIST is written in flat names; the namespace child carries
+  // only "recall_memory". Testing the bare name stripped every MCP tool from
+  // local backends even though the list explicitly whitelists them.
+  const tools = [{
+    type: "namespace",
+    name: "mcp__modeldock__",
+    tools: [{ name: "recall_memory" }, { name: "speak" }],
+  }];
+  const { tools: kept, stripped } = applyToolPolicy(tools, {
+    allowToolNames: new Set(["mcp__modeldock__recall_memory"]),
+  });
+  assert.deepEqual(kept.map((tool) => tool.name), ["mcp__modeldock__recall_memory"]);
+  assert.equal(stripped.allowlist, 1, "only the un-whitelisted sibling is dropped");
+});
+
+test("flattenNamespaceCalls collapses replayed Codex tool calls onto the declared name", () => {
+  // Declared as namespace "mcp__node_repl"; Codex replays the call with the
+  // trailing-separator spelling "mcp__node_repl__". Both must resolve to the
+  // one flat name the upstream was actually given.
+  const namespaces = new Map([["mcp__node_repl__js", { name: "js", namespace: "mcp__node_repl" }]]);
+  const input = [
+    { type: "function_call", name: "js", namespace: "mcp__node_repl__", call_id: "call_1", arguments: "{}" },
+    { type: "function_call", name: "js", namespace: "mcp__node_repl", call_id: "call_2", arguments: "{}" },
+    { type: "function_call", name: "exec_command", call_id: "call_3", arguments: "{}" },
+  ];
+  const out = flattenNamespaceCalls(input, namespaces);
+  assert.equal(out[0].name, "mcp__node_repl__js");
+  assert.equal(out[0].namespace, undefined);
+  assert.equal(out[1].name, "mcp__node_repl__js", "both spellings land on the same declared tool");
+  assert.equal(out[2], input[2], "a namespace-less builtin call is untouched");
+  assert.equal(flattenNamespaceCalls([{ type: "message", role: "user" }], namespaces).length, 1);
+});
+
+test("flattenNamespaceCalls falls back to concatenation for an undeclared tool", () => {
+  const input = [{ type: "function_call", name: "gone", namespace: "mcp__stale__", call_id: "call_1", arguments: "{}" }];
+  const out = flattenNamespaceCalls(input, new Map());
+  assert.equal(out[0].name, "mcp__stale__gone");
+  assert.equal(out[0].namespace, undefined);
+});
+
+test("restoreNamespaceCall splits a flattened call back into name and namespace", () => {
+  const namespaces = new Map([["mcp__modeldock__web_search_exa", { name: "web_search_exa", namespace: "mcp__modeldock" }]]);
+  const call = { type: "function_call", name: "mcp__modeldock__web_search_exa", call_id: "call_1", arguments: "{}" };
+  assert.deepEqual(restoreNamespaceCall(call, namespaces), {
+    type: "function_call",
+    name: "web_search_exa",
+    namespace: "mcp__modeldock",
+    call_id: "call_1",
+    arguments: "{}",
+  });
+  const builtin = { type: "function_call", name: "exec_command", call_id: "call_2", arguments: "{}" };
+  assert.equal(restoreNamespaceCall(builtin, namespaces), builtin, "unknown names pass through untouched");
+  assert.equal(restoreNamespaceCall(call, new Map()), call, "no namespaces means no rewrite");
+});
+
+test("pipeNormalizedStream restores the namespace on a full-lifecycle tool call", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const namespaces = new Map([["mcp__modeldock__web_search_exa", { name: "web_search_exa", namespace: "mcp__modeldock" }]]);
+  const call = { id: "item_1", type: "function_call", name: "mcp__modeldock__web_search_exa", call_id: "call_1", arguments: "{\"query\":\"x\"}" };
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.created","response":{"id":"resp_1","model":"deepseek-v4-flash"}}\n\n'));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_1", type: "response.output_item.added", item: call })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_1", type: "response.output_item.done", item: { ...call, status: "completed" } })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_1", type: "response.completed", response: { id: "resp_1", model: "deepseek-v4-flash", output: [call] } })}\n\n`));
+      controller.close();
+    },
+  });
+  await pipeNormalizedStream(body, res, null, () => {}, namespaces);
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  const events = forwarded
+    .split(/\r\n\r\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  const added = events.find((event) => event.type === "response.output_item.added");
+  assert.equal(added.item.name, "web_search_exa");
+  assert.equal(added.item.namespace, "mcp__modeldock");
+  const done = events.find((event) => event.type === "response.output_item.done");
+  assert.equal(done.item.name, "web_search_exa");
+  assert.equal(done.item.namespace, "mcp__modeldock");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output[0].name, "web_search_exa");
+  assert.equal(completed.response.output[0].namespace, "mcp__modeldock");
+  assert.ok(!forwarded.includes("mcp__modeldock__web_search_exa"), "the flattened name never reaches Codex");
+});
+
+test("pipeNormalizedStream forwards a stream with no namespaced call untouched", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const namespaces = new Map([["mcp__modeldock__web_search_exa", { name: "web_search_exa", namespace: "mcp__modeldock" }]]);
+  const call = { id: "item_1", type: "function_call", name: "exec_command", call_id: "call_1", arguments: "{}" };
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_1","type":"response.created","response":{"id":"resp_1","model":"deepseek-v4-flash"}}\n\n'));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_1", type: "response.output_item.added", item: call })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_1", type: "response.completed", response: { id: "resp_1", model: "deepseek-v4-flash", output: [call] } })}\n\n`));
+      controller.close();
+    },
+  });
+  await pipeNormalizedStream(body, res, null, () => {}, namespaces);
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.match(forwarded, /"name":"exec_command"/);
+  assert.ok(!forwarded.includes('"namespace"'), "builtin calls gain no namespace field");
+});
+
+test("the local slim tool set keeps the shell Codex actually sends", () => {
+  // Codex renamed the shell exec_command -> shell_command; the allowlist still
+  // named only the old spelling, so slim mode handed local models a tool set
+  // with no shell in it at all.
+  // Codex uses three interchangeable spellings depending on config and on the
+  // model's catalog declaration. "shell" is what a local custom model actually
+  // receives, and it was the spelling still missing after the first fix.
+  for (const shell of ["shell", "shell_command", "exec_command"]) {
+    const { tools: kept } = applyToolPolicy(
+      [{ type: "function", name: shell }],
+      { allowToolNames: LOCAL_TOOL_ALLOWLIST },
+    );
+    assert.deepEqual(kept.map((tool) => tool.name), [shell], `${shell} must survive slim mode`);
+  }
+  const tools = [
+    { type: "function", name: "write_stdin" },
+    { type: "function", name: "wait" },
+    { type: "function", name: "apply_patch" },
+    { type: "function", name: "spawn_agent" },
+  ];
+  const { tools: kept } = applyToolPolicy(tools, { allowToolNames: LOCAL_TOOL_ALLOWLIST });
+  const names = kept.map((tool) => tool.name);
+  assert.ok(names.includes("write_stdin") && names.includes("wait"), "the tools that pair with the shell survive");
+  assert.ok(!names.includes("spawn_agent"), "but not the multi-agent surface");
 });

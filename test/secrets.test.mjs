@@ -86,7 +86,7 @@ test("migrateEnvSecrets is safe and non-destructive on every platform", (t) => {
 });
 
 test("migrateEnvSecrets does nothing when there is nothing to migrate", (t) => {
-  if (!dpapiSupported()) return t.skip("DPAPI is supported here");
+  if (!dpapiSupported()) return t.skip("DPAPI is not available on this platform");
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-secrets-"));
   const file = path.join(dir, ".env");
   writeFileSync(file, `OPENCODE_GO_TOKEN=${PREFIX}c2stYWxyZWFkeQ==\n`, "utf8");

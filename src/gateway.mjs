@@ -22,6 +22,13 @@ const HOSTED_TOOL_TYPES = new Set([
   "computer_use",
   "browser_use",
   "artifact",
+  // Codex sends this one nameless (`{ type: "image_generation" }`). Because the
+  // hidden/allowlist filters below both key off a string name, a hosted type
+  // that is missing from this set is not merely un-stripped - it is invisible to
+  // every other filter and forwarded verbatim, even in slim mode. Observed
+  // reaching a local backend on 2026-08-18. ModelDock serves image generation
+  // through mcp__modeldock__image_gen instead.
+  "image_generation",
 ]);
 
 // Tools that hand the model bytes it cannot interpret (text-only main models).
@@ -34,10 +41,25 @@ const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
 // the core tools so the fixed overhead fits and the model keeps real
 // conversation room (a small-context backend would otherwise be left with
 // almost no room for the task).
-const LOCAL_TOOL_ALLOWLIST = new Set([
+export const LOCAL_TOOL_ALLOWLIST = new Set([
+  // The shell, and the tools that only make sense beside it (feed stdin to a
+  // running command, wait on a backgrounded one). Codex ships THREE spellings
+  // and picks by configuration and by the model's own catalog declaration, not
+  // by version - all three are current as of 2026-08-18:
+  //   shell          - sent for qwen3.8:27b@custom, i.e. the actual slim-mode case
+  //   shell_command  - 30877 successful calls in local transcripts
+  //   exec_command   - 6621 successful calls, most recent 2026-08-16
+  // None supersedes another, so all are listed; an entry that matches nothing
+  // costs nothing. Missing the spelling your config happens to use is not a
+  // degraded tool set, it is a local model with no shell at all - which is what
+  // slim mode shipped until 2026-08-18. Verify with the section 18 harness
+  // using the REAL ~/.codex/config.toml before assuming any name is gone.
+  "shell",
+  "shell_command",
   "exec_command",
-  "apply_patch",
   "write_stdin",
+  "wait",
+  "apply_patch",
   "update_plan",
   "read_file",
   "write_file",
@@ -1313,14 +1335,29 @@ function normalizeFunctionTool(tool) {
   return next;
 }
 
+// Codex is not consistent about whether a namespace name carries its trailing
+// separator: the live desktop CLI declares "mcp__modeldock__" while transcripts
+// also carry the bare "mcp__node_repl" spelling for the same server. Joining
+// blind would emit "mcp__modeldock____recall_memory" (four separators) for the
+// first spelling, which is not a name any model reproduces - they normalize it
+// back to the two-separator form and then match nothing. Trim, then join.
+const trimNamespaceTail = (value) => String(value).replace(/_+$/, "");
+const joinNamespace = (namespace, name) => `${trimNamespaceTail(namespace)}__${name}`;
+
 // Tool policy: keep standard function/custom tools, flatten MCP namespaces so
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
 export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS, allowToolNames } = {}) {
-  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 } };
+  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 }, namespaces: new Map() };
   const hidden = new Set(hiddenToolNames || []);
   const allow = allowToolNames ? new Set(allowToolNames) : null;
   const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0 };
+  // Reverse map for the flattening below: flat wire name -> { name, namespace }.
+  // Codex resolves an incoming function_call by (namespace, name), so the
+  // response path has to undo the flattening with the exact pair it was built
+  // from. Splitting the flat name back apart is not possible: the namespace and
+  // the tool name both contain "__" separators of their own.
+  const namespaces = new Map();
   const out = [];
   const allowed = (name) => !allow || allow.has(name);
   for (const tool of tools) {
@@ -1333,16 +1370,21 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
       const children = Array.isArray(tool.tools) ? tool.tools : [];
       for (const child of children) {
         if (!child?.name) continue;
-        if (hidden.has(child.name)) {
+        // The allowlist is written in flat names (mcp__modeldock__recall_memory)
+        // because that is what the model and every other caller see; the child
+        // carries only its bare name, so qualify before testing membership.
+        const flatName = joinNamespace(tool.name, child.name);
+        if (hidden.has(child.name) || hidden.has(flatName)) {
           stripped.hidden += 1;
           continue;
         }
-        if (!allowed(child.name)) {
+        if (!allowed(flatName)) {
           stripped.allowlist += 1;
           continue;
         }
         stripped.namespaceChildren += 1;
-        out.push(normalizeFunctionTool({ ...structuredClone(child), type: "function", name: `${tool.name}__${child.name}` }));
+        namespaces.set(flatName, { name: child.name, namespace: tool.name });
+        out.push(normalizeFunctionTool({ ...structuredClone(child), type: "function", name: flatName }));
       }
       continue;
     }
@@ -1362,7 +1404,61 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
     }
     out.push(tool.type === "function" ? normalizeFunctionTool(structuredClone(tool)) : structuredClone(tool));
   }
-  return { tools: out, stripped };
+  return { tools: out, stripped, namespaces };
+}
+
+// Codex splits an MCP tool call across two fields: `name` is the bare tool name
+// and `namespace` names the owning server (for example name "js", namespace
+// "mcp__node_repl__"). Upstreams that only speak plain OpenAI function tools do
+// not have that second field, which is why applyToolPolicy flattens the
+// declarations into a single qualified name. Both directions of that rename
+// have to happen or the call cannot be resolved at the other end.
+//
+// Inbound (history replay): collapse the pair back into the flat name the
+// upstream was given, so a replayed call matches the tool it declared.
+//
+// The pair is resolved against the declarations this request actually carried,
+// so either namespace spelling lands on the one name the upstream was given.
+export function flattenNamespaceCalls(input, namespaces = null) {
+  if (!Array.isArray(input)) return input;
+  const byPair = new Map();
+  for (const [flatName, split] of namespaces || []) {
+    byPair.set(joinNamespace(split.namespace, split.name), flatName);
+  }
+  let changed = false;
+  const out = input.map((item) => {
+    if (item?.type !== "function_call" || typeof item.namespace !== "string" || !item.namespace) return item;
+    changed = true;
+    const pair = joinNamespace(item.namespace, item.name);
+    const next = { ...item, name: byPair.get(pair) || pair };
+    delete next.namespace;
+    return next;
+  });
+  return changed ? out : input;
+}
+
+// Outbound (model response): restore the pair. Without this Codex looks the flat
+// name up in a registry keyed by (namespace, name), finds nothing, and answers
+// the model with a synthetic "unsupported call: <name>" instead of running the
+// tool - the failure mode that makes every mcp__* tool look dead in a session
+// while the built-in shell keeps working.
+export function restoreNamespaceCall(item, namespaces) {
+  if (!namespaces?.size || item?.type !== "function_call" || typeof item.name !== "string") return item;
+  const split = namespaces.get(item.name);
+  if (!split) return item;
+  return { ...item, name: split.name, namespace: split.namespace };
+}
+
+// Apply restoreNamespaceCall across a response.completed output array.
+export function restoreNamespaceOutput(output, namespaces) {
+  if (!namespaces?.size || !Array.isArray(output)) return output;
+  let changed = false;
+  const out = output.map((item) => {
+    const next = restoreNamespaceCall(item, namespaces);
+    if (next !== item) changed = true;
+    return next;
+  });
+  return changed ? out : output;
 }
 
 // Resolve the upstream for a model. The owning provider decides the base URL and
@@ -1539,7 +1635,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
 // re-frames such streams into the standard sequence, synthesizing missing
 // lifecycle events and the completed response's output array. Streams that
 // already carry the full lifecycle pass through event-for-event.
-export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse) {
+export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
@@ -1565,6 +1661,22 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   let preludeResponse = null;
   const writeOut = (text) => res.write(text);
   const sseEvent = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
+  // Restore the (name, namespace) pair on every event shape that can carry a
+  // function_call: the item lifecycle events and the final output array.
+  // Returns the argument unchanged when there is nothing to rewrite.
+  const restoreStreamEvent = (event) => {
+    if (!namespaces?.size || !event || typeof event !== "object") return event;
+    if (event.item?.type === "function_call") {
+      const item = restoreNamespaceCall(event.item, namespaces);
+      if (item !== event.item) return { ...event, item };
+      return event;
+    }
+    if (Array.isArray(event.response?.output)) {
+      const output = restoreNamespaceOutput(event.response.output, namespaces);
+      if (output !== event.response.output) return { ...event, response: { ...event.response, output } };
+    }
+    return event;
+  };
   const flushPrelude = () => {
     while (prelude.length) writeOut(prelude.shift());
   };
@@ -1707,6 +1819,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       partType,
       text: "",
       name: item.name || "",
+      // Carried so the reconstructed done/completed items keep the pair Codex
+      // needs to resolve the call; the added event was already restored.
+      namespace: typeof item.namespace === "string" ? item.namespace : "",
       callId: item.call_id || item.id || "",
       status: "in_progress",
       argumentsDone: false,
@@ -1806,7 +1921,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
         }));
       }
       const doneItem = entry.partType === "function_call"
-        ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, call_id: entry.callId, arguments: entry.text }
+        ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, ...(entry.namespace ? { namespace: entry.namespace } : {}), call_id: entry.callId, arguments: entry.text }
         : entry.partType === "reasoning_text"
           ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
           : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] };
@@ -1816,7 +1931,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     }
     const response = parsed?.response || {};
     const output = Array.from(track.items.values()).map((entry, index) => entry.partType === "function_call"
-      ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, call_id: entry.callId, arguments: entry.text, output_index: index }
+      ? { id: entry.itemId, type: "function_call", status: "completed", name: entry.name, ...(entry.namespace ? { namespace: entry.namespace } : {}), call_id: entry.callId, arguments: entry.text, output_index: index }
       : entry.partType === "reasoning_text"
         ? { id: entry.itemId, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: entry.text }] }
         : { id: entry.itemId, type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: entry.text }] });
@@ -1837,6 +1952,15 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       } catch {
         continue;
       }
+      // Undo the tool-declaration flattening before the event reaches Codex.
+      // When nothing is rewritten `raw` stays the original bytes, so a stream
+      // that carries no namespaced tool call is still forwarded verbatim.
+      const restored = restoreStreamEvent(parsed);
+      let raw = block + delim;
+      if (restored !== parsed) {
+        parsed = restored;
+        raw = sseEvent(parsed);
+      }
       if (normal) {
         if (parsed?.type === "response.output_text.delta" && typeof parsed.delta === "string" && parsed.delta.length > 0) {
           sawDeliverable = true;
@@ -1845,13 +1969,13 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
           sawDeliverable = true;
         }
         const finished = finishEvent(parsed);
-        writeOut(finished === parsed ? block + delim : sseEvent(finished));
+        writeOut(finished === parsed ? raw : sseEvent(finished));
         return;
       }
       if (!sawFirstEvent) {
         const kind = parsed?.type;
         if (kind === "response.created" || kind === "response.in_progress") {
-          prelude.push(block + delim);
+          prelude.push(raw);
           preludeResponse = { ...(preludeResponse || {}), ...(parsed.response || {}) };
           return;
         }
@@ -1871,7 +1995,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
           flushPrelude();
           normal = true;
           const finished = finishEvent(parsed);
-          writeOut(finished === parsed ? block + delim : sseEvent(finished));
+          writeOut(finished === parsed ? raw : sseEvent(finished));
           return;
         }
       }
@@ -2890,10 +3014,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
-  const { tools, stripped } = applyToolPolicy(normalizedPayload.tools, {
+  const { tools, stripped, namespaces } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
+  // The declarations above were flattened; the replayed history has to use the
+  // same flat names or the upstream sees calls for tools it was never given.
+  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces);
   // Same budget logic as the tool whitelist: a small-context local model gets
   // no value from the hyperframes skill entries, and every stripped line is
   // tokens the model no longer pays to read on each turn.
@@ -3047,7 +3174,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // SSE shape: a sparse/bare tool stream is re-framed; a full Responses
       // lifecycle passes through event-for-event. Do not key this on provider.
       const piped = normalizedPayload.stream === true
-        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse)
+        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
       if (piped.completedResponse) completedResponse = piped.completedResponse;

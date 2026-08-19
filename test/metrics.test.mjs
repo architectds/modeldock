@@ -115,16 +115,35 @@ test("recordVisionModel counts per model and fallback", () => {
   assert.equal(metrics.vision.fallback, 1);
 });
 
-test("snapshot shape and average latency", () => {
+test("snapshot shape and average latency", async () => {
   const metrics = makeMetrics();
-  const finish = metrics.begin("web", {});
-  finish({ ok: true });
+  // Two finished requests, one of each outcome: the average divides by
+  // ok + errors, so a failed request has to count toward it. Asserting only
+  // "averageLatencyMs is an integer >= 0" passed for any wrong arithmetic,
+  // including dividing by ok alone or reporting the last latency instead.
+  const first = metrics.begin("web", {});
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  first({ ok: true });
+  const second = metrics.begin("web", {});
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  second({ ok: false });
+
   const snap = metrics.snapshot({ ready: true });
   assert.equal(snap.ready, true);
   assert.ok(snap.uptimeMs >= 0);
   assert.ok(snap.recent.length >= 1);
-  assert.ok(Number.isInteger(snap.web.averageLatencyMs));
-  assert.ok(snap.responses.averageLatencyMs >= 0);
+  assert.equal(snap.web.ok, 1);
+  assert.equal(snap.web.errors, 1);
+  assert.ok(metrics.web.latencyMs > 0, "the sleeps make the accumulated latency non-zero");
+  assert.equal(
+    snap.web.averageLatencyMs,
+    Math.round(metrics.web.latencyMs / 2),
+    "the average is the accumulated latency over every finished request",
+  );
+  // The untouched kind must read as exactly 0, not NaN from 0/0: that zero
+  // branch is the whole reason average() is guarded.
+  assert.equal(snap.responses.total, 0);
+  assert.equal(snap.responses.averageLatencyMs, 0);
 });
 
 test("extractResponseUsage reads top-level usage", () => {
