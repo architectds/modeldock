@@ -732,6 +732,21 @@ export function effectiveContextWindow(model) {
   return Number(model?.contextWindow) > 0 ? Number(model.contextWindow) : CONTEXT_WINDOW;
 }
 
+// The provider a slug is addressed to, when that provider is one this gateway
+// publishes. An owned address means the model was chosen from the catalog this
+// gateway wrote - not a model id Codex made up - which is what separates a
+// selection to honour from a default to re-route.
+//
+// Native models carry no suffix at all, so they never match here: a bare id is
+// the one case that still falls back.
+export function ownedProviderOf(model) {
+  const slug = String(model || "");
+  const separator = slug.lastIndexOf(PROVIDER_SEPARATOR);
+  if (separator <= 0) return "";
+  const suffix = slug.slice(separator + PROVIDER_SEPARATOR.length);
+  return allProfiles().some((profile) => profile.id === suffix) ? suffix : "";
+}
+
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
   const profile = profileById(provider);

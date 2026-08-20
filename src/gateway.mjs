@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
+import { ownedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -393,16 +393,8 @@ export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
   // A slug carrying a provider suffix this gateway owns is addressed to that
   // provider, whether or not it still resolves. "Unknown means native" is right
   // for a bare Codex slug and wrong here: it sent a request for a removed
-  // custom endpoint to chatgpt.com, which has never heard of the model, and the
-  // 401 that came back read as an auth problem rather than a missing endpoint.
-  //
-  // Only suffixes naming a real profile count. "@openai" names none - it is a
-  // picker label, not an owner - and keeps falling through to the rule below.
-  const separator = requestedModel.lastIndexOf(PROVIDER_SEPARATOR);
-  if (separator > 0) {
-    const suffix = requestedModel.slice(separator + PROVIDER_SEPARATOR.length);
-    if (allProfiles().some((profile) => profile.id === suffix)) return false;
-  }
+  // custom endpoint to chatgpt.com, which has never heard of the model.
+  if (ownedProviderOf(requestedModel)) return false;
   return !(knownModels && knownModels.has(requestedModel));
 }
 
@@ -2930,6 +2922,29 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
   }
+  // An address of ours that no longer resolves. The model was published by this
+  // gateway and picked from that catalog, so the endpoint behind it was removed
+  // - a configuration fault to report, not a stale id to paper over. Falling
+  // back to the main model here would answer with a model the user did not
+  // choose and say nothing about it, which is the same trade the vision
+  // fallback used to make.
+  //
+  // Only owned addresses. A bare id may be one of Codex's own models, and
+  // those carry no provider at all - that is the one case that still falls back.
+  const ownedProvider = ownedProviderOf(requestedModel);
+  if (ownedProvider && !knownModels?.has?.(requestedModel)) {
+    const error = {
+      error: {
+        type: "configuration_error",
+        message: `${requestedModel} is no longer configured. Its ${ownedProvider} endpoint was removed; pick another model, or restart Codex to drop it from the picker.`,
+      },
+    };
+    res.statusCode = 503;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(error));
+    return { ok: false, httpStatus: 503, route: { model: requestedModel, reason: "unconfigured_provider" }, error };
+  }
+
   // Remote compaction for routed models: Codex expects a compaction output item
   // (v2) or replacement history (v1) back, which DeepSeek does not produce
   // natively. Intercept instead of forwarding the raw request.
