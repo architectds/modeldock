@@ -4,6 +4,7 @@ import { allProfiles, bareModelId, profileById, publishedSlugFor } from "./profi
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
+import { isModelPublished, selectedModelSlugs } from "./model-toggles.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -89,6 +90,10 @@ export function catalogFor(config) {
     baseInstructions: baseInstructionsFor(config),
   });
   const enabledProviderIds = enabledProvidersFor(config);
+  // Stamped by the server next to contextOverrides; absent in callers that only
+  // want the shipped catalog, which then publishes everything as before.
+  const toggles = config.modelToggles || {};
+  const selected = selectedModelSlugs(config, config.subagentModel);
   const models = (catalog.models || []).map((entry) => {
     // A model's own capability declaration is the only source of truth. The
     // profile-generated entries already carry per-model modalities (a text-only
@@ -105,6 +110,11 @@ export function catalogFor(config) {
     const owner = ownerProviderFor(entry.slug);
     const profile = profileById(owner);
     const modelEntry = profile.availableModels?.find((m) => m.id === entry.slug.replace(/@.*$/, ""));
+    // Switched off on the Models page. A model the gateway is itself pointed at
+    // is published whatever the file says: the selection is the later and
+    // stronger statement, and withholding it would leave Codex unable to name
+    // the model it is currently talking to.
+    if (!isModelPublished(toggles, entry.slug) && !selected.has(entry.slug)) return false;
     return enabledProviderIds.has(owner)
       && !(modelEntry?.endpoint === "chat" || modelEntry?.status === "unavailable");
   });
@@ -112,10 +122,10 @@ export function catalogFor(config) {
   // "see it, can't use it" noise (every request 401s), so subscribers keep the
   // merge and everyone else gets the curated catalog only.
   if (config.nativeMerge === false) {
-    return { ...catalog, models: orderCatalogByProvider(applyPerModelInstructions(config, models)) };
+    return { ...catalog, models: orderCatalogByUse(applyPerModelInstructions(config, models), config.usageByModel) };
   }
   const merged = mergeNativeCatalog({ ...catalog, models }, config);
-  return { ...merged, models: orderCatalogByProvider(applyPerModelInstructions(config, merged.models)) };
+  return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models), config.usageByModel) };
 }
 
 // The Codex App picker list is the model_catalog_json file when configured, not
@@ -124,7 +134,7 @@ export function catalogFor(config) {
 // 2026-08-07: `codex debug models` returns the bundled native catalog with no
 // catalog file, and exactly the catalog file when one is set). Native entries
 // are appended after ours and the whole list is re-ordered by provider (see
-// orderCatalogByProvider); picker-hidden entries stay out of the list (requests
+// orderCatalogByUse); picker-hidden entries stay out of the list (requests
 // for them still route natively through the unknown-slug path in the gateway).
 // A missing or stale cache degrades to the curated catalog alone.
 export function mergeNativeCatalog(catalog, config) {
@@ -195,31 +205,24 @@ function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null))
   };
 }
 
-// Provider labels in picker order. The Codex picker orders catalog entries by
-// their `priority` field: the curated catalog numbers priorities 1..N while the
-// merged native entries carry their own native priorities (1, 2, 3, 7, 29...),
-// so without renumbering the native models interleave with ours and scatter
-// across the picker. Renumber priorities so every provider's models sit
-// together - groups ordered by provider label, existing within-group order
-// preserved.
-const PROVIDER_LABELS = {
-  "opencode-go": "OpenCode Go",
-  "deepseek-official": "DeepSeek Official",
-  custom: "Custom",
-  ollama: "Ollama (local)",
-  openai: "OpenAI",
-};
-
-function providerLabelFor(entry) {
-  const provider = entry?.provider || ownerProviderFor(entry?.slug);
-  return PROVIDER_LABELS[provider] || provider;
-}
-
-function orderCatalogByProvider(models) {
+// Picker order. The Codex picker orders catalog entries by their `priority`
+// field: the curated catalog numbers priorities 1..N while the merged native
+// entries carry their own native priorities (1, 2, 3, 7, 29...), so without
+// renumbering the native models interleave with ours and scatter across the
+// picker. Renumbering is therefore not optional; the only question is what
+// order to renumber into.
+//
+// It is use. A published catalog is thirty-odd models and a person switches
+// between four of them, so the four are what the list should open on. Grouping
+// by provider - which this used to do - sorts the list by a fact about billing
+// that nobody is looking for at the moment they open a model picker.
+//
+function orderCatalogByUse(models, usage = {}) {
   if (!Array.isArray(models)) return models;
+  const requests = (entry) => Number(usage[entry?.slug]?.requests || usage[entry?.slug] || 0);
   return models
-    .map((entry, index) => ({ entry, label: providerLabelFor(entry), index }))
-    .sort((left, right) => String(left.label).localeCompare(String(right.label)) || left.index - right.index)
+    .map((entry, index) => ({ entry, used: requests(entry), index }))
+    .sort((left, right) => right.used - left.used || left.index - right.index)
     .map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
 }
 

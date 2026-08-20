@@ -33,6 +33,9 @@ import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsErr
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
+import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
+import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
+import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
@@ -1034,6 +1037,13 @@ export function createServices(config = loadConfig()) {
   // ~/.modeldock file with paths baked from the temp root.
   const catalogFile = mutableConfig.codexCatalogFile
     || stateFile("codex-model-catalog.json");
+  // Same redirect as the catalog: a test config that isolates one isolates both,
+  // and the writer below orders the picker from it.
+  const rollupFile = mutableConfig.usageRollupFile || usageRollupPath();
+  // Resolved once and published on services, so the boot-time tidy and the
+  // endpoint that edits the same file can never disagree about which file it is.
+  const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
+  const lifecycleFile = mutableConfig.modelLifecycleFile || modelLifecyclePath();
   // The Ollama connection snapshot follows the same state-dir redirect. Real
   // configs restore it during loadConfig; this re-apply covers hand-built test
   // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
@@ -1093,6 +1103,14 @@ export function createServices(config = loadConfig()) {
         ...mutableConfig,
         mainModel: modelSelection.mainModel,
         visionModel: modelSelection.visionModel,
+        // Read fresh rather than taken from services: the agent file is edited
+        // from the dashboard, and a model the gateway is pointed at is published
+        // whatever the toggles say.
+        subagentModel: readSubagentModel(mutableConfig),
+        // Picker order. Read here rather than held on the config because the
+        // file is folded on its own schedule, and a catalog written after a
+        // fold should carry the order that fold implies.
+        usageByModel: rollupTotals(readRollup(rollupFile)),
       });
       mkdirSync(path.dirname(catalogFile), { recursive: true });
       // Atomic replace: Codex reads this file on its own schedule, so a
@@ -1129,8 +1147,55 @@ export function createServices(config = loadConfig()) {
     },
     (error) => console.log(`[gate] model refresh error: ${error.message}`),
   );
+  // The weekly tidy. At boot rather than on a timer: a gateway that runs for a
+  // month should tidy four times, not once, and one that is only started on
+  // Mondays should still tidy - which a scheduled day of the week would miss.
+  //
+  // Every model currently in the published set gets its first-seen stamp on the
+  // way past, so a model added today starts its thirty days today rather than
+  // inheriting the window's.
+  const runModelTidy = (now = Date.now()) => {
+    try {
+      const lifecycle = readLifecycle(lifecycleFile);
+      const models = modelOptions(mutableConfig, mutableConfig.profileId)
+        .filter((entry) => !entry.status || entry.status === "available");
+      const stamped = stampFirstSeen(lifecycle.firstSeen, models, now);
+      const rollup = readRollup(rollupFile);
+      const decision = shouldTidy({ lastTidyAt: lifecycle.lastTidyAt, rollup, now });
+      if (!decision.run) {
+        if (stamped.changed) writeLifecycle(lifecycleFile, { ...lifecycle, firstSeen: stamped.firstSeen });
+        return { ...decision, parked: [] };
+      }
+      const toggles = readModelToggles(togglesFile);
+      const parked = modelsToPark({
+        models,
+        rollup,
+        toggles,
+        selected: selectedModelSlugs(mutableConfig, readSubagentModel(mutableConfig)),
+        firstSeen: stamped.firstSeen,
+        now,
+      });
+      for (const slug of parked) toggles[slug] = false;
+      if (parked.length) {
+        writeModelToggles(togglesFile, toggles);
+        mutableConfig.modelToggles = toggles;
+        writeCatalogFile();
+      }
+      writeLifecycle(lifecycleFile, { lastTidyAt: new Date(now).toISOString(), firstSeen: stamped.firstSeen });
+      if (parked.length) {
+        console.log(`[gate] model tidy: ${parked.length} unused for 30 days, removed from the Codex picker (${parked.join(", ")})`);
+      }
+      return { ...decision, parked };
+    } catch (error) {
+      // Housekeeping must never stop a gateway from starting.
+      console.log(`[gate] model tidy skipped: ${error.message}`);
+      return { run: false, reason: "error", parked: [] };
+    }
+  };
+
   // Write once at boot so the file exists even when the refresh is disabled or fails.
   writeCatalogFile();
+  runModelTidy();
   refreshModelCatalog();
   const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
   const modelRefreshTimer = refreshIntervalHours > 0
@@ -1150,7 +1215,8 @@ export function createServices(config = loadConfig()) {
     // "openai"), which is exactly what the collaboration relay needs.
     subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, modelRefreshTimer, ollamaSnapshotFile,
+    refreshModelCatalog, writeCatalogFile, runModelTidy, modelRefreshTimer, ollamaSnapshotFile,
+    usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
   });
 }
@@ -1838,8 +1904,63 @@ export function createApp(services = createServices()) {
     if (restartRequired) recordConfigAction(metrics, "context_window_update", { ok: true });
     return res.json({ id: slug, contextWindow: overrides[slug] ?? null, restartRequired });
   });
+  // Switch a published model out of Codex's picker, or back into it.
+  //
+  // Same shape as the context-window edit next door and for the same reason:
+  // the file is the record, the profiles are rebuilt from it, and Codex reads
+  // model_catalog_json on its own schedule - so the change lands on the next
+  // Codex restart, which is what restartRequired tells the dashboard to say.
+  app.post("/api/models/enabled", mutateConfig, async (req, res) => {
+    const { id, enabled } = req.body || {};
+    const slug = String(id || "").trim();
+    if (!slug) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "A model id is required." } });
+    }
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ error: { type: "invalid_state", message: "enabled must be true or false." } });
+    }
+    // Refused rather than silently ignored: the catalog would publish this
+    // model anyway (a selected model always is), so accepting the write would
+    // store a preference that never takes effect and show a switch that lies.
+    const selected = selectedModelSlugs(config, readSubagentModel(config));
+    if (!enabled && selected.has(slug)) {
+      return res.status(409).json({
+        error: {
+          type: "model_in_use",
+          message: "This model is currently selected. Choose a different one first, then switch this off.",
+        },
+      });
+    }
+    const file = services.modelTogglesFile || modelTogglesPath();
+    const toggles = readModelToggles(file);
+    // Recorded either way, never deleted: an entry is how the weekly tidy knows
+    // a person has ruled on this model and it should keep its hands off. A
+    // delete would leave a rescued model looking untouched, and the tidy would
+    // park it again a week later.
+    toggles[slug] = enabled;
+    writeModelToggles(file, toggles);
+    config.modelToggles = toggles;
+    config.subagentModel = readSubagentModel(config);
+    services.writeCatalogFile?.();
+    // The choice is on disk and in the catalog by now. If marking the restart
+    // fails, the change still happened - reporting it as rejected would send
+    // the user back to flip a switch that already flipped.
+    let restartRequired = true;
+    try {
+      await services.configSwitcher.markRestartRequired();
+    } catch (error) {
+      restartRequired = false;
+      recordConfigAction(metrics, "model_enabled_update", { ok: false, error: error.message });
+    }
+    if (restartRequired) recordConfigAction(metrics, "model_enabled_update", { ok: true });
+    return res.json({ id: slug, enabled, restartRequired });
+  });
   app.get("/api/models/roster", (req, res) => {
     const totals = rollupTotals(readRollup(services.usageRollupFile || usageRollupPath()));
+    // The roster is the only place a switched-off model can be switched back
+    // on, so it lists them all and marks the state - never filters by it.
+    const toggles = readModelToggles(services.modelTogglesFile || modelTogglesPath());
+    const selected = selectedModelSlugs(config, readSubagentModel(config));
     // The same published set every picker reads. Walking the profiles instead
     // skipped the native GPT models, which are appended to the set rather than
     // living in a profile - so the page was missing the models with the most
@@ -1865,6 +1986,11 @@ export function createApp(services = createServices()) {
         speedTier: entry.speedTier || "",
         quota5h: entry.quota5h || 0,
         usage: totals[entry.id] || null,
+        // published: reaches Codex's picker. locked: the gateway is pointed at
+        // it, so it is published whatever the file says and the row cannot be
+        // switched off from here.
+        published: isModelPublished(toggles, entry.id) || selected.has(entry.id),
+        locked: selected.has(entry.id),
       }));
     return res.json({ windowDays: 30, models });
   });

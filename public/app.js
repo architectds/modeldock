@@ -1258,7 +1258,112 @@ async function openSettings() {
 const contextToK = (value) => (value ? String(Math.round(value / 1000)) : "");
 const contextFromK = (raw) => Math.round(Number(raw) * 1000);
 
-const ROSTER_COLUMNS = ["model", "provider", "context", "vision", "requests", "tps", "cache"];
+// "published" heads an unlabelled column: the switches read as a column of
+// their own, and a heading over them would have to be a verb ("Publish"?) that
+// reads as an action on all of them rather than the state of each.
+const ROSTER_COLUMNS = ["published", "model", "provider", "context", "vision", "requests", "tps", "cache"];
+
+// The column the table is ordered by, and which way. Requests descending is
+// where it starts, because "what am I actually running" is the first question
+// this page answers; a click on another heading answers a different one.
+//
+// Two states per column, not three: the third ("back to how it was") is
+// already reachable by clicking Requests, so a cycle that passes through it
+// would only add a click nobody asked for.
+const rosterSort = { column: "requests", direction: "desc" };
+
+// Numbers sort as numbers, text as text, and a missing value always sinks -
+// an unused model has no tps to compare, and floating it to the top of an
+// ascending sort would say it was the fastest.
+const ROSTER_SORT_KEYS = {
+  published: (entry) => (entry.published === false ? 0 : 1),
+  model: (entry) => entry.label || entry.id,
+  provider: (entry) => entry.providerLabel || entry.provider || "",
+  context: (entry) => entry.contextWindow || 0,
+  vision: (entry) => (entry.supportsVision ? 1 : 0),
+  requests: (entry) => entry.usage?.requests || 0,
+  tps: (entry) => entry.usage?.tps || 0,
+  cache: (entry) => entry.usage?.cacheRate || 0,
+};
+
+function sortRoster(rows) {
+  const key = ROSTER_SORT_KEYS[rosterSort.column] || ROSTER_SORT_KEYS.requests;
+  const sign = rosterSort.direction === "asc" ? 1 : -1;
+  return rows.sort((a, b) => {
+    const left = key(a);
+    const right = key(b);
+    const compared = typeof left === "string" || typeof right === "string"
+      ? String(left).localeCompare(String(right))
+      : (left || 0) - (right || 0);
+    // Output tokens break a tie on traffic: two models called the same number
+    // of times are not equally used if one of them wrote ten times as much.
+    // The label breaks everything else, so the order never wobbles between
+    // renders of identical data.
+    return compared * sign
+      || ((b.usage?.out || 0) - (a.usage?.out || 0)) * (rosterSort.column === "requests" ? 1 : 0)
+      || String(a.label).localeCompare(String(b.label));
+  });
+}
+
+// One row's switch. A model that is switched off keeps its row - the roster is
+// the only way back on - so the state is drawn, never filtered.
+//
+// The gateway's own selections are drawn as on and locked rather than hidden:
+// the catalog publishes them whatever the file says, so an interactive switch
+// there would be a control that cannot change anything.
+function rosterSwitch(entry, onChanged) {
+  const cell = document.createElement("td");
+  cell.className = "roster-switch-cell";
+  const wrap = document.createElement("label");
+  wrap.className = "roster-switch";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = entry.published !== false;
+  input.disabled = Boolean(entry.locked);
+  const track = document.createElement("span");
+  track.className = "roster-switch-track";
+  track.append(document.createElement("i"));
+  wrap.append(input, track);
+  if (entry.locked) {
+    wrap.classList.add("locked");
+    wrap.title = t("roster.switchLocked");
+  } else {
+    wrap.title = input.checked ? t("roster.switchOn") : t("roster.switchOff");
+  }
+  input.setAttribute("aria-label", `${t("roster.switchLabel")} - ${entry.label}`);
+
+  input.addEventListener("change", async () => {
+    const next = input.checked;
+    input.disabled = true;
+    try {
+      const response = await fetch("/api/models/enabled", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: entry.id, enabled: next }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error?.message || `Models ${response.status}`);
+      entry.published = next;
+      wrap.title = next ? t("roster.switchOn") : t("roster.switchOff");
+      // The row recedes here rather than on the next render: this handler
+      // deliberately does not re-render (that would throw away the scroll
+      // position of a thirty-row table), so the class has to follow the switch.
+      cell.closest("tr")?.classList.toggle("roster-parked", !next);
+      // The restart banner is driven by the same restartRequired flag this
+      // route sets, so the row stays put and the page says it once at the top.
+      // Re-rendering here would also throw away the scroll position on a
+      // thirty-row table for a change the user can already see.
+      onChanged?.();
+    } catch (error) {
+      input.checked = !next;
+      window.alert(error.message);
+    } finally {
+      input.disabled = Boolean(entry.locked);
+    }
+  });
+  cell.append(wrap);
+  return cell;
+}
 
 function rosterCell(text, className) {
   const cell = document.createElement("td");
@@ -1267,8 +1372,10 @@ function rosterCell(text, className) {
   return cell;
 }
 
-function rosterRow(entry, rank) {
+function rosterRow(entry, rank, onChanged) {
   const row = document.createElement("tr");
+  if (entry.published === false) row.classList.add("roster-parked");
+  row.append(rosterSwitch(entry, onChanged));
   const name = document.createElement("td");
   const position = document.createElement("span");
   position.className = "roster-rank";
@@ -1382,12 +1489,7 @@ async function renderModelRoster() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Roster ${response.status}`);
     const rows = [...(data.models || [])];
-    // Requests first, then output tokens: two models called the same number of
-    // times are not equally used if one of them wrote ten times as much.
-    rows.sort((a, b) =>
-      (b.usage?.requests || 0) - (a.usage?.requests || 0)
-      || (b.usage?.out || 0) - (a.usage?.out || 0)
-      || a.label.localeCompare(b.label));
+    sortRoster(rows);
     host.innerHTML = "";
     const table = document.createElement("table");
     table.className = "roster-table";
@@ -1395,11 +1497,42 @@ async function renderModelRoster() {
     for (const column of ROSTER_COLUMNS) {
       const cell = document.createElement("th");
       // The context column names its unit; every other column is its own label.
-      cell.textContent = t(column === "context" ? "roster.contextWindow" : `roster.${column}`);
+      // The switch column is deliberately unlabelled (see ROSTER_COLUMNS).
+      cell.textContent = column === "published"
+        ? ""
+        : t(column === "context" ? "roster.contextWindow" : `roster.${column}`);
+      if (column === "published") cell.className = "roster-head-switch";
       // Numeric columns are right-aligned in the body, so their headers are
       // too. This was a nth-child rule counting the first four columns, which
       // put the Context heading on the left of a right-aligned column.
       if (["context", "requests", "tps", "cache"].includes(column)) cell.className = "roster-head-num";
+      // The switch column has no heading to click, and nothing to order by that
+      // the state itself does not already say.
+      if (column !== "published") {
+        cell.classList.add("roster-head-sort");
+        cell.tabIndex = 0;
+        cell.setAttribute("role", "button");
+        if (rosterSort.column === column) {
+          cell.classList.add("is-sorted");
+          cell.dataset.direction = rosterSort.direction;
+          cell.setAttribute("aria-sort", rosterSort.direction === "asc" ? "ascending" : "descending");
+        }
+        const resort = () => {
+          // A new column starts descending for numbers and ascending for text:
+          // "most requests" and "A first" are what each one is usually asked.
+          if (rosterSort.column === column) {
+            rosterSort.direction = rosterSort.direction === "asc" ? "desc" : "asc";
+          } else {
+            rosterSort.column = column;
+            rosterSort.direction = ["model", "provider"].includes(column) ? "asc" : "desc";
+          }
+          renderModelRoster();
+        };
+        cell.addEventListener("click", resort);
+        cell.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); resort(); }
+        });
+      }
       head.append(cell);
     }
     const body = document.createElement("tbody");
@@ -1407,7 +1540,7 @@ async function renderModelRoster() {
     let used = 0;
     rows.forEach((entry, index) => {
       if (entry.usage) used += 1;
-      body.append(rosterRow(entry, String(index + 1)));
+      body.append(rosterRow(entry, String(index + 1), () => pollConfig().catch(() => {})));
     });
     table.append(body);
     host.append(table);

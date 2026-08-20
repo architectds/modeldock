@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
-import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
 
 function configStub() {
@@ -336,7 +336,7 @@ test("allowedEffortsFor gates max at 0.138 and ultra at 0.144", () => {
   assert.ok(allowedEffortsFor("0.145.0").has("ultra"));
 });
 
-test("catalogFor groups models by provider label with sequential priorities", () => {
+test("catalogFor orders the picker by use, with sequential priorities", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
@@ -352,18 +352,40 @@ test("catalogFor groups models by provider label with sequential priorities", ()
       tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
       nativeCatalogFile: file,
     });
-    const groups = [];
-    for (const entry of catalog.models) {
-      const label = entry.display_name.split(" - ")[0];
-      if (groups.at(-1)?.label !== label) groups.push({ label, slugs: [] });
-      groups.at(-1).slugs.push(entry.slug);
-    }
-    assert.deepEqual(groups.map((group) => group.label), ["DeepSeek Official", "OpenAI", "OpenCode Go"], "groups are ordered by provider label");
-    assert.deepEqual(groups[1].slugs, ["gpt-5.5", "gpt-5.2"], "native entries keep their captured order within the group");
-    assert.ok(groups[2].slugs[0].includes("deepseek-v4-flash") || groups[2].slugs[0] === "deepseek-v4-flash", "the curated main model opens the OpenCode Go group");
+    // Renumbering is what the picker needs: native entries arrive carrying
+    // their own priorities (7, 29) and would otherwise scatter through the list.
     catalog.models.forEach((entry, index) => {
       assert.equal(entry.priority, index + 1, `${entry.slug} carries a sequential picker priority`);
     });
+    // With no usage recorded, nothing has a claim on the top, so every model
+    // keeps the position it arrived in - a catalog that reshuffled itself on
+    // each write would move the picker under the user for no reason.
+    const unused = catalog.models.map((entry) => entry.slug);
+    const again = catalogFor({
+      ...configStub(),
+      tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+      nativeCatalogFile: file,
+    }).models.map((entry) => entry.slug);
+    assert.deepEqual(again, unused, "the order is stable when nothing has been used");
+
+    // Traffic is what promotes: the two most-used models open the picker, in
+    // that order, wherever they sat before.
+    const ordered = catalogFor({
+      ...configStub(),
+      tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
+      nativeCatalogFile: file,
+      usageByModel: {
+        "gpt-5.2": { requests: 900 },
+        "deepseek-v4-pro@opencode-go": { requests: 4000 },
+      },
+    }).models.map((entry) => entry.slug);
+    assert.equal(ordered[0], "deepseek-v4-pro@opencode-go", "the most-used model opens the picker");
+    assert.equal(ordered[1], "gpt-5.2", "then the next, native or not");
+    assert.deepEqual(
+      ordered.filter((slug) => !["deepseek-v4-pro@opencode-go", "gpt-5.2"].includes(slug)),
+      unused.filter((slug) => !["deepseek-v4-pro@opencode-go", "gpt-5.2"].includes(slug)),
+      "and the untouched tail keeps its previous order",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -398,4 +420,22 @@ test("catalogFor never publishes chat-dialect models even if marked available", 
   };
   const catalog = catalogFor({ ...configStub(), profile });
   assert.ok(!catalog.models.some((entry) => entry.slug === "qwen3.8-max"), "chat vision model must not be published");
+});
+
+// The convention that keeps the Models page honest: a model that only speaks
+// chat/completions can never reach the picker, because the relay Codex talks to
+// speaks Responses and nothing converts between them. Marking such a model
+// `status: "unavailable"` is how that is expressed today, and it is what stops
+// the roster from listing a row whose switch would do nothing - the roster
+// filters on status alone. Nothing enforced the pairing, so this does.
+test("a chat-only model is also marked unavailable, so it never reaches a picker", () => {
+  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
+    const chatOnly = (profile.availableModels || []).filter((model) => model.endpoint === "chat");
+    const published = chatOnly.filter((model) => model.status !== "unavailable");
+    assert.deepEqual(
+      published.map((model) => model.id),
+      [],
+      `${profile.id}: a chat-only model must carry status "unavailable" as well`,
+    );
+  }
 });

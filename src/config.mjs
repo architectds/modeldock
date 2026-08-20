@@ -7,6 +7,7 @@ import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
+import { readModelToggles } from "./model-toggles.mjs";
 import { readCustomEndpoints } from "./custom-endpoints.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { defaultStateDir, stateDir } from "./state-dir.mjs";
@@ -384,6 +385,10 @@ export function loadConfig() {
   // the pickers read this map instead. Without it, editing a native model's
   // window returned 200 and changed neither the page nor the file Codex reads.
   const contextOverrides = readContextOverrides();
+  // Which published models reach Codex's picker. Read here so every consumer of
+  // a config - the catalog writer, the roster, a test fixture - sees the same
+  // set without each of them reaching for the file.
+  const modelToggles = readModelToggles();
   const customBaseUrl = customEndpoints[0]?.baseUrl || "";
   const customApiKey = customEndpoints[0]?.apiKey || "";
   const customModel = customEndpoints[0]?.modelId || "";
@@ -470,6 +475,7 @@ export function loadConfig() {
     tokens,
     customEndpoints,
     contextOverrides,
+    modelToggles,
     customBaseUrl,
     customApiKey,
     customModel,

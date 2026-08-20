@@ -763,3 +763,37 @@ body { padding-left: 88px; }
 .xai-device p { margin: 0 0 6px; color: var(--muted); font-size: 11px; }
 .xai-device a { color: var(--blue); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
 .xai-code { margin: 8px 0 0 !important; color: var(--text) !important; font: 700 20px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace !important; letter-spacing: .18em; }
+
+/* Models page: the publish switch in the first column.
+   Narrower than .mode-track (40x20) because it repeats on every row of a
+   thirty-model table, where that one reads as a control per line rather than
+   as a column. Same colour language, half the footprint. */
+.roster-head-switch { width: 46px; }
+.roster-table td.roster-switch-cell { width: 46px; padding-left: 10px; padding-right: 0; }
+.roster-switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.roster-switch input { position: absolute; opacity: 0; pointer-events: none; }
+.roster-switch-track { position: relative; width: 30px; height: 16px; border: 1px solid #365064; border-radius: 99px; background: #16242f; transition: background .18s ease, border-color .18s ease; }
+.roster-switch-track i { position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); transition: left .18s ease, background .18s ease; }
+.roster-switch input:checked + .roster-switch-track { border-color: #2a78a9; background: rgba(80,183,255,.16); }
+.roster-switch input:checked + .roster-switch-track i { left: 16px; background: var(--blue); }
+.roster-switch input:focus-visible + .roster-switch-track { outline: 2px solid var(--blue); outline-offset: 3px; }
+.roster-switch input:disabled + .roster-switch-track { cursor: default; }
+/* Locked: the gateway is pointed at this model, so it is published whatever
+   the file says. Drawn as on and settled - not greyed out, which would read as
+   "off and unavailable" on the one row that is most certainly on. */
+.roster-switch.locked { cursor: default; }
+.roster-switch.locked input:checked + .roster-switch-track { border-color: #2f4a5e; background: rgba(137,160,175,.14); }
+.roster-switch.locked input:checked + .roster-switch-track i { background: var(--muted); }
+/* A parked row stays legible - it is the only way back on - but recedes. */
+.roster-parked td { color: #6c8090; }
+.roster-parked td strong { color: #8ea3b1; font-weight: 500; }
+
+/* Sortable column headings. The arrow only appears on the active column: a
+   table where every heading carries one says nothing about which is in force. */
+.roster-table th.roster-head-sort { cursor: pointer; user-select: none; transition: color .15s ease; }
+.roster-table th.roster-head-sort:hover { color: var(--text); }
+.roster-table th.roster-head-sort:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.roster-table th.is-sorted { color: var(--blue); }
+.roster-table th.is-sorted::after { content: ""; display: inline-block; width: 0; height: 0; margin-left: 6px; vertical-align: middle; border-left: 3.5px solid transparent; border-right: 3.5px solid transparent; }
+.roster-table th.is-sorted[data-direction="desc"]::after { border-top: 4px solid var(--blue); }
+.roster-table th.is-sorted[data-direction="asc"]::after { border-bottom: 4px solid var(--blue); }
