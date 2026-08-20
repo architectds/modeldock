@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
+import { allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -390,6 +390,19 @@ export function normalizeLegacySlug(model, knownModels) {
 export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
   if (typeof requestedModel !== "string" || requestedModel.length === 0) return false;
   if (nativeSlugs?.has?.(requestedModel)) return true;
+  // A slug carrying a provider suffix this gateway owns is addressed to that
+  // provider, whether or not it still resolves. "Unknown means native" is right
+  // for a bare Codex slug and wrong here: it sent a request for a removed
+  // custom endpoint to chatgpt.com, which has never heard of the model, and the
+  // 401 that came back read as an auth problem rather than a missing endpoint.
+  //
+  // Only suffixes naming a real profile count. "@openai" names none - it is a
+  // picker label, not an owner - and keeps falling through to the rule below.
+  const separator = requestedModel.lastIndexOf(PROVIDER_SEPARATOR);
+  if (separator > 0) {
+    const suffix = requestedModel.slice(separator + PROVIDER_SEPARATOR.length);
+    if (allProfiles().some((profile) => profile.id === suffix)) return false;
+  }
   return !(knownModels && knownModels.has(requestedModel));
 }
 
@@ -2747,6 +2760,22 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         upstream: target.provider,
       };
     }
+    // Nothing serves this model any more: the endpoint that did was removed,
+    // and Codex still lists it because its catalog is read at startup. Without
+    // this the URL is "/responses" with no host and fetch fails as if the
+    // network were at fault.
+    if (!/^https?:\/\//i.test(String(target.url || ""))) {
+      const gone = {
+        error: {
+          type: "configuration_error",
+          message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
+        },
+      };
+      res.statusCode = 503;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(gone));
+      return { ok: false, httpStatus: 503, route, error: gone };
+    }
     if (!target.token && target.tokenRequired !== false) {
       const body = JSON.stringify({
         error: {
@@ -3001,6 +3030,22 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const upstreamModel = target.model;
   if (config.debug?.dumpAll && config.debug?.dumpDir) {
     dumpRequestBody(config.debug.dumpDir, { ...normalizedPayload, model: upstreamModel });
+  }
+  // Nothing serves this model any more: the endpoint that did was removed,
+  // and Codex still lists it because its catalog is read at startup. Without
+  // this the URL is "/responses" with no host and fetch fails as if the
+  // network were at fault.
+  if (!/^https?:\/\//i.test(String(target.url || ""))) {
+    const gone = {
+      error: {
+        type: "configuration_error",
+        message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
+      },
+    };
+    res.statusCode = 503;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(gone));
+    return { ok: false, httpStatus: 503, route, error: gone };
   }
   if (!target.token && target.tokenRequired !== false) {
     const error = {

@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -1710,6 +1710,8 @@ export function createApp(services = createServices()) {
       });
       writeCustomEndpoints(endpointsFile(), next);
       const endpoints = republishEndpoints();
+      // A newly added endpoint publishes a model Codex reads only at startup.
+      await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, "custom_endpoint_add", { ok: true });
       return res.json({
         ok: true,
@@ -1747,6 +1749,8 @@ export function createApp(services = createServices()) {
       config.visionModel = "";
       services.modelSelection.visionModel = "";
     }
+    // The model stays in the picker and no longer resolves; a restart drops it.
+    await services.configSwitcher.markRestartRequired();
     recordConfigAction(metrics, "custom_endpoint_remove", { ok: true });
     return res.json({ removed: model, endpoints: next.map((entry) => ({ modelId: entry.modelId, baseUrl: entry.baseUrl })) });
   });
@@ -1931,6 +1935,8 @@ export function createApp(services = createServices()) {
       writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
       applyLocalEngineProfile(engine, snapshot);
       services.writeCatalogFile?.();
+      // Same for a local engine: the models are new to Codex.
+      await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
       return res.json({ engine, baseUrl: base, models: snapshot.models, settings: settingsPayload(services) });
     } catch (error) {
@@ -1962,17 +1968,41 @@ export function createApp(services = createServices()) {
         error: { type: "no_launch", message: `No remembered way to start ${engine || "that engine"}.` },
       });
     }
+    // The button hides itself while the engine answers, but that is a rendered
+    // snapshot: an engine that came back between the render and the click would
+    // get a second copy started on a port the first one holds. The second copy
+    // fails to bind, and the only place that failure appears is the log below.
+    // Checking here costs one probe and turns a confusing "start" into a plain
+    // "it is already running".
+    const alreadyUp = (await (services.discoverEngines || discoverLocalEngines)({}))
+      .some((found) => found.engine === engine);
+    if (alreadyUp) {
+      recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: "already running" });
+      return res.status(409).json({
+        error: { type: "already_running", message: `${LOCAL_ENGINE_LABELS[engine] || engine} is already answering.` },
+      });
+    }
     try {
+      // Never discard the output of a background launch (AGENTS.md): an engine
+      // that dies on a missing model file, a held port, or a driver fault says
+      // so on stderr and nowhere else - and this button is pressed precisely
+      // when the engine has already failed once.
+      const logDir = path.join(os.tmpdir(), "modeldock");
+      mkdirSync(logDir, { recursive: true });
+      const logFile = path.join(logDir, `engine-${engine}.log`);
+      const log = openSync(logFile, "a");
       const child = spawn(remembered.binary, remembered.args, {
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", log, log],
         windowsHide: true,
       });
+      // The parent's copy of the descriptor is not needed once the child owns it.
+      closeSync(log);
       // Ours to start, not ours to hold: the engine outlives this gateway, and
       // a restart of ModelDock must not take the user's model down with it.
       child.unref();
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: true });
-      return res.json({ engine, started: true, binary: remembered.binary });
+      return res.json({ engine, started: true, binary: remembered.binary, logFile });
     } catch (error) {
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: error.message });
       return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
@@ -2017,6 +2047,8 @@ export function createApp(services = createServices()) {
       applyOllamaProfile(config, snapshot);
       config.ollamaBaseUrl = result.endpoint;
       services.writeCatalogFile?.();
+      // Ollama publishes models Codex cannot see until it restarts.
+      await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, "ollama_connect", { ok: true, models: result.models.length });
       return res.json({
         ok: true,

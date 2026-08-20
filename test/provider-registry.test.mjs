@@ -282,3 +282,45 @@ test("a failing vision model fails, rather than being replaced by a remote one",
 
   applyOllamaProfile({}, null);
 });
+
+// A model whose endpoint was removed is still in Codex's picker, because that
+// catalog is read at startup. Selecting it used to build "/responses" with no
+// host, and fetch failed as if the network were at fault. The gateway says what
+// actually happened instead.
+test("a model nothing serves fails as configuration, not as network", async () => {
+  const { applyCustomProfile } = await import("../src/profiles.mjs");
+
+  const configured = { customEndpoints: [{ modelId: "vendor-x", baseUrl: "https://api.vendor.example/v1", apiKey: "sk-v" }] };
+  applyCustomProfile(configured);
+  assert.match(upstreamTargetFor(configured, "vendor-x@custom").url, /^https:\/\//);
+
+  // The endpoint is removed while Codex still lists the model.
+  const removed = { customEndpoints: [] };
+  applyCustomProfile(removed);
+  const target = upstreamTargetFor(removed, "vendor-x@custom");
+  assert.equal(
+    /^https?:\/\//i.test(target.url),
+    false,
+    "the target has no host, which is the shape the relay refuses",
+  );
+});
+
+// Disconnecting a local engine is not the same event. The profile keeps its
+// address and the model keeps working while the engine runs, which is why that
+// route does not raise the restart banner: a restart would remove a working
+// entry rather than fix a broken one.
+test("disconnecting a local engine leaves its model reachable", async () => {
+  const { applyLocalEngineProfile } = await import("../src/profiles.mjs");
+
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen", upstreamId: "qwen" }],
+  });
+  const connected = upstreamTargetFor({}, "qwen@llamacpp");
+  applyLocalEngineProfile("llamacpp", null);
+  const afterDisconnect = upstreamTargetFor({}, "qwen@llamacpp");
+
+  assert.equal(afterDisconnect.url, connected.url, "the address survives the disconnect");
+  assert.equal(afterDisconnect.tokenRequired, false, "and the tokenless gate still lets it through");
+  assert.match(afterDisconnect.url, /^http:\/\/127\.0\.0\.1/);
+});

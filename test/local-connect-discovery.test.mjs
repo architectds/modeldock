@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
@@ -168,4 +168,55 @@ test("only the engine actually attached is shown as connected", async (t) => {
   assert.equal(byPort[8080].connected, false, "a second llama.cpp is not attached just by being llama.cpp");
   assert.equal(byPort[8080].connectedModels, 0);
   assert.equal(engines.filter((engine) => engine.connected).length, 1);
+});
+
+test("restart refuses to start a second copy of an engine that is answering", async (t) => {
+  // The button hides itself while the engine answers, but that is a rendered
+  // snapshot. A direct call - or a click after the engine came back - used to
+  // spawn a second copy that could only fail to bind the port.
+  const { base, services } = await startApp(t, {
+    discoverEngines: async () => [
+      { engine: "llamacpp", baseUrl: "http://127.0.0.1:11435", port: 11435, models: ["a"], connectable: true },
+    ],
+  });
+  // We do know how to start it - the race is that it came back on its own.
+  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "a" }],
+    launch: { binary: process.execPath, args: ["-e", "0"] },
+  });
+  const response = await fetch(`${base}/api/local/restart`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 409);
+  assert.equal(payload.error.type, "already_running");
+});
+
+test("restart reports where the engine's output went", async (t) => {
+  // AGENTS.md: a background launch must log, never discard. This button is
+  // pressed exactly when the engine already died once, so the reason has to
+  // land somewhere the user can be pointed at.
+  const { base, services } = await startApp(t, { discoverEngines: async () => [] });
+  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "a" }],
+    // Something harmless that exists on every platform and exits immediately.
+    launch: { binary: process.execPath, args: ["-e", "process.stderr.write('engine boot\n')"] },
+  });
+  const response = await fetch(`${base}/api/local/restart`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.ok(payload.logFile, "the caller is told where the output went");
+  assert.match(payload.logFile, /engine-llamacpp\.log$/);
+  // Give the detached child a moment to write and exit.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const written = await readFile(payload.logFile, "utf8");
+  assert.match(written, /engine boot/, "stderr reached the log instead of /dev/null");
 });
