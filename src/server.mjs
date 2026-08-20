@@ -1865,6 +1865,37 @@ export function createApp(services = createServices()) {
     }
   });
 
+  // Replace the key on an endpoint that is already configured. A key typed
+  // once used to be unreachable: the only way to correct it was to remove the
+  // endpoint and add it again, which also threw away its context window and
+  // vision flag. The address is not editable here - a different host is a
+  // different endpoint - so only the credential moves.
+  app.post("/api/custom/key", mutateConfig, async (req, res) => {
+    const model = String(req.body?.modelId || "").trim();
+    const providerId = String(req.body?.providerId || "").trim();
+    const apiKey = String(req.body?.apiKey || "");
+    if (!model || !apiKey) {
+      return res.status(400).json({ error: { type: "model", message: "A model id and an API key are required." } });
+    }
+    const before = readCustomEndpoints(endpointsFile());
+    let found = false;
+    const next = before.map((entry) => {
+      if (entry.modelId !== model) return entry;
+      if (providerId && (entry.providerId || "custom") !== providerId) return entry;
+      found = true;
+      return { ...entry, apiKey };
+    });
+    if (!found) {
+      return res.status(404).json({ error: { type: "model", message: `No endpoint serves ${model}.` } });
+    }
+    writeCustomEndpoints(endpointsFile(), next);
+    republishEndpoints();
+    recordConfigAction(metrics, "custom_endpoint_key", { ok: true });
+    // The key changes what the endpoint can do, not what Codex sees, so no
+    // restart is asked for.
+    return res.json({ modelId: model, providerId: providerId || "custom" });
+  });
+
   app.post("/api/custom/remove", mutateConfig, async (req, res) => {
     const model = String(req.body?.modelId || "").trim();
     const providerId = String(req.body?.providerId || "").trim();

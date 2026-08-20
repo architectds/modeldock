@@ -1667,6 +1667,11 @@ $("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(
 // One record per model rather than one slot: a self-hosted vLLM alongside a
 // third-party API is an ordinary setup, and the slot this replaced silently
 // overwrote the first endpoint when a second was added.
+// One field per configured endpoint, shaped like the preset above it: the
+// provider on top, its key below, editable in place. The list used to be
+// summary rows you could only delete, so a key typed once was invisible and
+// unchangeable afterwards - the page could show you what you had configured
+// but not let you correct it.
 async function renderEndpointList() {
   const host = $("endpoint-list");
   const note = $("endpoint-list-note");
@@ -1678,55 +1683,119 @@ async function renderEndpointList() {
     const endpoints = data.endpoints || [];
     host.innerHTML = "";
     for (const endpoint of endpoints) {
-      const item = document.createElement("li");
-      item.className = "endpoint-row";
-      const head = document.createElement("div");
-      head.className = "endpoint-head";
-      const name = document.createElement("strong");
-      name.textContent = endpoint.modelId;
-      const where = document.createElement("span");
-      where.className = "endpoint-base";
-      where.textContent = endpoint.baseUrl;
-      head.append(name, where);
-      const facts = document.createElement("p");
-      facts.className = "endpoint-facts";
-      const bits = [];
-      // The model id is no longer unique on its own - two providers may serve
-      // the same one - so the row names the provider that does.
-      bits.push(endpoint.providerId || "custom");
-      if (endpoint.contextWindow) bits.push(`${number(endpoint.contextWindow)} ${t("roster.context")}`);
-      if (endpoint.supportsVision) bits.push(t("roster.vision"));
-      bits.push(t(endpoint.apiKeyConfigured ? "endpoints.keySet" : "endpoints.keyMissing"));
-      facts.textContent = bits.join(" \u00b7 ");
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "custom-action endpoint-remove";
-      remove.textContent = t("endpoints.remove");
-      remove.addEventListener("click", async () => {
-        remove.disabled = true;
-        try {
-          const reply = await fetch("/api/custom/remove", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ modelId: endpoint.modelId, providerId: endpoint.providerId }),
-          });
-          const body = await reply.json();
-          if (!reply.ok) throw new Error(body.error?.message || `Remove ${reply.status}`);
-          await renderEndpointList();
-          renderModelRoster().catch(() => {});
-          poll().catch(() => {});
-        } catch (error) {
-          window.alert(error.message);
-          remove.disabled = false;
-        }
-      });
-      item.append(head, facts, remove);
-      host.append(item);
+      host.append(endpointField(endpoint));
     }
     if (note) note.textContent = endpoints.length ? "" : t("endpoints.empty");
   } catch (error) {
     if (note) note.textContent = error.message;
   }
+}
+
+$("endpoint-save")?.addEventListener("click", async () => {
+  const button = $("endpoint-save");
+  const status = $("endpoint-save-status");
+  button.disabled = true;
+  if (status) status.textContent = t("settings.saving");
+  try {
+    const deepseek = $("settings-deepseek-token")?.value.trim();
+    if (deepseek) {
+      const reply = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deepseekApiKey: deepseek }),
+      });
+      const body = await reply.json();
+      if (!reply.ok) throw new Error(body.error?.message || `Save ${reply.status}`);
+      $("settings-deepseek-token").value = "";
+    }
+    // A user-set endpoint keeps its own key, so each changed one is its own
+    // write rather than a single payload the server would have to unpick.
+    for (const field of document.querySelectorAll("#endpoint-list .field")) {
+      const key = field.querySelector(".endpoint-key");
+      const value = key?.value.trim();
+      if (!value) continue;
+      const reply = await fetch("/api/custom/key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          modelId: field.dataset.modelId,
+          providerId: field.dataset.providerId,
+          apiKey: value,
+        }),
+      });
+      const body = await reply.json();
+      if (!reply.ok) throw new Error(body.error?.message || `Save ${reply.status}`);
+      key.value = "";
+    }
+    if (status) status.textContent = t("settings.saved");
+    await renderEndpointList();
+    pollConfig().catch(() => {});
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function endpointField(endpoint) {
+  const field = document.createElement("label");
+  field.className = "field";
+  field.dataset.modelId = endpoint.modelId;
+  field.dataset.providerId = endpoint.providerId || "custom";
+
+  const head = document.createElement("div");
+  head.className = "field-head";
+  const name = document.createElement("span");
+  // The address is the provider and the model together: the same model id
+  // can be served by two providers, and the name has to say which one this is.
+  name.textContent = `${endpoint.providerId || "custom"} / ${endpoint.modelId}`;
+  const where = document.createElement("a");
+  where.className = "endpoint-base";
+  where.href = endpoint.baseUrl;
+  where.target = "_blank";
+  where.rel = "noopener noreferrer";
+  where.textContent = endpoint.baseUrl;
+  head.append(name, where);
+
+  const row = document.createElement("div");
+  row.className = "settings-row";
+  const key = document.createElement("input");
+  key.type = "password";
+  key.className = "endpoint-key";
+  key.autocomplete = "off";
+  key.spellcheck = false;
+  // Never echo a stored key back into the field: the placeholder reports that
+  // one is set, and leaving it blank keeps it - the same contract the preset
+  // key fields have always had.
+  key.placeholder = t(endpoint.apiKeyConfigured ? "settings.configured" : "settings.required");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "custom-action endpoint-remove";
+  remove.textContent = t("endpoints.remove");
+  remove.addEventListener("click", async (event) => {
+    event.preventDefault();
+    remove.disabled = true;
+    try {
+      const reply = await fetch("/api/custom/remove", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ modelId: endpoint.modelId, providerId: endpoint.providerId }),
+      });
+      const body = await reply.json();
+      if (!reply.ok) throw new Error(body.error?.message || `Remove ${reply.status}`);
+      await renderEndpointList();
+      renderModelRoster().catch(() => {});
+      poll().catch(() => {});
+      pollConfig().catch(() => {});
+    } catch (error) {
+      window.alert(error.message);
+      remove.disabled = false;
+    }
+  });
+  row.append(key, remove);
+
+  field.append(head, row);
+  return field;
 }
 
 // --- Custom model add section ---
@@ -2400,9 +2469,9 @@ async function saveSettings() {
   try {
     const body = {};
     const go = $("settings-go-token").value.trim();
-    const ds = $("settings-deepseek-token").value.trim();
+    // DeepSeek moved to the API page and saves there; this button keeps the
+    // providers that are still on this page.
     if (go) body.opencodeGoToken = go;
-    if (ds) body.deepseekApiKey = ds;
     if (!Object.keys(body).length) {
       closeSettings();
       return;

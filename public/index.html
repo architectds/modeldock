@@ -201,13 +201,6 @@
         </div>
         <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
       </label>
-      <label class="field">
-        <div class="field-head">
-          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
-          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-        </div>
-        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-      </label>
       <div class="field" id="xai-section">
         <div class="field-head">
           <span data-i18n="xai.title">xAI (Grok) subscription</span>
@@ -236,10 +229,21 @@
         <section class="panel page-panel">
           <p class="eyebrow" data-i18n="nav.api">Custom endpoint</p>
           <h2 data-i18n="page.apiTitle">Custom endpoint</h2>
-      <div class="field" id="endpoint-list-field">
-        <div class="field-head"><span data-i18n="endpoints.title">Configured endpoints</span></div>
-        <ul id="endpoint-list" class="endpoint-list"></ul>
-        <p id="endpoint-list-note" class="custom-hint" aria-live="polite"></p>
+      <div class="field-head" id="endpoint-list-head">
+        <span data-i18n="endpoints.title">Configured endpoints</span>
+        <span id="endpoint-list-note" class="custom-hint" aria-live="polite"></span>
+      </div>
+      <label class="field" id="deepseek-field">
+        <div class="field-head">
+          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+        </div>
+        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      </label>
+      <div id="endpoint-list" class="endpoint-list"></div>
+      <div class="settings-actions">
+        <span id="endpoint-save-status" aria-live="polite"></span>
+        <button id="endpoint-save" type="button" data-i18n="settings.save">Save</button>
       </div>
       <details id="custom-add" class="custom-add">
         <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
