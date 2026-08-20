@@ -1445,7 +1445,15 @@ async function renderLocalEngines() {
     // colour follows reality rather than the last good scan.
     localDiscovery.clear();
     for (const engine of engines) {
-      if (!engine.offline && Number.isInteger(engine.port)) localDiscovery.set(engine.engine, engine);
+      // One entry per engine, and which one matters: discovery lists the ports
+      // it read from the process table before the fixed candidates, precisely so
+      // the attributed one wins. Overwriting on a repeated engine id inverted
+      // that - a llama-server on 11435 was replaced by a fixed-list hit on 8080,
+      // taking the pid, binary and launch arguments with it, and the dialog then
+      // offered the default port while the real server ran elsewhere.
+      if (!engine.offline && Number.isInteger(engine.port) && preferEngine(engine, localDiscovery.get(engine.engine))) {
+        localDiscovery.set(engine.engine, engine);
+      }
     }
     for (const engineId of localEngineIds) paintEngineButton(engineId);
     for (const engine of engines) {
@@ -1897,6 +1905,16 @@ function renderOllamaSection(state) {
 // enforced by assertLocalBase on the server.
 const localEngineIds = ["ollama", "llamacpp", "vllm"];
 const localDiscovery = new Map();
+
+// A connected engine beats an idle one; an engine we could attribute to a
+// process beats one we only found by knocking on a default port. Otherwise the
+// first stays, which is discovery order.
+function preferEngine(next, current) {
+  if (!current) return true;
+  if (Boolean(next.connected) !== Boolean(current.connected)) return Boolean(next.connected);
+  if (Boolean(next.pid) !== Boolean(current.pid)) return Boolean(next.pid);
+  return false;
+}
 const localConnectedState = new Map();
 const localDefaultPorts = { ollama: 11434, llamacpp: 8080, vllm: 8000 };
 let localConfigEngine = "";
