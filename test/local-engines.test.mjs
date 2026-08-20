@@ -77,7 +77,7 @@ test("discoverLocalEngines returns only what answered", async () => {
     "8080/props": { slots_idle: 2 },
     "8080/v1/models": { data: [{ id: "qwen3-27b" }] },
   });
-  const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
+  const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50, listeners: [] });
   assert.deepEqual(found.map((f) => f.engine), ["ollama", "llamacpp"]);
   assert.deepEqual(found.find((f) => f.engine === "llamacpp").models, ["qwen3-27b"]);
 });
@@ -155,7 +155,7 @@ test("every engine discovery calls connectable is one the gateway can attach", a
     return { ok: false, json: async () => ({}) };
   };
 
-  const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
+  const found = await discoverLocalEngines({ fetchImpl, timeoutMs: 50, listeners: [] });
   assert.deepEqual(found.map((f) => f.engine), ["llamacpp", "vllm"], "both engines are found and named");
 
   for (const engine of found) {
@@ -176,7 +176,7 @@ test("a bare OpenAI-compatible server is found but not offered a Connect button"
     if (url === "http://127.0.0.1:8000/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
     return { ok: false, json: async () => ({}) };
   };
-  const [found] = await discoverLocalEngines({ fetchImpl, timeoutMs: 50 });
+  const [found] = await discoverLocalEngines({ fetchImpl, timeoutMs: 50, listeners: [] });
   // It has no profile to attach to, and the API page already takes an endpoint
   // with a key. Offering a button that could only fail would be worse.
   assert.equal(found.engine, "openai");

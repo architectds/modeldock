@@ -280,7 +280,7 @@
           <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" data-i18n="ollama.download">No Ollama, download here</a>
         </div>
         <div class="custom-row">
-          <button id="ollama-connect" type="button" class="custom-action primary" data-i18n="ollama.connect">Connect and Save</button>
+          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
@@ -291,12 +291,7 @@
           <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer" data-i18n="llamacpp.download">No llama.cpp, get it here</a>
         </div>
         <div class="custom-row">
-          <label class="chip-toggle">
-            <input id="llamacpp-vision" type="checkbox" />
-            <span data-i18n="local.vision">Takes images</span>
-          </label>
-          <button id="llamacpp-connect" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
-          <button id="llamacpp-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="llamacpp-error" class="custom-error" aria-live="polite" hidden></p>
@@ -307,12 +302,7 @@
           <a href="https://docs.vllm.ai/en/latest/getting_started/installation.html" target="_blank" rel="noopener noreferrer" data-i18n="vllm.download">No vLLM, get it here</a>
         </div>
         <div class="custom-row">
-          <label class="chip-toggle">
-            <input id="vllm-vision" type="checkbox" />
-            <span data-i18n="local.vision">Takes images</span>
-          </label>
-          <button id="vllm-connect" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
-          <button id="vllm-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="vllm-error" class="custom-error" aria-live="polite" hidden></p>
@@ -337,6 +327,32 @@
 
     </main>
 
+    <!-- One port dialog for all three local engines. Discovery pre-fills it;
+         an engine that was not found opens the same dialog empty so there is
+         always a way in. No API key field: a local engine is reachable only on
+         loopback, which is the whole reason it needs no credential. -->
+    <dialog id="local-config-dialog" class="settings-dialog">
+      <div class="settings-card local-config-card">
+        <div class="settings-head">
+          <div><p class="eyebrow" data-i18n="local.portEyebrow">LOCAL ENGINE</p><h2 id="local-config-title">Engine</h2></div>
+          <button id="local-config-close" type="button" class="settings-close" aria-label="Close" title="Close">&times;</button>
+        </div>
+        <label class="field">
+          <div class="field-head"><span data-i18n="local.port">Port on this machine</span></div>
+          <input id="local-config-port" class="lang-select" type="number" min="1" max="65535" inputmode="numeric" placeholder="11435" />
+        </label>
+        <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
+        <label class="chip-toggle" id="local-config-vision-row">
+          <input id="local-config-vision" type="checkbox" />
+          <span data-i18n="local.vision">Takes images</span>
+        </label>
+        <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
+        <div class="custom-row local-config-actions">
+          <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
+          <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+        </div>
+      </div>
+    </dialog>
     <dialog id="settings-dialog" class="settings-dialog">
       <div class="settings-card">
         <div class="settings-head">

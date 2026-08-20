@@ -1246,6 +1246,17 @@ async function openSettings() {
 // actually running", and grouping answers "what could I run from here"
 // instead. Provider is a column because a model id is provider plus name and
 // the same name serves from two of them.
+// Thousands, rounded, so a column of windows reads at a glance: 272, 1000,
+// 262. Exact thousands were worse than the six digits they replaced - 262144
+// became 262.144 and 1048576 became 1048.576.
+//
+// Rounding a field that is also its own input would normally rewrite the
+// number on the next save, so the Save button watches the text rather than
+// the value: a row nobody typed in cannot save, whatever it displays. The
+// exact window is in the cell's tooltip.
+const contextToK = (value) => (value ? String(Math.round(value / 1000)) : "");
+const contextFromK = (raw) => Math.round(Number(raw) * 1000);
+
 const ROSTER_COLUMNS = ["model", "provider", "context", "vision", "requests", "tps", "cache"];
 
 function rosterCell(text, className) {
@@ -1287,10 +1298,11 @@ function rosterRow(entry, rank) {
   contextField.type = "text";
   contextField.className = "roster-context";
   contextField.inputMode = "numeric";
-  contextField.value = entry.contextWindow ? String(entry.contextWindow) : "";
-  contextField.setAttribute("aria-label", t("roster.context"));
+  contextField.value = contextToK(entry.contextWindow);
+  const contextShown = contextField.value;
+  contextField.setAttribute("aria-label", t("roster.contextWindow"));
   if (entry.contextSource) {
-    contextField.title = t(`roster.context.${entry.contextSource}`);
+    contextField.title = `${number(entry.contextWindow)} - ${t(`roster.context.${entry.contextSource}`)}`;
     if (entry.contextSource !== "measured") contextField.classList.add("roster-claimed");
     if (entry.contextSource === "user") contextField.classList.add("roster-edited");
   }
@@ -1303,12 +1315,12 @@ function rosterRow(entry, rank) {
     const raw = contextField.value.trim();
     // An emptied field means "forget my correction", not "set it to zero".
     if (raw === "") return null;
-    const value = Number(raw.replace(/[,_\s]/g, ""));
+    const value = contextFromK(raw.replace(/[,_\s]/g, ""));
     return Number.isFinite(value) ? value : undefined;
   };
   const syncSave = () => {
     const next = parse();
-    save.hidden = next === undefined || next === (entry.contextWindow || null);
+    save.hidden = next === undefined || contextField.value.trim() === contextShown;
   };
   contextField.addEventListener("input", syncSave);
   save.addEventListener("click", async () => {
@@ -1332,7 +1344,7 @@ function rosterRow(entry, rank) {
       pollConfig().catch(() => {});
     } catch (error) {
       window.alert(error.message);
-      contextField.value = String(entry.contextWindow || "");
+      contextField.value = contextToK(entry.contextWindow);
       syncSave();
     } finally {
       save.disabled = false;
@@ -1342,7 +1354,7 @@ function rosterRow(entry, rank) {
   contextField.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !save.hidden) save.click();
     if (event.key === "Escape") {
-      contextField.value = String(entry.contextWindow || "");
+      contextField.value = contextToK(entry.contextWindow);
       syncSave();
       contextField.blur();
     }
@@ -1381,7 +1393,12 @@ async function renderModelRoster() {
     const head = document.createElement("tr");
     for (const column of ROSTER_COLUMNS) {
       const cell = document.createElement("th");
-      cell.textContent = t(`roster.${column}`);
+      // The context column names its unit; every other column is its own label.
+      cell.textContent = t(column === "context" ? "roster.contextWindow" : `roster.${column}`);
+      // Numeric columns are right-aligned in the body, so their headers are
+      // too. This was a nth-child rule counting the first four columns, which
+      // put the Context heading on the left of a right-aligned column.
+      if (["context", "requests", "tps", "cache"].includes(column)) cell.className = "roster-head-num";
       head.append(cell);
     }
     const body = document.createElement("tbody");
@@ -1407,6 +1424,11 @@ async function renderModelRoster() {
 // Read-only: it reports what is already listening so the user does not have to
 // know a port number. Connecting still goes through the flow that owns the
 // engine, which is why nothing here writes.
+// 81920 reads as 80K to anyone who set it; the exact figure is noise here.
+function formatContextSize(tokens) {
+  return tokens >= 1024 ? `${Math.round(tokens / 1024)}K` : String(tokens);
+}
+
 async function renderLocalEngines() {
   const list = $("local-engine-list");
   const note = $("local-discovery-note");
@@ -1418,6 +1440,14 @@ async function renderLocalEngines() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Discover ${response.status}`);
     const engines = data.engines || [];
+    // Feed the dialog: a discovered engine opens pre-filled and its button goes
+    // blue. An engine that has stopped answering is dropped from the map so the
+    // colour follows reality rather than the last good scan.
+    localDiscovery.clear();
+    for (const engine of engines) {
+      if (!engine.offline && Number.isInteger(engine.port)) localDiscovery.set(engine.engine, engine);
+    }
+    for (const engineId of localEngineIds) paintEngineButton(engineId);
     for (const engine of engines) {
       const item = document.createElement("li");
       item.className = "local-engine";
@@ -1435,6 +1465,23 @@ async function renderLocalEngines() {
         ? engine.models.join(", ")
         : t("local.noModels");
       item.append(head, models);
+      // What the operating system already knows about the process behind this
+      // port: the model file actually loaded, the context it was started with,
+      // and which build is running. Read rather than asked for, so it cannot
+      // disagree with the engine. Absent for a port we could not attribute
+      // (inside WSL or a container), and that row simply stays shorter.
+      const spec = engine.launch;
+      if (spec || engine.binary) {
+        const runtime = document.createElement("p");
+        runtime.className = "local-engine-runtime";
+        const parts = [];
+        if (spec?.model) parts.push(spec.model.split(/[\\/]/).pop());
+        if (spec?.ctxSize) parts.push(t("local.ctxTokens", { tokens: formatContextSize(spec.ctxSize) }));
+        if (spec?.parallel) parts.push(t("local.slots", { count: spec.parallel }));
+        if (engine.binary) parts.push(engine.binary);
+        runtime.textContent = parts.join(" · ");
+        item.append(runtime);
+      }
       // A scan result, not a control. Every engine connects from its own
       // section below, so this list stays one shape for all three.
       const state = document.createElement("p");
@@ -1456,11 +1503,16 @@ async function renderLocalEngines() {
       list.append(item);
     }
     if (note) note.textContent = engines.length ? "" : t("local.none");
+    return engines;
   } catch (error) {
     if (note) note.textContent = error.message;
+    return [];
   }
 }
 
+// Rescan discovers and nothing else. Connecting is the dialog's job, which is
+// what gives an undiscovered engine a way in at all: there is no state where
+// the user is left with a button that can only report failure.
 $("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(() => {}); });
 // --- Configured endpoints (API page) ---
 //
@@ -1800,7 +1852,6 @@ if (customAddBtn) {
 }
 
 // --- Ollama (local) connect section ---
-const ollamaConnectBtn = $("ollama-connect");
 const ollamaStatus = $("ollama-status");
 const ollamaError = $("ollama-error");
 
@@ -1830,112 +1881,188 @@ function renderOllamaSection(state) {
   ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
 }
 
-if (ollamaConnectBtn) {
-  ollamaConnectBtn.addEventListener("click", async () => {
-    ollamaConnectBtn.disabled = true;
-    ollamaConnectBtn.textContent = t("ollama.connecting");
-    ollamaShow("", false);
-    try {
-      const response = await fetch("/api/ollama/connect", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        throw Object.assign(new Error(body.error?.message || "Connect failed"), { code: body.error?.type });
-      }
-      renderOllamaSection(body.settings?.ollama);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-    } catch (error) {
-      ollamaShow(ollamaErrorText(error.code) || error.message, true);
-    } finally {
-      ollamaConnectBtn.disabled = false;
-      ollamaConnectBtn.textContent = t("ollama.connect");
-    }
-  });
+// --- Local engines: one port dialog for all three ---
+//
+// Scanning discovers, the dialog decides. The two were briefly one action,
+// which left no way in at all when discovery came up empty; now a button
+// always opens the same dialog and an engine that was not found is typed in.
+//
+// Blue means reachable, not merely configured. Both routes to blue are a probe
+// that succeeded: discovery answers /props and /v1/models before it reports an
+// engine, and a hand-typed port turns blue only after connect accepts it. A
+// blue button that meant "a number is present" would be a colour saying nothing.
+//
+// There is no API key field. A local engine is reachable on loopback only, and
+// that is the entire reason it needs no credential - one decision, not two,
+// enforced by assertLocalBase on the server.
+const localEngineIds = ["ollama", "llamacpp", "vllm"];
+const localDiscovery = new Map();
+const localConnectedState = new Map();
+const localDefaultPorts = { ollama: 11434, llamacpp: 8080, vllm: 8000 };
+let localConfigEngine = "";
+
+function localEngineLabel(engine) {
+  return { ollama: "Ollama", llamacpp: "llama.cpp", vllm: "vLLM" }[engine] || engine;
 }
 
-// --- llama.cpp and vLLM (local) connect sections ---
-//
-// One function for both: they differ only in which engine id they post and
-// which elements they own. Writing it twice would be two places to fix the
-// next time the connect contract moves.
-function wireLocalSection(engine) {
-  const connectBtn = $(`${engine}-connect`);
-  const disconnectBtn = $(`${engine}-disconnect`);
+function paintEngineButton(engine) {
+  const button = $(`${engine}-configure`);
+  if (!button) return;
+  const reachable = localDiscovery.has(engine) || localConnectedState.get(engine);
+  button.classList.toggle("primary", Boolean(reachable));
+  button.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
+}
+
+function localShow(engine, text, isError) {
   const status = $(`${engine}-status`);
   const errorLine = $(`${engine}-error`);
-  const visionBox = $(`${engine}-vision`);
-  if (!connectBtn) return () => {};
+  if (status) {
+    status.hidden = !text || Boolean(isError);
+    status.textContent = isError ? "" : text || "";
+  }
+  if (errorLine) {
+    errorLine.hidden = !(text && isError);
+    errorLine.textContent = isError ? text : "";
+  }
+}
 
-  const show = (text, isError) => {
-    if (status) {
-      status.hidden = !text || Boolean(isError);
-      status.textContent = isError ? "" : text || "";
-    }
-    if (errorLine) {
-      errorLine.hidden = !(text && isError);
-      errorLine.textContent = isError ? text : "";
-    }
-  };
-
-  // Connect stays visible while connected so a reload after loading another
-  // model republishes the list; disconnect is what takes the profile down.
-  const render = (state) => {
-    const connected = Boolean(state?.connected && state.models?.length);
-    if (disconnectBtn) disconnectBtn.hidden = !connected;
-    if (visionBox) visionBox.checked = Boolean(state?.models?.some((model) => model.supportsVision));
-    connectBtn.textContent = t(connected ? "local.reconnect" : "local.connect");
-    show(connected ? t("local.connected", { count: state.models.length }) : "", false);
-  };
-
-  const run = async (path, body, pendingKey) => {
-    connectBtn.disabled = true;
-    if (disconnectBtn) disconnectBtn.disabled = true;
-    show("", false);
-    const previous = connectBtn.textContent;
-    connectBtn.textContent = t(pendingKey);
-    try {
-      const response = await fetch(path, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error?.message || `Connect ${response.status}`);
-      render(payload.settings?.local?.[engine]);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-      renderModelRoster().catch(() => {});
-      renderLocalEngines().catch(() => {});
-    } catch (error) {
-      connectBtn.textContent = previous;
-      show(error.message, true);
-    } finally {
-      connectBtn.disabled = false;
-      if (disconnectBtn) disconnectBtn.disabled = false;
-    }
-  };
-
-  connectBtn.addEventListener("click", () => run(
-    "/api/local/connect",
-    { engine, asVision: Boolean(visionBox?.checked) },
-    "local.connecting",
-  ));
-  disconnectBtn?.addEventListener("click", () => run(
-    "/api/local/disconnect",
-    { engine },
-    "local.disconnecting",
-  ));
-  return render;
+// Called with the settings payload for one engine, so the button and its status
+// line agree with what the server actually published.
+function renderLocalEngineState(engine, state) {
+  const connected = Boolean(state?.connected && state.models?.length);
+  localConnectedState.set(engine, connected);
+  localShow(engine, connected ? t("local.connected", { count: state.models.length }) : "", false);
+  paintEngineButton(engine);
 }
 
 const renderLocalSections = {
-  llamacpp: wireLocalSection("llamacpp"),
-  vllm: wireLocalSection("vllm"),
+  llamacpp: (state) => renderLocalEngineState("llamacpp", state),
+  vllm: (state) => renderLocalEngineState("vllm", state),
 };
+
+function openLocalConfig(engine) {
+  localConfigEngine = engine;
+  const dialog = $("local-config-dialog");
+  if (!dialog) return;
+  const found = localDiscovery.get(engine);
+  const title = $("local-config-title");
+  if (title) title.textContent = localEngineLabel(engine);
+
+  // Pre-filled when discovery found it, empty with a hint when it did not.
+  const port = $("local-config-port");
+  if (port) {
+    port.value = found ? String(found.port) : "";
+    port.placeholder = String(localDefaultPorts[engine] || 8080);
+  }
+
+  // Read-only proof that the pre-filled port is the right one: the model file
+  // actually loaded and the context it was started with, taken from the process
+  // behind that port rather than from anything the user typed.
+  const runtime = $("local-config-runtime");
+  if (runtime) {
+    const parts = [];
+    if (found?.launch?.model) parts.push(found.launch.model.split(/[\\/]/).pop());
+    if (found?.launch?.ctxSize) parts.push(t("local.ctxTokens", { tokens: formatContextSize(found.launch.ctxSize) }));
+    if (found?.binary) parts.push(found.binary);
+    runtime.textContent = parts.join(" · ");
+    runtime.hidden = parts.length === 0;
+  }
+
+  // Ollama publishes vision from its own model metadata, so the toggle would be
+  // a control that changes nothing there.
+  const visionRow = $("local-config-vision-row");
+  if (visionRow) visionRow.hidden = engine === "ollama";
+  const vision = $("local-config-vision");
+  if (vision) vision.checked = false;
+
+  const disconnect = $("local-config-disconnect");
+  if (disconnect) disconnect.hidden = !localConnectedState.get(engine);
+  const errorLine = $("local-config-error");
+  if (errorLine) errorLine.hidden = true;
+  const save = $("local-config-save");
+  if (save) save.textContent = t("local.connect");
+
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeLocalConfig() {
+  const dialog = $("local-config-dialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function submitLocalConfig(action) {
+  const engine = localConfigEngine;
+  if (!engine) return;
+  const save = $("local-config-save");
+  const disconnect = $("local-config-disconnect");
+  const errorLine = $("local-config-error");
+  const showError = (text) => {
+    if (!errorLine) return;
+    errorLine.hidden = !text;
+    errorLine.textContent = text || "";
+  };
+  showError("");
+
+  const ollama = engine === "ollama";
+  let body = ollama ? {} : { engine };
+  if (action === "connect") {
+    const field = $("local-config-port");
+    const port = Number(String(field?.value || "").trim() || field?.placeholder || 0);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      showError(t("local.errPort"));
+      return;
+    }
+    // Host is fixed: assertLocalBase refuses anything but loopback anyway, so a
+    // host field could only ever be a way to be told no.
+    const baseUrl = `http://127.0.0.1:${port}`;
+    body = ollama
+      ? { baseUrl }
+      : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) };
+  }
+
+  if (save) save.disabled = true;
+  if (disconnect) disconnect.disabled = true;
+  const previous = save?.textContent;
+  if (save && action === "connect") save.textContent = t("local.connecting");
+  try {
+    const path = ollama ? `/api/ollama/${action}` : `/api/local/${action}`;
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error?.message || `${action} ${response.status}`);
+    if (ollama) renderOllamaSection(payload.settings?.ollama);
+    else renderLocalEngineState(engine, payload.settings?.local?.[engine]);
+    closeLocalConfig();
+    poll().catch(() => {});
+    pollConfig().catch(() => {});
+    renderModelRoster().catch(() => {});
+    renderLocalEngines().catch(() => {});
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    if (save) {
+      save.disabled = false;
+      if (previous) save.textContent = previous;
+    }
+    if (disconnect) disconnect.disabled = false;
+  }
+}
+
+for (const engineId of localEngineIds) {
+  $(`${engineId}-configure`)?.addEventListener("click", () => openLocalConfig(engineId));
+  paintEngineButton(engineId);
+}
+$("local-config-close")?.addEventListener("click", closeLocalConfig);
+$("local-config-save")?.addEventListener("click", () => { submitLocalConfig("connect").catch(() => {}); });
+$("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
+
+
 
 function closeSettings() {
   const dialog = $("settings-dialog");

@@ -13,6 +13,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
+import { listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
 
 export class LocalEngineError extends Error {
   constructor(code, message) {
@@ -126,11 +127,61 @@ export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 80
   };
 }
 
-export async function discoverLocalEngines({ fetchImpl = fetch, timeoutMs = 800, candidates = LOCAL_CANDIDATES } = {}) {
+// Two sources of candidate ports, in this order:
+//
+// 1. The process table (engine-processes.mjs). This is the one that finds an
+//    engine the user moved - `llama-server --port 11435` is invisible to any
+//    fixed list, and moving it is the ordinary case on a machine running two
+//    of anything. It also carries the binary and command line, so a hit here
+//    is already an adoption spec rather than just an address.
+// 2. The fixed list below, which still earns its place: it costs three probes,
+//    and it catches an engine whose owning process we cannot attribute -
+//    inside WSL or a container the port is published here while the process
+//    is not, and reading another user's process needs elevation we do not ask
+//    for.
+//
+// `listeners` is injected by tests so a unit test never shells out to the
+// operating system. Passing an empty array reduces this to the old behaviour.
+export async function discoverLocalEngines({
+  fetchImpl = fetch,
+  timeoutMs = 800,
+  candidates = LOCAL_CANDIDATES,
+  listeners = null,
+} = {}) {
+  const observed = listeners || await listEngineListeners();
+  // Process-derived ports first so their metadata wins; the fixed list only
+  // contributes ports nothing was attributed to.
+  const byPort = new Map();
+  for (const listener of observed) {
+    if (Number.isInteger(listener?.port)) byPort.set(listener.port, listener);
+  }
+  for (const candidate of candidates) {
+    if (!byPort.has(candidate.port)) byPort.set(candidate.port, { port: candidate.port });
+  }
   const found = await Promise.all(
-    candidates.map((candidate) => probeLocalEngine(candidate.port, { fetchImpl, timeoutMs })),
+    [...byPort.keys()].map((port) => probeLocalEngine(port, { fetchImpl, timeoutMs })),
   );
-  return found.filter(Boolean);
+  return found.filter(Boolean).map((engine) => describeFromProcess(engine, byPort.get(engine.port)));
+}
+
+// Attach what the operating system already told us about the process behind a
+// confirmed engine. Nothing here is invented: a port we could not attribute
+// simply keeps the fields it had.
+function describeFromProcess(engine, listener) {
+  if (!listener?.pid || !listener.binary) return engine;
+  const described = {
+    ...engine,
+    pid: listener.pid,
+    binary: listener.binary,
+    cmdline: listener.cmdline || "",
+  };
+  // Only llama.cpp's command line is parsed today. vLLM runs under a bare
+  // `python` whose arguments follow no shared convention, and guessing at them
+  // would produce a spec that looks authoritative and is not.
+  if (engine.engine === "llamacpp" && described.cmdline) {
+    described.launch = parseLlamaArgs(described.cmdline);
+  }
+  return described;
 }
 
 // One file keyed by engine rather than a file per engine: a fourth engine then

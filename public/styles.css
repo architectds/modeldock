@@ -684,6 +684,26 @@ body { padding-left: 88px; }
 .local-engine-head { display: flex; align-items: baseline; gap: 10px; }
 .local-engine-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .local-engine-models { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+/* The engine button is always clickable; only its colour changes. Muted means
+   "not found yet, open me and type the port", primary means the engine answered
+   a probe. Never disabled: a disabled button is the state that left a user with
+   an engine on a non-default port and no way to say so. */
+/* The primary state paints with a gradient, which background-color cannot
+   transition; border and text are what actually animate. */
+.engine-button { transition: border-color 120ms ease, color 120ms ease; }
+.local-config-card { max-width: 460px; }
+.local-config-card .local-engine-runtime { margin: 8px 0 0; }
+.local-config-actions { margin-top: 14px; }
+
+/* Runtime facts read from the process table. Monospace because it is mostly
+   file paths, and a long binary path wraps rather than widening the card. */
+.local-engine-runtime {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  overflow-wrap: anywhere;
+}
 .local-engine-actions { margin-top: 9px; align-items: center; }
 .local-engine-state { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
 /* Connected is the state worth seeing at a glance in a list of several. The
@@ -695,8 +715,9 @@ body { padding-left: 88px; }
 .roster-panel { max-width: none; }
 .roster-window { margin: 0; color: var(--muted); font-size: 12px; }
 .roster-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
-.roster-table th { text-align: right; padding: 7px 10px; color: var(--muted); font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
-.roster-table th:nth-child(-n+4) { text-align: left; }
+.roster-table th { padding: 7px 10px; color: var(--muted); font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+.roster-table th { text-align: left; }
+.roster-table th.roster-head-num { text-align: right; }
 .roster-table td { padding: 8px 10px; border-bottom: 1px solid rgba(35,55,71,.5); }
 .roster-table tr:last-child td { border-bottom: 0; }
 .roster-rank { display: inline-block; min-width: 22px; color: var(--muted); font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
