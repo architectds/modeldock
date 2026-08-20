@@ -40,7 +40,9 @@ test("lists all profiles as selectable options", () => {
   // llamacpp and vllm are registered even before anything connects: a keyless
   // engine is filtered out of the picker by having no models (enabledProviders),
   // not by being absent from the registry, which still has to validate its id.
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "ollama", "llamacpp", "vllm"]);
+  // xai sits with the other keyed providers: registered up front so its id
+  // validates, empty until someone signs in.
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "xai", "ollama", "llamacpp", "vllm"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
 });
 

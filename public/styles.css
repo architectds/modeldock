@@ -752,3 +752,14 @@ body { padding-left: 88px; }
 .endpoint-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .endpoint-facts { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .endpoint-remove { position: absolute; top: 10px; right: 12px; }
+
+/* The sign-in row sits where a token input sits, so the three providers read
+   as one list: a name above, one control below. */
+.settings-row { display: flex; align-items: center; gap: 10px; }
+.settings-row .custom-status { color: var(--muted); font-size: 11px; }
+/* Shown only while a sign-in is waiting. The code is read off this screen and
+   typed on another, so it is set large and monospaced. */
+.xai-device { margin: 10px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); }
+.xai-device p { margin: 0 0 6px; color: var(--muted); font-size: 11px; }
+.xai-device a { color: var(--blue); font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
+.xai-code { margin: 8px 0 0 !important; color: var(--text) !important; font: 700 20px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace !important; letter-spacing: .18em; }

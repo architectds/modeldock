@@ -208,6 +208,23 @@
         </div>
         <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
       </label>
+      <div class="field" id="xai-section">
+        <div class="field-head">
+          <span data-i18n="xai.title">xAI (Grok) subscription</span>
+          <a href="https://grok.com" target="_blank" rel="noopener noreferrer" data-i18n="xai.about">No subscription?</a>
+        </div>
+        <div class="settings-row">
+          <button id="xai-signin" type="button" class="custom-action primary" data-i18n="xai.signIn" data-i18n-title="xai.hint">Sign in with Grok</button>
+          <button id="xai-disconnect" type="button" class="custom-action" data-i18n="xai.disconnect" hidden>Disconnect</button>
+          <span id="xai-status" class="custom-status" aria-live="polite" hidden></span>
+        </div>
+        <div id="xai-device" class="xai-device" hidden>
+          <p data-i18n="xai.deviceHint">Open this on any device and approve:</p>
+          <a id="xai-device-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+          <p class="xai-code" id="xai-device-code"></p>
+        </div>
+        <p id="xai-error" class="custom-error" aria-live="polite" hidden></p>
+      </div>
         <div class="settings-actions">
           <span id="settings-status" aria-live="polite"></span>
           <button id="settings-save" type="button" data-i18n="settings.save">Save</button>

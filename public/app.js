@@ -1223,6 +1223,7 @@ async function loadSettings() {
   renderAutostart(data);
   renderCustomSection(data.custom);
   renderOllamaSection(data.ollama);
+  renderXaiSection(data.xai);
   for (const [engine, render] of Object.entries(renderLocalSections)) render(data.local?.[engine]);
   lastSettings = data;
   return data;
@@ -2148,6 +2149,110 @@ $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfi
 
 
 
+// --- xAI (Grok) subscription sign-in ---
+//
+// A device grant is a person walking to a browser, so the page owns the
+// waiting: one poll per tick, and closing the tab ends it. The gateway does
+// not keep a loop running for a sign-in nobody is watching.
+let xaiPolling = null;
+
+function xaiShow(text, isError) {
+  const status = $("xai-status");
+  const error = $("xai-error");
+  if (status) {
+    status.hidden = !text || Boolean(isError);
+    status.textContent = isError ? "" : text || "";
+  }
+  if (error) {
+    error.hidden = !(text && isError);
+    error.textContent = isError ? text : "";
+  }
+}
+
+function renderXaiSection(state) {
+  const connected = Boolean(state?.connected && state.models?.length);
+  const signIn = $("xai-signin");
+  const disconnect = $("xai-disconnect");
+  if (disconnect) disconnect.hidden = !connected;
+  if (signIn) signIn.textContent = t(connected ? "xai.refresh" : "xai.signIn");
+  xaiShow(connected ? t("xai.connected", { count: state.models.length }) : "", false);
+}
+
+function showXaiDevice(device) {
+  const box = $("xai-device");
+  const link = $("xai-device-url");
+  const code = $("xai-device-code");
+  if (link) { link.href = device.verificationUrl; link.textContent = device.verificationUrl; }
+  // The link already carries the code; the code is shown too because a user
+  // reading it off one screen and typing it on another needs it visible.
+  if (code) code.textContent = device.userCode || "";
+  if (box) box.hidden = false;
+}
+
+function hideXaiDevice() {
+  const box = $("xai-device");
+  if (box) box.hidden = true;
+  if (xaiPolling) { clearInterval(xaiPolling); xaiPolling = null; }
+}
+
+if ($("xai-signin")) {
+  $("xai-signin").addEventListener("click", async () => {
+    const button = $("xai-signin");
+    button.disabled = true;
+    hideXaiDevice();
+    xaiShow(t("xai.starting"), false);
+    try {
+      const started = await fetch("/api/xai/start", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const device = await started.json();
+      if (!started.ok) throw new Error(device.error?.message || `Sign-in ${started.status}`);
+      showXaiDevice(device);
+      xaiShow(t("xai.waiting"), false);
+      // Opening it for them saves a copy-paste; if the browser blocks it the
+      // link is on screen anyway.
+      window.open(device.verificationUrl, "_blank", "noopener");
+      xaiPolling = setInterval(async () => {
+        try {
+          const reply = await fetch("/api/xai/poll", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+          const body = await reply.json();
+          if (reply.ok && body.status === "pending") return;
+          hideXaiDevice();
+          button.disabled = false;
+          if (!reply.ok) throw new Error(body.error?.message || `Sign-in ${reply.status}`);
+          renderXaiSection(body.settings?.xai);
+          poll().catch(() => {});
+          pollConfig().catch(() => {});
+          renderModelRoster().catch(() => {});
+        } catch (error) {
+          hideXaiDevice();
+          button.disabled = false;
+          xaiShow(error.message, true);
+        }
+      }, Math.max(Number(device.intervalMs) || 5000, 2000));
+    } catch (error) {
+      hideXaiDevice();
+      button.disabled = false;
+      xaiShow(error.message, true);
+    }
+  });
+}
+
+$("xai-disconnect")?.addEventListener("click", async () => {
+  const button = $("xai-disconnect");
+  button.disabled = true;
+  try {
+    const reply = await fetch("/api/xai/disconnect", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = await reply.json();
+    if (!reply.ok) throw new Error(body.error?.message || `Disconnect ${reply.status}`);
+    renderXaiSection(body.settings?.xai);
+    poll().catch(() => {});
+    renderModelRoster().catch(() => {});
+  } catch (error) {
+    xaiShow(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 function closeSettings() {
   const dialog = $("settings-dialog");
   if (typeof dialog.close === "function") dialog.close();
@@ -2226,6 +2331,7 @@ function refreshDynamicText() {
       if (!lastSettings) return;
       renderCustomSection(lastSettings.custom);
       renderOllamaSection(lastSettings.ollama);
+      renderXaiSection(lastSettings.xai);
       for (const [engine, render] of Object.entries(renderLocalSections)) {
         render(lastSettings.local?.[engine]);
       }

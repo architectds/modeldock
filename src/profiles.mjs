@@ -424,10 +424,43 @@ function localEngineProfile(id, label, defaultBaseUrl, compHash) {
 const LLAMACPP_PROFILE = localEngineProfile("llamacpp", "llama.cpp (local)", "http://127.0.0.1:8080", "modeldock-llamacpp-v1");
 const VLLM_PROFILE = localEngineProfile("vllm", "vLLM (local)", "http://127.0.0.1:8000", "modeldock-vllm-v1");
 
+// Grok through a Grok subscription rather than through metered API credits.
+//
+// It looks like a keyed provider from here - a bearer token on every request -
+// but the token is minted by an OAuth device grant and expires in hours, so it
+// lives in the auth snapshot and is refreshed onto config.tokens.xai. Nothing
+// downstream needs to know the difference, which is the point of asking the
+// profile rather than branching on the provider.
+const XAI_PROFILE = {
+  id: "xai",
+  label: "xAI (Grok)",
+  baseUrl: "https://api.x.ai/v1",
+  // No environment variable: this credential cannot be pasted, only signed in
+  // for, so an .env entry would be a place for a stale token to hide.
+  tokenEnvName: "",
+  blockedToolTypes: new Set([]),
+  hiddenToolNames: new Set([]),
+  availableModels: [],
+  modelCatalog({ mainModel, baseInstructions }) {
+    return modelCatalogDefaults({
+      profileId: "xai",
+      mainModel,
+      displayName: "xAI (Grok)",
+      description: "Grok models through a SuperGrok or X Premium subscription.",
+      compHash: "modeldock-xai-v1",
+      inputModalities: ["text", "image"],
+      supportsSearchTool: false,
+      baseInstructions,
+      availableModels: XAI_PROFILE.availableModels,
+    });
+  },
+};
+
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
+  xai: XAI_PROFILE,
   ollama: OLLAMA_PROFILE,
   llamacpp: LLAMACPP_PROFILE,
   vllm: VLLM_PROFILE,
@@ -502,6 +535,10 @@ defineRouting(OPENCODE_GO_PROFILE, {
       free: Boolean(entry?.free),
     };
   },
+});
+
+defineRouting(XAI_PROFILE, {
+  baseUrlFor: () => trimBase(XAI_PROFILE.baseUrl),
 });
 
 defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
@@ -686,6 +723,26 @@ function userEndpointProfile(id) {
 // upstreamId (the original tag with the colon) for the wire: the published id is
 // colon-free so the slug is safe for config.toml, but Ollama only serves the
 // original name. Empty snapshot clears the profile (disconnect).
+// Publish what the signed-in subscription can reach. The list is captured at
+// sign-in and replayed from the snapshot on every boot, so a restart never has
+// to contact xAI before the pickers are correct.
+export function applyXaiProfile(models) {
+  XAI_PROFILE.availableModels = (Array.isArray(models) ? models : [])
+    .filter((id) => typeof id === "string" && id)
+    .map((id) => ({
+      id,
+      label: id,
+      endpoint: "responses",
+      // xAI does not publish per-model context windows on /v1/models, and a
+      // number invented here would be worse than the catalog default that
+      // every unmeasured model already uses.
+      supportsVision: false,
+      ownerQualified: true,
+      status: "available",
+    }));
+  return XAI_PROFILE;
+}
+
 export function applyOllamaProfile(config, snapshot) {
   const baseUrl = normalizeOllamaBase(snapshot?.baseUrl || config?.ollamaBaseUrl);
   OLLAMA_PROFILE.baseUrl = baseUrl;
@@ -827,4 +884,4 @@ export function tokenFor(config, model) {
   return config?.tokens?.[provider] || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, XAI_PROFILE };

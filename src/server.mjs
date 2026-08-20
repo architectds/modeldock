@@ -26,7 +26,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
@@ -35,6 +35,7 @@ import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -543,6 +544,17 @@ function settingsPayload(services) {
       mainModel: ollamaMain,
       visionModel: ollamaVision,
     },
+    // The signed-in subscription, reported like any other provider so the page
+    // does not have to ask a second endpoint what state it is in.
+    xai: (() => {
+      const auth = readXaiAuth(services.xaiAuthFile || xaiAuthPath());
+      return {
+        connected: Boolean(auth?.accessToken),
+        models: auth?.models || [],
+        connectedAt: auth?.connectedAt || "",
+        expiresAt: auth?.expiresAt || 0,
+      };
+    })(),
     local: Object.fromEntries(CONNECTABLE_ENGINES.map((id) => {
       const profile = profileById(id);
       return [id, {
@@ -2028,6 +2040,125 @@ export function createApp(services = createServices()) {
     recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
     return res.json({ engine, models: [], settings: settingsPayload(services) });
   });
+  // Signing in to xAI. Three routes because a device grant is three moments:
+  // ask for a code, wait for a person, then use what they approved.
+  //
+  // The waiting is the page's job, not the server's: one poll per request keeps
+  // a user who closes the tab from leaving a loop running here.
+  let pendingXaiDevice = null;
+
+  const publishXai = (auth) => {
+    applyXaiProfile(auth?.models || []);
+    config.tokens = { ...(config.tokens || {}) };
+    if (auth?.accessToken) config.tokens.xai = auth.accessToken;
+    else delete config.tokens.xai;
+    services.writeCatalogFile?.();
+  };
+
+  app.post("/api/xai/start", mutateConfig, async (req, res) => {
+    try {
+      const device = await startDeviceAuthorization({});
+      pendingXaiDevice = device;
+      // The code and URL are not secrets - they are what the user has to read
+      // off the screen - but the device_code is, so it stays here.
+      return res.json({
+        userCode: device.userCode,
+        verificationUrl: device.verificationUrl,
+        expiresAt: device.expiresAt,
+        intervalMs: device.intervalMs,
+      });
+    } catch (error) {
+      recordConfigAction(metrics, "xai_start", { ok: false, error: error.message });
+      return res.status(502).json({ error: { type: error.code || "device", message: error.message } });
+    }
+  });
+
+  app.post("/api/xai/poll", mutateConfig, async (req, res) => {
+    if (!pendingXaiDevice) {
+      return res.status(409).json({ error: { type: "no_pending", message: "No sign-in is in progress." } });
+    }
+    if (Date.now() > pendingXaiDevice.expiresAt) {
+      pendingXaiDevice = null;
+      return res.status(408).json({ error: { type: "expired", message: "The sign-in code expired. Start again." } });
+    }
+    try {
+      const result = await pollDeviceToken(pendingXaiDevice.deviceCode, {});
+      if (result.status === "pending" || result.status === "slow_down") {
+        return res.json({ status: "pending" });
+      }
+      if (result.status !== "ready") {
+        pendingXaiDevice = null;
+        return res.status(403).json({
+          error: { type: result.status, message: result.message || "xAI declined the sign-in." },
+        });
+      }
+      // Approved. What matters next is whether this subscription can actually
+      // reach the models - xAI gates that separately from sign-in, so a token
+      // alone is not proof of anything.
+      const models = await listXaiModels(result.token.accessToken, {});
+      if (!models.length) {
+        throw new XaiAuthError("models", "Signed in, but this subscription reaches no models.");
+      }
+      const auth = { ...result.token, models, connectedAt: new Date().toISOString() };
+      writeXaiAuth(services.xaiAuthFile || xaiAuthPath(), auth);
+      publishXai(auth);
+      pendingXaiDevice = null;
+      await services.configSwitcher.markRestartRequired();
+      recordConfigAction(metrics, "xai_connect", { ok: true, models: models.length });
+      return res.json({ status: "connected", models, settings: settingsPayload(services) });
+    } catch (error) {
+      pendingXaiDevice = null;
+      recordConfigAction(metrics, "xai_connect", { ok: false, error: error.message });
+      const status = error instanceof XaiAuthError && error.code === "forbidden" ? 403 : 502;
+      return res.status(status).json({ error: { type: error.code || "connect", message: error.message } });
+    }
+  });
+
+  app.post("/api/xai/disconnect", mutateConfig, async (req, res) => {
+    clearXaiAuth(services.xaiAuthFile || xaiAuthPath());
+    publishXai(null);
+    pendingXaiDevice = null;
+    recordConfigAction(metrics, "xai_disconnect", { ok: true });
+    return res.json({ status: "disconnected", settings: settingsPayload(services) });
+  });
+
+  // An access token lasts hours and the refresh token outlives it, so the
+  // session survives restarts without asking the user to sign in again. Checked
+  // on a timer rather than per request: the relay's target() is synchronous,
+  // and a refresh in that path would be a network call inside a hot loop.
+  const refreshXaiToken = async () => {
+    const file = services.xaiAuthFile || xaiAuthPath();
+    const auth = readXaiAuth(file);
+    if (!auth || !accessTokenExpired(auth)) return;
+    if (!auth.refreshToken) {
+      // Nothing to refresh with: the session is over and saying so beats
+      // publishing models that 401 on the next turn.
+      clearXaiAuth(file);
+      publishXai(null);
+      return;
+    }
+    try {
+      const token = await refreshAccessToken(auth.refreshToken, {});
+      const next = { ...auth, ...token };
+      writeXaiAuth(file, next);
+      publishXai(next);
+    } catch (error) {
+      console.log(`[gate] xAI token refresh failed: ${error.message}`);
+      clearXaiAuth(file);
+      publishXai(null);
+    }
+  };
+
+  // Restore the signed-in session at boot, so the pickers are right before the
+  // first request rather than after the first refresh tick.
+  const restoredXai = readXaiAuth(services.xaiAuthFile || xaiAuthPath());
+  if (restoredXai) publishXai(restoredXai);
+  // Every ten minutes, and only if there is a session to keep alive - a test
+  // gateway with no snapshot never reaches the network from here.
+  const xaiTimer = setInterval(() => { refreshXaiToken().catch(() => {}); }, 10 * 60 * 1000);
+  xaiTimer.unref?.();
+  refreshXaiToken().catch(() => {});
+
   app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
     const { baseUrl } = req.body || {};
     try {
