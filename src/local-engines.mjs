@@ -14,6 +14,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { isLoopbackHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { launchSpecFrom, listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
+import { modelFactsAreStale, readModelFacts } from "./gguf.mjs";
 
 export class LocalEngineError extends Error {
   constructor(code, message) {
@@ -147,6 +148,7 @@ export async function discoverLocalEngines({
   timeoutMs = 800,
   candidates = LOCAL_CANDIDATES,
   listeners = null,
+  factsOptions = undefined,
 } = {}) {
   const observed = listeners || await listEngineListeners();
   // Process-derived ports first so their metadata wins; the fixed list only
@@ -161,13 +163,13 @@ export async function discoverLocalEngines({
   const found = await Promise.all(
     [...byPort.keys()].map((port) => probeLocalEngine(port, { fetchImpl, timeoutMs })),
   );
-  return found.filter(Boolean).map((engine) => describeFromProcess(engine, byPort.get(engine.port)));
+  return found.filter(Boolean).map((engine) => describeFromProcess(engine, byPort.get(engine.port), factsOptions));
 }
 
 // Attach what the operating system already told us about the process behind a
 // confirmed engine. Nothing here is invented: a port we could not attribute
 // simply keeps the fields it had.
-function describeFromProcess(engine, listener) {
+function describeFromProcess(engine, listener, factsOptions) {
   if (!listener?.pid || !listener.binary) return engine;
   const described = {
     ...engine,
@@ -180,6 +182,10 @@ function describeFromProcess(engine, listener) {
   // would produce a spec that looks authoritative and is not.
   if (engine.engine === "llamacpp" && described.cmdline) {
     described.launch = parseLlamaArgs(described.cmdline);
+    // The scan is where the model file is read; everything downstream reads the
+    // cache instead of the file.
+    const facts = modelFactsFor(described.launch.model, factsOptions);
+    if (facts) described.modelFacts = facts;
   }
   return described;
 }
@@ -209,6 +215,56 @@ export function writeLocalEngineSnapshot(file, engine, snapshot) {
   writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
   renameSync(tmp, file);
   return file;
+}
+
+// What a model file costs, remembered so the ledger does not re-read a 12 GiB
+// file on every scan. Keyed by the model PATH rather than by the engine: the
+// facts belong to the file, and two engines can serve the same one.
+//
+// The scan is the single reading point. By the time a row turns blue the
+// numbers are already in hand, so opening the drawer reads nothing - and the
+// ledger still answers after the engine stops, which is exactly when a user
+// asks what to change.
+export function modelFactsCachePath() {
+  return stateFile("model-facts.json");
+}
+
+export function readModelFactsCache(file = modelFactsCachePath()) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeModelFactsCache(file, all) {
+  try {
+    mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
+    renameSync(tmp, file);
+  } catch {
+    // A cache that cannot be written is a slow scan, not a broken one.
+  }
+}
+
+// Cached facts for one model file, reading it only when the cache is absent or
+// the file changed underneath. Returns null for anything unreadable: a missing
+// model must cost the row its ledger, never the whole scan.
+export function modelFactsFor(modelPath, { file = modelFactsCachePath(), read = readModelFacts } = {}) {
+  if (!modelPath) return null;
+  const all = readModelFactsCache(file);
+  const cached = all[modelPath];
+  if (cached && !modelFactsAreStale(cached, modelPath)) return cached;
+  try {
+    const facts = read(modelPath);
+    all[modelPath] = facts;
+    writeModelFactsCache(file, all);
+    return facts;
+  } catch {
+    return cached || null;
+  }
 }
 
 export function clearLocalEngineSnapshot(file, engine) {

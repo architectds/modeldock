@@ -44,6 +44,13 @@ const DYNAMIC = [
   // app.js: t(`roster.context.${entry.contextSource}`)
   { prefix: "roster.context.", suffixes: ["vendor", "measured", "user", "native"], site: "app.js: t(`roster.context.${entry.contextSource}`)" },
   { prefix: "roster.", suffixes: ["model", "provider", "context", "vision", "requests", "tps", "cache"], site: "app.js: t(`roster.${column}`)" },
+  // The server sends a warning code and no prose, so the text is looked up by
+  // that code. app.js: t(`warn.${warning.code}`)
+  {
+    prefix: "warn.",
+    suffixes: ["context_shift_ineffective", "kv_quant_unsupported", "mtp_ignored"],
+    site: "app.js: t(`warn.${warning.code}`)",
+  },
 ];
 
 test("every English translation key is referenced by the dashboard", () => {

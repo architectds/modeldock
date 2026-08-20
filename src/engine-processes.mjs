@@ -175,6 +175,52 @@ export async function listEngineListeners({
   }
 }
 
+// Rewrite a llama-server argv with the settings a user chose, keeping every
+// other argument exactly as it was.
+//
+// Editing the observed argv rather than composing a fresh one is deliberate: a
+// composed line would silently drop whatever this user needed and we did not
+// think of - a chat template, a device selection, an alias, a LoRA. The parts
+// being tuned are replaced by name; everything else survives untouched.
+const OVERRIDE_FLAGS = {
+  ctxSize: ["-c", "--ctx-size"],
+  parallel: ["-np", "--parallel"],
+  cacheTypeK: ["-ctk", "--cache-type-k"],
+  cacheTypeV: ["-ctv", "--cache-type-v"],
+};
+
+export function applyLaunchOverrides(args, overrides = {}) {
+  const out = [];
+  const drop = new Set();
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined || value === null) continue;
+    for (const flag of OVERRIDE_FLAGS[key] || []) drop.add(flag);
+  }
+  const source = Array.isArray(args) ? args : [];
+  for (let i = 0; i < source.length; i += 1) {
+    const token = source[i];
+    if (drop.has(token)) {
+      // Skip the flag and the value that belongs to it, but never swallow the
+      // next flag when this one was written without a value.
+      const next = source[i + 1];
+      if (next !== undefined && !next.startsWith("-")) i += 1;
+      continue;
+    }
+    // Switches we are about to set ourselves, so a second copy cannot appear.
+    if (token === "--kv-unified" || token === "-kvu" || token === "--no-kv-unified" || token === "-no-kvu") continue;
+    out.push(token);
+  }
+  if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
+  if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
+  if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
+  if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
+  // Slots that each see the whole window rather than a reserved slice. Written
+  // explicitly because llama.cpp only defaults it on when the slot count is
+  // auto, so setting --parallel silently turns it off.
+  if (overrides.kvUnified) out.push("--kv-unified");
+  return out;
+}
+
 // llama-server's command line is a complete adoption spec. Parsing it is what
 // turns "an engine is running on 11435" into "Qwen3.8-27B Q3_K_M, 80K context,
 // one slot, vulkan build" without asking the user to retype any of it.

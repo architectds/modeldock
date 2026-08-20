@@ -9,7 +9,11 @@ import {
   parseWindowsInspection,
   tokenizeCommandLine,
   launchSpecFrom,
+  applyLaunchOverrides,
 } from "../src/engine-processes.mjs";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
 // Verbatim from this machine on 2026-08-19: a llama-server the fixed candidate
@@ -176,4 +180,112 @@ test("a port we could not attribute remembers no launch", () => {
   assert.equal(launchSpecFrom({ binary: "llama-server", cmdline: "" }), null);
   assert.equal(launchSpecFrom(null), null);
   assert.equal(launchSpecFrom({ cmdline: "llama-server --port 8080" }), null, "a binary is required");
+});
+
+test("the scan is where the model file gets read, and it is read once", async () => {
+  // Reading a 12 GiB file on every render would be absurd, so discovery reads
+  // it and caches by path. By the time a row turns blue the ledger already has
+  // its numbers, and opening the drawer reads nothing.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-facts-"));
+  const cache = path.join(dir, "model-facts.json");
+  // A real file, because staleness is decided by its size and mtime - a fixture
+  // that disagrees with the disk would look stale on every read.
+  const model = path.join(dir, "model.gguf");
+  writeFileSync(model, "not really a model");
+  const stat = statSync(model);
+  let reads = 0;
+  const read = (file) => {
+    reads += 1;
+    return { path: file, fileBytes: stat.size, mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64, attentionLayers: 16, kvBytesPerToken: 65536 };
+  };
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
+    if (url === "http://127.0.0.1:11435/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const cmdline = `"C:\llama\llama-server.exe" -m ${model} -c 81920 --port 11435`;
+  const options = {
+    fetchImpl,
+    timeoutMs: 50,
+    listeners: [{ port: 11435, pid: 1, name: "llama-server", binary: "C:\llama\llama-server.exe", cmdline }],
+    factsOptions: { file: cache, read },
+  };
+
+  const [first] = await discoverLocalEngines(options);
+  assert.equal(first.modelFacts.kvBytesPerToken, 65536, "the ledger's input rides along with the scan result");
+  assert.equal(reads, 1);
+
+  const [second] = await discoverLocalEngines(options);
+  assert.equal(second.modelFacts.kvBytesPerToken, 65536);
+  assert.equal(reads, 1, "a second scan uses the cache rather than the file");
+
+  // Re-quantize under the same path and the cache has to notice.
+  writeFileSync(model, "a different model entirely, of another size");
+  await discoverLocalEngines(options);
+  assert.equal(reads, 2, "a changed file is read again");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unreadable model costs that row its ledger, not the whole scan", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-facts-bad-"));
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
+    if (url === "http://127.0.0.1:11435/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const [found] = await discoverLocalEngines({
+    fetchImpl,
+    timeoutMs: 50,
+    listeners: [{ port: 11435, pid: 1, name: "llama-server", binary: "b", cmdline: REAL_CMDLINE }],
+    factsOptions: { file: path.join(dir, "c.json"), read: () => { throw new Error("gone"); } },
+  });
+  assert.equal(found.engine, "llamacpp", "the engine is still discovered");
+  assert.equal(found.launch.ctxSize, 81920, "and still carries its launch spec");
+  assert.equal(found.modelFacts, undefined, "just without a ledger");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("applying overrides edits the argv instead of composing a new one", () => {
+  // A composed command line would silently drop whatever this user needed and
+  // we did not think of. Only the tuned flags are replaced; the rest survives.
+  const args = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+  const next = applyLaunchOverrides(args, { ctxSize: 49152, parallel: 1, kvUnified: true });
+  const line = next.join(" ");
+  assert.match(line, /-c 49152/);
+  assert.doesNotMatch(line, /81920/, "the old context is gone, not duplicated");
+  assert.equal(next.filter((token) => token === "-c").length, 1);
+  assert.equal(next.filter((token) => token === "--parallel").length, 1);
+  assert.match(line, /--kv-unified/);
+  // Everything the user had that we never asked about is still there.
+  for (const kept of ["-fa", "auto", "--context-shift", "-ngl", "99", "-mg", "1", "-sm", "none", "--jinja", "-t", "16"]) {
+    assert.ok(next.includes(kept), `${kept} survived`);
+  }
+  // String.raw, because a Windows path in an ordinary literal quietly loses its
+  // separators: "D:\models\..." reads as "D:modelsQwen...".
+  assert.ok(next.includes(String.raw`D:\models\Qwen3.8-27B-Q3_K_M.gguf`), "and so did the model");
+});
+
+test("KV precision reaches both halves of the cache or neither", () => {
+  const args = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+  const quantized = applyLaunchOverrides(args, { cacheTypeK: "q8_0", cacheTypeV: "q8_0" });
+  assert.ok(quantized.includes("-ctk") && quantized.includes("-ctv"));
+  // f16 is the default, so it is expressed by saying nothing rather than by
+  // writing a flag the engine already assumes.
+  const plain = applyLaunchOverrides(args, { ctxSize: 32768 });
+  assert.ok(!plain.includes("-ctk"), "no cache flag when the default is wanted");
+});
+
+test("an override never swallows the flag that follows a valueless one", () => {
+  const next = applyLaunchOverrides(["-c", "--jinja", "-ngl", "99"], { ctxSize: 8192 });
+  assert.ok(next.includes("--jinja"), "the switch after a valueless -c is not eaten");
+  assert.ok(next.includes("-ngl") && next.includes("99"));
+  assert.equal(next.filter((t) => t === "-c").length, 1);
+});
+
+test("an existing unified switch is replaced, not doubled", () => {
+  const next = applyLaunchOverrides(["--kv-unified", "-ngl", "99"], { kvUnified: true });
+  assert.equal(next.filter((t) => t === "--kv-unified").length, 1);
+  // And the opposite switch cannot survive alongside it.
+  const flipped = applyLaunchOverrides(["--no-kv-unified", "-ngl", "99"], { kvUnified: true });
+  assert.ok(!flipped.includes("--no-kv-unified"));
 });

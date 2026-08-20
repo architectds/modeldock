@@ -223,6 +223,9 @@ function drawWave(canvas, history, peak, hoverIndex = -1, color = WAVE_AMBER, po
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.clientWidth || canvas.width;
   const height = canvas.clientHeight || canvas.height;
+  // A hidden view measures zero. Returning leaves the last good frame in
+  // place instead of clearing it to nothing.
+  if (!width || !height) return;
   if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
@@ -409,6 +412,9 @@ function drawCacheWave(canvas, history, hoverIndex = -1) {
   const dpr = window.devicePixelRatio || 1;
   const width = canvas.clientWidth || canvas.width;
   const height = canvas.clientHeight || canvas.height;
+  // A hidden view measures zero. Returning leaves the last good frame in
+  // place instead of clearing it to nothing.
+  if (!width || !height) return;
   if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
@@ -1223,7 +1229,6 @@ async function loadSettings() {
   renderAutostart(data);
   renderCustomSection(data.custom);
   renderOllamaSection(data.ollama);
-  renderXaiSection(data.xai);
   for (const [engine, render] of Object.entries(renderLocalSections)) render(data.local?.[engine]);
   lastSettings = data;
   return data;
@@ -1558,6 +1563,90 @@ async function renderModelRoster() {
 // Read-only: it reports what is already listening so the user does not have to
 // know a port number. Connecting still goes through the flow that owns the
 // engine, which is why nothing here writes.
+// One decimal is the resolution that matters here: the difference between 0.4
+// and 2.1 GiB of headroom is the whole story, and a second decimal is noise.
+function gib(bytes) {
+  return (Number(bytes || 0) / 1024 ** 3).toFixed(2);
+}
+
+// Headroom below this reads as "it fitted, and then something else on the
+// desktop wanted memory". Measured: the 80K configuration left 0.40 GiB and was
+// evicted; the 52K one leaves 2.15 GiB and is not.
+const VRAM_TIGHT_BYTES = 1.5 * 1024 ** 3;
+
+function vramIsTight(vram) {
+  return Boolean(vram && vram.headroom !== null && vram.headroom < VRAM_TIGHT_BYTES);
+}
+
+// The row line: enough to spot a card in trouble without opening the drawer.
+function vramSummaryLine(vram) {
+  if (!vram?.card) return "";
+  const used = `${gib(vram.total)} / ${gib(vram.card.totalBytes)} GiB`;
+  if (vram.headroom === null) return used;
+  return `${used} · ${t("vram.headroom", { gib: gib(vram.headroom) })}`;
+}
+
+// The drawer's stacked bar. Segment widths are shares of the CARD, not of the
+// total, so an over-committed configuration visibly runs past the end instead
+// of quietly rescaling to fit its own frame.
+// Warnings are keyed by code so the text lives in the translation table and
+// the server sends no prose.
+function warningText(code) {
+  return t(`warn.${code}`);
+}
+
+function renderEngineWarnings(warnings) {
+  const box = $("local-warnings");
+  if (!box) return;
+  const list = Array.isArray(warnings) ? warnings : [];
+  box.replaceChildren();
+  box.hidden = list.length === 0;
+  for (const warning of list) {
+    const item = document.createElement("li");
+    item.textContent = warningText(warning.code);
+    box.append(item);
+  }
+}
+
+function renderVramBar(vram) {
+  const box = $("local-vram");
+  if (!box) return;
+  if (!vram?.card) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const card = vram.card.totalBytes || 1;
+  const pct = (bytes) => `${Math.max(0, Math.min(100, (Number(bytes || 0) / card) * 100))}%`;
+  const set = (id, bytes) => { const el = $(id); if (el) el.style.width = pct(bytes); };
+  set("vram-weights", vram.weights);
+  set("vram-kv", vram.kv);
+  set("vram-overhead", vram.overhead);
+  set("vram-headroom", Math.max(0, vram.headroom || 0));
+  box.classList.toggle("is-tight", vramIsTight(vram));
+  const caption = $("local-vram-caption");
+  if (caption) {
+    caption.textContent = [
+      t("vram.weights", { gib: gib(vram.weights) }),
+      t("vram.kv", { gib: gib(vram.kv) }),
+      t("vram.overhead", { gib: gib(vram.overhead) }),
+      t("vram.headroom", { gib: gib(Math.max(0, vram.headroom || 0)) }),
+    ].join(" · ");
+  }
+  // A tight configuration comes with the answer, not just the complaint.
+  const advice = $("local-vram-advice");
+  if (advice) {
+    const show = vramIsTight(vram) && vram.recommendedContext > 0 && vram.recommendedContext < vram.contextTokens;
+    advice.hidden = !show;
+    if (show) {
+      advice.textContent = t("vram.advice", {
+        now: formatContextSize(vram.contextTokens),
+        suggest: formatContextSize(vram.recommendedContext),
+      });
+    }
+  }
+}
+
 // 81920 reads as 80K to anyone who set it; the exact figure is noise here.
 // Thousands, the same base the Models page reads windows in. Binary K is the
 // computing convention and would suit a llama.cpp -c 81920 (80K exactly), but
@@ -1629,6 +1718,26 @@ async function renderLocalEngines() {
         if (engine.binary) parts.push(engine.binary);
         runtime.textContent = parts.join(" · ");
         item.append(runtime);
+      }
+      // What this configuration costs on the card it is running on, read at
+      // scan time from the model file's own header.
+      const summary = vramSummaryLine(engine.vram);
+      if (summary) {
+        const line = document.createElement("p");
+        line.className = "local-engine-vram";
+        line.classList.toggle("is-tight", vramIsTight(engine.vram));
+        line.textContent = summary;
+        item.append(line);
+      }
+      // A marker on the row, not only inside the drawer: someone who does not
+      // already suspect a problem will never open the drawer to find one.
+      if (engine.warnings?.length) {
+        const flag = document.createElement("p");
+        flag.className = "local-engine-flag";
+        flag.textContent = engine.warnings.length === 1
+          ? warningText(engine.warnings[0].code)
+          : t("warn.count", { n: engine.warnings.length });
+        item.append(flag);
       }
       // A scan result, not a control. Every engine connects from its own
       // section below, so this list stays one shape for all three.
@@ -2156,11 +2265,16 @@ function localEngineLabel(engine) {
 }
 
 function paintEngineButton(engine) {
-  const button = $(`${engine}-configure`);
-  if (!button) return;
-  const reachable = localDiscovery.has(engine) || localConnectedState.get(engine);
-  button.classList.toggle("primary", Boolean(reachable));
-  button.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
+  const label = $(`${engine}-configure`);
+  if (!label) return;
+  // Reachable means a probe answered - discovery answers /props and /v1/models
+  // before reporting an engine, and a hand-typed port only counts once connect
+  // accepted it. The colour therefore always means "this really responds".
+  const reachable = Boolean(localDiscovery.has(engine) || localConnectedState.get(engine));
+  const row = $(`${engine}-row`);
+  row?.classList.toggle("is-reachable", reachable);
+  row?.classList.toggle("is-open", localConfigEngine === engine);
+  label.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
 }
 
 function localShow(engine, text, isError) {
@@ -2195,10 +2309,253 @@ const renderLocalSections = {
   vllm: (state) => renderLocalEngineState("vllm", state),
 };
 
+// --- Trade-off sliders ---------------------------------------------------
+//
+// Dragging recomputes the budget in the page from coefficients the scan already
+// sent, so a drag is arithmetic rather than a round trip per pixel. The formula
+// itself stays on the server; only per-token costs cross the wire.
+//
+// The three controls do not all spend the same thing. Context and KV precision
+// both buy or release VRAM, so they move the bar. Concurrency does not: the KV
+// buffer is sized by `-c` whatever the slot count, so sessions divide a window
+// rather than enlarge a bill. It is capped instead by the floor below.
+
+// A session under this has no working room left once the per-turn fixed
+// overhead is paid - measured at 9,908 tokens of system prompt and tool
+// schemas. Four sessions in a 48K window leaves each about 2K, which is why
+// the cap exists rather than letting the control read "fine" at four.
+const SESSION_FLOOR_TOKENS = 15 * 1024;
+const KV_STOPS = ["q4_0", "q8_0", "f16"];
+
+let tuneState = null;
+
+function tuneBudget(ledger, contextTokens, kvType) {
+  const perToken = ledger.perTokenByKv?.[kvType] || ledger.perToken || 0;
+  const kv = Math.round(perToken * contextTokens);
+  const total = ledger.weights + kv + ledger.overhead;
+  const card = ledger.card?.totalBytes || 0;
+  return { ...ledger, kv, total, contextTokens, headroom: card ? card - total : null, fits: card ? total <= card : null };
+}
+
+// The rungs this precision can still afford. Cheaper KV does not shrink the
+// bar, it lengthens the ladder - which is the trade the control exists to show.
+function tuneRungs(ledger, kvType) {
+  const perToken = ledger.perTokenByKv?.[kvType] || 0;
+  const card = ledger.card?.totalBytes || 0;
+  if (!perToken || !card) return [];
+  const spare = card - ledger.minimumHeadroom - ledger.weights - ledger.overhead;
+  const rungs = (ledger.contextLadder || []).filter((rung) => rung * perToken <= spare);
+  // Always offer the smallest rung: a card too small for even that has a
+  // problem the slider cannot express, and an empty control explains nothing.
+  return rungs.length ? rungs : (ledger.contextLadder || []).slice(0, 1);
+}
+
+// llama.cpp's own argument order, so the line can be pasted as-is.
+function tuneCommand(state) {
+  const spec = state.launch || {};
+  const parts = [];
+  if (spec.model) parts.push(`-m ${/\s/.test(spec.model) ? `"${spec.model}"` : spec.model}`);
+  parts.push(`-c ${state.context}`);
+  if (state.kv !== "f16") parts.push(`-ctk ${state.kv} -ctv ${state.kv}`);
+  parts.push(`--parallel ${state.sessions}`, "--kv-unified");
+  if (spec.gpuLayers) parts.push(`-ngl ${spec.gpuLayers}`);
+  if (spec.port) parts.push(`--host 127.0.0.1 --port ${spec.port}`);
+  return `llama-server ${parts.join(" ")}`;
+}
+
+// The settings a community sweep would pick for this card, applied to the
+// controls rather than announced in a panel: the bar reflows and the command
+// changes, which is the comparison, without claiming a speed this machine has
+// not demonstrated.
+function optimizedConfig(ledger) {
+  // Cheaper KV buys window at no quality cost worth the name - except where it
+  // is broken, which is the whole reason the stop is locked on AMD.
+  const kv = ledger.card?.vendor === "amd" ? "f16" : "q8_0";
+  const perToken = ledger.perTokenByKv?.[kv] || ledger.perToken || 0;
+  const card = ledger.card?.totalBytes || 0;
+  const spare = card - ledger.recommendedHeadroom - ledger.weights - ledger.overhead;
+  const rungs = (ledger.contextLadder || []).filter((rung) => perToken && rung * perToken <= spare);
+  return {
+    kv,
+    // A cushion, not the ceiling: the recommendation is the largest rung that
+    // still survives something else on the desktop wanting memory.
+    context: rungs.length ? rungs[rungs.length - 1] : (ledger.contextLadder || [])[0],
+    // One session gets the whole window. Concurrency is a choice the user makes
+    // against a known cost, not something an optimizer should spend for them.
+    sessions: 1,
+  };
+}
+
+function renderTune() {
+  const box = $("local-tune");
+  if (!box) return;
+  if (!tuneState) {
+    box.hidden = true;
+    const cmd = $("tune-command");
+    if (cmd) cmd.hidden = true;
+    const optimize = $("local-optimize");
+    if (optimize) optimize.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const optimize = $("local-optimize");
+  if (optimize) optimize.hidden = false;
+  const { ledger } = tuneState;
+
+  // Context moves between fixed rungs, so the slider indexes the ladder rather
+  // than carrying token counts. Nothing has to round.
+  const rungs = tuneRungs(ledger, tuneState.kv);
+  let index = rungs.indexOf(tuneState.context);
+  if (index < 0) {
+    // The running configuration may sit off the ladder, or above what this
+    // precision affords; fall back to the nearest rung at or below it.
+    index = Math.max(0, rungs.filter((rung) => rung <= tuneState.context).length - 1);
+    tuneState.context = rungs[index];
+  }
+  const context = $("tune-context");
+  if (context) {
+    context.max = String(Math.max(0, rungs.length - 1));
+    context.value = String(index);
+    context.disabled = rungs.length <= 1;
+  }
+  const contextValue = $("tune-context-value");
+  if (contextValue) contextValue.textContent = formatContextSize(tuneState.context);
+
+  // Sessions: capped by the floor, not by memory.
+  const maxSessions = Math.max(1, Math.floor(tuneState.context / SESSION_FLOOR_TOKENS));
+  tuneState.sessions = Math.min(tuneState.sessions, maxSessions);
+  const sessions = $("tune-sessions");
+  if (sessions) {
+    sessions.max = String(maxSessions);
+    sessions.value = String(tuneState.sessions);
+    sessions.disabled = maxSessions <= 1;
+  }
+  const sessionsValue = $("tune-sessions-value");
+  if (sessionsValue) {
+    sessionsValue.textContent = maxSessions <= 1
+      ? t("tune.sessionsOne")
+      : String(tuneState.sessions);
+  }
+
+  // Precision stops: unavailable on this vendor, or too expensive at the
+  // current context. Locked reads "not available" and nothing more.
+  const locked = ledger.card?.vendor === "amd";
+  for (const stop of document.querySelectorAll("#tune-kv .tune-stop")) {
+    const kv = stop.dataset.kv;
+    const unusable = locked && kv !== "f16";
+    stop.disabled = unusable;
+    stop.classList.toggle("is-active", kv === tuneState.kv);
+    stop.title = unusable ? t("tune.kvUnavailable") : "";
+  }
+  const note = $("tune-kv-note");
+  if (note) note.textContent = locked ? t("tune.kvLocked") : "";
+
+  renderVramBar(tuneBudget(ledger, tuneState.context, tuneState.kv));
+
+  const command = $("tune-command");
+  const text = $("tune-command-text");
+  const changed = tuneState.context !== ledger.contextTokens || tuneState.kv !== "f16";
+  if (command) command.hidden = !changed;
+  if (text && changed) text.textContent = tuneCommand(tuneState);
+}
+
+// Called when the drawer opens: a discovered engine with a ledger gets sliders
+// seeded from what it is actually running, so the first thing they show is the
+// truth rather than a default.
+function startTune(found) {
+  const ledger = found?.vram;
+  if (!ledger?.card || !ledger.perTokenByKv) {
+    tuneState = null;
+    renderTune();
+    return;
+  }
+  tuneState = {
+    ledger,
+    launch: found.launch || {},
+    context: ledger.contextTokens,
+    sessions: Math.max(1, Number(found.launch?.parallel) || 1),
+    kv: "f16",
+  };
+  renderTune();
+}
+
+$("tune-context")?.addEventListener("input", (event) => {
+  if (!tuneState) return;
+  const rungs = tuneRungs(tuneState.ledger, tuneState.kv);
+  const picked = rungs[Number(event.target.value)];
+  if (picked) tuneState.context = picked;
+  renderTune();
+});
+$("tune-sessions")?.addEventListener("input", (event) => {
+  if (!tuneState) return;
+  tuneState.sessions = Number(event.target.value) || 1;
+  renderTune();
+});
+// Applying stops the engine and starts it again, which is the only way a
+// launch flag changes. The button says restart for that reason: the cost is
+// the point, not a detail to bury.
+$("tune-apply")?.addEventListener("click", async () => {
+  if (!tuneState) return;
+  const button = $("tune-apply");
+  const status = $("tune-apply-status");
+  const show = (text, isError) => {
+    if (!status) return;
+    status.hidden = !text;
+    status.textContent = text || "";
+    status.classList.toggle("is-error", Boolean(isError));
+  };
+  button.disabled = true;
+  show(t("tune.applying"), false);
+  try {
+    const response = await fetch("/api/local/apply", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        engine: localConfigEngine,
+        contextTokens: tuneState.context,
+        sessions: tuneState.sessions,
+        kvType: tuneState.kv,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error?.message || `Apply ${response.status}`);
+    // An engine takes a while to load a model back into memory, so the scan
+    // that proves it came back is worth waiting for rather than reporting
+    // success the moment the process was spawned.
+    show(t("tune.applyWait"), false);
+    for (let i = 0; i < 40; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const engines = await renderLocalEngines();
+      if (engines.some((found) => found.engine === localConfigEngine)) {
+        show("", false);
+        openLocalConfig(localConfigEngine);
+        return;
+      }
+    }
+    show(t("tune.applySlow"), true);
+  } catch (error) {
+    show(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("tune-optimize")?.addEventListener("click", () => {
+  if (!tuneState) return;
+  Object.assign(tuneState, optimizedConfig(tuneState.ledger));
+  renderTune();
+});
+$("tune-kv")?.addEventListener("click", (event) => {
+  const stop = event.target.closest(".tune-stop");
+  if (!stop || stop.disabled || !tuneState) return;
+  tuneState.kv = stop.dataset.kv;
+  renderTune();
+});
+
 function openLocalConfig(engine) {
   localConfigEngine = engine;
-  const dialog = $("local-config-dialog");
-  if (!dialog) return;
+  const drawer = $("local-drawer");
+  if (!drawer) return;
   const found = localDiscovery.get(engine);
   const title = $("local-config-title");
   if (title) title.textContent = localEngineLabel(engine);
@@ -2222,6 +2579,10 @@ function openLocalConfig(engine) {
     runtime.textContent = parts.join(" · ");
     runtime.hidden = parts.length === 0;
   }
+  // The row and the drawer read one ledger, so they cannot disagree.
+  renderVramBar(found?.vram);
+  renderEngineWarnings(found?.warnings);
+  startTune(found);
 
   // Ollama publishes vision from its own model metadata, so the toggle would be
   // a control that changes nothing there.
@@ -2237,15 +2598,19 @@ function openLocalConfig(engine) {
   const save = $("local-config-save");
   if (save) save.textContent = t("local.connect");
 
-  if (typeof dialog.showModal === "function") dialog.showModal();
-  else dialog.setAttribute("open", "");
+  // Not modal: the row this drawer describes stays readable beside it, which
+  // is the whole reason it is not the dialog it replaced.
+  drawer.hidden = false;
+  for (const engineId of localEngineIds) paintEngineButton(engineId);
+  $("local-config-port")?.focus();
 }
 
 function closeLocalConfig() {
-  const dialog = $("local-config-dialog");
-  if (!dialog) return;
-  if (typeof dialog.close === "function") dialog.close();
-  else dialog.removeAttribute("open");
+  const drawer = $("local-drawer");
+  if (drawer) drawer.hidden = true;
+  localConfigEngine = "";
+  startTune(null);
+  for (const engineId of localEngineIds) paintEngineButton(engineId);
 }
 
 async function submitLocalConfig(action) {
@@ -2310,7 +2675,14 @@ async function submitLocalConfig(action) {
 }
 
 for (const engineId of localEngineIds) {
+  // The row is a mouse convenience; the button inside it is the real control,
+  // so the keyboard and assistive tech get one named, focusable target instead
+  // of a div pretending to be a button around another button.
   $(`${engineId}-configure`)?.addEventListener("click", () => openLocalConfig(engineId));
+  $(`${engineId}-row`)?.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    openLocalConfig(engineId);
+  });
   // The request carries an engine id and nothing else: what runs is what the
   // gateway wrote down while that engine was serving.
   $(`${engineId}-restart`)?.addEventListener("click", async () => {
@@ -2350,110 +2722,6 @@ $("local-config-save")?.addEventListener("click", () => { submitLocalConfig("con
 $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
 
 
-
-// --- xAI (Grok) subscription sign-in ---
-//
-// A device grant is a person walking to a browser, so the page owns the
-// waiting: one poll per tick, and closing the tab ends it. The gateway does
-// not keep a loop running for a sign-in nobody is watching.
-let xaiPolling = null;
-
-function xaiShow(text, isError) {
-  const status = $("xai-status");
-  const error = $("xai-error");
-  if (status) {
-    status.hidden = !text || Boolean(isError);
-    status.textContent = isError ? "" : text || "";
-  }
-  if (error) {
-    error.hidden = !(text && isError);
-    error.textContent = isError ? text : "";
-  }
-}
-
-function renderXaiSection(state) {
-  const connected = Boolean(state?.connected && state.models?.length);
-  const signIn = $("xai-signin");
-  const disconnect = $("xai-disconnect");
-  if (disconnect) disconnect.hidden = !connected;
-  if (signIn) signIn.textContent = t(connected ? "xai.refresh" : "xai.signIn");
-  xaiShow(connected ? t("xai.connected", { count: state.models.length }) : "", false);
-}
-
-function showXaiDevice(device) {
-  const box = $("xai-device");
-  const link = $("xai-device-url");
-  const code = $("xai-device-code");
-  if (link) { link.href = device.verificationUrl; link.textContent = device.verificationUrl; }
-  // The link already carries the code; the code is shown too because a user
-  // reading it off one screen and typing it on another needs it visible.
-  if (code) code.textContent = device.userCode || "";
-  if (box) box.hidden = false;
-}
-
-function hideXaiDevice() {
-  const box = $("xai-device");
-  if (box) box.hidden = true;
-  if (xaiPolling) { clearInterval(xaiPolling); xaiPolling = null; }
-}
-
-if ($("xai-signin")) {
-  $("xai-signin").addEventListener("click", async () => {
-    const button = $("xai-signin");
-    button.disabled = true;
-    hideXaiDevice();
-    xaiShow(t("xai.starting"), false);
-    try {
-      const started = await fetch("/api/xai/start", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-      const device = await started.json();
-      if (!started.ok) throw new Error(device.error?.message || `Sign-in ${started.status}`);
-      showXaiDevice(device);
-      xaiShow(t("xai.waiting"), false);
-      // Opening it for them saves a copy-paste; if the browser blocks it the
-      // link is on screen anyway.
-      window.open(device.verificationUrl, "_blank", "noopener");
-      xaiPolling = setInterval(async () => {
-        try {
-          const reply = await fetch("/api/xai/poll", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-          const body = await reply.json();
-          if (reply.ok && body.status === "pending") return;
-          hideXaiDevice();
-          button.disabled = false;
-          if (!reply.ok) throw new Error(body.error?.message || `Sign-in ${reply.status}`);
-          renderXaiSection(body.settings?.xai);
-          poll().catch(() => {});
-          pollConfig().catch(() => {});
-          renderModelRoster().catch(() => {});
-        } catch (error) {
-          hideXaiDevice();
-          button.disabled = false;
-          xaiShow(error.message, true);
-        }
-      }, Math.max(Number(device.intervalMs) || 5000, 2000));
-    } catch (error) {
-      hideXaiDevice();
-      button.disabled = false;
-      xaiShow(error.message, true);
-    }
-  });
-}
-
-$("xai-disconnect")?.addEventListener("click", async () => {
-  const button = $("xai-disconnect");
-  button.disabled = true;
-  try {
-    const reply = await fetch("/api/xai/disconnect", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    const body = await reply.json();
-    if (!reply.ok) throw new Error(body.error?.message || `Disconnect ${reply.status}`);
-    renderXaiSection(body.settings?.xai);
-    poll().catch(() => {});
-    renderModelRoster().catch(() => {});
-  } catch (error) {
-    xaiShow(error.message, true);
-  } finally {
-    button.disabled = false;
-  }
-});
 
 function closeSettings() {
   const dialog = $("settings-dialog");
@@ -2533,7 +2801,6 @@ function refreshDynamicText() {
       if (!lastSettings) return;
       renderCustomSection(lastSettings.custom);
       renderOllamaSection(lastSettings.ollama);
-      renderXaiSection(lastSettings.xai);
       for (const [engine, render] of Object.entries(renderLocalSections)) {
         render(lastSettings.local?.[engine]);
       }
@@ -2553,6 +2820,20 @@ if (langSelect) {
 }
 
 
+// Redraw every wave from the history it already holds. Used when the dashboard
+// becomes visible again, where there is nothing new to fetch - only a frame to
+// put back.
+function redrawWaves() {
+  const paint = (id, history, peakState, hoverState, color, pointsRef) => {
+    const canvas = $(id);
+    if (canvas) drawWave(canvas, history, peakState.peak, hoverState.hover, color, pointsRef);
+  };
+  paint("context-wave", visibleContextHistory, wavePeakState, waveHoverState, WAVE_AMBER, wavePoints);
+  paint("data-wave", visibleDataHistory, dataPeakState, dataHoverState, WAVE_GREEN, dataWavePoints);
+  paint("tps-wave", visibleTpsHistory, tpsPeakState, tpsHoverState, WAVE_VIOLET, tpsWavePoints);
+  const cache = $("cache-wave");
+  if (cache) drawCacheWave(cache, visibleCacheHistory, cacheHoverState.hover);
+}
 // Hash routing across the left rail. Views stay mounted and are toggled with a
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
@@ -2574,7 +2855,11 @@ function routeToView(name) {
 }
 
 function currentView() {
-  return routeToView((location.hash || "").replace(/^#/, ""));
+  const view = routeToView((location.hash || "").replace(/^#/, ""));
+  // The canvases could not draw while this view was hidden, so returning to
+  // it has to repaint rather than wait for the next datum to arrive.
+  if (view === "dashboard") redrawWaves();
+  return view;
 }
 
 window.addEventListener("hashchange", currentView);
