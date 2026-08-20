@@ -87,3 +87,44 @@ test("a redirected gateway refuses to rewrite the real Codex config", async (t) 
   });
   assert.equal(allowed.foreignCodexHome, "", "the opt-out is respected");
 });
+
+// envFileFor falls back to ~/.modeldock/.env whenever MODELDOCK_ENV_FILE and
+// MODELDOCK_CONFIG_DIR are unset, and the install tests spawn real gateways
+// that redirect the state directory and the Codex home but not that. Any
+// startup step that writes .env therefore writes the developer's live file:
+// the legacy-endpoint migration cleared a real install three times during
+// ordinary test runs before this check existed.
+test("a redirected install does not own the default .env", async (t) => {
+  const { ownsEnvFile, envFileFor } = await import("../src/config.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-owns-env-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const saved = { ...process.env };
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  });
+
+  const realEnv = path.join(os.homedir(), ".modeldock", ".env");
+
+  // The shape install-mock creates: state redirected, .env not.
+  process.env.MODELDOCK_STATE_DIR = path.join(dir, "install", ".modeldock");
+  delete process.env.MODELDOCK_ENV_FILE;
+  delete process.env.MODELDOCK_CONFIG_DIR;
+  assert.equal(ownsEnvFile(realEnv), false, "someone else's .env is not ours to rewrite");
+
+  // Its own .env, inside its own state directory, is.
+  assert.equal(
+    ownsEnvFile(path.join(dir, "install", ".modeldock", ".env")),
+    true,
+    "the file in our own state directory is ours",
+  );
+
+  // An ordinary install owns the default file.
+  delete process.env.MODELDOCK_STATE_DIR;
+  process.env.MODELDOCK_HOME_FOR_TEST = "";
+  if (stateDir() === path.join(os.homedir(), ".modeldock")) {
+    assert.equal(ownsEnvFile(realEnv), true, "the default install owns the default .env");
+  }
+  void envFileFor;
+});

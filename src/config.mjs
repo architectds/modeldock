@@ -9,6 +9,7 @@ import { readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
 import { readCustomEndpoints } from "./custom-endpoints.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
+import { defaultStateDir, stateDir } from "./state-dir.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
@@ -21,6 +22,22 @@ import { hasChatGptLogin } from "./codex-auth.mjs";
 // When nothing exists yet, fall back to ~/.modeldock/.env so first-run settings saves
 // land in a cwd-independent location. The resolved path is recorded on the config so
 // the settings API can write back to it.
+// Whether the .env this process resolved belongs to this install.
+//
+// envFileFor falls back to ~/.modeldock/.env whenever MODELDOCK_ENV_FILE and
+// MODELDOCK_CONFIG_DIR are unset, which is the case for every gateway the
+// install tests spawn: they redirect the state directory and the Codex home,
+// but not this. A one-time migration that writes .env therefore rewrote the
+// developer live .env on every `npm test`. Reading it there is fine; writing
+// it is not ours to do.
+export function ownsEnvFile(file) {
+  const resolved = path.resolve(file || envFileFor());
+  const ourState = path.resolve(stateDir());
+  if (resolved === path.join(ourState, ".env")) return true;
+  // The default install .env belongs to the default install.
+  return ourState === path.resolve(defaultStateDir());
+}
+
 export function envFileFor() {
   if (process.env.MODELDOCK_ENV_FILE) return path.resolve(process.env.MODELDOCK_ENV_FILE);
   if (process.env.MODELDOCK_CONFIG_DIR) return path.join(path.resolve(process.env.MODELDOCK_CONFIG_DIR), ".env");

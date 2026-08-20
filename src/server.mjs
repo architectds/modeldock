@@ -7,7 +7,7 @@ import express from "express";
 import zlib from "node:zlib";
 import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
+import { ownsEnvFile, parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
@@ -82,6 +82,19 @@ function serveInlineStatic(app) {
     if (req.method !== "GET") return next();
     if (!serve(req, res, publicTree, "")) next();
   });
+}
+
+// Two local engine addresses name the same server. Compared by host and port
+// because the stored form carries the /v1 the Responses dialect lives under and
+// the discovered form does not, so the strings never match even when the server
+// does.
+function sameLocalHost(a, b) {
+  if (!a || !b) return false;
+  try {
+    return new URL(a).host === new URL(b).host;
+  } catch {
+    return false;
+  }
 }
 
 function urlHost(host) {
@@ -1831,16 +1844,22 @@ export function createApp(services = createServices()) {
     try {
       const live = await (services.discoverEngines || discoverLocalEngines)({});
       const saved = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath()) || {};
+      // Attached-ness is a property of an address, not of an engine name. Now
+      // that discovery reads the process table it can find two llama-servers at
+      // once (a tuned 27B on 11435 and a scratch one on 8080 is the ordinary
+      // case), and keying this on the engine name alone marked both of them
+      // connected while only one was.
+      const attached = (engine) => sameLocalHost(saved[engine.engine]?.baseUrl, engine.baseUrl);
       const engines = live.map((engine) => ({
         ...engine,
-        connected: Boolean(saved[engine.engine]),
-        connectedModels: saved[engine.engine]?.models?.length || 0,
+        connected: attached(engine),
+        connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
       }));
       // An engine that was connected and has since been stopped still belongs on
       // the page. Dropping it would leave a profile published against a server
       // that is gone, with no control anywhere to take it back down.
       for (const [engine, snapshot] of Object.entries(saved)) {
-        if (engines.some((found) => found.engine === engine)) continue;
+        if (engines.some((found) => found.engine === engine && found.connected)) continue;
         engines.push({
           engine,
           label: LOCAL_ENGINE_LABELS[engine] || engine,
@@ -2151,9 +2170,12 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   // loadConfig, which has not happened yet at this point. migrateEnvSecrets
   // above reads the file for the same reason.
   const envPath = envFileFor();
-  const legacyCustom = migrateLegacyCustomEndpoint(
-    existsSync(envPath) ? parseEnvFile(readFileSync(envPath, "utf8")) : {},
-  );
+  // Only for the install that owns this .env. A gateway spawned by the install
+  // tests resolves the developer real ~/.modeldock/.env and has no business
+  // rewriting it - that cleared a live install three times before this check.
+  const legacyCustom = ownsEnvFile(envPath)
+    ? migrateLegacyCustomEndpoint(existsSync(envPath) ? parseEnvFile(readFileSync(envPath, "utf8")) : {})
+    : null;
   if (legacyCustom) {
     const cleared = Object.fromEntries(LEGACY_CUSTOM_ENV_KEYS.map((key) => [key, ""]));
     for (const key of LEGACY_CUSTOM_ENV_KEYS) delete process.env[key];
