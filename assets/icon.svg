@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- The Lyncius mark, taken from the site's favicon: square and circle,
+       measure and harmony. Black on light surfaces, white on dark, which is
+       why the browser tab gets this file rather than the raster copies -
+       a tab bar follows the OS theme and a single-colour PNG cannot.
+       assets/icon.png and icon.ico are generated from this geometry by
+       scripts/make-icon.ps1; change the mark here and re-run it. -->
+  <rect x="12" y="12" width="40" height="40" rx="10" fill="none" stroke-width="4.5"/>
+  <circle cx="32" cy="32" r="14" fill="none" stroke-width="4.5"/>
+  <style>
+    rect, circle { stroke: #000; }
+    @media (prefers-color-scheme: dark) {
+      rect, circle { stroke: #fff; }
+    }
+  </style>
+</svg>
