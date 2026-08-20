@@ -138,7 +138,17 @@ export function writeEnvFile(updates, file = envFileFor()) {
       for (const key of Object.keys(updates)) {
         if (!isSecretKey(key)) continue;
         const plain = String(updates[key]);
-        const stored = persisted[key];
+        const stored = persisted[key] ?? "";
+        // Clearing a secret leaves nothing to decrypt, so the check is that
+        // nothing is what landed. Reading an empty value as a failed
+        // round-trip made "forget this key" the one write that could not
+        // succeed - which is how a retired endpoint kept coming back.
+        if (plain === "") {
+          if (stored === "") continue;
+          const failed = new Error(`Secret ${key} was not cleared; .env was left unchanged.`);
+          failed.code = "env_write_verify_failed";
+          throw failed;
+        }
         if (!stored || decryptSecret(stored) !== plain) {
           const error = new Error(`Secret round-trip check failed for ${key}; .env was left unchanged.`);
           error.code = "env_write_verify_failed";
@@ -158,6 +168,7 @@ export function writeEnvFile(updates, file = envFileFor()) {
     if (hasSecretUpdate) pruneEnvBackups(file);
     for (const [key, value] of Object.entries(updates)) {
       if (value) process.env[key] = isSecretKey(key) ? decryptSecret(encryptSecret(value)) : value;
+      else delete process.env[key];
     }
     return file;
   } catch (error) {
@@ -345,20 +356,25 @@ export function loadConfig() {
   // The list is the source of truth. The single MODELDOCK_CUSTOM_* slot is
   // read as a migration path: an install that predates the list keeps working
   // and its endpoint becomes the first entry.
+  // The list is the only source. An install that predates it has its single
+  // MODELDOCK_CUSTOM_* slot folded in by migrateLegacyCustomEndpoint, which
+  // runs once at gateway startup - not here: this function is read-only, and
+  // a loader that writes .env writes whichever .env it resolves, which under
+  // `node --test` is the user's real one.
   const customEndpoints = readCustomEndpoints();
   // Native models are appended to the published set rather than living in a
   // profile, so the stamping pass at the end cannot reach them; the catalog and
   // the pickers read this map instead. Without it, editing a native model's
   // window returned 200 and changed neither the page nor the file Codex reads.
   const contextOverrides = readContextOverrides();
-  const customBaseUrl = customEndpoints[0]?.baseUrl || normalizeBaseUrl(process.env.MODELDOCK_CUSTOM_BASE_URL || "");
-  const customApiKey = customEndpoints[0]?.apiKey || process.env.MODELDOCK_CUSTOM_API_KEY || "";
-  const customModel = customEndpoints[0]?.modelId || String(process.env.MODELDOCK_CUSTOM_MODEL || "").trim();
-  const customVision = envOn("MODELDOCK_CUSTOM_VISION");
+  const customBaseUrl = customEndpoints[0]?.baseUrl || "";
+  const customApiKey = customEndpoints[0]?.apiKey || "";
+  const customModel = customEndpoints[0]?.modelId || "";
+  const customVision = Boolean(customEndpoints[0]?.supportsVision);
   // Advertised context window of the custom endpoint model (e.g. 32768 for a
   // local 32K llama.cpp serve). Written by the Add flow from /v1/models
   // meta.n_ctx so compaction thresholds match the real backend, not the 250K fallback.
-  const customContextWindow = Number(process.env.MODELDOCK_CUSTOM_CONTEXT_WINDOW) || 0;
+  const customContextWindow = Number(customEndpoints[0]?.contextWindow) || 0;
   // Ollama connection snapshot: the model list captured at connect time, restored
   // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
   const ollamaSnapshotFile = ollamaSnapshotPath();

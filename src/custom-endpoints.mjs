@@ -119,3 +119,48 @@ export function removeCustomEndpoint(endpoints, modelId) {
   const id = String(modelId || "").trim();
   return (endpoints || []).filter((entry) => entry.modelId !== id);
 }
+
+
+// The MODELDOCK_CUSTOM_* variables are how a single custom endpoint was
+// configured before this list existed. They were kept as a read-time
+// fallback, which quietly made them a second source of endpoints: the model
+// they described appeared in every picker while the page that manages
+// endpoints - which reads only this file - showed nothing, so there was no
+// way to remove it. One store, one answer; the variables are an input to it
+// on first boot and stop existing afterwards.
+//
+// Returns the entry it added, or null. The caller clears the variables: this
+// module owns the endpoint list, not the .env file.
+export const LEGACY_CUSTOM_ENV_KEYS = [
+  "MODELDOCK_CUSTOM_BASE_URL",
+  "MODELDOCK_CUSTOM_API_KEY",
+  "MODELDOCK_CUSTOM_MODEL",
+  "MODELDOCK_CUSTOM_VISION",
+  "MODELDOCK_CUSTOM_CONTEXT_WINDOW",
+  // Retired with the "as main" flag; cleared so the block leaves nothing behind.
+  "MODELDOCK_CUSTOM_MAIN",
+];
+
+export function migrateLegacyCustomEndpoint(env = process.env, file = customEndpointsPath()) {
+  const modelId = String(env.MODELDOCK_CUSTOM_MODEL || "").trim();
+  const baseUrl = String(env.MODELDOCK_CUSTOM_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (!modelId || !baseUrl) return null;
+
+  const existing = readCustomEndpoints(file);
+  // A list that already serves this model is the newer truth; the variables
+  // are leftovers and only need clearing.
+  if (existing.some((entry) => entry.modelId === modelId)) return { modelId, added: false };
+
+  const entry = {
+    modelId,
+    baseUrl,
+    apiKey: String(env.MODELDOCK_CUSTOM_API_KEY || ""),
+    contextWindow: Number(env.MODELDOCK_CUSTOM_CONTEXT_WINDOW) || 0,
+    supportsVision: ["1", "true", "on", "yes"].includes(
+      String(env.MODELDOCK_CUSTOM_VISION || "").trim().toLowerCase(),
+    ),
+    addedAt: new Date().toISOString(),
+  };
+  writeCustomEndpoints(file, [...existing, entry]);
+  return { modelId, added: true };
+}

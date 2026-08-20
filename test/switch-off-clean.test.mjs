@@ -171,7 +171,7 @@ test("a non-native top-level model never survives into the managed config", () =
 });
 
 test("connecting a custom endpoint publishes a model without becoming the default", async (t) => {
-  // MODELDOCK_CUSTOM_MAIN persists in .env, so ticking "as main" once made a
+  // MODELDOCK_CUSTOM_MAIN persisted in .env, so ticking "as main" once made a
   // local 27B the default across every later restart - for sessions that never
   // asked for it. A local model then trips the small-context tool whitelist,
   // which strips Codex from ~150 tools to 23. Connecting publishes a model; it
@@ -194,11 +194,24 @@ test("connecting a custom endpoint publishes a model without becoming the defaul
     }
   });
 
+  // The endpoint is configured the way endpoints are configured now: an entry
+  // in the list. The MODELDOCK_CUSTOM_* slot this used to set is no longer read
+  // by loadConfig - it is folded into the list once at gateway startup -
+  // because reading it made it a second source of endpoints that the page
+  // managing endpoints could not see, and so could not remove.
+  const endpointsFile = path.join(path.dirname(envFile), "custom-endpoints.json");
+  const { writeCustomEndpoints } = await import("../src/custom-endpoints.mjs");
+  writeCustomEndpoints(endpointsFile, [{
+    modelId: "qwen3.8:27b",
+    baseUrl: "http://127.0.0.1:11435/v1",
+    apiKey: "",
+    contextWindow: 0,
+    supportsVision: false,
+  }]);
+
   set("MODELDOCK_ENV_FILE", envFile);
   set("MODELDOCK_MAIN_MODEL", undefined);
-  set("MODELDOCK_CUSTOM_MAIN", "1");
-  set("MODELDOCK_CUSTOM_MODEL", "qwen3.8:27b");
-  set("MODELDOCK_CUSTOM_BASE_URL", "http://127.0.0.1:11435/v1");
+  set("MODELDOCK_CUSTOM_ENDPOINTS_FILE", endpointsFile);
 
   const { loadConfig } = await import("../src/config.mjs");
   const config = loadConfig();

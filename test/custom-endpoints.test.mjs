@@ -6,11 +6,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import {
   CustomEndpointsError,
   addCustomEndpoint,
   customEndpointFor,
+  migrateLegacyCustomEndpoint,
   readCustomEndpoints,
   removeCustomEndpoint,
   writeCustomEndpoints,
@@ -136,4 +137,104 @@ test("a corrupt file reads as no endpoints instead of throwing", (t) => {
   const file = tmpFile(t);
   writeFileSync(file, "{ not json", "utf8");
   assert.deepEqual(readCustomEndpoints(file), []);
+});
+
+// The MODELDOCK_CUSTOM_* variables configured a single custom endpoint before
+// the list existed, and were left readable as a fallback. That made them a
+// second source: the model they described showed up in every picker, while the
+// endpoints page - which reads only the list - showed nothing, so there was no
+// way to remove it. The variables are now an input on first boot and nothing
+// after.
+test("a legacy env slot becomes a list entry, once", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-legacy-custom-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "custom-endpoints.json");
+
+  const env = {
+    MODELDOCK_CUSTOM_MODEL: "qwen3.8:27b",
+    MODELDOCK_CUSTOM_BASE_URL: "http://127.0.0.1:11435/v1/",
+    MODELDOCK_CUSTOM_API_KEY: "sk-legacy",
+    MODELDOCK_CUSTOM_CONTEXT_WINDOW: "81920",
+    MODELDOCK_CUSTOM_VISION: "0",
+  };
+
+  const first = migrateLegacyCustomEndpoint(env, file);
+  assert.deepEqual(first, { modelId: "qwen3.8:27b", added: true });
+
+  const stored = readCustomEndpoints(file);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].modelId, "qwen3.8:27b");
+  assert.equal(stored[0].baseUrl, "http://127.0.0.1:11435/v1", "the trailing slash is normalised away");
+  assert.equal(stored[0].apiKey, "sk-legacy", "the key survives the move");
+  assert.equal(stored[0].contextWindow, 81920);
+  assert.equal(stored[0].supportsVision, false);
+
+  // Running again must not duplicate it: the list is already the truth.
+  const second = migrateLegacyCustomEndpoint(env, file);
+  assert.deepEqual(second, { modelId: "qwen3.8:27b", added: false });
+  assert.equal(readCustomEndpoints(file).length, 1);
+});
+
+test("nothing to migrate is not an event", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-legacy-none-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "custom-endpoints.json");
+
+  assert.equal(migrateLegacyCustomEndpoint({}, file), null);
+  // A half-configured slot describes no endpoint and must not create one.
+  assert.equal(migrateLegacyCustomEndpoint({ MODELDOCK_CUSTOM_MODEL: "m" }, file), null);
+  assert.equal(migrateLegacyCustomEndpoint({ MODELDOCK_CUSTOM_BASE_URL: "http://x/v1" }, file), null);
+  assert.equal(existsSync(file), false, "no file is created for nothing");
+});
+
+// Once the entry is in the list it is an ordinary endpoint: the page shows it
+// and Remove takes it away. That is the whole point of folding it in.
+test("a migrated endpoint removes like any other", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-legacy-remove-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "custom-endpoints.json");
+
+  migrateLegacyCustomEndpoint({
+    MODELDOCK_CUSTOM_MODEL: "qwen3.8:27b",
+    MODELDOCK_CUSTOM_BASE_URL: "http://127.0.0.1:11435/v1",
+  }, file);
+
+  const next = removeCustomEndpoint(readCustomEndpoints(file), "qwen3.8:27b");
+  writeCustomEndpoints(file, next);
+  assert.deepEqual(readCustomEndpoints(file), []);
+});
+
+// loadConfig is called by tests, tools and harnesses, and envFileFor resolves
+// to the user's real ~/.modeldock/.env unless something redirects it - which
+// the test preload deliberately does not do, because the install and restart
+// tests need their own .env. A loader that writes is therefore a loader that
+// writes the real file: putting the legacy migration inside loadConfig cleared
+// a live install's MODELDOCK_CUSTOM_* during an ordinary `npm test`.
+test("loadConfig does not write the .env it reads", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-loadconfig-ro-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const envFile = path.join(dir, ".env");
+  const original = [
+    "MODELDOCK_CUSTOM_BASE_URL=http://127.0.0.1:11435/v1",
+    "MODELDOCK_CUSTOM_MODEL=qwen3.8:27b",
+    "MODELDOCK_CUSTOM_CONTEXT_WINDOW=81920",
+    "",
+  ].join("\n");
+  writeFileSync(envFile, original, "utf8");
+
+  const saved = { ...process.env };
+  process.env.MODELDOCK_ENV_FILE = envFile;
+  process.env.MODELDOCK_STATE_DIR = dir;
+  process.env.MODELDOCK_CUSTOM_ENDPOINTS_FILE = path.join(dir, "custom-endpoints.json");
+  try {
+    const { loadConfig } = await import("../src/config.mjs");
+    loadConfig();
+    loadConfig();
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+
+  assert.equal(readFileSync(envFile, "utf8"), original, "the file it read is the file it left");
 });

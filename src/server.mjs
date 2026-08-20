@@ -1,13 +1,13 @@
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import zlib from "node:zlib";
 import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
+import { parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
@@ -28,7 +28,7 @@ import { RouteAffinity } from "./router.mjs";
 import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
-import { CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
+import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
@@ -1829,7 +1829,7 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/local/discover", async (req, res) => {
     try {
-      const live = await discoverLocalEngines({});
+      const live = await (services.discoverEngines || discoverLocalEngines)({});
       const saved = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath()) || {};
       const engines = live.map((engine) => ({
         ...engine,
@@ -1866,7 +1866,23 @@ export function createApp(services = createServices()) {
       if (!CONNECTABLE_ENGINES.includes(engine)) {
         throw new LocalEngineError("engine", `Unknown local engine: ${engine}`);
       }
-      const base = normalizeBaseUrl(assertLocalBase(baseUrl || profileById(engine).baseUrl));
+      // Scanning and connecting are one action. Discovering the address here
+      // rather than trusting the caller to send one is what makes them one:
+      // the button in the list and the button in the engine's own section both
+      // arrive with no address and both get the port the engine is really on.
+      // Without this the fallback was the profile's default port, so an engine
+      // started with `--port 11435` was found by the scan and then not
+      // connectable, which is the worst of both.
+      const discovered = baseUrl
+        ? null
+        : (await (services.discoverEngines || discoverLocalEngines)({})).find((found) => found.engine === engine);
+      if (!baseUrl && !discovered) {
+        throw new LocalEngineError(
+          "not_found",
+          `No ${LOCAL_ENGINE_LABELS[engine] || engine} server is answering on this machine. Start it, then connect.`,
+        );
+      }
+      const base = normalizeBaseUrl(assertLocalBase(baseUrl || discovered.baseUrl));
       const listed = await listEndpointModels({ baseUrl: base, apiKey: "" });
       if (!listed.models.length) {
         throw new LocalEngineError("models", "The engine reported no models. Load one, then reconnect.");
@@ -1911,7 +1927,14 @@ export function createApp(services = createServices()) {
   app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
     const { baseUrl } = req.body || {};
     try {
-      const result = await listOllamaModels({ baseUrl });
+      // Same rule as the other engines: discover the address instead of
+      // falling back to a default port. Ollama's 11434 is stable enough that
+      // this rarely changes the outcome, but OLLAMA_HOST can move it, and a
+      // moved Ollama was previously found by the scan and then not connectable.
+      const discovered = baseUrl
+        ? null
+        : (await (services.discoverEngines || discoverLocalEngines)({})).find((found) => found.engine === "ollama");
+      const result = await listOllamaModels({ baseUrl: baseUrl || discovered?.baseUrl });
       if (!result.models.length) {
         throw new OllamaError("models", "Ollama returned no chat-capable models. Pull one first (ollama pull <model>).");
       }
@@ -2116,6 +2139,36 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToP
   const migration = migrateEnvSecrets();
   if (migration.migrated > 0) {
     console.log(`Encrypted ${migration.migrated} secret(s) in ${migration.file} (backup: ${migration.backup})`);
+  }
+  // One-time: an install configured before the endpoint list keeps its custom
+  // endpoint, as an entry in the list rather than as MODELDOCK_CUSTOM_*
+  // variables. Those variables used to be read as a fallback, which made them
+  // a second source of endpoints - the model appeared in every picker while
+  // the page that manages endpoints could not see it, and so could not remove
+  // it. Here rather than in loadConfig because this block runs only for the
+  // real gateway process.
+  // Read from the file, not from process.env: applyEnvFile runs inside
+  // loadConfig, which has not happened yet at this point. migrateEnvSecrets
+  // above reads the file for the same reason.
+  const envPath = envFileFor();
+  const legacyCustom = migrateLegacyCustomEndpoint(
+    existsSync(envPath) ? parseEnvFile(readFileSync(envPath, "utf8")) : {},
+  );
+  if (legacyCustom) {
+    const cleared = Object.fromEntries(LEGACY_CUSTOM_ENV_KEYS.map((key) => [key, ""]));
+    for (const key of LEGACY_CUSTOM_ENV_KEYS) delete process.env[key];
+    try {
+      writeEnvFile(cleared, envFileFor());
+      if (legacyCustom.added) {
+        console.log(`Moved the custom endpoint ${legacyCustom.modelId} from .env into the endpoint list.`);
+      }
+    } catch (error) {
+      // A read-only .env must not stop the gateway from starting; the list
+      // already has the entry. Said out loud because it is not harmless:
+      // while the variables sit in the file, removing the endpoint lets the
+      // next start bring it back.
+      console.warn(`Could not clear MODELDOCK_CUSTOM_* from .env: ${error.message}`);
+    }
   }
   let instance;
   try {

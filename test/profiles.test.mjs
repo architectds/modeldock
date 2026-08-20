@@ -87,9 +87,14 @@ test("a text-only Ollama main model does not advertise image input", () => {
 });
 
 test("custom profile is empty until configured and fills from config", () => {
-  const empty = applyCustomProfile({ customModel: "", customBaseUrl: "" });
+  // The endpoint list is the only input. It used to also accept the single
+  // customModel/customBaseUrl pair from the retired MODELDOCK_CUSTOM_* slot,
+  // which is what published a model the endpoints page could not see or remove.
+  const empty = applyCustomProfile({ customEndpoints: [] });
   assert.equal(empty.availableModels.length, 0);
-  const filled = applyCustomProfile({ customModel: "vendor/model-x", customBaseUrl: "https://vendor.example/v1", customVision: true });
+  const filled = applyCustomProfile({
+    customEndpoints: [{ modelId: "vendor/model-x", baseUrl: "https://vendor.example/v1", supportsVision: true }],
+  });
   assert.equal(filled.id, "custom");
   assert.equal(filled.label, "Custom");
   const model = filled.availableModels[0];
@@ -106,9 +111,13 @@ test("custom profile is empty until configured and fills from config", () => {
 });
 
 test("custom profile scales small-context windows by 0.8 for Codex tokenizer mismatch", () => {
-  const small = applyCustomProfile({ customModel: "qwen", customBaseUrl: "http://127.0.0.1:11435/v1", customContextWindow: 32768 });
+  const small = applyCustomProfile({
+    customEndpoints: [{ modelId: "qwen", baseUrl: "http://127.0.0.1:11435/v1", contextWindow: 32768 }],
+  });
   assert.equal(small.availableModels[0].contextWindow, 26214, "32K local model advertises 26214 so compaction fires early");
-  const big = applyCustomProfile({ customModel: "gpt-x", customBaseUrl: "https://api.example/v1", customContextWindow: 131072 });
+  const big = applyCustomProfile({
+    customEndpoints: [{ modelId: "gpt-x", baseUrl: "https://api.example/v1", contextWindow: 131072 }],
+  });
   assert.equal(big.availableModels[0].contextWindow, 131072, "big custom endpoints keep their real window");
 });
 

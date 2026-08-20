@@ -583,17 +583,11 @@ export function applyCustomProfile(config) {
   // first one's baseUrl for callers that ask the profile rather than the
   // model; per-model routing goes through customEndpointFor.
   const endpoints = Array.isArray(config?.customEndpoints) ? config.customEndpoints : [];
-  const legacyModel = String(config?.customModel || "").trim();
-  const legacyBase = String(config?.customBaseUrl || "").trim().replace(/\/+$/, "");
-  const legacy = legacyModel && legacyBase
-    ? [{
-        modelId: legacyModel,
-        baseUrl: legacyBase,
-        contextWindow: Number(config.customContextWindow) > 0 ? Number(config.customContextWindow) : 0,
-        supportsVision: Boolean(config.customVision),
-      }]
-    : [];
-  const published = endpoints.length ? endpoints : legacy;
+  // No second source: an install's legacy MODELDOCK_CUSTOM_* slot is folded
+  // into the list by the loader. Publishing from config.customModel as well
+  // put a model in every picker that the endpoints page could not see, and so
+  // could not remove.
+  const published = endpoints;
   CUSTOM_PROFILE.baseUrl = published[0]?.baseUrl || "";
   CUSTOM_PROFILE.availableModels = published.map((entry) => {
     const advertised = localContextWindow(entry.contextWindow || undefined);
