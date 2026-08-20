@@ -37,9 +37,6 @@ import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlug
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
-import { applyLaunchOverrides, tokenizeCommandLine } from "./engine-processes.mjs";
-import { estimateVramBudget, kvBytesPerToken, maxContextFor, CONTEXT_LADDER, KV_ELEMENT_BYTES, MINIMUM_HEADROOM_BYTES, RECOMMENDED_HEADROOM_BYTES } from "./gguf.mjs";
-import { primaryGpu, probeGpus, usableBytesOf } from "./gpu.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -422,45 +419,6 @@ function subagentPayload(services) {
     options,
     providers: subagentProviders(services.config),
     selectedProvider: selectedEntry?.provider || options[0]?.provider || NATIVE_PROVIDER.id,
-  };
-}
-
-// The VRAM ledger for one discovered engine: what its current configuration
-// costs against the card it is running on. Both the row summary and the drawer
-// read this one object, so the two can never disagree about a number.
-//
-// Absent pieces degrade to null rather than to a guess - no model facts (an
-// engine we could not attribute) or no card (a probe that failed) simply means
-// no ledger for that row, not a made-up one.
-function vramLedgerFor(engine, gpus) {
-  const facts = engine?.modelFacts;
-  const contextTokens = Number(engine?.launch?.ctxSize) || 0;
-  if (!facts?.kvBytesPerToken || !contextTokens) return null;
-  const card = primaryGpu(gpus, { mainGpu: Number(engine?.launch?.mainGpu) });
-  // What an allocator can actually reach, not what the card physically has -
-  // budgeting against the raw capacity overstates headroom by most of a
-  // gigabyte and recommends a context that gets evicted.
-  const cardBytes = usableBytesOf(card);
-  const budget = estimateVramBudget({ shape: facts, weightsBytes: facts.fileBytes, contextTokens, cardBytes });
-  return {
-    ...budget,
-    contextTokens,
-    card: card ? { name: card.name, vendor: card.vendor, totalBytes: cardBytes, capacityBytes: card.totalBytes } : null,
-    // Everything a slider needs to recompute the budget as it moves, so
-    // dragging is arithmetic in the page rather than a round trip per pixel.
-    perTokenByKv: Object.fromEntries(Object.keys(KV_ELEMENT_BYTES).map((kv) => [kv, kvBytesPerToken(facts, kv)])),
-    recommendedHeadroom: RECOMMENDED_HEADROOM_BYTES,
-    minimumHeadroom: MINIMUM_HEADROOM_BYTES,
-    trainedContext: facts.trainedContext || 0,
-    contextLadder: CONTEXT_LADDER.filter((rung) => !facts.trainedContext || rung <= facts.trainedContext),
-    // What it should be instead, so a tight configuration comes with an answer
-    // rather than only a complaint.
-    recommendedContext: cardBytes ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes }) : 0,
-    // How far the slider may be dragged: past the recommendation, but not past
-    // the point where the configuration certainly fails.
-    maxContext: cardBytes
-      ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes, headroomBytes: MINIMUM_HEADROOM_BYTES })
-      : 0,
   };
 }
 
@@ -1235,26 +1193,13 @@ export function createServices(config = loadConfig()) {
     }
   };
 
-  // The periodic pass: refresh the model list, then tidy what it leaves. The
-  // tidy has to be on this timer and not only at boot - the gateways that most
-  // need it are the ones left running for weeks, and a boot-only tidy never
-  // fires on those at all. Running it daily costs nothing, because the weekly
-  // guard inside it decides whether this call does any work.
-  //
-  // After the refresh rather than beside it: a model that arrived in this pass
-  // should get its first-seen stamp before anything reasons about its age.
-  const runScheduledMaintenance = () => refreshModelCatalog().then(
-    () => runModelTidy(),
-    () => runModelTidy(),
-  );
-
   // Write once at boot so the file exists even when the refresh is disabled or fails.
   writeCatalogFile();
   runModelTidy();
   refreshModelCatalog();
   const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
   const modelRefreshTimer = refreshIntervalHours > 0
-    ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)
+    ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
   // Tests inject a partial config that omits codexHome; fall back to the same
@@ -1270,7 +1215,7 @@ export function createServices(config = loadConfig()) {
     // "openai"), which is exactly what the collaboration relay needs.
     subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
+    refreshModelCatalog, writeCatalogFile, runModelTidy, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
   });
@@ -2090,14 +2035,10 @@ export function createApp(services = createServices()) {
       // case), and keying this on the engine name alone marked both of them
       // connected while only one was.
       const attached = (engine) => sameLocalHost(saved[engine.engine]?.baseUrl, engine.baseUrl);
-      // Probed once per scan, not per engine: two llama-servers on one machine
-      // are still one set of cards.
-      const gpus = await (services.probeGpus || probeGpus)({});
       const engines = live.map((engine) => ({
         ...engine,
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
-        vram: vramLedgerFor(engine, gpus),
       }));
       // An engine that was connected and has since been stopped still belongs on
       // the page. Dropping it would leave a profile published against a server
@@ -2241,74 +2182,6 @@ export function createApp(services = createServices()) {
       return res.json({ engine, started: true, binary: remembered.binary, logFile });
     } catch (error) {
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: error.message });
-      return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
-    }
-  });
-
-// Apply a tuned configuration: stop the engine we discovered, start it again
-  // with the chosen settings, and remember them.
-  //
-  // Stopping someone's model is not a thing to do on a stale reading, so the
-  // engine is re-discovered first and the process is only signalled when the
-  // port, the pid and the binary all still agree. A pid alone is not identity -
-  // the operating system reuses them, and the one we saw a minute ago could be
-  // anything by now.
-  app.post("/api/local/apply", mutateConfig, async (req, res) => {
-    const { engine, contextTokens, sessions, kvType } = req.body || {};
-    if (!CONNECTABLE_ENGINES.includes(engine)) {
-      return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
-    }
-    const live = await (services.discoverEngines || discoverLocalEngines)({});
-    const running = live.find((found) => found.engine === engine);
-    if (!running?.pid || !running.binary || !running.cmdline) {
-      return res.status(409).json({
-        error: {
-          type: "not_attributable",
-          message: "That engine is not running, or is not one this machine can attribute to a process.",
-        },
-      });
-    }
-    const args = applyLaunchOverrides(tokenizeCommandLine(running.cmdline).slice(1), {
-      ctxSize: Number(contextTokens) || undefined,
-      parallel: Number(sessions) || undefined,
-      cacheTypeK: kvType && kvType !== "f16" ? kvType : undefined,
-      cacheTypeV: kvType && kvType !== "f16" ? kvType : undefined,
-      kvUnified: true,
-    });
-    try {
-      process.kill(running.pid);
-    } catch (error) {
-      recordConfigAction(metrics, `local_apply_${engine}`, { ok: false, error: error.message });
-      return res.status(502).json({ error: { type: "stop_failed", message: error.message } });
-    }
-    // The port does not free instantly, and starting a second copy onto a held
-    // port is the failure this waits out.
-    for (let i = 0; i < 40; i += 1) {
-      if (!(await (services.discoverEngines || discoverLocalEngines)({})).some((found) => found.pid === running.pid)) break;
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    try {
-      const logDir = path.join(os.tmpdir(), "modeldock");
-      mkdirSync(logDir, { recursive: true });
-      const logFile = path.join(logDir, `engine-${engine}.log`);
-      const log = openSync(logFile, "a");
-      const child = spawn(running.binary, args, { detached: true, stdio: ["ignore", log, log], windowsHide: true });
-      closeSync(log);
-      child.unref();
-      // The chosen spec, so a later restart replays what the user picked rather
-      // than what they happened to have typed before.
-      const file = services.localEnginesFile || localEnginesSnapshotPath();
-      const snapshot = readLocalEnginesSnapshot(file)?.[engine];
-      if (snapshot) {
-        writeLocalEngineSnapshot(file, engine, {
-          ...snapshot,
-          launch: { binary: running.binary, args },
-        });
-      }
-      recordConfigAction(metrics, `local_apply_${engine}`, { ok: true });
-      return res.json({ engine, started: true, args, logFile });
-    } catch (error) {
-      recordConfigAction(metrics, `local_apply_${engine}`, { ok: false, error: error.message });
       return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
     }
   });
