@@ -25,3 +25,9 @@ process.env.MODELDOCK_USAGE_EVENTS_FILE ||= path.join(dir, "usage-events.jsonl")
 // directly, so isolating the services object is not enough - a test that adds
 // an endpoint writes the running gateway's real list without it.
 process.env.MODELDOCK_CUSTOM_ENDPOINTS_FILE ||= path.join(dir, "custom-endpoints.json");
+// The state dir too. usage-rollup.json, model-toggles.json and
+// model-lifecycle.json all resolve through stateFile(), which without this
+// redirect is the real ~/.modeldock - and a test run was writing fake models
+// (vendor-alpha@custom, shared-model@alpha) into the live gateway's usage
+// history, which the weekly model tidy now reads to decide what to park.
+process.env.MODELDOCK_STATE_DIR ||= path.join(dir, "state");
