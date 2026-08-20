@@ -2,12 +2,17 @@
 // refuses to reach. Both are pure enough to test without a live engine.
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
 import {
   LocalEngineError,
   assertLocalBase,
   discoverLocalEngines,
   CONNECTABLE_ENGINES,
   engineFromProbes,
+  rememberedLaunch,
+  writeLocalEngineSnapshot,
   probeLocalEngine,
 } from "../src/local-engines.mjs";
 import { allProfiles } from "../src/profiles.mjs";
@@ -241,4 +246,39 @@ test("a connected local engine reaches the catalog Codex reads", async () => {
   assert.equal(enabledProvidersFor(config).has("vllm"), true);
 
   applyLocalEngineProfile("vllm", null);
+});
+
+// The restart route runs a program. What makes that safe is where the program
+// comes from: the snapshot this install wrote while the engine was serving,
+// never the request. rememberedLaunch is that boundary, so it refuses anything
+// that is not a binary plus a list of arguments.
+test("a remembered launch is a binary and an argument list, or nothing", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-remembered-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "local-engines.json");
+
+  writeLocalEngineSnapshot(file, "llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen" }],
+    launch: { binary: "/opt/llama/llama-server", args: ["-m", "/models/q.gguf", "-c", "81920"] },
+  });
+  assert.deepEqual(rememberedLaunch("llamacpp", file), {
+    binary: "/opt/llama/llama-server",
+    args: ["-m", "/models/q.gguf", "-c", "81920"],
+  });
+
+  // An engine connected before this was recorded has nothing to replay, and an
+  // engine never connected at all has no entry.
+  writeLocalEngineSnapshot(file, "vllm", { baseUrl: "http://127.0.0.1:8000/v1", models: [] });
+  assert.equal(rememberedLaunch("vllm", file), null);
+  assert.equal(rememberedLaunch("ollama", file), null);
+
+  // A snapshot that carries a string where a list belongs is not a launch: the
+  // whole point of the list is that no shell ever sees it.
+  writeLocalEngineSnapshot(file, "llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [],
+    launch: { binary: "/opt/llama/llama-server", args: "-m /models/q.gguf; rm -rf /" },
+  });
+  assert.equal(rememberedLaunch("llamacpp", file), null);
 });

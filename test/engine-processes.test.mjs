@@ -8,6 +8,7 @@ import {
   parsePosixProcesses,
   parseWindowsInspection,
   tokenizeCommandLine,
+  launchSpecFrom,
 } from "../src/engine-processes.mjs";
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
@@ -143,4 +144,36 @@ test("an unattributed port is still discovered, just without a spec", async () =
   assert.equal(found.engine, "llamacpp");
   assert.equal(found.pid, undefined);
   assert.equal(found.launch, undefined, "no command line means no invented spec");
+});
+
+// "Start it again" is only honest if the launch is the one that actually ran.
+// A llama-server takes a dozen arguments - the model path, the context size,
+// how many layers go to the GPU, which device - and anything composed here
+// would be a guess wearing the clothes of a memory.
+test("a launch spec is the process's own argv, not a reconstruction", () => {
+  const cmdline = String.raw`"D:\llama\llama-server.exe" -m D:\models\Qwen3-27B-Q3_K_M.gguf -a qwen3:27b -fa auto -c 81920 --context-shift -ngl 99 --host 127.0.0.1 --port 11435 --jinja -t 16 -mg 1 -sm none`;
+  const spec = launchSpecFrom({ binary: String.raw`D:\llama\llama-server.exe`, cmdline });
+
+  assert.equal(spec.binary, String.raw`D:\llama\llama-server.exe`);
+  // argv is a list, so the relaunch never goes through a shell and nothing in a
+  // model path can escape into one.
+  assert.ok(Array.isArray(spec.args));
+  assert.equal(spec.args[0], "-m");
+  assert.equal(spec.args[1], String.raw`D:\models\Qwen3-27B-Q3_K_M.gguf`);
+  assert.deepEqual(spec.args.slice(-6), ["-t", "16", "-mg", "1", "-sm", "none"],
+    "the tail is carried verbatim, device flags included");
+  assert.equal(spec.args.includes("81920"), true, "the context size is carried, not re-derived");
+  assert.equal(spec.args.includes("99"), true, "so is the GPU layer count");
+  // argv[0] is the binary and is not repeated in the argument list.
+  assert.equal(spec.args.includes(String.raw`D:\llama\llama-server.exe`), false);
+});
+
+test("a port we could not attribute remembers no launch", () => {
+  // The fixed candidate list finds a port without a process behind it - inside
+  // WSL, in a container, or under another user. Offering to start that would be
+  // offering to start something we have never seen.
+  assert.equal(launchSpecFrom({ port: 8080 }), null);
+  assert.equal(launchSpecFrom({ binary: "llama-server", cmdline: "" }), null);
+  assert.equal(launchSpecFrom(null), null);
+  assert.equal(launchSpecFrom({ cmdline: "llama-server --port 8080" }), null, "a binary is required");
 });

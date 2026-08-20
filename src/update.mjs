@@ -344,7 +344,9 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
 // silently - an empty update.log, no spawn error, the old gateway still
 // serving. Giving the child no fd at all is what the manual "run restart.ps1"
 // path already does, and that path works.
-function scheduleRestart(rootDir, {
+// Exported for the spawn-shape test: the Windows restart has to outlive the
+// gateway it stops, and that is a property of these spawn arguments alone.
+export function scheduleRestart(rootDir, {
   spawnImpl = spawn,
   platform = process.platform,
 } = {}) {
@@ -354,16 +356,22 @@ function scheduleRestart(rootDir, {
   };
   try {
     const [command, args] = platform === "win32"
-      ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(rootDir, "scripts", "restart.ps1"), "-Force"]]
+      ? ["cmd.exe", ["/c", "start", "", "/b", "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(rootDir, "scripts", "restart.ps1"), "-Force"]]
       : ["sh", [path.join(rootDir, "scripts", "restart.sh"), "-Force"]];
-    // detached only on POSIX. On Windows it is actively harmful: measured on Windows
-    // 11, a detached powershell.exe is created (spawn fires, a pid is allocated) and
-    // then never executes the script - no output, no error, nothing. That is the
-    // whole restart failure. It reproduced with stdio to a raw fd and with cmd.exe
-    // redirection, with and without windowsHide, inside and outside a sandbox; the
-    // same spawn without `detached` runs and logs normally every time. Windows does
-    // not kill children when a parent exits, so unref() alone survives the restart
-    // script stopping this gateway - which is all detached was ever there to buy.
+    // The restart script's first act is to stop this gateway - its own parent -
+    // so it only runs to completion if it outlives us. Measured on Windows 11: a
+    // plain spawnImpl child does NOT. With the parent alive the script finishes;
+    // with the parent exiting right after the spawn the same child is torn down
+    // mid-script and never reaches its Start-Process. unref() does not change
+    // that, and it is exactly the reported failure - the dashboard says
+    // "restarting...", the old listener dies, and nothing starts in its place.
+    //
+    // `detached: true` is not the fix either: measured on the same machine, a
+    // detached powershell.exe gets a pid and then never executes the script at
+    // all. Going through cmd's `start` re-parents the script away from this
+    // process and it survives - verified with the parent exiting 400ms after the
+    // spawn, and with a rootDir containing a space. The empty "" is start's
+    // window-title argument, which it would otherwise take from the command.
     const child = spawnImpl(command, args, {
       env,
       stdio: ["ignore", "ignore", "ignore"],

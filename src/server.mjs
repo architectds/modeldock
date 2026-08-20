@@ -1,6 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -33,7 +34,7 @@ import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
-import { ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -530,6 +531,7 @@ function settingsPayload(services) {
     ollama: {
       baseUrl: config.ollamaBaseUrl || OLLAMA_DEFAULT_BASE,
       connected: ollamaConnected,
+      canRestart: Boolean(readOllamaSnapshot(services.ollamaSnapshotFile)?.launch?.binary),
       models: (ollamaProfile.availableModels || []).map((model) => ({
         id: model.id,
         upstreamId: model.upstreamId,
@@ -545,6 +547,8 @@ function settingsPayload(services) {
       return [id, {
         baseUrl: profile.baseUrl,
         connected: Boolean(profile.availableModels?.length),
+        // Drives a control that is hidden when there is nothing to replay.
+        canRestart: Boolean(rememberedLaunch(id, services.localEnginesFile || localEnginesSnapshotPath())),
         models: (profile.availableModels || []).map((model) => ({
           id: model.id,
           label: model.label || model.id,
@@ -1910,6 +1914,10 @@ export function createApp(services = createServices()) {
       // speaks /v1/chat/completions fails the connect instead of every later turn.
       await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
       const snapshot = {
+        // What started this engine, read from the process behind the port we
+        // just connected to. Kept so a stopped engine can be started again as
+        // it was, rather than from a command line we would have to invent.
+        launch: await launchSpecForPort(new URL(base).port),
         baseUrl: base,
         connectedAt: new Date().toISOString(),
         models: listed.models.map((model) => ({
@@ -1929,6 +1937,45 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;
       return res.status(status).json({ error: { type: error.code || "local_connect_failed", message: error.message } });
+    }
+  });
+
+  // Start an engine again exactly as it was running when it was connected.
+  //
+  // The request names an engine and nothing more. The binary and its arguments
+  // come from the snapshot this install wrote while that engine was serving, so
+  // there is no path from an HTTP body to a process argument, and argv is a list
+  // rather than a string so no shell parses a model path.
+  //
+  // Only offered for an engine we have actually met. Composing a launch for one
+  // we have not - guessing a model path, a context size, how many layers belong
+  // on the GPU - would be a guess wearing the clothes of a memory.
+  app.post("/api/local/restart", mutateConfig, async (req, res) => {
+    const { engine } = req.body || {};
+    const remembered = engine === "ollama"
+      ? readOllamaSnapshot(services.ollamaSnapshotFile)?.launch
+      : (CONNECTABLE_ENGINES.includes(engine)
+        ? rememberedLaunch(engine, services.localEnginesFile || localEnginesSnapshotPath())
+        : null);
+    if (!remembered?.binary || !Array.isArray(remembered.args)) {
+      return res.status(404).json({
+        error: { type: "no_launch", message: `No remembered way to start ${engine || "that engine"}.` },
+      });
+    }
+    try {
+      const child = spawn(remembered.binary, remembered.args, {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      // Ours to start, not ours to hold: the engine outlives this gateway, and
+      // a restart of ModelDock must not take the user's model down with it.
+      child.unref();
+      recordConfigAction(metrics, `local_restart_${engine}`, { ok: true });
+      return res.json({ engine, started: true, binary: remembered.binary });
+    } catch (error) {
+      recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: error.message });
+      return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
     }
   });
 
@@ -1960,7 +2007,12 @@ export function createApp(services = createServices()) {
       // Prove the Responses dialect before persisting so an old Ollama (< 0.13.3)
       // fails the connect with readable guidance instead of a silent 404 later.
       await probeOllamaResponses({ baseUrl: result.endpoint, modelId: result.models[0].upstreamId });
-      const snapshot = { baseUrl: result.endpoint, connectedAt: new Date().toISOString(), models: result.models };
+      const snapshot = {
+        baseUrl: result.endpoint,
+        connectedAt: new Date().toISOString(),
+        models: result.models,
+        launch: await launchSpecForPort(new URL(result.endpoint).port || 11434),
+      };
       writeOllamaSnapshot(services.ollamaSnapshotFile, snapshot);
       applyOllamaProfile(config, snapshot);
       config.ollamaBaseUrl = result.endpoint;

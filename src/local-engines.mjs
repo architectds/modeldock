@@ -13,7 +13,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
-import { listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
+import { launchSpecFrom, listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
 
 export class LocalEngineError extends Error {
   constructor(code, message) {
@@ -228,4 +228,23 @@ export function clearLocalEngineSnapshot(file, engine) {
     // Best effort: a stale entry is only honoured while it still parses.
   }
   return file;
+}
+
+
+// The remembered launch for an engine, or null. Reading it through one
+// function keeps the shape of the snapshot an implementation detail of this
+// module rather than something the restart route has to know.
+export function rememberedLaunch(engine, file = localEnginesSnapshotPath()) {
+  const spec = readLocalEnginesSnapshot(file)?.[engine]?.launch;
+  if (!spec?.binary || !Array.isArray(spec.args)) return null;
+  return { binary: spec.binary, args: spec.args };
+}
+
+// Attach the launch of whatever process is serving this port, when we could
+// attribute one. A port we could not attribute simply carries no launch, and
+// the Restart control stays hidden rather than offering a guess.
+export async function launchSpecForPort(port, { listeners = null } = {}) {
+  const observed = listeners || await listEngineListeners();
+  const match = observed.find((listener) => Number(listener?.port) === Number(port));
+  return launchSpecFrom(match);
 }

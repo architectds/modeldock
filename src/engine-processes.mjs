@@ -223,3 +223,21 @@ export function parseLlamaArgs(cmdline) {
   }
   return spec;
 }
+
+
+// What it takes to start this engine again, taken from the process that was
+// already serving it. We do not compose a command line: a llama-server is
+// started with a dozen arguments - the model path, the context size, how many
+// layers go to the GPU, which device - and anything we invented would be a
+// guess presented as a memory. Replaying exactly what ran is the only honest
+// version of "start it again".
+//
+// argv is stored as a list rather than a string so the relaunch never goes
+// through a shell: there is nothing for a quote or a semicolon in a model path
+// to escape into.
+export function launchSpecFrom(listener) {
+  if (!listener?.binary || !listener.cmdline) return null;
+  const tokens = tokenizeCommandLine(listener.cmdline);
+  if (!tokens.length) return null;
+  return { binary: listener.binary, args: tokens.slice(1) };
+}

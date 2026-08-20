@@ -1461,6 +1461,7 @@ async function renderLocalEngines() {
       }
     }
     for (const engineId of localEngineIds) paintEngineButton(engineId);
+    for (const engineId of localEngineIds) paintRestartButton(engineId);
     for (const engine of engines) {
       const item = document.createElement("li");
       item.className = "local-engine";
@@ -1892,6 +1893,9 @@ function renderOllamaSection(state) {
   ollamaState = state || { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
   const connected = Boolean(ollamaState.connected && ollamaState.models?.length);
   ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
+  // Same rule the other two get: something to replay, and nothing answering.
+  localCanRestart.set("ollama", Boolean(ollamaState.canRestart));
+  paintRestartButton("ollama");
 }
 
 // --- Local engines: one port dialog for all three ---
@@ -1910,6 +1914,15 @@ function renderOllamaSection(state) {
 // enforced by assertLocalBase on the server.
 const localEngineIds = ["ollama", "llamacpp", "vllm"];
 const localDiscovery = new Map();
+const localCanRestart = new Map();
+
+// Offered only when there is a launch to replay and nothing is answering:
+// starting a second copy on a port the first one holds just fails.
+function paintRestartButton(engine) {
+  const button = $(`${engine}-restart`);
+  if (!button) return;
+  button.hidden = !localCanRestart.get(engine) || localDiscovery.has(engine);
+}
 
 // A connected engine beats an idle one; an engine we could attribute to a
 // process beats one we only found by knocking on a default port. Otherwise the
@@ -1956,6 +1969,11 @@ function renderLocalEngineState(engine, state) {
   localConnectedState.set(engine, connected);
   localShow(engine, connected ? t("local.connected", { count: state.models.length }) : "", false);
   paintEngineButton(engine);
+  // Shown only when there is a launch to replay, and only while the engine is
+  // not answering: starting a second copy on a port the first one holds fails,
+  // and offering it would read as a control that does not work.
+  localCanRestart.set(engine, Boolean(state?.canRestart));
+  paintRestartButton(engine);
 }
 
 const renderLocalSections = {
@@ -2079,6 +2097,38 @@ async function submitLocalConfig(action) {
 
 for (const engineId of localEngineIds) {
   $(`${engineId}-configure`)?.addEventListener("click", () => openLocalConfig(engineId));
+  // The request carries an engine id and nothing else: what runs is what the
+  // gateway wrote down while that engine was serving.
+  $(`${engineId}-restart`)?.addEventListener("click", async () => {
+    const button = $(`${engineId}-restart`);
+    button.disabled = true;
+    localShow(engineId, t("local.restarting"), false);
+    try {
+      const reply = await fetch("/api/local/restart", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ engine: engineId }),
+      });
+      const body = await reply.json();
+      if (!reply.ok) throw new Error(body.error?.message || `Restart ${reply.status}`);
+      // A model can take a while to load - a large one much longer than any
+      // fixed wait would be honest about - so this polls until the engine
+      // answers or the ceiling is reached, and says which happened.
+      let up = false;
+      for (let waited = 0; waited < 60_000 && !up; waited += 2_000) {
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+        await renderLocalEngines();
+        up = localDiscovery.has(engineId);
+      }
+      localShow(engineId, up ? "" : t("local.restartSlow"), !up);
+      poll().catch(() => {});
+      pollConfig().catch(() => {});
+    } catch (error) {
+      localShow(engineId, error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
   paintEngineButton(engineId);
 }
 $("local-config-close")?.addEventListener("click", closeLocalConfig);

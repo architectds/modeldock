@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically } from "../src/update.mjs";
+import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically, scheduleRestart } from "../src/update.mjs";
 
 function responseBody(body) {
   const bytes = Buffer.from(body);
@@ -631,4 +631,49 @@ test("createUpdater.apply keeps only the two most recent rollback snapshots", as
   assert.ok(snapshots.includes(firstCurrent), "the previous generation survives");
   const current = readFileSync(path.join(rollbackRoot, "current"), "utf8").trim();
   assert.equal(current, snapshots[1], "the marker still points at the newest snapshot");
+});
+
+// The Windows restart script stops the gateway that spawned it, so it only
+// finishes if it outlives that parent. Measured on Windows 11, a plain child
+// does not: kill or exit the parent right after the spawn and the script is
+// torn down before its Start-Process, which is the "restarting..." that never
+// comes back with the listener gone. Going through cmd's `start` re-parents it.
+// This test pins the spawn shape, since that is the entire fix.
+test("the Windows restart is re-parented so it survives stopping its own parent", () => {
+  const calls = [];
+  const rootDir = ["C:", "Users", "Chen Bao", ".modeldock"].join(path.sep);
+  scheduleRestart(rootDir, {
+    spawnImpl: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { on() {}, unref() {} };
+    },
+    platform: "win32",
+  });
+
+  assert.equal(calls.length, 1);
+  const { command, args, options } = calls[0];
+  assert.equal(command, "cmd.exe", "a direct powershell child dies with the gateway it stops");
+  assert.deepEqual(args.slice(0, 4), ["/c", "start", "", "/b"], "start needs its empty window-title argument");
+  assert.ok(args.includes("powershell.exe"));
+  assert.ok(args.includes("-Force"), "the takeover flag still reaches the script");
+  // A path with a space must arrive as one argument; cmd would otherwise split
+  // it and powershell would report a script it cannot find.
+  assert.ok(
+    args.some((arg) => arg === path.join(rootDir, "scripts", "restart.ps1")),
+    "the script path stays a single argument",
+  );
+  assert.notEqual(options.detached, true, "a detached powershell never executes the script on Windows");
+});
+
+test("the POSIX restart stays detached rather than going through cmd", () => {
+  const calls = [];
+  scheduleRestart("/home/u/.modeldock", {
+    spawnImpl: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { on() {}, unref() {} };
+    },
+    platform: "linux",
+  });
+  assert.equal(calls[0].command, "sh");
+  assert.equal(calls[0].options.detached, true, "detach is the POSIX way to outlive the parent");
 });
