@@ -26,6 +26,12 @@ function testStateDir() {
   return path.join(os.tmpdir(), `modeldock-test-state-${process.pid}`);
 }
 
+// Where an ordinary install keeps its state. Compared against the resolved
+// directory to answer whether this process has been pointed somewhere else.
+export function defaultStateDir() {
+  return path.join(os.homedir(), ".modeldock");
+}
+
 export function stateDir({ home } = {}) {
   const isolated = testStateDir();
   if (isolated && home === undefined) return isolated;

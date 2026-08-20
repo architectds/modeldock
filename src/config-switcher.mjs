@@ -1,6 +1,8 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import { defaultStateDir, stateDir } from "./state-dir.mjs";
 import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 
 // The dashboard writes this agent file into <codexHome>/agents. Codex reads that
@@ -278,6 +280,33 @@ export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], ca
   return `${lines.join("\n").replace(/\n/g, newline)}${newline}`;
 }
 
+// A gateway whose state directory has been redirected is a throwaway: a test
+// run, a mock install, a second instance being tried out. Such a gateway has
+// no business rewriting the real ~/.codex/config.toml, because that file
+// points Codex at a base URL - and a throwaway gateway pointing Codex at
+// itself takes the user's editor with it when it exits. This happened while
+// testing: a gateway started with only MODELDOCK_STATE_DIR isolated rewrote
+// the live config.
+//
+// Only the mismatch is refused. A throwaway gateway with a throwaway
+// CODEX_HOME is the normal test setup and is untouched, and an install that
+// genuinely wants a redirected state directory to drive the real Codex can
+// say so with MODELDOCK_ALLOW_FOREIGN_CODEX_HOME=1.
+function foreignCodexHome(codexHome) {
+  if (process.env.MODELDOCK_ALLOW_FOREIGN_CODEX_HOME) return "";
+  const redirected = stateDir() !== defaultStateDir();
+  if (!redirected) return "";
+  const realCodexHome = path.resolve(path.join(os.homedir(), ".codex"));
+  if (path.resolve(codexHome) !== realCodexHome) return "";
+  return [
+    `refusing to write ${path.join(realCodexHome, "config.toml")}:`,
+    `this gateway's state directory is ${stateDir()}, not ${defaultStateDir()},`,
+    "so it is not the install that owns this machine's Codex.",
+    "Point MODELDOCK_CODEX_HOME at a throwaway directory too,",
+    "or set MODELDOCK_ALLOW_FOREIGN_CODEX_HOME=1 if this is deliberate.",
+  ].join(" ");
+}
+
 export class CodexConfigSwitcher {
   // Either a fixed model id or a function returning the caller's current
   // selection. Passing the function makes `model` a view of that selection
@@ -294,6 +323,7 @@ export class CodexConfigSwitcher {
   constructor({ codexHome, baseUrl, model, nativeModels = [], catalogFile = "", mcpUrl = "", mcpCommand = "", mcpArgs = [], mcpEnv = {} }) {
     this.codexHome = path.resolve(codexHome || path.join(process.cwd(), ".modeldock-codex-home"));
     this.configPath = path.join(this.codexHome, "config.toml");
+    this.foreignCodexHome = foreignCodexHome(this.codexHome);
     this.stateDir = path.join(this.codexHome, "modeldock");
     this.statePath = path.join(this.stateDir, "config-switch-state.json");
     this.baseUrl = baseUrl;
@@ -385,6 +415,9 @@ export class CodexConfigSwitcher {
   }
 
   async enable() {
+    if (this.foreignCodexHome) {
+      throw Object.assign(new Error(this.foreignCodexHome), { code: "FOREIGN_CODEX_HOME" });
+    }
     const state = await this.#readState();
     if (state.stateError) throw Object.assign(new Error(`Cannot read switch state: ${state.stateError}`), { code: "STATE_INVALID" });
     if (state.enabled) {
@@ -500,6 +533,9 @@ export class CodexConfigSwitcher {
   }
 
   async disable() {
+    if (this.foreignCodexHome) {
+      throw Object.assign(new Error(this.foreignCodexHome), { code: "FOREIGN_CODEX_HOME" });
+    }
     const state = await this.#readState();
     if (!state.enabled) return this.status();
     let current = await this.#readCurrent();
