@@ -578,37 +578,107 @@ export function profileOptions() {
 // Populate the custom profile from config so the catalog and per-model routing
 // treat the configured endpoint/model like any other provider. Called at config
 // load and after the dashboard Add flow writes new values.
+// One profile per named provider, built from the endpoint list.
+//
+// Every user endpoint used to answer to a single "custom" provider, so a
+// machine with three of them published three models all suffixed @custom -
+// one address for three different upstreams. Usage could not be attributed,
+// the same model id could not be served from two hosts, and removing one
+// endpoint left the others sharing an address with a hole in it. The registry
+// was already the only thing routing consults, so a provider per name costs
+// an entry rather than a call site.
+//
+// An endpoint that names no provider is in the "custom" group, which is where
+// every endpoint added before this existed already is: their published slugs
+// do not move, so nothing in a picker breaks.
 export function applyCustomProfile(config) {
-  // Every configured endpoint publishes its model. The profile keeps the
-  // first one's baseUrl for callers that ask the profile rather than the
-  // model; per-model routing goes through customEndpointFor.
   const endpoints = Array.isArray(config?.customEndpoints) ? config.customEndpoints : [];
-  // No second source: an install's legacy MODELDOCK_CUSTOM_* slot is folded
-  // into the list by the loader. Publishing from config.customModel as well
-  // put a model in every picker that the endpoints page could not see, and so
-  // could not remove.
-  const published = endpoints;
-  CUSTOM_PROFILE.baseUrl = published[0]?.baseUrl || "";
-  CUSTOM_PROFILE.availableModels = published.map((entry) => {
-    const advertised = localContextWindow(entry.contextWindow || undefined);
-    return {
-      id: entry.modelId,
-      label: entry.modelId,
-      endpoint: "responses",
-      supportsVision: Boolean(entry.supportsVision),
-      ...(advertised ? { contextWindow: advertised } : {}),
-      ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
-      supportedReasoningLevels: LOCAL_REASONING_LEVELS,
-      defaultReasoningLevel: "xhigh",
-      reasoningSource: "measured",
-      // Always owner-qualified so the published slug carries @custom: the
-      // picker groups it under Custom and routing never mistakes it for an
-      // opencode-go model with the same bare id.
-      ownerQualified: true,
-      status: "available",
-    };
-  });
+  const groups = new Map();
+  for (const entry of endpoints) {
+    const id = String(entry?.providerId || "custom");
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(entry);
+  }
+  // The built-in custom profile always exists, empty when nothing is in that
+  // group, because callers ask for it by name.
+  if (!groups.has("custom")) groups.set("custom", []);
+
+  // A provider whose last endpoint was removed stops existing, or its models
+  // would keep resolving to a profile nothing feeds.
+  for (const id of Object.keys(PROFILES)) {
+    if (PROFILES[id]?.userDefined && !groups.has(id)) delete PROFILES[id];
+  }
+
+  for (const [id, group] of groups) {
+    const profile = id === "custom" ? CUSTOM_PROFILE : (PROFILES[id] || userEndpointProfile(id));
+    PROFILES[id] = profile;
+    profile.baseUrl = group[0]?.baseUrl || "";
+    profile.availableModels = group.map((entry) => {
+      const advertised = localContextWindow(entry.contextWindow || undefined);
+      return {
+        id: entry.modelId,
+        label: entry.modelId,
+        endpoint: "responses",
+        supportsVision: Boolean(entry.supportsVision),
+        ...(advertised ? { contextWindow: advertised } : {}),
+        ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
+        supportedReasoningLevels: LOCAL_REASONING_LEVELS,
+        defaultReasoningLevel: "xhigh",
+        reasoningSource: "measured",
+        // Always owner-qualified: the slug carries the provider that serves it,
+        // so routing never mistakes it for another provider's model of the
+        // same bare id.
+        ownerQualified: true,
+        status: "available",
+      };
+    });
+  }
   return CUSTOM_PROFILE;
+}
+
+// A provider the user named. It reaches its endpoints exactly the way the
+// built-in custom profile does - the lookup is by model, and each entry
+// carries its own host and key - so the only thing that differs is the name.
+function userEndpointProfile(id) {
+  const profile = {
+    id,
+    label: id,
+    baseUrl: "",
+    tokenEnvName: "",
+    userDefined: true,
+    blockedToolTypes: new Set([]),
+    hiddenToolNames: new Set([]),
+    availableModels: [],
+    modelCatalog({ mainModel, baseInstructions }) {
+      return modelCatalogDefaults({
+        profileId: id,
+        mainModel,
+        displayName: id,
+        description: `Models served by ${id} through the ModelDock Responses gate.`,
+        compHash: `modeldock-${id}-v1`,
+        inputModalities: ["text", "image"],
+        supportsSearchTool: false,
+        baseInstructions,
+        availableModels: profile.availableModels,
+      });
+    },
+  };
+  defineRouting(profile, {
+    normalizesPayload: true,
+    baseUrlFor: (config, model) => trimBase(
+      customEndpointFor(config?.customEndpoints, model)?.baseUrl || "",
+    ),
+    target: (config, model) => {
+      const endpoint = customEndpointFor(config?.customEndpoints, model);
+      return {
+        provider: id,
+        model: bareModelId(model),
+        url: `${trimBase(endpoint?.baseUrl || "")}/responses`,
+        token: endpoint?.apiKey || "",
+      };
+    },
+  });
+  return profile;
 }
 
 // Populate the ollama profile from the connection snapshot (written by the

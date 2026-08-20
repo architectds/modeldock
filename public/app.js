@@ -1557,6 +1557,9 @@ async function renderEndpointList() {
       const facts = document.createElement("p");
       facts.className = "endpoint-facts";
       const bits = [];
+      // The model id is no longer unique on its own - two providers may serve
+      // the same one - so the row names the provider that does.
+      bits.push(endpoint.providerId || "custom");
       if (endpoint.contextWindow) bits.push(`${number(endpoint.contextWindow)} ${t("roster.context")}`);
       if (endpoint.supportsVision) bits.push(t("roster.vision"));
       bits.push(t(endpoint.apiKeyConfigured ? "endpoints.keySet" : "endpoints.keyMissing"));
@@ -1571,7 +1574,7 @@ async function renderEndpointList() {
           const reply = await fetch("/api/custom/remove", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ modelId: endpoint.modelId }),
+            body: JSON.stringify({ modelId: endpoint.modelId, providerId: endpoint.providerId }),
           });
           const body = await reply.json();
           if (!reply.ok) throw new Error(body.error?.message || `Remove ${reply.status}`);
@@ -1842,6 +1845,7 @@ if (customAddBtn) {
           apiKey,
           modelId,
           asVision: Boolean(customAsVision?.checked),
+          providerId: $("custom-provider")?.value || "",
         }),
       });
       const body = await response.json();
@@ -1921,7 +1925,14 @@ const localCanRestart = new Map();
 function paintRestartButton(engine) {
   const button = $(`${engine}-restart`);
   if (!button) return;
-  button.hidden = !localCanRestart.get(engine) || localDiscovery.has(engine);
+  const offer = Boolean(localCanRestart.get(engine)) && !localDiscovery.has(engine);
+  button.hidden = !offer;
+  // The remembered launch is the process's own argv and nothing else. An engine
+  // configured through LLAMA_ARG_* or OLLAMA_HOST comes back with the same
+  // command line and different settings, so say so rather than imply a faithful
+  // replay. This goes away once a chosen spec exists, because those args are ours.
+  const hint = $(`${engine}-restart-hint`);
+  if (hint) hint.hidden = !offer;
 }
 
 // A connected engine beats an idle one; an engine we could attribute to a

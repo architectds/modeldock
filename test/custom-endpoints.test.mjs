@@ -238,3 +238,68 @@ test("loadConfig does not write the .env it reads", async (t) => {
 
   assert.equal(readFileSync(envFile, "utf8"), original, "the file it read is the file it left");
 });
+
+// Every user endpoint used to answer to one "custom" provider, so three
+// endpoints published three models all suffixed @custom - one address for three
+// upstreams. Naming the provider is what makes the address mean something.
+test("an endpoint belongs to the provider it names", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-provider-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "custom-endpoints.json");
+
+  let list = [];
+  list = addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://alpha.example/v1", apiKey: "sk-a", providerId: "Alpha" });
+  list = addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://beta.example/v1", apiKey: "sk-b", providerId: "beta" });
+  // No provider means the group every endpoint added before this is already in,
+  // so their published slugs do not move.
+  list = addCustomEndpoint(list, { modelId: "legacy", baseUrl: "https://old.example/v1", apiKey: "sk-o" });
+  writeCustomEndpoints(file, list);
+
+  const stored = readCustomEndpoints(file);
+  assert.deepEqual(stored.map((e) => `${e.providerId}/${e.modelId}`), ["alpha/shared", "beta/shared", "custom/legacy"]);
+
+  // The suffix decides which endpoint answers, which is the whole point.
+  assert.equal(customEndpointFor(stored, "shared@alpha").baseUrl, "https://alpha.example/v1");
+  assert.equal(customEndpointFor(stored, "shared@beta").baseUrl, "https://beta.example/v1");
+  assert.equal(customEndpointFor(stored, "legacy@custom").baseUrl, "https://old.example/v1");
+  // A provider that serves no such model resolves to nothing rather than to
+  // somebody else's endpoint.
+  assert.equal(customEndpointFor(stored, "legacy@alpha"), null);
+});
+
+test("a clash is per provider, and built-in names are refused", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-provider-clash-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  let list = [];
+  list = addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://alpha.example/v1", apiKey: "", providerId: "alpha" });
+  // The same id under another provider is exactly what naming them allows.
+  assert.doesNotThrow(() => addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://beta.example/v1", apiKey: "", providerId: "beta" }));
+  // Under the same one it is still unroutable.
+  assert.throws(
+    () => addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://other.example/v1", apiKey: "", providerId: "alpha" }),
+    (error) => error.code === "duplicate",
+  );
+  // A built-in name would put two different things at one address.
+  for (const reserved of ["ollama", "llamacpp", "vllm", "opencode-go", "deepseek-official"]) {
+    assert.throws(
+      () => addCustomEndpoint(list, { modelId: "x", baseUrl: "https://x.example/v1", apiKey: "", providerId: reserved }),
+      (error) => error.code === "provider",
+      `${reserved} is refused`,
+    );
+  }
+});
+
+// Removing one of two endpoints serving the same model id must take the one
+// that was asked for.
+test("removal names the provider", () => {
+  let list = [];
+  list = addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://alpha.example/v1", apiKey: "", providerId: "alpha" });
+  list = addCustomEndpoint(list, { modelId: "shared", baseUrl: "https://beta.example/v1", apiKey: "", providerId: "beta" });
+
+  const left = removeCustomEndpoint(list, "shared", "alpha");
+  assert.deepEqual(left.map((e) => e.providerId), ["beta"]);
+  // Without a provider it still means "every endpoint for that model", which is
+  // what a caller written before providers existed means by it.
+  assert.deepEqual(removeCustomEndpoint(list, "shared"), []);
+});

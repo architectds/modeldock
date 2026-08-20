@@ -38,11 +38,41 @@ function normalizeBase(raw) {
 // One record per published model. The model id is the key because that is what
 // routing has to resolve: a request arrives naming a model, and the endpoint
 // that serves it has to be found from the name alone.
+// Provider ids this gateway defines itself. A user-named provider may not
+// take one of these: the suffix is a routing address, and two different
+// things answering to one address is the failure this whole change removes.
+export const RESERVED_PROVIDER_IDS = ["opencode-go", "deepseek-official", "ollama", "llamacpp", "vllm", "openai"];
+
+// Lowercase, no separator, no spaces: the id becomes the @suffix of every
+// model this endpoint publishes, and that suffix is parsed by splitting on
+// the separator.
+export function normalizeProviderId(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
+export function validateProviderId(value) {
+  const id = normalizeProviderId(value);
+  // Absent is allowed and means "custom": every endpoint added before this
+  // existed is in that group, and moving them would change the slug Codex has
+  // in its picker.
+  if (!id) return "custom";
+  if (RESERVED_PROVIDER_IDS.includes(id)) {
+    throw new CustomEndpointsError("provider", `${id} is a built-in provider name. Choose another.`);
+  }
+  return id;
+}
+
 function cleanEntry(entry) {
   const modelId = String(entry?.modelId || "").trim();
   const baseUrl = normalizeBase(entry?.baseUrl);
   if (!modelId || !baseUrl) return null;
   return {
+    providerId: validateProviderId(entry?.providerId),
     modelId,
     baseUrl,
     apiKey: decryptSecret(entry.apiKey || ""),
@@ -62,10 +92,14 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
     const clean = [];
     for (const entry of list) {
       const item = cleanEntry(entry);
-      // A duplicate model id cannot be routed: the second one would be
-      // unreachable, so it is dropped on read rather than published as a lie.
-      if (!item || seen.has(item.modelId)) continue;
-      seen.add(item.modelId);
+      // The key is the address, not the model id: two providers may each serve
+      // a model of the same name and both are reachable, because the published
+      // slug carries the provider. Keying on the id alone silently dropped the
+      // second one.
+      if (!item) continue;
+      const key = `${item.providerId}@${item.modelId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       clean.push(item);
     }
     return clean;
@@ -81,6 +115,7 @@ export function writeCustomEndpoints(file, endpoints) {
     return file;
   }
   const payload = endpoints.map((entry) => ({
+    providerId: entry.providerId || "custom",
     modelId: entry.modelId,
     baseUrl: normalizeBase(entry.baseUrl),
     apiKey: entry.apiKey ? encryptSecret(entry.apiKey) : "",
@@ -96,28 +131,57 @@ export function writeCustomEndpoints(file, endpoints) {
 }
 
 // Routing asks this, and only this: which endpoint serves this model?
+// The endpoint serving a model, by the address the model carries.
+//
+// The suffix is the provider, and looking it up by bare model id alone made
+// two providers serving the same id indistinguishable: qwen@together resolved
+// to whichever host happened to be first in the list. The suffix is the whole
+// reason providers are named.
+//
+// A bare id still matches on model alone, because a caller that has not been
+// through routing yet - a probe, a legacy config value - has no suffix to give.
 export function customEndpointFor(endpoints, model) {
   if (!model) return null;
-  const bare = String(model).split("@")[0];
-  return (endpoints || []).find((entry) => entry.modelId === bare) || null;
+  const slug = String(model);
+  const separator = slug.lastIndexOf("@");
+  const bare = separator > 0 ? slug.slice(0, separator) : slug;
+  const provider = separator > 0 ? slug.slice(separator + 1) : "";
+  const list = endpoints || [];
+  if (provider) {
+    const owned = list.find((entry) =>
+      entry.modelId === bare && (entry.providerId || "custom") === provider);
+    if (owned) return owned;
+    // A suffix naming a provider that serves no such model resolves to nothing
+    // rather than to somebody else s endpoint.
+    if (list.some((entry) => (entry.providerId || "custom") === provider)) return null;
+  }
+  return list.find((entry) => entry.modelId === bare) || null;
 }
 
 export function addCustomEndpoint(endpoints, entry) {
   const item = cleanEntry({ ...entry, apiKey: "" });
   if (!item) throw new CustomEndpointsError("model", "An endpoint needs a base URL and a model id.");
-  if (endpoints.some((existing) => existing.modelId === item.modelId)) {
-    const owner = endpoints.find((existing) => existing.modelId === item.modelId);
+  // A clash is per provider, not global: naming providers is exactly what
+  // makes the same model id on two hosts addressable, and refusing it would
+  // undo the reason for naming them.
+  const clash = endpoints.find((existing) =>
+    existing.modelId === item.modelId && (existing.providerId || "custom") === item.providerId);
+  if (clash) {
     throw new CustomEndpointsError(
       "duplicate",
-      `${item.modelId} is already served by ${owner.baseUrl}. Remove that endpoint first, or add this model under a different id.`,
+      `${item.modelId} is already served by ${clash.baseUrl} under ${item.providerId}. Remove that endpoint first, or give this one a different provider name.`,
     );
   }
   return [...endpoints, { ...item, apiKey: String(entry.apiKey || ""), addedAt: new Date().toISOString() }];
 }
 
-export function removeCustomEndpoint(endpoints, modelId) {
+export function removeCustomEndpoint(endpoints, modelId, providerId = "") {
   const id = String(modelId || "").trim();
-  return (endpoints || []).filter((entry) => entry.modelId !== id);
+  const provider = normalizeProviderId(providerId);
+  // Without a provider this removes every endpoint serving that model id,
+  // which is what a caller written before providers existed means by it.
+  return (endpoints || []).filter((entry) =>
+    entry.modelId !== id || (provider && (entry.providerId || "custom") !== provider));
 }
 
 

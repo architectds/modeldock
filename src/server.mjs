@@ -525,6 +525,7 @@ function settingsPayload(services) {
         baseUrl: entry.baseUrl,
         contextWindow: entry.contextWindow,
         supportsVision: entry.supportsVision,
+      providerId: entry.providerId || "custom",
         apiKeyConfigured: Boolean(entry.apiKey),
       })),
     },
@@ -1678,6 +1679,7 @@ export function createApp(services = createServices()) {
     // Keys never leave the machine: the list reports whether one is set, not
     // what it is.
     const endpoints = readCustomEndpoints(endpointsFile()).map((entry) => ({
+      providerId: entry.providerId || "custom",
       modelId: entry.modelId,
       baseUrl: entry.baseUrl,
       label: entry.label,
@@ -1690,7 +1692,7 @@ export function createApp(services = createServices()) {
   });
 
   app.post("/api/custom/add", mutateConfig, async (req, res) => {
-    const { baseUrl, apiKey, modelId, asVision, label } = req.body || {};
+    const { baseUrl, apiKey, modelId, asVision, label, providerId } = req.body || {};
     try {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
@@ -1701,6 +1703,7 @@ export function createApp(services = createServices()) {
       const listed = await listEndpointModels({ baseUrl, apiKey });
       const advertisedContext = listed.models.find((m) => m.id === model)?.contextWindow || 0;
       const next = addCustomEndpoint(readCustomEndpoints(endpointsFile()), {
+        providerId,
         modelId: model,
         baseUrl: normalizeBaseUrl(baseUrl),
         apiKey,
@@ -1731,11 +1734,12 @@ export function createApp(services = createServices()) {
 
   app.post("/api/custom/remove", mutateConfig, async (req, res) => {
     const model = String(req.body?.modelId || "").trim();
+    const providerId = String(req.body?.providerId || "").trim();
     if (!model) {
       return res.status(400).json({ error: { type: "model", message: "A model id is required." } });
     }
     const before = readCustomEndpoints(endpointsFile());
-    const next = removeCustomEndpoint(before, model);
+    const next = removeCustomEndpoint(before, model, providerId);
     if (next.length === before.length) {
       return res.status(404).json({ error: { type: "model", message: `No endpoint serves ${model}.` } });
     }
@@ -1744,7 +1748,11 @@ export function createApp(services = createServices()) {
     // A selection cannot outlive the endpoint that served it. Vision is a
     // stored preference, so it has to be let go of explicitly; the main model
     // records what Codex routed with and corrects itself on the next request.
-    const qualified = `${model}${PROVIDER_SEPARATOR}custom`;
+    // Published under its own provider, so the selection it may have filled
+    // carries that provider and not a hard-coded "custom".
+    const gone = before.find((entry) => entry.modelId === model
+      && (!providerId || (entry.providerId || "custom") === providerId));
+    const qualified = `${model}${PROVIDER_SEPARATOR}${gone?.providerId || "custom"}`;
     if (config.visionModel === qualified) {
       config.visionModel = "";
       services.modelSelection.visionModel = "";
