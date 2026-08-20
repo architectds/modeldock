@@ -21,6 +21,7 @@ import {
   startDeviceAuthorization,
   writeXaiAuth,
 } from "../src/xai-auth.mjs";
+import { dpapiSupported } from "../src/secrets.mjs";
 
 const reply = (status, body) => ({
   ok: status >= 200 && status < 300,
@@ -126,9 +127,18 @@ test("both tokens are stored encrypted, and the refresh token is the one worth p
     models: ["grok-4.6"],
   });
 
+  // DPAPI is Windows-only. Where it exists both tokens must be sealed; where it
+  // does not they are stored as given, the same bargain every other secret in
+  // this install makes - and asserting the Windows behaviour everywhere is how
+  // this test passed locally and failed on Linux CI.
   const raw = readFileSync(file, "utf8");
-  assert.equal(raw.includes("access-plaintext"), false, "the access token is not on disk in the clear");
-  assert.equal(raw.includes("refresh-plaintext"), false, "nor the refresh token, which outlives it");
+  if (dpapiSupported()) {
+    assert.equal(raw.includes("access-plaintext"), false, "the access token is not on disk in the clear");
+    assert.equal(raw.includes("refresh-plaintext"), false, "nor the refresh token, which outlives it");
+    assert.match(raw, /"refreshToken": "dpapi:/);
+  } else {
+    assert.ok(raw.includes("refresh-plaintext"), "without DPAPI it is stored as given");
+  }
 
   const back = readXaiAuth(file);
   assert.equal(back.accessToken, "access-plaintext");
