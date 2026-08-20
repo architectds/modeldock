@@ -1425,8 +1425,13 @@ async function renderModelRoster() {
 // know a port number. Connecting still goes through the flow that owns the
 // engine, which is why nothing here writes.
 // 81920 reads as 80K to anyone who set it; the exact figure is noise here.
+// Thousands, the same base the Models page reads windows in. Binary K is the
+// computing convention and would suit a llama.cpp -c 81920 (80K exactly), but
+// most published windows are decimal - 272000, 200000, 1000000 - and showing
+// DeepSeek 1M as 976.6K to keep Kimi 256K round is the worse trade. One base
+// across the product beats either base used in half of it.
 function formatContextSize(tokens) {
-  return tokens >= 1024 ? `${Math.round(tokens / 1024)}K` : String(tokens);
+  return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : String(tokens);
 }
 
 async function renderLocalEngines() {
