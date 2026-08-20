@@ -212,18 +212,45 @@ function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null))
 // picker. Renumbering is therefore not optional; the only question is what
 // order to renumber into.
 //
-// It is use. A published catalog is thirty-odd models and a person switches
-// between four of them, so the four are what the list should open on. Grouping
-// by provider - which this used to do - sorts the list by a fact about billing
-// that nobody is looking for at the moment they open a model picker.
+// Native entries keep the front of the list, in the order Codex captured them.
+// The picker draws them as its own section above a divider, and that section is
+// Codex's to arrange - reordering it by our traffic counts scattered models the
+// App presents as a set, and dropped them below the line entirely whenever we
+// had no figure for them.
+//
+// Everything we route sorts below that, by use. A published catalog is
+// thirty-odd models and a person switches between four of them, so the four are
+// what the lower half should open on. Grouping it by provider - which this used
+// to do - sorts by a fact about billing that nobody is looking for at the
+// moment they open a model picker.
 //
 function orderCatalogByUse(models, usage = {}) {
   if (!Array.isArray(models)) return models;
-  const requests = (entry) => Number(usage[entry?.slug]?.requests || usage[entry?.slug] || 0);
-  return models
-    .map((entry, index) => ({ entry, used: requests(entry), index }))
-    .sort((left, right) => right.used - left.used || left.index - right.index)
-    .map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
+  // The rollup keys on the published slug, and a native entry's slug is bare -
+  // its traffic is filed under "<slug>@openai" because that is how the relay
+  // records it. Looking it up bare finds nothing, which read as "never used"
+  // and sent the models with the most traffic on a signed-in machine to the
+  // bottom of the picker. Rebuild the key the way rollupKey does.
+  const usageKey = (entry) => {
+    const slug = String(entry?.slug || "");
+    return slug.includes("@") ? slug : `${slug}@${entry?.provider || "unknown"}`;
+  };
+  const requests = (entry) => {
+    const found = usage[usageKey(entry)] ?? usage[entry?.slug];
+    return Number(found?.requests ?? found ?? 0);
+  };
+  // A native entry is the one without an owner suffix: it comes from Codex's
+  // own catalog rather than a provider of ours.
+  const isNative = (entry) => !String(entry?.slug || "").includes("@");
+  const decorated = models.map((entry, index) => ({ entry, used: requests(entry), index }));
+  const native = decorated.filter(({ entry }) => isNative(entry)).sort((a, b) => a.index - b.index);
+  const routed = decorated
+    .filter(({ entry }) => !isNative(entry))
+    .sort((left, right) => right.used - left.used || left.index - right.index);
+  // Renumbered across both halves: the native entries arrive carrying Codex's
+  // own priorities (1, 2, 3, 7, 29...), and leaving those in place is what let
+  // them interleave with ours and scatter through the picker.
+  return [...native, ...routed].map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
 }
 
 // Native entries keep their full metadata (capabilities, instructions) but the
