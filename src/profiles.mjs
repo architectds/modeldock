@@ -478,17 +478,25 @@ const XAI_PROFILE = {
   // "function" below - this set is the second line, for anything else Codex
   // starts sending in that shape.
   blockedToolTypes: new Set(["custom"]),
-  // Codex sends apply_patch as a `custom` tool under "freeform", and xAI has no
-  // such variant. "function" is the shape it does accept.
+  // NOT "function". That was tried on 2026-08-21 and it stopped Codex from
+  // starting at all: config_load, the whole app, no models, no gate.
   //
-  // Declared on the profile rather than passed to modelCatalog, because the
-  // published catalog is cross-provider: whichever profile writes the file
-  // publishes an entry for every enabled provider's models. An entry has to
-  // carry the shape ITS OWNER accepts. Keyed off the profile that wrote the
-  // file, a Grok entry published from the opencode-go catalog would say
-  // freeform, Codex would send `custom`, blockedToolTypes would drop it, and
-  // the turn would run with no apply_patch tool at all.
-  applyPatchToolType: "function",
+  // apply_patch_tool_type is a closed serde enum on Codex's side, the same
+  // shape as reasoning_effort - see the comment above allowedEffortsFor in
+  // catalog.mjs, which records the identical failure for `max`. Codex's own
+  // bundled catalog uses exactly one value, "freeform", on every entry of
+  // every model (checked against 0.149.0-alpha.4), and an unknown variant
+  // anywhere in model_catalog_json fails the load rather than the entry.
+  //
+  // So the freeform tool still reaches Codex, still arrives as a `custom` tool,
+  // and blockedToolTypes drops it before it reaches xAI. Grok therefore has no
+  // apply_patch tool - it edits through shell like any model whose provider
+  // cannot take the freeform one. That is a real loss and the right trade: a
+  // missing patch tool is a slower turn, and a catalog Codex refuses to load
+  // is no Codex.
+  //
+  // Reopening this needs evidence about which variants that enum accepts,
+  // from the Codex build in use, not from the field's name.
   // Grok runs these itself. Measured the same day: a request carrying
   // { type: "web_search" } and one carrying { type: "x_search" } both return
   // 200. The gate strips hosted tools by default because most upstreams have

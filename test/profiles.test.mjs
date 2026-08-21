@@ -257,16 +257,12 @@ test("the xAI profile publishes the wire shapes xAI actually accepts", () => {
   const mine = entries.filter((entry) => entry.slug.endsWith("@xai"));
   assert.ok(mine.length >= 2, "both signed-in models are published");
 
-  // apply_patch as a `custom` tool is refused outright: 422 "unknown variant
-  // `custom`". Codex sends that shape whenever the catalog says freeform, so
-  // these entries ask for the function shape instead - and they carry it out of
-  // any catalog, not only the one this profile writes.
-  assert.deepEqual([...new Set(mine.map((entry) => entry.apply_patch_tool_type))], ["function"]);
-  const fromElsewhere = OPENCODE_GO_PROFILE
-    .modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: "base" })
-    .models.filter((entry) => entry.slug.endsWith("@xai"));
-  assert.deepEqual([...new Set(fromElsewhere.map((entry) => entry.apply_patch_tool_type))], ["function"],
-    "a Grok entry published from another provider's catalog still says function");
+  // freeform, and only freeform. Publishing "function" here on 2026-08-21
+  // stopped Codex starting at all - config_load - because apply_patch_tool_type
+  // is a closed enum on its side and its own bundled catalog uses one value.
+  // The freeform tool still arrives as a `custom` tool and blockedToolTypes
+  // drops it before xAI sees it, so Grok edits through shell instead.
+  assert.deepEqual([...new Set(mine.map((entry) => entry.apply_patch_tool_type))], ["freeform"]);
 
   // Grok runs its own search - measured 200 for both web_search and x_search -
   // so the catalog says so rather than leaving Exa to redo it.
@@ -279,17 +275,18 @@ test("the xAI profile publishes the wire shapes xAI actually accepts", () => {
   assert.equal(XAI_PROFILE.availableModels.every((model) => !model.imageUrlShape), true);
 });
 
-test("every other profile keeps the freeform patch tool", () => {
+test("every profile publishes the one patch-tool shape Codex can load", () => {
   // freeform is the better shape and stays the default. xAI takes the other one
   // because there the freeform tool is not a worse patch tool, it is a 422.
   const go = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: "base" });
   const official = DEEPSEEK_OFFICIAL_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
-  // Every entry EXCEPT the ones xAI owns: those carry function wherever they
-  // are published, which is the point of resolving the shape per owner.
+  // Every entry, xAI included. The field is a closed enum on Codex's side and
+  // its own catalog only ever says freeform; publishing anything else stopped
+  // Codex loading its config at all.
   for (const catalog of [go, official]) {
-    const others = (catalog.models || []).filter((entry) => !entry.slug.endsWith("@xai"));
-    assert.ok(others.length > 5, "the catalog is cross-provider, so there is plenty to check");
-    assert.deepEqual([...new Set(others.map((entry) => entry.apply_patch_tool_type))], ["freeform"]);
+    const entries = catalog.models || [];
+    assert.ok(entries.length > 5, "the catalog is cross-provider, so there is plenty to check");
+    assert.deepEqual([...new Set(entries.map((entry) => entry.apply_patch_tool_type))], ["freeform"]);
   }
 });
 
