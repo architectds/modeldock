@@ -133,10 +133,19 @@ function runCommandDefault(file, args, timeoutMs) {
   });
 }
 
-// Returns [{ port, pid, name, binary, cmdline }] for every loopback-reachable
-// listening socket whose owning process looks like an inference engine.
-// A port with no attributable process still comes back (pid 0) when it is
-// reachable, because a container or VM relay hides the real process.
+// An address this gateway can actually reach a listener on. Loopback and the
+// wildcards qualify; a socket bound only to a LAN address does not, and its
+// pid does not belong to the port we probe at 127.0.0.1.
+function reachableAddress(address) {
+  const host = String(address || "").replace(/^\[/, "").replace(/\]$/, "");
+  return host === "" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::" || host === "::1";
+}
+
+// Returns [{ port, address, pid, name, binary, cmdline }] for every listening
+// socket whose owning process looks like an inference engine, plus every socket
+// whose process could not be attributed at all - those come back without a spec
+// rather than being dropped, because a container or VM relay hides the real
+// process and elevation is needed to read another user's command line.
 export async function listEngineListeners({
   platform = process.platform,
   runCommand = runCommandDefault,
@@ -162,17 +171,192 @@ export async function listEngineListeners({
     }
     const seen = new Map();
     for (const listener of listeners) {
-      const info = processes.get(listener.pid) || { pid: listener.pid, name: "", binary: "", cmdline: "" };
-      if (!looksLikeEngineProcess(info)) continue;
+      const known = processes.get(listener.pid);
+      // A port whose process we could not read still comes back. Reading
+      // another user's command line needs elevation on every platform, and a
+      // container relay hides the process outright, so the alternative to
+      // returning it without a spec is not returning it at all - and then a
+      // llama-server on --port 11435 is invisible to the half of discovery
+      // that exists to find exactly that. The probe decides whether it is ours.
+      //
+      // Only genuinely unattributed pids get this. A process we can see and
+      // whose name is not an engine is still dropped, so the machine's other
+      // fifty listening sockets are not probed on every scan.
+      const info = known || { pid: listener.pid, name: "", binary: "", cmdline: "" };
+      if (known && !looksLikeEngineProcess(info)) continue;
       // One row per port: a process may hold the same port on several
       // addresses (IPv4 and IPv6), and that is one engine, not two.
-      if (seen.has(listener.port)) continue;
-      seen.set(listener.port, { port: listener.port, ...info });
+      //
+      // Which row wins is not arbitrary. Two DIFFERENT processes can hold the
+      // same port number on different local addresses, and Get-NetTCPConnection
+      // does not promise an order, so keeping whichever arrived first can file
+      // a port under the pid of a process that is not answering on it. The one
+      // this gateway reaches is the one bound to loopback or to the wildcard,
+      // and that pid is what a restart signals - so it is the one kept.
+      const already = seen.get(listener.port);
+      if (already && !(reachableAddress(listener.address) && !reachableAddress(already.address))) continue;
+      seen.set(listener.port, { port: listener.port, address: listener.address || "", ...info });
     }
     return [...seen.values()];
   } catch {
     return [];
   }
+}
+
+// Rewrite a llama-server argv with the settings a user chose, keeping every
+// other argument exactly as it was.
+//
+// Editing the observed argv rather than composing a fresh one is deliberate: a
+// composed line would silently drop whatever this user needed and we did not
+// think of - a chat template, a device selection, an alias, a LoRA. The parts
+// being tuned are replaced by name; everything else survives untouched.
+const OVERRIDE_FLAGS = {
+  ctxSize: ["-c", "--ctx-size"],
+  parallel: ["-np", "--parallel"],
+  cacheTypeK: ["-ctk", "--cache-type-k"],
+  cacheTypeV: ["-ctv", "--cache-type-v"],
+};
+
+// Presence-only switches: there is no value token to step over, and the two
+// spellings are opposites rather than aliases.
+const OVERRIDE_SWITCHES = {
+  kvUnified: {
+    on: "--kv-unified",
+    off: "--no-kv-unified",
+    spellings: ["--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"],
+  },
+  // Turned off by writing the negative form rather than by removing the
+  // positive one. llama.cpp has flipped this default once already, so a
+  // configuration that means it has to say it; both spellings are present in
+  // the builds this targets, and the older ones that only ever had
+  // --no-context-shift are the ones where the default was the wrong way round.
+  contextShift: {
+    on: "--context-shift",
+    off: "--no-context-shift",
+    spellings: ["--context-shift", "--no-context-shift"],
+  },
+};
+
+// Three states per key, not two. `undefined` means the caller does not own this
+// setting and whatever is on the command line stays. Any other value - `null`
+// included - means the caller owns it, so the existing flag comes off first and
+// is rewritten only if there is something to write.
+//
+// The distinction is the whole fix. Choosing f16 in the drawer passes no cache
+// type, which under the old rule skipped the key entirely, so an existing
+// `-ctk q8_0` survived a restart whose own preview line said f16 - the engine
+// came back running something the UI had just told the user it was leaving. The
+// switch had the mirror bug: it was stripped unconditionally, so a user's
+// deliberate `--no-kv-unified` disappeared on a restart that only moved the
+// context slider.
+export function applyLaunchOverrides(args, overrides = {}) {
+  const out = [];
+  const drop = new Set();
+  const dropSwitch = new Set();
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    for (const flag of OVERRIDE_FLAGS[key] || []) drop.add(flag);
+    for (const flag of OVERRIDE_SWITCHES[key]?.spellings || []) dropSwitch.add(flag);
+  }
+  const source = Array.isArray(args) ? args : [];
+  for (let i = 0; i < source.length; i += 1) {
+    const token = source[i];
+    if (dropSwitch.has(token)) continue;
+    if (drop.has(token)) {
+      // Skip the flag and the value that belongs to it, but never swallow the
+      // next flag when this one was written without a value.
+      const next = source[i + 1];
+      if (next !== undefined && !next.startsWith("-")) i += 1;
+      continue;
+    }
+    out.push(token);
+  }
+  if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
+  if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
+  if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
+  if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
+  // Slots that each see the whole window rather than a reserved slice. Written
+  // explicitly because llama.cpp only defaults it on when the slot count is
+  // auto, so setting --parallel silently turns it off.
+  if (typeof overrides.kvUnified === "boolean") {
+    out.push(overrides.kvUnified ? OVERRIDE_SWITCHES.kvUnified.on : OVERRIDE_SWITCHES.kvUnified.off);
+  }
+  if (typeof overrides.contextShift === "boolean") {
+    out.push(overrides.contextShift ? OVERRIDE_SWITCHES.contextShift.on : OVERRIDE_SWITCHES.contextShift.off);
+  }
+  return out;
+}
+
+// The settings the tuning drawer owns, and the only place they are named.
+//
+// The drawer has to show the command its own Apply would run, and for a while
+// it built that line from scratch out of a short list of flags it knew about.
+// A real llama-server is started with a dozen: the alias the model is served
+// under, -fa, --jinja, -mg/-sm pinning it to a card. None of those were in the
+// list, so the line under "start it with" was missing eight flags that Apply
+// itself preserves - harmless if pressed, silently different if pasted.
+//
+// So the page no longer composes anything. The server strips exactly these
+// keys from the real argv and sends the remainder; the page appends its three
+// choices to it. Adding a knob means adding it here, and the test next to
+// `drawerLaunchTail` fails until both halves know about it.
+const DRAWER_OWNED = { ctxSize: null, parallel: null, cacheTypeK: null, cacheTypeV: null, kvUnified: null };
+
+// Two settings this stack cannot be trusted with, refused rather than offered.
+//
+// Quantized KV returns wrong answers here rather than slow ones, and context
+// shifting is turned off because it is not something we are willing to have
+// running on this vendor. Both are enforced where the argv is built, not in
+// the page: greying a control out stops the dashboard from asking for it and
+// stops nothing else, and /api/local/apply takes its settings from a request
+// body that need never have come from the page.
+export function vendorRefusals(vendor) {
+  const amd = String(vendor || "").toLowerCase() === "amd";
+  return { quantizedKv: amd, contextShift: amd };
+}
+
+// Everything the engine was started with except what the drawer decides. The
+// vendor matters because a refusal is a setting the drawer owns too - it has
+// to come off the base, or the preview would show a flag the restart removes.
+export function launchBaseArgs(args, { vendor } = {}) {
+  const refuse = vendorRefusals(vendor);
+  return applyLaunchOverrides(args, {
+    ...DRAWER_OWNED,
+    ...(refuse.contextShift ? { contextShift: null } : {}),
+  });
+}
+
+// The drawer's three choices as flags, in the order applyLaunchOverrides
+// writes them. This is the half the page duplicates, so it is kept to a shape
+// with no branching worth getting wrong, and pinned by a test.
+export function drawerLaunchTail({ contextTokens, sessions, kvType, vendor } = {}) {
+  const refuse = vendorRefusals(vendor);
+  const tail = [];
+  if (Number(contextTokens)) tail.push("-c", String(Number(contextTokens)));
+  if (Number(sessions)) tail.push("--parallel", String(Number(sessions)));
+  // f16 is llama.cpp's default, so it is expressed by writing nothing.
+  if (!refuse.quantizedKv && kvType && kvType !== "f16") tail.push("-ctk", String(kvType), "-ctv", String(kvType));
+  tail.push("--kv-unified");
+  if (refuse.contextShift) tail.push("--no-context-shift");
+  return tail;
+}
+
+// What Apply runs. The one caller that actually spawns, and the definition the
+// preview above is measured against.
+export function drawerLaunchArgs(args, choices = {}) {
+  const refuse = vendorRefusals(choices.vendor);
+  // A refused setting is not a default the caller may override: whatever the
+  // request asked for, the cache comes back to f16 and context shifting is
+  // written off, so a body that never came from the page cannot get around it.
+  const cache = !refuse.quantizedKv && choices.kvType && choices.kvType !== "f16" ? choices.kvType : null;
+  return applyLaunchOverrides(args, {
+    ctxSize: Number(choices.contextTokens) || undefined,
+    parallel: Number(choices.sessions) || undefined,
+    cacheTypeK: cache,
+    cacheTypeV: cache,
+    kvUnified: true,
+    contextShift: refuse.contextShift ? false : undefined,
+  });
 }
 
 // llama-server's command line is a complete adoption spec. Parsing it is what
@@ -190,6 +374,12 @@ const LLAMA_FLAGS = [
   ["mainGpu", ["-mg", "--main-gpu"]],
   ["splitMode", ["-sm", "--split-mode"]],
   ["slotSavePath", ["--slot-save-path"]],
+  // Read, not just written: without these the KV precision an engine is
+  // actually running was invisible, so the budget assumed f16 for a cache that
+  // was half that size, and the "KV quantization is broken here" warning could
+  // never fire because its condition was permanently undefined.
+  ["cacheTypeK", ["-ctk", "--cache-type-k"]],
+  ["cacheTypeV", ["-ctv", "--cache-type-v"]],
 ];
 
 // Splits on whitespace but keeps quoted runs together, so a model path with a

@@ -377,6 +377,11 @@ export function readModelFacts(file) {
 
 export function modelFactsAreStale(facts, file) {
   if (!facts || facts.path !== file) return true;
+  // A record written before the tensor ledger existed describes the same file
+  // with an older reader: it carries no weightBytes, so a budget built on it
+  // would silently keep charging the card for blocks the backend skips. The
+  // file has not changed, but what we know how to read out of it has.
+  if (!facts.weightBytes) return true;
   try {
     const stat = statSync(file);
     return facts.fileBytes !== stat.size || facts.mtimeMs !== Math.round(stat.mtimeMs);

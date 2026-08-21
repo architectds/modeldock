@@ -4,12 +4,22 @@ import {
   listEngineListeners,
   looksLikeEngineProcess,
   parseLlamaArgs,
+  launchBaseArgs,
+  drawerLaunchTail,
+  drawerLaunchArgs,
   parsePosixListeners,
   parsePosixProcesses,
   parseWindowsInspection,
   tokenizeCommandLine,
   launchSpecFrom,
+  applyLaunchOverrides,
 } from "../src/engine-processes.mjs";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
 // Verbatim from this machine on 2026-08-19: a llama-server the fixed candidate
@@ -176,4 +186,296 @@ test("a port we could not attribute remembers no launch", () => {
   assert.equal(launchSpecFrom({ binary: "llama-server", cmdline: "" }), null);
   assert.equal(launchSpecFrom(null), null);
   assert.equal(launchSpecFrom({ cmdline: "llama-server --port 8080" }), null, "a binary is required");
+});
+
+test("the scan is where the model file gets read, and it is read once", async () => {
+  // Reading a 12 GiB file on every render would be absurd, so discovery reads
+  // it and caches by path. By the time a row turns blue the ledger already has
+  // its numbers, and opening the drawer reads nothing.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-facts-"));
+  const cache = path.join(dir, "model-facts.json");
+  // A real file, because staleness is decided by its size and mtime - a fixture
+  // that disagrees with the disk would look stale on every read.
+  const model = path.join(dir, "model.gguf");
+  writeFileSync(model, "not really a model");
+  const stat = statSync(model);
+  let reads = 0;
+  const read = (file) => {
+    reads += 1;
+    return { path: file, fileBytes: stat.size, mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64, attentionLayers: 16, kvBytesPerToken: 65536 };
+  };
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
+    if (url === "http://127.0.0.1:11435/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const cmdline = `"C:\llama\llama-server.exe" -m ${model} -c 81920 --port 11435`;
+  const options = {
+    fetchImpl,
+    timeoutMs: 50,
+    listeners: [{ port: 11435, pid: 1, name: "llama-server", binary: "C:\llama\llama-server.exe", cmdline }],
+    factsOptions: { file: cache, read },
+  };
+
+  const [first] = await discoverLocalEngines(options);
+  assert.equal(first.modelFacts.kvBytesPerToken, 65536, "the ledger's input rides along with the scan result");
+  assert.equal(reads, 1);
+
+  const [second] = await discoverLocalEngines(options);
+  assert.equal(second.modelFacts.kvBytesPerToken, 65536);
+  assert.equal(reads, 1, "a second scan uses the cache rather than the file");
+
+  // Re-quantize under the same path and the cache has to notice.
+  writeFileSync(model, "a different model entirely, of another size");
+  await discoverLocalEngines(options);
+  assert.equal(reads, 2, "a changed file is read again");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("an unreadable model costs that row its ledger, not the whole scan", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-facts-bad-"));
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
+    if (url === "http://127.0.0.1:11435/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const [found] = await discoverLocalEngines({
+    fetchImpl,
+    timeoutMs: 50,
+    listeners: [{ port: 11435, pid: 1, name: "llama-server", binary: "b", cmdline: REAL_CMDLINE }],
+    factsOptions: { file: path.join(dir, "c.json"), read: () => { throw new Error("gone"); } },
+  });
+  assert.equal(found.engine, "llamacpp", "the engine is still discovered");
+  assert.equal(found.launch.ctxSize, 81920, "and still carries its launch spec");
+  assert.equal(found.modelFacts, undefined, "just without a ledger");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("applying overrides edits the argv instead of composing a new one", () => {
+  // A composed command line would silently drop whatever this user needed and
+  // we did not think of. Only the tuned flags are replaced; the rest survives.
+  const args = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+  const next = applyLaunchOverrides(args, { ctxSize: 49152, parallel: 1, kvUnified: true });
+  const line = next.join(" ");
+  assert.match(line, /-c 49152/);
+  assert.doesNotMatch(line, /81920/, "the old context is gone, not duplicated");
+  assert.equal(next.filter((token) => token === "-c").length, 1);
+  assert.equal(next.filter((token) => token === "--parallel").length, 1);
+  assert.match(line, /--kv-unified/);
+  // Everything the user had that we never asked about is still there.
+  for (const kept of ["-fa", "auto", "--context-shift", "-ngl", "99", "-mg", "1", "-sm", "none", "--jinja", "-t", "16"]) {
+    assert.ok(next.includes(kept), `${kept} survived`);
+  }
+  // String.raw, because a Windows path in an ordinary literal quietly loses its
+  // separators: "D:\models\..." reads as "D:modelsQwen...".
+  assert.ok(next.includes(String.raw`D:\models\Qwen3.8-27B-Q3_K_M.gguf`), "and so did the model");
+});
+
+test("KV precision reaches both halves of the cache or neither", () => {
+  const args = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+  const quantized = applyLaunchOverrides(args, { cacheTypeK: "q8_0", cacheTypeV: "q8_0" });
+  assert.ok(quantized.includes("-ctk") && quantized.includes("-ctv"));
+  // f16 is the default, so it is expressed by saying nothing rather than by
+  // writing a flag the engine already assumes.
+  const plain = applyLaunchOverrides(args, { ctxSize: 32768 });
+  assert.ok(!plain.includes("-ctk"), "no cache flag when the default is wanted");
+});
+
+test("an override never swallows the flag that follows a valueless one", () => {
+  const next = applyLaunchOverrides(["-c", "--jinja", "-ngl", "99"], { ctxSize: 8192 });
+  assert.ok(next.includes("--jinja"), "the switch after a valueless -c is not eaten");
+  assert.ok(next.includes("-ngl") && next.includes("99"));
+  assert.equal(next.filter((t) => t === "-c").length, 1);
+});
+
+test("an existing unified switch is replaced, not doubled", () => {
+  const next = applyLaunchOverrides(["--kv-unified", "-ngl", "99"], { kvUnified: true });
+  assert.equal(next.filter((t) => t === "--kv-unified").length, 1);
+  // And the opposite switch cannot survive alongside it.
+  const flipped = applyLaunchOverrides(["--no-kv-unified", "-ngl", "99"], { kvUnified: true });
+  assert.ok(!flipped.includes("--no-kv-unified"));
+});
+
+test("the KV precision an engine is running is readable, not just writable", () => {
+  // The two flags were in the override table but not in the parse table, so
+  // `launch.cacheTypeK` was permanently undefined: every ledger budgeted f16
+  // for a cache that might be half or a quarter of that, and the warning that
+  // fires on quantized KV could never see a reason to.
+  const spec = parseLlamaArgs("llama-server -m m.gguf -c 80000 -ctk q8_0 -ctv q8_0 -ngl 99");
+  assert.equal(spec.cacheTypeK, "q8_0");
+  assert.equal(spec.cacheTypeV, "q8_0");
+  assert.equal(parseLlamaArgs("llama-server -m m.gguf --cache-type-k q4_0").cacheTypeK, "q4_0");
+  assert.equal(parseLlamaArgs("llama-server -m m.gguf -c 8192").cacheTypeK, undefined, "absent stays absent");
+});
+
+test("choosing the default precision takes the flag off, rather than leaving it", () => {
+  // f16 is written by saying nothing, which is why this is not symmetric with
+  // setting q8_0: the caller has to be able to say "I own this and the answer
+  // is the default". null says that; undefined says "not mine".
+  const running = ["-m", "m.gguf", "-ctk", "q8_0", "-ctv", "q8_0", "-c", "80000"];
+  const back = applyLaunchOverrides(running, { ctxSize: 48000, cacheTypeK: null, cacheTypeV: null, kvUnified: true });
+  assert.ok(!back.includes("-ctk"), "the engine would have come back on q8_0 behind an f16 preview");
+  assert.ok(!back.includes("-ctv"));
+  assert.ok(back.includes("48000"));
+});
+
+test("a setting the caller does not own is left where the user put it", () => {
+  // Moving only the context slider must not rewrite unrelated choices. The
+  // switch used to be stripped unconditionally, so a deliberate
+  // --no-kv-unified vanished on a restart that never mentioned it.
+  const kept = applyLaunchOverrides(["-m", "m.gguf", "--no-kv-unified", "-ctk", "q8_0", "-c", "80000"], { ctxSize: 48000 });
+  assert.ok(kept.includes("--no-kv-unified"), "an unowned switch survives");
+  assert.ok(kept.includes("-ctk"), "an unowned flag survives with its value");
+  assert.deepEqual(kept.filter((t) => t === "-c"), ["-c"]);
+});
+
+test("the unified switch can be turned off as well as on", () => {
+  const off = applyLaunchOverrides(["--kv-unified", "-ngl", "99"], { kvUnified: false });
+  assert.ok(off.includes("--no-kv-unified"));
+  assert.ok(!off.includes("--kv-unified"));
+});
+
+// --- the drawer's preview is the line Apply runs ---------------------------
+
+// public/app.js is a browser script, so the page cannot import the module the
+// server builds launch arguments with. It carries its own copy of the tail
+// half instead, and this reads that copy out of the file and runs it. Without
+// this the two drift silently, which is exactly how the preview came to be
+// missing eight flags in the first place: nothing compared them.
+function pageFunction(name) {
+  const source = readFileSync(path.join(root, "public/app.js"), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} is gone from public/app.js`);
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(end > start, `${name} in public/app.js is not a top-level function any more`);
+  return source.slice(start, end + 2);
+}
+
+const REAL_ARGV = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+
+test("the page's copy of the launch tail is the server's copy", () => {
+  const { tuneTail } = new Function(`${pageFunction("tuneTail")}\nreturn { tuneTail };`)();
+  for (const contextTokens of [16000, 48000, 262144]) {
+    for (const sessions of [1, 4]) {
+      for (const kvType of ["f16", "q8_0", "q4_0"]) {
+        for (const vendor of ["amd", "nvidia", "intel", undefined]) {
+          const state = { context: contextTokens, sessions, kv: kvType, ledger: { card: { vendor } } };
+          assert.deepEqual(
+            tuneTail(state),
+            drawerLaunchTail({ contextTokens, sessions, kvType, vendor }),
+            `public/app.js tuneTail drifted at ${contextTokens}/${sessions}/${kvType}/${vendor} - `
+            + "a setting was added to one half of the drawer and not the other",
+          );
+        }
+      }
+    }
+  }
+});
+
+test("what one card cannot be trusted with, another can", () => {
+  // The refusals belong to this vendor, not to the product. Quantized KV
+  // returns wrong answers on the AMD stack here, and llama.cpp disables
+  // context shifting for this model anyway - "KV cache shifting is not
+  // supported for this context, disabling KV cache shifting" is the engine's
+  // own line in the log. Neither is true of an NVIDIA card, and a rule written
+  // as "we do not do this" rather than "this card cannot" would have taken a
+  // working feature away from everyone.
+  const running = ["-m", "m.gguf", "-fa", "auto", "--context-shift", "-c", "80000", "--parallel", "1"];
+  const wants = { contextTokens: 48000, sessions: 1, kvType: "q8_0" };
+
+  const nvidia = drawerLaunchArgs(running, { ...wants, vendor: "nvidia" });
+  assert.ok(nvidia.includes("-ctk") && nvidia.includes("q8_0"), "a quantized cache is honoured");
+  assert.ok(nvidia.includes("--context-shift"), "the user's own context shifting is left alone");
+  assert.ok(!nvidia.includes("--no-context-shift"));
+
+  const amd = drawerLaunchArgs(running, { ...wants, vendor: "amd" });
+  assert.ok(!amd.includes("-ctk") && !amd.includes("-ctv"), "refused whatever the request asked for");
+  assert.ok(!amd.includes("--context-shift"), "and written off rather than left to a default");
+  assert.ok(amd.includes("--no-context-shift"));
+
+  // Everything the drawer does not own survives on both.
+  for (const argv of [nvidia, amd]) {
+    assert.ok(argv.includes("-fa") && argv.includes("auto"));
+    assert.ok(argv.includes("48000"));
+  }
+
+  // An unknown or absent vendor is not quietly treated as the restricted one.
+  for (const vendor of ["intel", "unknown", undefined]) {
+    const other = drawerLaunchArgs(running, { ...wants, vendor });
+    assert.ok(other.includes("-ctk"), `${vendor} lost its cache setting`);
+    assert.ok(other.includes("--context-shift"), `${vendor} lost its context shifting`);
+  }
+});
+
+test("base plus tail is exactly what Apply spawns", () => {
+  // The split only holds if stripping and rewriting are the same operation
+  // seen from two sides. If they ever are not, the preview is a different
+  // command from the one the button runs - which is the whole defect.
+  for (const choices of [
+    { contextTokens: 48000, sessions: 1, kvType: "f16" },
+    { contextTokens: 16000, sessions: 4, kvType: "q8_0" },
+    { contextTokens: 262144, sessions: 2, kvType: "q4_0" },
+  ]) {
+    for (const vendor of ["amd", "nvidia", "intel", undefined]) {
+      const withVendor = { ...choices, vendor };
+      assert.deepEqual(
+        [...launchBaseArgs(REAL_ARGV, { vendor }), ...drawerLaunchTail(withVendor)],
+        drawerLaunchArgs(REAL_ARGV, withVendor),
+        `preview and spawn disagree at ${JSON.stringify(withVendor)}`,
+      );
+    }
+  }
+});
+
+test("the preview keeps every flag the restart keeps", () => {
+  // The eight this engine carries that the old composed line dropped. -a is
+  // the one that bites hardest: it is the model id the engine serves under, so
+  // pasting a line without it brings the engine back under a different name
+  // and ModelDock's own connection no longer matches.
+  const base = launchBaseArgs(REAL_ARGV, { vendor: "nvidia" });
+  for (const flag of ["-a", "-fa", "--context-shift", "--reasoning-budget", "-ngl", "--jinja", "-t", "-mg", "-sm"]) {
+    assert.ok(base.includes(flag), `${flag} is not in the line the drawer shows`);
+  }
+  // And none of the five the drawer decides, because it appends those itself.
+  for (const flag of ["-c", "--ctx-size", "-np", "--parallel", "-ctk", "-ctv", "--kv-unified", "--no-kv-unified"]) {
+    assert.ok(!base.includes(flag), `${flag} would appear twice`);
+  }
+});
+
+// Two processes can hold one port number on different local addresses, and the
+// process table does not promise an order. Keeping whichever row arrived first
+// files the port under a pid that is not answering on it - and that pid is what
+// /api/local/apply signals, so the wrong engine gets stopped.
+test("a port held on two addresses is filed under the one this gateway reaches", async () => {
+  const rows = (order) => JSON.stringify({
+    listeners: order,
+    processes: [
+      { ProcessId: 111, Name: "llama-server.exe", ExecutablePath: "C:/a/llama-server.exe", CommandLine: "llama-server -m a.gguf --host 127.0.0.1 --port 8080" },
+      { ProcessId: 222, Name: "llama-server.exe", ExecutablePath: "D:/b/llama-server.exe", CommandLine: "llama-server -m b.gguf --host 192.168.1.5 --port 8080" },
+    ],
+  });
+  const loopback = { LocalAddress: "127.0.0.1", LocalPort: 8080, OwningProcess: 111 };
+  const lan = { LocalAddress: "192.168.1.5", LocalPort: 8080, OwningProcess: 222 };
+  for (const order of [[loopback, lan], [lan, loopback]]) {
+    const [found] = await listEngineListeners({ platform: "win32", runCommand: async () => rows(order) });
+    assert.equal(found.pid, 111, "the loopback row owns the port whichever way they arrive");
+  }
+});
+
+// Reading another user's command line needs elevation, and a relay hides the
+// process outright. Dropping the port makes a moved engine invisible to the
+// half of discovery written to find moved engines.
+test("a port whose process cannot be read is still offered, without a spec", async () => {
+  const stdout = JSON.stringify({
+    listeners: [
+      { LocalAddress: "127.0.0.1", LocalPort: 11435, OwningProcess: 29704 },
+      { LocalAddress: "0.0.0.0", LocalPort: 445, OwningProcess: 4 },
+    ],
+    // 29704 is missing entirely; 4 is readable and is not an engine.
+    processes: [{ ProcessId: 4, Name: "System", ExecutablePath: "", CommandLine: "" }],
+  });
+  const found = await listEngineListeners({ platform: "win32", runCommand: async () => stdout });
+  assert.deepEqual(found.map((f) => f.port), [11435], "the readable non-engine is still dropped");
+  assert.equal(found[0].cmdline, "", "no spec is invented for a process we cannot see");
+  assert.equal(launchSpecFrom(found[0]), null, "and no launch is remembered from one");
 });
