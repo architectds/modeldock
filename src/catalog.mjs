@@ -212,18 +212,36 @@ function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null))
 // picker. Renumbering is therefore not optional; the only question is what
 // order to renumber into.
 //
-// It is use. A published catalog is thirty-odd models and a person switches
-// between four of them, so the four are what the list should open on. Grouping
-// by provider - which this used to do - sorts the list by a fact about billing
-// that nobody is looking for at the moment they open a model picker.
+// Native entries keep the front of the list, in the order Codex captured them.
+// The picker draws them as its own section above a divider, and that section is
+// Codex's to arrange - reordering it by our traffic counts scatters models the
+// App presents as a set.
+//
+// Everything we route sorts below that, by use. A published catalog is
+// thirty-odd models and a person switches between four of them, so the four are
+// what the lower half should open on. Grouping it by provider - which this used
+// to do - sorts by a fact about billing that nobody is looking for at the
+// moment they open a model picker.
 //
 function orderCatalogByUse(models, usage = {}) {
   if (!Array.isArray(models)) return models;
-  const requests = (entry) => Number(usage[entry?.slug]?.requests || usage[entry?.slug] || 0);
-  return models
-    .map((entry, index) => ({ entry, used: requests(entry), index }))
-    .sort((left, right) => right.used - left.used || left.index - right.index)
-    .map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
+  // Only the routed half is ever ranked, and every routed slug carries its
+  // owner - which is also how the rollup keys them, so a direct lookup matches.
+  // Native slugs are bare and their traffic is filed under "<slug>@openai";
+  // nothing looks it up, because their order is Codex's, not ours.
+  const requests = (entry) => {
+    const found = usage[entry?.slug];
+    return Number(found?.requests ?? found ?? 0);
+  };
+  // A native entry is the one without an owner suffix: it comes from Codex's
+  // own catalog rather than a provider of ours.
+  const isNative = (entry) => !String(entry?.slug || "").includes("@");
+  const decorated = models.map((entry, index) => ({ entry, used: requests(entry), index }));
+  const native = decorated.filter(({ entry }) => isNative(entry)).sort((a, b) => a.index - b.index);
+  const routed = decorated
+    .filter(({ entry }) => !isNative(entry))
+    .sort((left, right) => right.used - left.used || left.index - right.index);
+  return [...native, ...routed].map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
 }
 
 // Native entries keep their full metadata (capabilities, instructions) but the

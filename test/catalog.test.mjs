@@ -368,22 +368,21 @@ test("catalogFor orders the picker by use, with sequential priorities", () => {
     }).models.map((entry) => entry.slug);
     assert.deepEqual(again, unused, "the order is stable when nothing has been used");
 
-    // Traffic is what promotes: the two most-used models open the picker, in
-    // that order, wherever they sat before.
+    // Traffic promotes within the half we own. The native section above the
+    // divider is Codex's arrangement, and our counts do not reorder it.
     const ordered = catalogFor({
       ...configStub(),
       tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
       nativeCatalogFile: file,
-      usageByModel: {
-        "gpt-5.2": { requests: 900 },
-        "deepseek-v4-pro@opencode-go": { requests: 4000 },
-      },
+      usageByModel: { "deepseek-v4-pro@opencode-go": { requests: 4000 } },
     }).models.map((entry) => entry.slug);
-    assert.equal(ordered[0], "deepseek-v4-pro@opencode-go", "the most-used model opens the picker");
-    assert.equal(ordered[1], "gpt-5.2", "then the next, native or not");
+    const natives = ordered.filter((slug) => !slug.includes("@"));
+    const routed = ordered.filter((slug) => slug.includes("@"));
+    assert.deepEqual(ordered.slice(0, natives.length), natives, "every native entry sits above the divider");
+    assert.equal(routed[0], "deepseek-v4-pro@opencode-go", "the most-used routed model opens the lower half");
     assert.deepEqual(
-      ordered.filter((slug) => !["deepseek-v4-pro@opencode-go", "gpt-5.2"].includes(slug)),
-      unused.filter((slug) => !["deepseek-v4-pro@opencode-go", "gpt-5.2"].includes(slug)),
+      routed.slice(1),
+      unused.filter((slug) => slug.includes("@") && slug !== "deepseek-v4-pro@opencode-go"),
       "and the untouched tail keeps its previous order",
     );
   } finally {
@@ -438,4 +437,36 @@ test("a chat-only model is also marked unavailable, so it never reaches a picker
       `${profile.id}: a chat-only model must carry status "unavailable" as well`,
     );
   }
+});
+
+test("the native section keeps Codex's own order, not ours", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-section-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "native-catalog.json");
+  // Captured order is sol, then terra. Terra carries far more of our traffic;
+  // the picker must still show them the way Codex arranged them, because that
+  // section is drawn above the divider as a set the App owns.
+  writeFileSync(file, JSON.stringify({
+    captured_with: "0.1.0",
+    models: [
+      { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list", priority: 1 },
+      { slug: "gpt-5.6-terra", display_name: "GPT-5.6-Terra", visibility: "list", priority: 2 },
+    ],
+  }), "utf8");
+
+  const order = catalogFor({
+    ...configStub(),
+    tokens: { "opencode-go": "go-token" },
+    nativeCatalogFile: file,
+    // Keyed the way the ordering reads it, so that a rule sorting natives by
+    // traffic would visibly move terra ahead of sol and this would catch it.
+    usageByModel: {
+      "gpt-5.6-terra": { requests: 9000 },
+      "deepseek-v4-pro@opencode-go": { requests: 5000 },
+    },
+  }).models.map((entry) => entry.slug);
+
+  assert.deepEqual(order.slice(0, 2), ["gpt-5.6-sol", "gpt-5.6-terra"], "captured order survives our traffic counts");
+  assert.equal(order[2], "deepseek-v4-pro@opencode-go", "the busiest routed model opens the lower half");
+  assert.ok(!order.slice(2).some((slug) => !slug.includes("@")), "no native entry falls below the divider");
 });
