@@ -202,7 +202,15 @@ test("the scan is where the model file gets read, and it is read once", async ()
   let reads = 0;
   const read = (file) => {
     reads += 1;
-    return { path: file, fileBytes: stat.size, mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64, attentionLayers: 16, kvBytesPerToken: 65536 };
+    // weightBytes is part of what a current record carries: a cached record
+    // without it was written by a reader that could not see the tensor ledger,
+    // and is re-read rather than trusted. A stub that omits it would look stale
+    // on every scan and this test would be measuring nothing.
+    return {
+      path: file, fileBytes: stat.size, weightBytes: stat.size, ignoredBytes: 0,
+      mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64,
+      attentionLayers: 16, kvBytesPerToken: 65536,
+    };
   };
   const fetchImpl = async (url) => {
     if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
