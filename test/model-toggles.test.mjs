@@ -14,6 +14,7 @@ import {
   writeModelToggles,
 } from "../src/model-toggles.mjs";
 import { readLifecycle, writeLifecycle } from "../src/model-lifecycle-state.mjs";
+import { modelsToPark } from "../src/model-tidy.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -24,13 +25,13 @@ async function tempFile(name = "model-toggles.json") {
 
 // --- the file ---
 
-test("both answers are written down, and nothing else is", async (t) => {
+test("legacy boolean entries round-trip, and nothing else does", async (t) => {
   const file = await tempFile();
   t.after(() => rm(path.dirname(file), { recursive: true, force: true }));
 
   writeModelToggles(file, { "a@go": false, "b@go": true, "c@go": "maybe", "d@go": 1 });
-  // false is hidden and true is "the user put this back". Absence is the third
-  // state - never ruled on - and it is the only one the weekly tidy may touch.
+  // false is hidden; true is kept only so an older file can be migrated on the
+  // next tidy. Non-boolean hand edits are discarded.
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { "a@go": false, "b@go": true });
 });
 
@@ -176,21 +177,89 @@ test("switching a model off rewrites the catalog Codex reads", async (t) => {
   assert.deepEqual(readModelToggles(app.services.modelTogglesFile), { [victim]: false });
 });
 
-test("switching it back on restores it, and records that a person did", async (t) => {
+test("switching it back on restores it, and restarts its clock", async (t) => {
   const app = await startApp();
   t.after(app.stop);
   const victim = "deepseek-v4-pro@opencode-go";
   const catalogFile = path.join(app.dir, "codex-model-catalog.json");
+  const before = Date.now();
 
   await setEnabled(app.base, victim, false);
   await setEnabled(app.base, victim, true);
 
   const slugs = JSON.parse(await readFile(catalogFile, "utf8")).models.map((m) => m.slug);
   assert.ok(slugs.includes(victim), "back in the picker");
-  // Not deleted: the entry is what stops the weekly tidy from parking it again
-  // seven days after the person said to keep it.
-  assert.deepEqual(readModelToggles(app.services.modelTogglesFile), { [victim]: true });
-  assert.equal(isRuleEligible(readModelToggles(app.services.modelTogglesFile), victim), false);
+  // The entry is gone rather than flipped to true: a rescue says "I want this
+  // one", not "never judge this one again".
+  assert.equal(existsSync(app.services.modelTogglesFile), false, "no entry left behind");
+  assert.equal(isRuleEligible(readModelToggles(app.services.modelTogglesFile), victim), true);
+
+  const stamped = Date.parse(readLifecycle(app.services.modelLifecycleFile).firstSeen[victim]);
+  assert.ok(stamped >= before, "and its thirty-day clock starts over");
+});
+
+// The two halves of the rescue, stated as behaviour rather than as file shape:
+// the clock restart is what makes deleting the entry safe, and deleting the
+// entry is what stops the exemption outliving the intent.
+test("a rescued model is not re-parked next week, but is not exempt forever", async (t) => {
+  const app = await startApp();
+  t.after(app.stop);
+  const victim = "deepseek-v4-pro@opencode-go";
+  const DAY = 24 * 60 * 60 * 1000;
+
+  // Age the model past the window first. Without this the boot pass has just
+  // stamped it with "now" and the assertions below hold whether or not the
+  // rescue restamps anything - the test would pass for the wrong reason.
+  const seeded = readLifecycle(app.services.modelLifecycleFile);
+  writeLifecycle(app.services.modelLifecycleFile, {
+    ...seeded,
+    firstSeen: { ...seeded.firstSeen, [victim]: new Date(Date.now() - 40 * DAY).toISOString() },
+  });
+
+  await setEnabled(app.base, victim, false);
+  await setEnabled(app.base, victim, true);
+
+  const toggles = readModelToggles(app.services.modelTogglesFile);
+  const firstSeen = readLifecycle(app.services.modelLifecycleFile).firstSeen;
+  assert.ok(Date.now() - Date.parse(firstSeen[victim]) < DAY, "the rescue restamped it, not the boot pass");
+  // A rollup wide enough to judge on, in which this model has no traffic at
+  // all - the exact input that parked it the first time.
+  const rollup = { version: 2, days: { "2000-01-01": {} } };
+  const models = [{ id: victim, provider: "opencode-go" }];
+
+  const nextWeek = Date.now() + 7 * DAY;
+  assert.deepEqual(
+    modelsToPark({ models, rollup, toggles, firstSeen, now: nextWeek }), [],
+    "a week later the rescue still stands",
+  );
+
+  const nextMonth = Date.now() + 31 * DAY;
+  assert.deepEqual(
+    modelsToPark({ models, rollup, toggles, firstSeen, now: nextMonth }), [victim],
+    "thirty days later, unused, it is judged again like any other model",
+  );
+});
+
+test("a legacy re-enable entry receives the same fresh thirty-day clock", async (t) => {
+  const app = await startApp();
+  t.after(app.stop);
+  const victim = "deepseek-v4-pro@opencode-go";
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  writeModelToggles(app.services.modelTogglesFile, { [victim]: true });
+  const seeded = readLifecycle(app.services.modelLifecycleFile);
+  writeLifecycle(app.services.modelLifecycleFile, {
+    ...seeded,
+    firstSeen: { ...seeded.firstSeen, [victim]: new Date(now - 60 * DAY).toISOString() },
+  });
+  seedRollup(app.services.usageRollupFile, "deepseek-v4-flash@opencode-go", now);
+
+  const result = app.services.runModelTidy(now);
+  assert.ok(!result.parked.includes(victim), "the legacy entry is not parked immediately on upgrade");
+  assert.deepEqual(readModelToggles(app.services.modelTogglesFile), {}, "legacy true no longer becomes a permanent exemption");
+  const stamped = Date.parse(readLifecycle(app.services.modelLifecycleFile).firstSeen[victim]);
+  assert.ok(stamped >= now, "the legacy rescue gets a new thirty-day clock");
 });
 
 test("the model the gateway is pointed at cannot be switched off", async (t) => {

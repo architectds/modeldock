@@ -2469,6 +2469,38 @@ function usageTokens(usage) {
   };
 }
 
+// The request body size for the transfer card, taken from the count the
+// transport already made instead of serializing the payload a second time.
+//
+// Codex re-sends the whole conversation every turn (previous_response_id is
+// dropped downstream, deliberately), so on a large session "payload" is the
+// entire history: JSON.stringify(payload) purely to measure it allocated a
+// second full copy of the conversation on every keystroke-turn, for a number
+// on a dashboard card. content-length is that same number, already counted.
+//
+// Only when the body on the wire is the body we parsed: the zstd decoder
+// rewrites content-encoding to identity and content-length to the decoded
+// length, so its requests qualify. A gzip body inflated by the JSON parser
+// does not - its content-length still describes the compressed bytes - and
+// neither does a chunked upload that declared no length. Those fall back to
+// measuring the honest way.
+function requestBytesIn(headers, payload) {
+  const encoding = String(headers?.["content-encoding"] || "identity").toLowerCase();
+  const declared = Number(headers?.["content-length"]);
+  if (encoding === "identity" && Number.isFinite(declared) && declared >= 0) return declared;
+  return Buffer.byteLength(JSON.stringify(payload));
+}
+
+// Serialize once and keep the string: it is both what goes on the wire and
+// what the transfer card counts. Handing fetch() an object makes it serialize
+// internally, so measuring the object separately produced the same bytes
+// twice - and on the routed path the two copies had drifted, measuring a
+// payload without the upstream model override that the sent one carried.
+function serializedBody(value) {
+  const body = JSON.stringify(value);
+  return { body, bytes: Buffer.byteLength(body) };
+}
+
 // Native passthrough for a Responses request. Unlike the routed path there is no
 // tool policy, no historical-image rewrite, and no image escalation: the native
 // backend owns hosted tools, history images, and its own vision. Only the input
@@ -2480,7 +2512,8 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const native = { ...payload };
   if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
   delete native.previous_response_id;
-  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
+  const bytesIn = requestBytesIn(incomingHeaders, payload);
+  const { body: nativeBody, bytes: upstreamBytes } = serializedBody(native);
   const { pathname, search } = splitRequestUrl(requestUrl);
   const target = nativeTarget(pathname, search);
   const finish = metrics?.begin?.("responses", {
@@ -2510,10 +2543,9 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     const upstream = await fetch(target, {
       method: "POST",
       headers: nativeHeaders(incomingHeaders),
-      body: JSON.stringify(native),
+      body: nativeBody,
       signal,
     });
-    const upstreamBytes = Buffer.byteLength(JSON.stringify(native));
     if (!upstream.ok) {
       markFirstResponse();
       const raw = await upstream.text();
@@ -2890,7 +2922,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
   const upstreamSummarizeBody = routedProvider === "xai" ? normalizeXaiPayload(summarizeBody) : summarizeBody;
-  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
+  const bytesIn = requestBytesIn(incomingHeaders, payload);
 
   const target = upstreamTargetFor(config, route.model);
   const upstreamModel = target.model;
@@ -3231,7 +3263,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
 
   // Transfer-card "in": the request body bytes the client actually sent this
   // gate. Re-serializing the parsed payload is the honest post-decode size.
-  const bytesIn = Buffer.byteLength(JSON.stringify(payload));
+  const bytesIn = requestBytesIn(incomingHeaders, payload);
 
   // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
@@ -3328,13 +3360,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
 
   try {
+    const routed = serializedBody({ ...normalizedPayload, model: upstreamModel });
+    const upstreamBytes = routed.bytes;
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
-      body: JSON.stringify({ ...normalizedPayload, model: upstreamModel }),
+      body: routed.body,
       signal,
     });
-    const upstreamBytes = Buffer.byteLength(JSON.stringify(normalizedPayload));
     if (!upstream.ok) {
       markFirstResponse();
       if (config.debug?.dumpDir) {

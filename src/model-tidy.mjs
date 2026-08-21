@@ -11,8 +11,8 @@
 // picker with one model too many in it, and the only way back is a page they
 // may not know exists.
 //
-//   never ruled on   a person who has touched the switch has said something
-//                    this is not entitled to overrule (see isRuleEligible)
+//   no entry at all  a `false` is already parked, and a hand-written `true` is
+//                    a deliberate exemption (see isRuleEligible)
 //   not selected     the gateway routes to it; the catalog publishes it anyway
 //   not native       native entries come from Codex's own catalog, which is
 //                    authoritative for them - they are not ours to withhold
@@ -20,6 +20,7 @@
 //                    judged on, only a short one that reads the same as disuse
 //   window is full   a fresh install accumulates forward, so before the rollup
 //                    spans thirty days every zero means "not yet", not "never"
+import { isRuleEligible } from "./model-toggles.mjs";
 import { rollupTotals } from "./usage-rollup.mjs";
 
 export const TIDY_WINDOW_DAYS = 30;
@@ -72,7 +73,7 @@ export function modelsToPark({
   for (const model of models || []) {
     const slug = model?.id || model?.slug;
     if (!slug) continue;
-    if (toggles[slug] !== undefined) continue;
+    if (!isRuleEligible(toggles, slug)) continue;
     if (selected.has(slug)) continue;
     if (model.native || model.provider === "openai") continue;
     const seen = asTime(firstSeen[slug]);

@@ -3195,6 +3195,86 @@ test("relayResponses counts the request body bytes as transfer-in", async () => 
   }
 });
 
+// One relay, three questions about bytes. Codex re-sends the whole
+// conversation every turn - previous_response_id is dropped on purpose - so on
+// a large session the payload IS the history, and anything that serializes it
+// a second time allocates a second copy of the conversation per turn.
+async function relayBytes({ headers, sentBodies = [], model = "deepseek-v4-flash" } = {}) {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const transformOptions = [];
+  const metrics = {
+    begin: () => () => {},
+    recordResponseTransform: (_report, options) => transformOptions.push(options),
+    recordResponseUsage: () => {},
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    sentBodies.push(init?.body);
+    return new Response(
+      'data: {"type":"response.completed","response":{"id":"resp_1","model":"deepseek-v4-flash"}}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  const payload = {
+    model,
+    stream: true,
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+  };
+  try {
+    const services = compactServices();
+    const result = await relayResponses(payload, res, {
+      ...services,
+      // The router only relays a model it knows; a published slug has to be
+      // declared here the way the real gateway declares its catalog.
+      knownModels: new Set([...services.knownModels, model]),
+      metrics,
+      requestUrl: "/v1/responses",
+      ...(headers ? { incomingHeaders: headers } : {}),
+    });
+    return { result, payload, bytesIn: transformOptions[0]?.bytesIn };
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("transfer-in is the length the transport counted, not a second serialization", async () => {
+  // A length that cannot have come from measuring this payload: if the number
+  // reported is 4242, nobody re-serialized the conversation to get it.
+  const { bytesIn, payload } = await relayBytes({ headers: { "content-length": "4242" } });
+  assert.notEqual(4242, Buffer.byteLength(JSON.stringify(payload)), "fixture check: the two disagree");
+  assert.equal(bytesIn, 4242, "read from content-length");
+});
+
+test("transfer-in is measured when the counted length is not the body we parsed", async () => {
+  // gzip: the JSON parser inflated it, so content-length still describes the
+  // compressed bytes and cannot stand in for the parsed size. Same for a
+  // chunked upload that declared no length at all.
+  const gzipped = await relayBytes({ headers: { "content-length": "4242", "content-encoding": "gzip" } });
+  assert.equal(gzipped.bytesIn, Buffer.byteLength(JSON.stringify(gzipped.payload)), "gzip falls back to measuring");
+
+  const chunked = await relayBytes({ headers: { "content-type": "application/json" } });
+  assert.equal(chunked.bytesIn, Buffer.byteLength(JSON.stringify(chunked.payload)), "no length falls back to measuring");
+});
+
+test("transfer-out counts the bytes that were actually sent upstream", async () => {
+  // These used to be two different serializations, and they had drifted: the
+  // body carried the upstream model override and the measurement did not.
+  const sentBodies = [];
+  // A published slug, so the body that goes out ("deepseek-v4-flash") and the
+  // payload it was built from ("deepseek-v4-flash@opencode-go") do not
+  // serialize to the same length. With a bare model name the two are identical
+  // and this test cannot tell a single serialization from two.
+  const { result } = await relayBytes({ sentBodies, model: "deepseek-v4-flash@opencode-go" });
+  assert.equal(sentBodies.length, 1, "fixture check: one upstream call");
+  assert.ok(
+    !sentBodies[0].includes("@opencode-go"),
+    "fixture check: the sent body carries the upstream model, not the published slug",
+  );
+  assert.equal(typeof sentBodies[0], "string", "fetch is handed the string, so it does not serialize again");
+  assert.equal(result.upstreamBytes, Buffer.byteLength(sentBodies[0]), "measured what went on the wire");
+});
+
 test("relayCompaction reports the failure telemetry when the upstream rejects the summarize call", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

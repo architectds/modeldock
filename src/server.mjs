@@ -1256,19 +1256,36 @@ export function createServices(config = loadConfig()) {
       const models = modelOptions(mutableConfig, mutableConfig.profileId)
         .filter((entry) => !entry.status || entry.status === "available");
       const stamped = stampFirstSeen(lifecycle.firstSeen, models, now);
+      const firstSeen = { ...stamped.firstSeen };
+      const toggles = readModelToggles(togglesFile);
+      // Before the sparse false-only format, re-enabling a model wrote
+      // `{ slug: true }`. Those legacy entries cannot be distinguished from a
+      // hand edit, but keeping them forever would contradict the new rescue
+      // contract. Convert them once into a fresh first-seen timestamp: the
+      // model stays visible now, survives the next weekly tidy, and is judged
+      // normally again after a full thirty days.
+      const legacyRescued = Object.keys(toggles).filter((slug) => toggles[slug] === true);
+      if (legacyRescued.length) {
+        const refreshedAt = new Date(now).toISOString();
+        for (const slug of legacyRescued) {
+          delete toggles[slug];
+          if (firstSeen[slug]) firstSeen[slug] = refreshedAt;
+        }
+        writeModelToggles(togglesFile, toggles);
+        mutableConfig.modelToggles = toggles;
+      }
       const rollup = readRollup(rollupFile);
       const decision = shouldTidy({ lastTidyAt: lifecycle.lastTidyAt, rollup, now });
       if (!decision.run) {
-        if (stamped.changed) writeLifecycle(lifecycleFile, { ...lifecycle, firstSeen: stamped.firstSeen });
+        if (stamped.changed || legacyRescued.length) writeLifecycle(lifecycleFile, { ...lifecycle, firstSeen });
         return { ...decision, parked: [] };
       }
-      const toggles = readModelToggles(togglesFile);
       const parked = modelsToPark({
         models,
         rollup,
         toggles,
         selected: selectedModelSlugs(mutableConfig, readSubagentModel(mutableConfig)),
-        firstSeen: stamped.firstSeen,
+        firstSeen,
         now,
       });
       for (const slug of parked) toggles[slug] = false;
@@ -1277,7 +1294,7 @@ export function createServices(config = loadConfig()) {
         mutableConfig.modelToggles = toggles;
         writeCatalogFile();
       }
-      writeLifecycle(lifecycleFile, { lastTidyAt: new Date(now).toISOString(), firstSeen: stamped.firstSeen });
+      writeLifecycle(lifecycleFile, { lastTidyAt: new Date(now).toISOString(), firstSeen });
       if (parked.length) {
         console.log(`[gate] model tidy: ${parked.length} unused for 30 days, removed from the Codex picker (${parked.join(", ")})`);
       }
@@ -2074,11 +2091,28 @@ export function createApp(services = createServices()) {
     }
     const file = services.modelTogglesFile || modelTogglesPath();
     const toggles = readModelToggles(file);
-    // Recorded either way, never deleted: an entry is how the weekly tidy knows
-    // a person has ruled on this model and it should keep its hands off. A
-    // delete would leave a rescued model looking untouched, and the tidy would
-    // park it again a week later.
-    toggles[slug] = enabled;
+    if (enabled) {
+      // Rescuing a model clears its entry and restarts the thirty-day clock,
+      // rather than recording an exemption that outlives the intent. A person
+      // switching one back on is saying "I want this one", not "never judge
+      // this one again" - and a permanent exemption is how a picker fills up
+      // with models somebody enabled once, three years ago, and never opened.
+      //
+      // The restamp is what makes the delete safe. Without it the model is
+      // eligible again on its old firstSeen, and the next tidy parks it a week
+      // later - seven days after the person said otherwise rather than the
+      // thirty the rule promises. That was the reason the entry used to be
+      // kept; restarting the clock answers it without the exemption.
+      delete toggles[slug];
+      const lifecycleFile = services.modelLifecycleFile || modelLifecyclePath();
+      const lifecycle = readLifecycle(lifecycleFile);
+      writeLifecycle(lifecycleFile, {
+        ...lifecycle,
+        firstSeen: { ...lifecycle.firstSeen, [slug]: new Date().toISOString() },
+      });
+    } else {
+      toggles[slug] = false;
+    }
     writeModelToggles(file, toggles);
     config.modelToggles = toggles;
     config.subagentModel = readSubagentModel(config);

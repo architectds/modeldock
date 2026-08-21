@@ -10,13 +10,16 @@
 // newly added model available without an edit here and keeps the file the size
 // of the exceptions rather than the size of the catalog.
 //
-// Both answers are written down, though, because absence has a third meaning
-// the rule depends on. `false` is hidden and `true` is "the user put this
-// back", and only a model with NO entry has never been ruled on by a person -
-// which is the only kind the weekly tidy is allowed to touch. Without the
-// `true`, switching a parked model back on would leave it looking untouched
-// again and the tidy would park it a week later, seven days after the person
-// said otherwise rather than the thirty the rule promises.
+// Only `false` is written. Switching a model back on deletes its entry and
+// restarts its thirty-day clock instead of recording `true`, because "I want
+// this one back" is not "never judge this one again": an exemption that
+// outlives the intent fills the picker with models enabled once and never
+// opened. The clock restart is what stops the tidy parking a rescued model a
+// week later on its old first-seen date.
+//
+// Older gateways wrote `true` on re-enable. The startup tidy migrates that
+// legacy entry to an absent toggle plus a fresh thirty-day timestamp, so an
+// upgrade cannot leave a formerly rescued model permanently exempt.
 //
 // Kept outside the catalog for the same reason context overrides are: an
 // upgrade that ships a new model list cannot discard the choices somebody made
@@ -69,9 +72,9 @@ export function isModelPublished(toggles, slug) {
   return (toggles || {})[slug] !== false;
 }
 
-// Whether the weekly tidy may decide this model's fate. A person who has
-// touched the switch - either way - has said something the tidy is not
-// entitled to overrule, so it manages only what nobody has ruled on.
+// Whether the weekly tidy may decide this model's fate: only models with no
+// entry at all. A `false` is already parked; legacy `true` entries are removed
+// and restamped before the tidy evaluates the model.
 export function isRuleEligible(toggles, slug) {
   return (toggles || {})[slug] === undefined;
 }
