@@ -309,8 +309,8 @@ export class MemoryStore {
     const label = path.basename(resolved) || slug;
     // The registry is discovery metadata, not canonical memory: a locked
     // global db must never block a committed project write.
-    this.#tryEventWrite(() => {
-      this.db.prepare(`
+    this.#tryEventWrite((eventDb) => {
+      eventDb.prepare(`
         INSERT INTO node_registry (node_id, node_path, slug, label, first_seen, last_seen, status)
         VALUES (?, ?, ?, ?, ?, ?, 'active')
         ON CONFLICT(node_id) DO UPDATE SET
@@ -489,7 +489,7 @@ export class MemoryStore {
       db.exec("ROLLBACK");
       throw error;
     }
-    this.#tryEventWrite(() => this.db.exec(`
+    this.#tryEventWrite((eventDb) => eventDb.exec(`
       DELETE FROM memory_events
       WHERE rowid NOT IN (SELECT rowid FROM memory_events ORDER BY rowid DESC LIMIT ${MAX_EVENTS_KEPT})
     `));
@@ -847,8 +847,8 @@ export class MemoryStore {
 
   #recordEvent(kind, scope, detail) {
     const id = stableId("evt", kind, scope, detail, Date.now());
-    return this.#tryEventWrite(() => {
-      this.db
+    return this.#tryEventWrite((eventDb) => {
+      eventDb
         .prepare("INSERT INTO memory_events (id, kind, scope, detail, created_at) VALUES (?, ?, ?, ?, ?)")
         .run(id, kind, scope, JSON.stringify(detail), new Date().toISOString());
     });
@@ -857,15 +857,32 @@ export class MemoryStore {
   #tryEventWrite(write) {
     // The event feed is telemetry, not canonical memory. Do not inherit the
     // five-second canonical-write timeout here: a locked event DB must neither
-    // fail nor delay a completed store/link operation.
-    this.db.exec("PRAGMA busy_timeout = 0");
+    // fail nor delay a completed store/link operation. A PRAGMA on the main
+    // connection was not enough under contention: Node's DatabaseSync retains
+    // its constructor timeout while a statement is acquiring the lock. An
+    // independent zero-timeout connection makes the soft-write boundary real.
+    let eventDb;
+    let transactionOpen = false;
     try {
-      write();
+      const file = this.dbFiles.get(GLOBAL_NODE) || path.join(this.memoryDir, "global.db");
+      eventDb = new DatabaseSync(file, { timeout: 0 });
+      eventDb.exec("PRAGMA busy_timeout = 0");
+      // Acquire the one write lock explicitly before running maintenance. This
+      // is the nonblocking gate: if another process owns it, the write is
+      // deferred before an INSERT/DELETE can enter a slower lock path.
+      eventDb.exec("BEGIN IMMEDIATE");
+      transactionOpen = true;
+      write(eventDb);
+      eventDb.exec("COMMIT");
+      transactionOpen = false;
       return true;
     } catch {
+      if (transactionOpen) {
+        try { eventDb.exec("ROLLBACK"); } catch { /* preserve the soft failure */ }
+      }
       return false;
     } finally {
-      this.db.exec("PRAGMA busy_timeout = 5000");
+      try { eventDb?.close(); } catch { /* best effort */ }
     }
   }
 
