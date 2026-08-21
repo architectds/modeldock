@@ -608,24 +608,30 @@ test("DeepSeek-only onboarding selects a working DeepSeek main route with no vis
 
   const models = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(models.selectedProvider, "deepseek-official");
+  // DeepSeek published a vision model on 2026-08-21, so this install now has
+  // one of its own. It used to end up with no vision route at all - the whole
+  // point of this case was a provider that could not see - and onboarding now
+  // finds the sibling model on the same key and the same endpoint.
   assert.deepEqual(models.selected, {
     mainModel: "deepseek-v4-flash@deepseek-official",
-    visionModel: "",
+    visionModel: "deepseek-v4-flash-vision-exp@deepseek-official",
   });
-  assert.deepEqual(models.visionProviders, []);
-  assert.equal(models.selectedVisionProvider, "");
+  assert.deepEqual(models.visionProviders.map((provider) => provider.id), ["deepseek-official"]);
+  assert.equal(models.selectedVisionProvider, "deepseek-official");
 
   const status = await (await fetch(`${instance.base}/api/status`)).json();
   assert.equal(status.ready, true);
   assert.equal(status.config.mainProvider, "deepseek-official");
-  assert.equal(status.config.visionModel, "");
-  assert.equal(status.config.visionUpstreamUrl, "");
+  assert.equal(status.config.visionModel, "deepseek-v4-flash-vision-exp@deepseek-official");
+  // The vision leg goes to the provider's own endpoint, which is the one this
+  // install already has a key for - no second credential, no second host.
+  assert.equal(status.config.visionUpstreamUrl, `http://127.0.0.1:${upstreamPort}/v1`);
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
 
   const env = await readFile(envFile, "utf8");
   assert.match(env, /^MODELDOCK_PROFILE=deepseek-official$/m);
   assert.doesNotMatch(env, /^MODELDOCK_MAIN_MODEL=/m, "main model is derived per session, not persisted as an env slot");
-  assert.match(env, /^MODELDOCK_VISION_MODEL=none$/m);
+  assert.match(env, /^MODELDOCK_VISION_MODEL=deepseek-v4-flash-vision-exp@deepseek-official$/m);
   // The routed DeepSeek selection lives in .env (the gateway's default route);
   // config.toml's top-level model stays a native slug so Codex can always
   // start, even without the published catalog.

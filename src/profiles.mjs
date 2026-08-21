@@ -312,6 +312,19 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    // DeepSeek's first vision model, announced 2026-08-21 and experimental by
+    // its own name. It reads images through the same Responses endpoint the
+    // other two use, so it needs no route of its own - only a published entry
+    // that says it takes images.
+    //
+    // The window is the vendor's figure rather than ours: the pricing page
+    // lists 1M for all three, and nothing here has measured this one. No
+    // vision score either - that comes from running the evaluation, and an
+    // invented number would rank it against models that earned theirs. Its
+    // reasoning ladder is its sibling's, on the strength of DeepSeek saying
+    // its text capabilities are on par with V4-Flash, which is a claim rather
+    // than a measurement and is not marked as one.
+    { id: "deepseek-v4-flash-vision-exp", label: "DeepSeek V4 Flash Vision Exp", endpoint: "responses", supportsVision: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
   ],
 
   modelCatalog({ mainModel, baseInstructions }) {

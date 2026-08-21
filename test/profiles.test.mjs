@@ -138,8 +138,19 @@ test("deepseek-official profile routes the main model on DeepSeek with harness o
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.harnessTools, undefined, "harness tool fields are gone");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.baseUrl, "https://api.deepseek.com");
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.tokenEnvName, "DEEPSEEK_API_KEY");
-  assert.deepEqual(DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id), ["deepseek-v4-flash", "deepseek-v4-pro"]);
+  assert.deepEqual(
+    DEEPSEEK_OFFICIAL_PROFILE.availableModels.map((model) => model.id),
+    ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"],
+  );
   assert.equal(DEEPSEEK_OFFICIAL_PROFILE.availableModels.every((model) => model.endpoint === "responses"), true);
+  // The third one is the reason this provider can see. Until it existed, a
+  // DeepSeek-only install had a main model and no vision route at all; it now
+  // has one on the same key and the same endpoint, so nothing else has to be
+  // configured for images to work.
+  assert.deepEqual(
+    DEEPSEEK_OFFICIAL_PROFILE.availableModels.filter((model) => model.supportsVision).map((model) => model.id),
+    ["deepseek-v4-flash-vision-exp"],
+  );
 });
 
 test("model catalog is generated per profile with distinct comp hashes", () => {
