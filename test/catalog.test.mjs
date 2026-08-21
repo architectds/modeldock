@@ -34,9 +34,12 @@ test("catalogFor writes per-model base instructions for vision capability", () =
   const catalog = catalogFor(configStub());
   const text = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
   const vision = catalog.models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
-  assert.ok(text && vision, "both a text-only and a vision-capable entry are published");
+  const flashVision = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash-vision-exp@opencode-go");
+  assert.ok(text && vision && flashVision, "both DeepSeek Flash variants and a vision-capable entry are published");
   assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
   assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
+  assert.deepEqual(flashVision.input_modalities, ["text", "image"], "OpenCode Go Flash Vision Exp declares image input");
+  assert.ok(!flashVision.base_instructions.includes("TEXT-ONLY"), "OpenCode Go Flash Vision Exp receives direct-vision instructions");
 });
 
 test("catalogFor keeps the main model first with the profile comp hash", () => {

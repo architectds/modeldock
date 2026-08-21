@@ -52,17 +52,25 @@ async function listen(server) {
 async function startApp(configOverrides = {}) {
   const config = { ...baseConfig(), ...configOverrides };
   if (configOverrides.goToken === null) delete config.goToken;
+  // Temp directories this call created, and only those: a caller that passed
+  // its own summariesFile or catalog paths owns them and cleans them itself.
+  // stop() removes what is listed here, which every caller registers with
+  // t.after - without it one npm test run left about ten thousand directories
+  // in the OS temp dir for the sandbox reaper to carry until they aged out.
+  const owned = [];
   // Isolate the persisted-summaries file: tests must never read or write the real
   // ~/.modeldock/summaries.json (a run of npm test was polluting the live gate's
   // file with 260 fake ses_ entries).
   if (!config.summariesFile) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-summaries-"));
+    owned.push(dir);
     config.summariesFile = path.join(dir, "summaries.json");
   }
   // Isolate the catalog file and native capture: tests must never read or write
   // the real ~/.modeldock state (a test run was polluting the live gate's files).
   if (!config.codexCatalogFile || !config.nativeCatalogFile) {
     const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-catalog-test-"));
+    owned.push(dir);
     config.codexCatalogFile = config.codexCatalogFile || path.join(dir, "codex-model-catalog.json");
     config.nativeCatalogFile = config.nativeCatalogFile || path.join(dir, "native-catalog.json");
   }
@@ -74,7 +82,19 @@ async function startApp(configOverrides = {}) {
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  return { base, server, services, stop: async () => { await services.mediaStore.cleanup(); server.closeAllConnections?.(); await new Promise((resolve) => server.close(resolve)); } };
+  return {
+    base,
+    server,
+    services,
+    stop: async () => {
+      await services.mediaStore.cleanup();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+      // Last, so a failure to close the server cannot leave the directories
+      // behind, and after mediaStore.cleanup, which may still be writing.
+      await Promise.all(owned.map((dir) => rm(dir, { recursive: true, force: true })));
+    },
+  };
 }
 
 function jsonBody(req) {
@@ -149,7 +169,7 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   t.after(instance.stop);
   const initial = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
-  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go"]);
+  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["deepseek-v4-flash-vision-exp@opencode-go", "gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go"]);
   const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }) });
   assert.equal(changed.status, 200);
   assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" });

@@ -229,6 +229,7 @@ const OPENCODE_GO_PROFILE = {
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-flash-vision-exp", label: "DeepSeek V4 Flash Vision Exp", endpoint: "responses", supportsVision: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
     // quota is exhausted; the upstream surfaces it per request.

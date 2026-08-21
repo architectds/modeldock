@@ -1,12 +1,12 @@
 // Delete stale ModelDock sandbox entries. "Stale" means older than
-// MODELDOCK_SANDBOX_MAX_AGE_DAYS (default 2). Cleans the configured sandbox
+// MODELDOCK_SANDBOX_MAX_AGE_DAYS (default 1). Cleans the configured sandbox
 // root plus any modeldock-* leftovers in the OS temp dir. The gateway log dir
 // (os.tmpdir()/modeldock) is never touched; in-use files are skipped, not fatal.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const maxAgeDays = Number(process.env.MODELDOCK_SANDBOX_MAX_AGE_DAYS) || 2;
+const maxAgeDays = Number(process.env.MODELDOCK_SANDBOX_MAX_AGE_DAYS) || 1;
 const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
 const now = Date.now();
 
