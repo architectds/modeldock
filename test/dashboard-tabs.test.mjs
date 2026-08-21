@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
@@ -263,4 +263,34 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
   assert.deepEqual(errors, [], "the dashboard threw while rendering its tabs");
+});
+
+// A canvas is sized from its CSS box, and from nothing else.
+//
+// This is a source check rather than a render check because the failure needs a
+// redraw to happen while the view is hidden, and the only thing that redraws on
+// its own is a 15-second poll. What it pins is exact and was live for the whole
+// life of the waveform: `canvas.clientWidth || canvas.width` falls back to the
+// bitmap, so a hidden canvas - which measures zero - reported its own bitmap
+// size instead, and the guard written directly underneath to catch that case
+// could never fire. Every poll that arrived while the dashboard sat on another
+// tab then re-entered the resize with width = the current bitmap, multiplied it
+// by the device pixel ratio again, and assigning canvas.width wipes the canvas.
+//
+// Measured at 125% display scaling: 345 -> 431 -> 539 -> 674, reaching
+// 279239x93075 after thirty polls, from a card 276 CSS pixels wide. At 100% the
+// resize condition is false and none of it happens, which is why the bug is
+// invisible on an unscaled screen.
+test("a canvas is sized from its CSS box, never from its own bitmap", () => {
+  const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8")
+    // The comment above the fix quotes the pattern it replaced, so the check
+    // reads code rather than prose.
+    .split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  const fallbacks = app.match(/client(?:Width|Height)\s*\|\|/g) || [];
+  assert.deepEqual(fallbacks, [], "a canvas that measures zero is hidden, and must be left alone rather than resized to its own bitmap");
+  // And every site that measures one still guards on the zero it can now see.
+  const measured = (app.match(/const width = canvas\.clientWidth;/g) || []).length;
+  const guarded = (app.match(/if \(!width \|\| !height\) return;/g) || []).length;
+  assert.equal(measured, guarded, "each canvas measurement keeps the hidden-view guard beneath it");
+  assert.ok(measured >= 2, "both wave renderers are covered");
 });

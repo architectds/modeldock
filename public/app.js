@@ -221,8 +221,17 @@ function renderContextWave(recent) {
 function drawWave(canvas, history, peak, hoverIndex = -1, color = WAVE_AMBER, pointsRef = wavePoints) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth || canvas.width;
-  const height = canvas.clientHeight || canvas.height;
+  // The CSS box, and only the CSS box. This used to fall back to the bitmap
+  // size, which defeated the very check below it: a hidden canvas measures zero
+  // but has a bitmap, so `clientWidth || width` handed back the bitmap and the
+  // guard never fired. Every poll that arrived while the dashboard was on
+  // another tab then re-entered the resize with width = the current bitmap,
+  // multiplied it by the device pixel ratio again, and assigning canvas.width
+  // wipes the canvas. Measured at 125% scaling: 345 -> 431 -> 539 -> 674, and
+  // 279239x93075 after about seven minutes away - a bitmap no browser will
+  // allocate, from a card that was 276 CSS pixels wide.
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
   // A hidden view measures zero. Returning leaves the last good frame in
   // place instead of clearing it to nothing.
   if (!width || !height) return;
@@ -410,8 +419,17 @@ function renderCacheWave(recent) {
 function drawCacheWave(canvas, history, hoverIndex = -1) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth || canvas.width;
-  const height = canvas.clientHeight || canvas.height;
+  // The CSS box, and only the CSS box. This used to fall back to the bitmap
+  // size, which defeated the very check below it: a hidden canvas measures zero
+  // but has a bitmap, so `clientWidth || width` handed back the bitmap and the
+  // guard never fired. Every poll that arrived while the dashboard was on
+  // another tab then re-entered the resize with width = the current bitmap,
+  // multiplied it by the device pixel ratio again, and assigning canvas.width
+  // wipes the canvas. Measured at 125% scaling: 345 -> 431 -> 539 -> 674, and
+  // 279239x93075 after about seven minutes away - a bitmap no browser will
+  // allocate, from a card that was 276 CSS pixels wide.
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
   // A hidden view measures zero. Returning leaves the last good frame in
   // place instead of clearing it to nothing.
   if (!width || !height) return;
