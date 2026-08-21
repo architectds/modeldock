@@ -3796,3 +3796,64 @@ test("the local slim tool set keeps the shell Codex actually sends", () => {
   assert.ok(names.includes("write_stdin") && names.includes("wait"), "the tools that pair with the shell survive");
   assert.ok(!names.includes("spawn_agent"), "but not the multi-agent surface");
 });
+
+// What xAI accepts on the wire, measured against api.x.ai/v1/responses on
+// 2026-08-21 with a live subscription token. Each case below is one request
+// that was actually sent; the numbers and error strings are quoted from what
+// came back, so this file is the record of that session as much as it is a
+// test.
+//
+// The defect that prompted it: a Grok turn died on
+//   422 "tools[8].type: unknown variant `custom`, expected one of `function`,
+//   `web_search`, `x_search`, `image_generation`, ..."
+// Codex emits apply_patch as a `custom` tool whenever the catalog says
+// freeform, applyToolPolicy passed unknown types straight through, and the
+// profile field that should have caught it - blockedToolTypes - was declared
+// on every profile and read by nothing.
+test("a tool type the upstream refuses never reaches it", () => {
+  const codexTools = [
+    { type: "function", name: "shell", parameters: { type: "object", properties: {} } },
+    { type: "custom", name: "apply_patch", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" } },
+  ];
+  const { tools, stripped } = applyToolPolicy(codexTools, { blockedToolTypes: new Set(["custom"]) });
+  assert.deepEqual(tools.map((tool) => tool.type), ["function"]);
+  assert.equal(stripped.blockedType, 1);
+  // Measured: sending both returns 422 and the whole turn is lost, not just the
+  // tool. Sending only the function tool returns 200.
+  assert.equal(tools.some((tool) => tool.type === "custom"), false, "one unknown variant costs the entire request");
+});
+
+test("a hosted tool the upstream runs itself is kept, not stripped", () => {
+  const codexTools = [
+    { type: "function", name: "shell", parameters: { type: "object", properties: {} } },
+    { type: "web_search" },
+    { type: "tool_search" },
+  ];
+  // Measured: xAI answers 200 to a request carrying { type: "web_search" } and
+  // 200 to one carrying { type: "x_search" }. Stripping them made the gate pay
+  // Exa to redo a search the subscription already covers.
+  const xai = applyToolPolicy(codexTools, { hostedToolTypes: new Set(["web_search", "x_search"]) });
+  assert.deepEqual(xai.tools.map((tool) => tool.type), ["function", "web_search"]);
+  assert.equal(xai.stripped.webSearch, 0);
+  assert.equal(xai.stripped.toolSearch, 1, "tool_search is still ours to answer, not theirs");
+
+  // Everyone else is unchanged: the default is to strip every hosted tool.
+  const other = applyToolPolicy(codexTools, {});
+  assert.deepEqual(other.tools.map((tool) => tool.type), ["function"]);
+  assert.equal(other.stripped.webSearch, 1);
+});
+
+test("a profile's blocked list does not swallow the hosted counters", () => {
+  // opencode-go declares tool_search and web_search in blockedToolTypes, and
+  // both are also hosted types. Deciding blocked first moved them into
+  // blockedType, so the metrics that report stripped hosted tooling read zero
+  // while nothing had changed on the wire.
+  const { tools, stripped } = applyToolPolicy(
+    [{ type: "web_search" }, { type: "tool_search" }],
+    { blockedToolTypes: new Set(["tool_search", "web_search"]) },
+  );
+  assert.deepEqual(tools, []);
+  assert.equal(stripped.webSearch, 1);
+  assert.equal(stripped.toolSearch, 1);
+  assert.equal(stripped.blockedType, 0, "a hosted tool is accounted as hosted");
+});

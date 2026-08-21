@@ -9,6 +9,8 @@ import {
   profileOptions,
   applyCustomProfile,
   applyOllamaProfile,
+  applyXaiProfile,
+  XAI_PROFILE,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
@@ -238,4 +240,65 @@ test("every published model carries a window and says where it came from", async
       assert.ok(["vendor", "measured"].includes(model.contextSource), `${model.id} does not say where its window came from`);
     }
   }
+});
+
+// The xAI wire, measured against api.x.ai/v1/responses on 2026-08-21 with a
+// live subscription token. Four models answered "red" to an 8x8-scaled-up
+// crimson PNG, so vision works; what took a session to find was the shapes it
+// refuses.
+test("the xAI profile publishes the wire shapes xAI actually accepts", () => {
+  applyXaiProfile(["grok-4.5", "grok-4.6"]);
+  const catalog = XAI_PROFILE.modelCatalog({ mainModel: "grok-4.5", baseInstructions: "base" });
+  const entries = catalog.models || [];
+  assert.ok(entries.length >= 2);
+
+  // The published catalog is cross-provider, so only the entries this profile
+  // owns are asserted here - the rest belong to their own providers.
+  const mine = entries.filter((entry) => entry.slug.endsWith("@xai"));
+  assert.ok(mine.length >= 2, "both signed-in models are published");
+
+  // apply_patch as a `custom` tool is refused outright: 422 "unknown variant
+  // `custom`". Codex sends that shape whenever the catalog says freeform, so
+  // these entries ask for the function shape instead - and they carry it out of
+  // any catalog, not only the one this profile writes.
+  assert.deepEqual([...new Set(mine.map((entry) => entry.apply_patch_tool_type))], ["function"]);
+  const fromElsewhere = OPENCODE_GO_PROFILE
+    .modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: "base" })
+    .models.filter((entry) => entry.slug.endsWith("@xai"));
+  assert.deepEqual([...new Set(fromElsewhere.map((entry) => entry.apply_patch_tool_type))], ["function"],
+    "a Grok entry published from another provider's catalog still says function");
+
+  // Grok runs its own search - measured 200 for both web_search and x_search -
+  // so the catalog says so rather than leaving Exa to redo it.
+  assert.deepEqual([...new Set(mine.map((entry) => entry.supports_search_tool))], [true]);
+
+  // Images are accepted, and the gate must not convert image_url to the object
+  // form on the way out: that returns 422 "invalid type: map, expected a
+  // string". No entry may carry imageUrlShape, which is what triggers it.
+  assert.deepEqual([...new Set(mine.map((entry) => JSON.stringify(entry.input_modalities)))], ['["text","image"]']);
+  assert.equal(XAI_PROFILE.availableModels.every((model) => !model.imageUrlShape), true);
+});
+
+test("every other profile keeps the freeform patch tool", () => {
+  // freeform is the better shape and stays the default. xAI takes the other one
+  // because there the freeform tool is not a worse patch tool, it is a 422.
+  const go = OPENCODE_GO_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", baseInstructions: "base" });
+  const official = DEEPSEEK_OFFICIAL_PROFILE.modelCatalog({ mainModel: "deepseek-v4-flash", baseInstructions: "base" });
+  // Every entry EXCEPT the ones xAI owns: those carry function wherever they
+  // are published, which is the point of resolving the shape per owner.
+  for (const catalog of [go, official]) {
+    const others = (catalog.models || []).filter((entry) => !entry.slug.endsWith("@xai"));
+    assert.ok(others.length > 5, "the catalog is cross-provider, so there is plenty to check");
+    assert.deepEqual([...new Set(others.map((entry) => entry.apply_patch_tool_type))], ["freeform"]);
+  }
+});
+
+test("xAI refuses the custom tool type and runs its own search", () => {
+  // The two halves of the fix, as the profile states them. applyToolPolicy is
+  // what enforces them; gateway.test.mjs covers that side.
+  assert.equal(XAI_PROFILE.blockedToolTypes.has("custom"), true);
+  assert.equal(XAI_PROFILE.hostedToolTypes.has("web_search"), true);
+  assert.equal(XAI_PROFILE.hostedToolTypes.has("x_search"), true);
+  // tool_search is answered by this gate, not by xAI, so it is not on the list.
+  assert.equal(XAI_PROFILE.hostedToolTypes.has("tool_search"), false);
 });

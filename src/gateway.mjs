@@ -1374,11 +1374,28 @@ const joinNamespace = (namespace, name) => `${trimNamespaceTail(namespace)}__${n
 // Tool policy: keep standard function/custom tools, flatten MCP namespaces so
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
-export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS, allowToolNames } = {}) {
-  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0 }, namespaces: new Map() };
+// blockedToolTypes: types this upstream refuses outright. It rejects the whole
+// request, not the tool, so one unknown variant costs the entire turn - xAI
+// answers 422 "unknown variant `custom`" and the session stops. Codex sends
+// apply_patch as a `custom` tool whenever the catalog says freeform, and until
+// this was wired the field was declared on every profile and read by nothing.
+//
+// hostedToolTypes: the hosted tools this upstream actually implements. The
+// default is to strip all of them, because most upstreams have none; xAI runs
+// its own web_search and x_search, and stripping those threw away a capability
+// the subscription pays for.
+export function applyToolPolicy(tools, {
+  hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS,
+  allowToolNames,
+  blockedToolTypes,
+  hostedToolTypes,
+} = {}) {
+  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map() };
   const hidden = new Set(hiddenToolNames || []);
   const allow = allowToolNames ? new Set(allowToolNames) : null;
-  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0 };
+  const blocked = new Set(blockedToolTypes || []);
+  const hostedOk = new Set(hostedToolTypes || []);
+  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0, blockedType: 0 };
   // Reverse map for the flattening below: flat wire name -> { name, namespace }.
   // Codex resolves an incoming function_call by (namespace, name), so the
   // response path has to undo the flattening with the exact pair it was built
@@ -1415,10 +1432,26 @@ export function applyToolPolicy(tools, { hiddenToolNames = TEXT_MODEL_HIDDEN_TOO
       }
       continue;
     }
+    // Hosted tools are decided first, and keep their own counters. Letting a
+    // profile's blocked list swallow them would have moved tool_search and
+    // web_search into blockedType for opencode-go, which declares both, and the
+    // metrics that report how much hosted tooling is being stripped would have
+    // started reading zero without anything changing on the wire.
     if (HOSTED_TOOL_TYPES.has(tool.type)) {
+      if (hostedOk.has(tool.type)) {
+        out.push(structuredClone(tool));
+        continue;
+      }
       if (tool.type === "tool_search") stripped.toolSearch += 1;
       else if (tool.type === "web_search") stripped.webSearch += 1;
       else stripped.otherHosted += 1;
+      continue;
+    }
+    // Everything else this upstream refuses. Unlike a hosted tool, which is
+    // dropped because we know it will not work, this one is dropped because
+    // sending it ends the turn: xAI answers 422 on the whole request.
+    if (blocked.has(tool.type)) {
+      stripped.blockedType += 1;
       continue;
     }
     if (typeof tool.name === "string" && hidden.has(tool.name)) {
@@ -3072,8 +3105,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
+  const routedProfile = profileById(routedProvider);
   const { tools, stripped, namespaces } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
+    // What this upstream refuses, and what it runs itself. Both are the
+    // profile's to declare: the gate cannot know from the model id that xAI
+    // rejects `custom` and serves its own web_search.
+    blockedToolTypes: routedProfile.blockedToolTypes,
+    hostedToolTypes: routedProfile.hostedToolTypes,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
   // The declarations above were flattened; the replayed history has to use the

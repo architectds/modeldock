@@ -77,7 +77,13 @@ const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "
 // One catalog entry. Codex's model picker lists whatever the active provider returns
 // from /v1/models, so emitting an entry per available model is what makes them all
 // selectable at runtime - no config rewrite, no restart.
-function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority, contextWindow = CONTEXT_WINDOW }) {
+// applyPatchToolType decides the wire shape Codex uses for apply_patch:
+// "freeform" makes it a `custom` tool carrying a grammar, "function" makes it
+// an ordinary function tool. Freeform is the better shape and stays the
+// default; an upstream with no `custom` variant in its tool enum takes the
+// other one, because there the freeform tool is not a worse patch tool, it is
+// a 422 that ends the turn.
+function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority, contextWindow = CONTEXT_WINDOW, applyPatchToolType = "freeform" }) {
   const autoCompactTokenLimit = Math.floor(contextWindow * AUTO_COMPACT_PERCENT);
   return {
         slug,
@@ -86,7 +92,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
         prefer_websockets: false,
         support_verbosity: true,
         default_verbosity: "low",
-        apply_patch_tool_type: "freeform",
+        apply_patch_tool_type: applyPatchToolType,
         web_search_tool_type: "text",
         input_modalities: inputModalities,
         supports_image_detail_original: false,
@@ -129,11 +135,19 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
   };
 }
 
-function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = GENERAL_REASONING_LEVELS, availableModels = [] }) {
+function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = GENERAL_REASONING_LEVELS, availableModels = [], applyPatchToolType = "freeform" }) {
   // The main entry is owner-qualified like every other published entry, even when
   // the caller passed a bare reference (a legacy .env or a test fixture).
   const qualifiedMain = publishedSlugFor(profileId, mainModel);
-  const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels };
+  const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, applyPatchToolType };
+  // The patch-tool shape belongs to whoever will receive the request, and this
+  // catalog is cross-provider, so it is resolved per entry from the slug's
+  // owner rather than taken from whichever profile is writing the file.
+  const patchToolTypeFor = (slug) => {
+    const at = String(slug || "").lastIndexOf(PROVIDER_SEPARATOR);
+    if (at <= 0) return applyPatchToolType;
+    return PROFILES[String(slug).slice(at + 1)]?.applyPatchToolType || applyPatchToolType;
+  };
   // The selected main model may belong to a provider other than the active
   // profile (e.g. a dashboard-added custom endpoint set as main). Label its
   // catalog entry "Provider - Model" like every other entry; the caller's
@@ -192,6 +206,7 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
       catalogEntry({
         ...base,
         slug: qualifiedMain,
+        applyPatchToolType: patchToolTypeFor(qualifiedMain),
         displayName: ownerQualifiedDisplayName(qualifiedMain) || displayName,
         description,
         inputModalities: mainModalities,
@@ -205,6 +220,7 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
       ...rest.map((model, index) => catalogEntry({
         ...base,
         slug: model.slug,
+        applyPatchToolType: patchToolTypeFor(model.slug),
         displayName: model.displayName,
         description: `${model.providerLabel} through the local ModelDock gate.`,
         // Codex sends images only to models that declare the modality; the gate still
@@ -452,7 +468,33 @@ const XAI_PROFILE = {
   // No environment variable: this credential cannot be pasted, only signed in
   // for, so an .env entry would be a place for a stale token to hide.
   tokenEnvName: "",
-  blockedToolTypes: new Set([]),
+  // Measured against api.x.ai/v1/responses on 2026-08-21. The endpoint answers
+  // 422 and refuses the WHOLE request on an unknown tool variant, so one
+  // `custom` tool costs the turn, not the tool: "unknown variant `custom`,
+  // expected one of function, web_search, x_search, image_generation,
+  // collections_search, file_search, code_execution, code_interpreter, mcp,
+  // shell". Codex emits apply_patch as `custom` whenever the catalog says
+  // freeform, which is why this entry also publishes applyPatchToolType
+  // "function" below - this set is the second line, for anything else Codex
+  // starts sending in that shape.
+  blockedToolTypes: new Set(["custom"]),
+  // Codex sends apply_patch as a `custom` tool under "freeform", and xAI has no
+  // such variant. "function" is the shape it does accept.
+  //
+  // Declared on the profile rather than passed to modelCatalog, because the
+  // published catalog is cross-provider: whichever profile writes the file
+  // publishes an entry for every enabled provider's models. An entry has to
+  // carry the shape ITS OWNER accepts. Keyed off the profile that wrote the
+  // file, a Grok entry published from the opencode-go catalog would say
+  // freeform, Codex would send `custom`, blockedToolTypes would drop it, and
+  // the turn would run with no apply_patch tool at all.
+  applyPatchToolType: "function",
+  // Grok runs these itself. Measured the same day: a request carrying
+  // { type: "web_search" } and one carrying { type: "x_search" } both return
+  // 200. The gate strips hosted tools by default because most upstreams have
+  // none, and stripping these threw away search the subscription already pays
+  // for and then paid Exa to do again.
+  hostedToolTypes: new Set(["web_search", "x_search"]),
   hiddenToolNames: new Set([]),
   availableModels: [],
   modelCatalog({ mainModel, baseInstructions }) {
@@ -463,7 +505,7 @@ const XAI_PROFILE = {
       description: "Grok models through a SuperGrok or X Premium subscription.",
       compHash: "modeldock-xai-v1",
       inputModalities: ["text", "image"],
-      supportsSearchTool: false,
+      supportsSearchTool: true,
       baseInstructions,
       availableModels: XAI_PROFILE.availableModels,
     });
@@ -740,6 +782,22 @@ function userEndpointProfile(id) {
 // Publish what the signed-in subscription can reach. The list is captured at
 // sign-in and replayed from the snapshot on every boot, so a restart never has
 // to contact xAI before the pickers are correct.
+// Which Grok models read images. /v1/models says only that a model exists, so
+// this is measured rather than asked for: on 2026-08-21 a 32x32 crimson PNG
+// sent to api.x.ai/v1/responses came back "red" from grok-4.5, grok-4.3,
+// grok-4.6 and grok-4.20-0309-non-reasoning. Every one of them had been
+// published as text-only, which is worse than it sounds - a text-only entry is
+// never offered as a vision model AND carries the instruction telling it to
+// hand images to something else, so a subscription that can see was being
+// asked to pay another model to look.
+//
+// The grok-4 family is what was measured, so it is what this claims. Anything
+// else - the imagine image/video models, grok-build - stays false until it has
+// been through the same test.
+function xaiModelSeesImages(id) {
+  return /^grok-4[.\-]/.test(String(id || ""));
+}
+
 export function applyXaiProfile(models) {
   XAI_PROFILE.availableModels = (Array.isArray(models) ? models : [])
     .filter((id) => typeof id === "string" && id)
@@ -750,7 +808,7 @@ export function applyXaiProfile(models) {
       // xAI does not publish per-model context windows on /v1/models, and a
       // number invented here would be worse than the catalog default that
       // every unmeasured model already uses.
-      supportsVision: false,
+      supportsVision: xaiModelSeesImages(id),
       ownerQualified: true,
       status: "available",
     }));
