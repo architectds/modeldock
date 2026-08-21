@@ -167,3 +167,42 @@ test("a Grok tool round trip keeps every turn's tool list on the wire xAI accept
   assert.ok(items.includes("function_call"), "the call is replayed");
   assert.ok(items.includes("function_call_output"), "and so is its result");
 });
+
+test("a visual Grok compaction keeps image evidence and returns a Codex handoff", async (t) => {
+  const { base, seen } = await startGrokApp(t, [answer("The attached image is red.")]);
+  const imageUrl = "data:image/png;base64,iVBORw0KGgo=";
+  const response = await fetch(`${base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "grok-4.5@xai",
+      stream: false,
+      input: [
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_text", text: "Remember the image." },
+            { type: "input_image", image_url: imageUrl },
+          ],
+        },
+        { type: "compaction_trigger" },
+      ],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const compacted = await response.json();
+  assert.equal(compacted.output[0].type, "compaction");
+  assert.match(compacted.output[0].encrypted_content, /^kcr1:/);
+
+  assert.equal(seen.length, 1, "compaction sends one summarize request to Grok");
+  const outbound = seen[0];
+  assert.equal(outbound.model, "grok-4.5");
+  assert.deepEqual(outbound.tools, []);
+  assert.equal(outbound.tool_choice, "none");
+  assert.ok(
+    outbound.input.some((item) => item.content?.some?.((part) => part.type === "input_image" && part.image_url === imageUrl)),
+    "the visual Grok summarize call receives the original image rather than a text placeholder",
+  );
+});

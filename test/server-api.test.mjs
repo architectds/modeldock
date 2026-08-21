@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyXaiProfile } from "../src/profiles.mjs";
+import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile } from "../src/profiles.mjs";
 import { dpapiSupported } from "../src/secrets.mjs";
 
 // Bare-path tests exercise the app wiring, not the caller-key guard. Enforcement
@@ -701,6 +701,49 @@ test("Grok-only onboarding selects a working xAI main and vision route", async (
   assert.deepEqual(models.selected, {
     mainModel: "grok-4.5@xai",
     visionModel: "grok-4.5@xai",
+  });
+  assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
+});
+
+test("local-only onboarding selects a connected Ollama route without a token", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-ollama-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(() => applyOllamaProfile({}, null));
+  applyOllamaProfile({}, {
+    baseUrl: "http://127.0.0.1:11434",
+    models: [{
+      id: "qwen3.8-27b",
+      upstreamId: "qwen3.8:27b",
+      label: "qwen3.8:27b",
+      supportsVision: false,
+      contextWindow: 262144,
+    }],
+  });
+  await writeFile(path.join(dir, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
+
+  const instance = await startApp({
+    goToken: null,
+    codexHome: dir,
+    envFile: path.join(dir, "modeldock.env"),
+    ollamaSnapshotFile: path.join(dir, "ollama-models.json"),
+  });
+  t.after(instance.stop);
+
+  const onboard = await (await fetch(`${instance.base}/api/onboarding`)).json();
+  assert.equal(onboard.anyTokenConfigured, true, "a connected keyless engine unlocks the wizard apply gate");
+
+  const applied = await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "on", nativeMerge: false }),
+  });
+  assert.equal(applied.status, 200);
+
+  const models = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(models.selectedProvider, "ollama");
+  assert.deepEqual(models.selected, {
+    mainModel: "qwen3.8-27b@ollama",
+    visionModel: "",
   });
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
 });

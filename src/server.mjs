@@ -251,10 +251,11 @@ function enabledProviders(config) {
   return all.filter((entry) => {
     if (entry.id === active) return true;
     // A keyless engine has no credential to check, so "connected" is the only
-    // test that means anything: it publishes once it has models. Naming Ollama
-    // here would have needed a new line per local engine.
+    // test that means anything: it publishes once it has models. The routing
+    // property is deliberate: xAI also has no environment variable, but its
+    // OAuth access token is still required on every request.
     const profile = profileById(entry.id);
-    if (!profile?.tokenEnvName) return Boolean(profile?.availableModels?.length);
+    if (profile?.keyless) return Boolean(profile.availableModels?.length);
     const token = config.tokens?.[entry.id];
     return Boolean(token);
   });
@@ -265,12 +266,13 @@ function providerModels(providerId) {
     .filter((model) => model.status !== "unavailable" && model.endpoint !== "chat");
 }
 
-function providerTokenConfigured(config, providerId) {
-  return Boolean(config.tokens?.[providerId] && providerModels(providerId).length);
+function providerRouteConfigured(config, providerId) {
+  const profile = profileById(providerId);
+  return Boolean(providerModels(providerId).length && (profile.keyless || config.tokens?.[providerId]));
 }
 
-function anyProviderTokenConfigured(config) {
-  return profileOptions().some((provider) => providerTokenConfigured(config, provider.id));
+function anyProviderRouteConfigured(config) {
+  return profileOptions().some((provider) => providerRouteConfigured(config, provider.id));
 }
 
 // Vision is cross-provider, but only across providers that can actually serve
@@ -279,7 +281,7 @@ function anyProviderTokenConfigured(config) {
 // lose their "active" pass without a configured token.
 function visionOptionsAcrossProviders(config, providerId) {
   return modelOptions(config, providerId).filter((model) =>
-    model.supportsVision && (model.provider === providerId || providerTokenConfigured(config, model.provider))
+    model.supportsVision && (model.provider === providerId || providerRouteConfigured(config, model.provider))
   );
 }
 
@@ -290,10 +292,10 @@ function visionOptionsAcrossProviders(config, providerId) {
 function onModeSelection(services) {
   const { config, modelSelection } = services;
   const currentProvider = providerForModel(config, modelSelection.mainModel);
-  const providerId = providerTokenConfigured(config, currentProvider)
+  const providerId = providerRouteConfigured(config, currentProvider)
     ? currentProvider
     : profileOptions().map((provider) => provider.id)
-      .find((id) => providerTokenConfigured(config, id));
+      .find((id) => providerRouteConfigured(config, id));
   if (!providerId) return null;
 
   const models = providerModels(providerId);
@@ -605,7 +607,7 @@ function settingsPayload(services) {
     ? bareModelId(modelSelection.visionModel)
     : "";
   return {
-    tokenConfigured: anyProviderTokenConfigured(config),
+    tokenConfigured: anyProviderRouteConfigured(config),
     providers: [
       { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
       { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
@@ -1577,7 +1579,7 @@ export function createApp(services = createServices()) {
         } else {
           const onSelection = onModeSelection(services);
           if (!onSelection) {
-            const error = new Error("Configure a provider token before enabling ON mode.");
+            const error = new Error("Connect a provider or configure a provider token before enabling ON mode.");
             error.code = "provider_token_required";
             throw error;
           }
@@ -1643,8 +1645,9 @@ export function createApp(services = createServices()) {
         "opencode-go": Boolean(config.tokens?.["opencode-go"]),
         "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
       },
-      // Any provider token unlocks the ON mode (the wizard's Apply gate).
-      anyTokenConfigured: anyProviderTokenConfigured(config),
+      // This legacy field name is the wizard contract; a connected keyless
+      // engine is equally able to unlock ON mode.
+      anyTokenConfigured: anyProviderRouteConfigured(config),
       autostart: settingsPayload(services).autostart,
     };
   }));

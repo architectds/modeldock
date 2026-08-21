@@ -122,9 +122,12 @@ stripped before the request reaches the API. Native GPT models stay in the
 Codex model picker; ModelDock never accesses, stores, copies, or replays
 OpenAI credentials.
 
-The setup guide accepts any configured provider token for ON mode. On a
-DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
-main model and `None` for vision, and persists that route across restarts.
+The setup guide accepts any configured provider or connected local engine for
+ON mode. On a DeepSeek-only install it selects
+`deepseek-v4-flash@deepseek-official`; on a Grok-only install it selects the
+available Grok model; and on a local-only install it selects the connected
+engine. Each route persists across restarts, with `None` for vision when that
+provider has no vision-capable model.
 
 **Local models** - an engine already running on this machine is found rather
 than configured. Press **Rescan** on the dashboard's local engines panel: the
