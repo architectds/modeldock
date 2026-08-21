@@ -256,8 +256,8 @@ test("subagent API exposes routed + native options and persists the agent file",
   await writeFile(nativeCatalogFile, JSON.stringify({
     captured_with: "0.1.0",
     models: [
-      { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" },
-      { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol" },
+      { slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" },
+      { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list" },
     ],
   }), "utf8");
   // The native provider is only offered while signed in; this scenario is the

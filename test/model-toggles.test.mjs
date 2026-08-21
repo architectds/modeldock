@@ -341,7 +341,7 @@ test("the roster shows a native model's traffic, which is filed under its provid
   t.after(app.stop);
   await writeFile(
     path.join(app.dir, "native-catalog.json"),
-    JSON.stringify({ models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", input_modalities: ["text"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list", input_modalities: ["text"] }] }),
     "utf8",
   );
   await writeFile(path.join(app.dir, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");

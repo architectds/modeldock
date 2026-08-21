@@ -202,6 +202,13 @@ function appendNativeModels(options, config) {
   if (!hasChatGptLogin(config.codexHome)) return options;
   for (const model of readNativeCatalog(config)?.models || []) {
     if (typeof model?.slug !== "string" || !model.slug) continue;
+    // The same test the Codex catalog applies, in the same spelling: a model
+    // Codex marks "hide" is one it does not offer, and offering it here only
+    // in our own pickers puts a choice in front of people that their own App
+    // will not show them. gpt-5.4, gpt-5.4-mini and codex-auto-review are
+    // hidden today; the review model in particular is internal machinery that
+    // happens to read images, not a vision model anyone was given.
+    if (model.visibility !== "list") continue;
     if (options.some((entry) => entry.id === model.slug)) continue;
     options.push({
       id: model.slug,

@@ -696,7 +696,7 @@ test("subagent picker hides the native provider without a sign-in", async (t) =>
   // the picker must still fail silently and offer no native provider.
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna" }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" }] }),
     "utf8",
   );
   const status = await (await fetch(`${instance.base}/api/status`)).json();
@@ -715,7 +715,7 @@ test("subagent picker offers the native provider once signed in", async (t) => {
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   const authPath = path.join(instance.services.config.codexHome, "auth.json");
@@ -736,7 +736,7 @@ test("vision picker offers native models once signed in, like subagent", async (
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
@@ -754,7 +754,7 @@ test("signing out hides native models from the vision picker too", async (t) => 
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   const status = await (await fetch(`${instance.base}/api/status`)).json();
@@ -770,7 +770,7 @@ test("POST /api/models accepts a native vision model once signed in", async (t) 
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
@@ -796,7 +796,7 @@ test("a signed-in vision picker lists the native slug alongside its routed twin"
   t.after(instance.stop);
   await writeFile(
     instance.services.config.nativeCatalogFile,
-    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", input_modalities: ["text", "image"] }] }),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }] }),
     "utf8",
   );
   await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
@@ -811,4 +811,33 @@ test("a signed-in vision picker lists the native slug alongside its routed twin"
   assert.ok(routed, "the curated catalog still offers the same model for the Go camp");
   assert.equal(routed.provider, "opencode-go");
   assert.notEqual(native.id, routed.id, "the two entries are only distinguishable by the owner suffix");
+});
+
+// Codex marks a model "hide" when it does not offer it - gpt-5.4, gpt-5.4-mini
+// and codex-auto-review are hidden today. Ours offered them anyway, because the
+// picker merge never read the field the Codex catalog filters on, so the vision
+// and subagent dropdowns listed models the user's own App will not show. The
+// review model in particular is internal machinery that happens to read images.
+test("a native model Codex hides is not offered in our pickers either", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  await writeFile(
+    instance.services.config.nativeCatalogFile,
+    JSON.stringify({
+      models: [
+        { slug: "gpt-5.6-terra", display_name: "GPT-5.6-Terra", visibility: "list", input_modalities: ["text", "image"] },
+        { slug: "codex-auto-review", display_name: "Codex Auto Review", visibility: "hide", input_modalities: ["text", "image"] },
+      ],
+    }),
+    "utf8",
+  );
+  await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");
+
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  const visionIds = (status.models.options || []).map((entry) => entry.id);
+  const subagentIds = (status.subagent.options || []).map((entry) => entry.id);
+
+  assert.ok(visionIds.includes("gpt-5.6-terra"), "a listed native model is still offered");
+  assert.ok(!visionIds.includes("codex-auto-review"), "a hidden one is not offered for vision");
+  assert.ok(!subagentIds.includes("codex-auto-review"), "nor as a subagent");
 });
