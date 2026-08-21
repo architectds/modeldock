@@ -313,3 +313,25 @@ test("the tidy holds off until the window is full, and then not again for a week
   assert.equal(tooSoon.run, false);
   assert.equal(tooSoon.reason, "ran_recently");
 });
+
+test("the periodic pass tidies too, not just the boot that started the gateway", async (t) => {
+  const app = await startApp();
+  t.after(app.stop);
+  const now = Date.now();
+  const busy = "deepseek-v4-flash@opencode-go";
+
+  // A gateway left running for weeks never boots again, so a boot-only tidy
+  // never fires on exactly the installs that accumulate the most models.
+  seedRollup(app.services.usageRollupFile, busy, now);
+  const catalogNow = JSON.parse(await readFile(path.join(app.dir, "codex-model-catalog.json"), "utf8"));
+  const firstSeen = {};
+  for (const entry of catalogNow.models) firstSeen[entry.slug] = new Date(now - 60 * DAY).toISOString();
+  writeLifecycle(app.services.modelLifecycleFile, { lastTidyAt: "", firstSeen });
+
+  assert.equal(existsSync(app.services.modelTogglesFile), false, "nothing parked before the pass");
+  await app.services.runScheduledMaintenance();
+
+  const parked = Object.values(readModelToggles(app.services.modelTogglesFile)).filter((v) => v === false);
+  assert.ok(parked.length > 0, "the periodic pass parked what the boot pass would have");
+  assert.ok(readLifecycle(app.services.modelLifecycleFile).lastTidyAt, "and recorded the run");
+});

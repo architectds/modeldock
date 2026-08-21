@@ -1193,13 +1193,26 @@ export function createServices(config = loadConfig()) {
     }
   };
 
+  // The periodic pass: refresh the model list, then tidy what it leaves. The
+  // tidy has to be on this timer and not only at boot - the gateways that most
+  // need it are the ones left running for weeks, and a boot-only tidy never
+  // fires on those at all. Running it daily costs nothing, because the weekly
+  // guard inside it decides whether this call does any work.
+  //
+  // After the refresh rather than beside it: a model that arrived in this pass
+  // should get its first-seen stamp before anything reasons about its age.
+  const runScheduledMaintenance = () => refreshModelCatalog().then(
+    () => runModelTidy(),
+    () => runModelTidy(),
+  );
+
   // Write once at boot so the file exists even when the refresh is disabled or fails.
   writeCatalogFile();
   runModelTidy();
   refreshModelCatalog();
   const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
   const modelRefreshTimer = refreshIntervalHours > 0
-    ? setInterval(refreshModelCatalog, refreshIntervalHours * 3_600_000)
+    ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
   // Tests inject a partial config that omits codexHome; fall back to the same
@@ -1215,7 +1228,7 @@ export function createServices(config = loadConfig()) {
     // "openai"), which is exactly what the collaboration relay needs.
     subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, runModelTidy, modelRefreshTimer, ollamaSnapshotFile,
+    refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
   });
