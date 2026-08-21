@@ -972,6 +972,17 @@ export function normalizeXaiInput(input) {
   return normalizeGatewayInput(input).map(normalizeStandardToolItem);
 }
 
+// Codex uses this OpenAI-native flag to grant its own backend web access. xAI
+// does not implement the field and rejects the whole Responses request when it
+// appears, even for a simple text turn. Its supported web_search/x_search tools
+// are handled by the xAI tool policy instead, so remove only this incompatible
+// transport hint on the xAI leg.
+export function normalizeXaiPayload(payload) {
+  if (!payload || typeof payload !== "object" || !("external_web_access" in payload)) return payload;
+  const { external_web_access: _externalWebAccess, ...normalized } = payload;
+  return normalized;
+}
+
 // llama.cpp's /v1/responses parses function_call.arguments with a strict JSON
 // parser. Codex's custom_tool_call.input is often a double-encoded string
 // (e.g. apply_patch content starting with a quote) that is not a JSON object.
@@ -2878,6 +2889,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   }
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
+  const upstreamSummarizeBody = routedProvider === "xai" ? normalizeXaiPayload(summarizeBody) : summarizeBody;
   const bytesIn = Buffer.byteLength(JSON.stringify(payload));
 
   const target = upstreamTargetFor(config, route.model);
@@ -3215,6 +3227,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // that can still carry the orphaned tool call this gateway just cleaned, so
   // strict upstreams (Go) would reject the request again.
   delete normalizedPayload.previous_response_id;
+  if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
 
   // Transfer-card "in": the request body bytes the client actually sent this
   // gate. Re-serializing the parsed payload is the honest post-decode size.

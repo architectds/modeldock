@@ -65,6 +65,11 @@ function fakeXai(queue) {
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     seen.push(body);
+    if (body.external_web_access !== undefined) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Argument not supported: external_web_access" }));
+      return;
+    }
     const bad = (body.tools || []).find((tool) => !XAI_TOOL_TYPES.has(tool?.type));
     if (bad) {
       res.writeHead(422, { "content-type": "application/json" });
@@ -207,6 +212,24 @@ test("a Grok namespace call returns to Codex and comes back to xAI on the same w
   assert.deepEqual(JSON.parse(replay.arguments), { x: 12, y: 34 });
 });
 
+test("a Grok request drops Codex's OpenAI-only external web access flag", async (t) => {
+  const { base, seen } = await startGrokApp(t, [answer("ok")]);
+  const response = await fetch(`${base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "grok-4.5@xai",
+      stream: false,
+      external_web_access: true,
+      input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+    }),
+  });
+
+  assert.equal(response.status, 200, "xAI rejects the unfiltered flag with HTTP 400");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].external_web_access, undefined, "the xAI wire contains no OpenAI-only transport flag");
+});
+
 test("a visual Grok compaction keeps image evidence and returns a Codex handoff", async (t) => {
   const { base, seen } = await startGrokApp(t, [answer("The attached image is red.")]);
   const imageUrl = "data:image/png;base64,iVBORw0KGgo=";
@@ -216,6 +239,7 @@ test("a visual Grok compaction keeps image evidence and returns a Codex handoff"
     body: JSON.stringify({
       model: "grok-4.5@xai",
       stream: false,
+      external_web_access: true,
       input: [
         {
           type: "message",
@@ -238,6 +262,7 @@ test("a visual Grok compaction keeps image evidence and returns a Codex handoff"
   assert.equal(seen.length, 1, "compaction sends one summarize request to Grok");
   const outbound = seen[0];
   assert.equal(outbound.model, "grok-4.5");
+  assert.equal(outbound.external_web_access, undefined, "the compaction wire also excludes Codex's OpenAI-only flag");
   assert.deepEqual(outbound.tools, []);
   assert.equal(outbound.tool_choice, "none");
   assert.ok(
