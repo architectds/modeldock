@@ -261,13 +261,31 @@ export function maxContextFor({
   const spare = cardBytes - headroomBytes - (weightsBytes || 0) - overheadBytes;
   if (spare <= 0) return 0;
   // Snap to a rung a person would actually type, and never past the context the
-  // model was trained for. A model trained below the ladder's first rung has no
-  // rung of its own, and its trained length is then the only sensible answer -
-  // snapping it to zero would report that a working model cannot run at all.
-  const affordable = snapContext(Math.floor(spare / perToken));
-  if (!shape.trainedContext) return affordable;
-  const trainedCap = snapContext(shape.trainedContext) || shape.trainedContext;
-  return Math.min(affordable || trainedCap, trainedCap);
+  // model was trained for.
+  const budget = Math.floor(spare / perToken);
+  const trained = shape.trainedContext || 0;
+  // A model trained below the ladder's first rung has no rung of its own, and
+  // its trained length is then the only sensible answer - snapping it to zero
+  // would report that a working model cannot run at all. It still has to fit:
+  // "the model is small" and "the card has room for it" are separate claims.
+  if (trained && trained < CONTEXT_LADDER[0]) return budget >= trained ? trained : 0;
+  // Zero means the card cannot reach even the smallest rung. That is an answer,
+  // not a missing one - the earlier `affordable || trainedCap` read it as "no
+  // opinion" and replied with the model's full trained context, so the tightest
+  // cards got the largest recommendation, and the advice line, which only shows
+  // when the suggestion is BELOW the running context, went quiet exactly when
+  // the bar was red.
+  return snapContext(trained ? Math.min(budget, trained) : budget);
+}
+
+// The rungs to offer for a model, before any card is consulted. Kept here so
+// the server and the page cannot disagree about what the ladder is: filtering
+// CONTEXT_LADDER by a trained length yields nothing at all for a 4K or 8K
+// model, and an empty ladder reached the slider as `undefined`.
+export function contextLadderFor(trainedContext) {
+  const trained = Number(trainedContext) || 0;
+  if (trained && trained < CONTEXT_LADDER[0]) return [trained];
+  return CONTEXT_LADDER.filter((rung) => !trained || rung <= trained);
 }
 
 // Everything about one model file, in the shape the snapshot stores. Keyed on

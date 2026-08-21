@@ -37,9 +37,9 @@ import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlug
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
-import { estimateVramBudget, kvBytesPerToken, maxContextFor, CONTEXT_LADDER, KV_ELEMENT_BYTES, MINIMUM_HEADROOM_BYTES, RECOMMENDED_HEADROOM_BYTES } from "./gguf.mjs";
+import { estimateVramBudget, kvBytesPerToken, maxContextFor, contextLadderFor, KV_ELEMENT_BYTES, MINIMUM_HEADROOM_BYTES, RECOMMENDED_HEADROOM_BYTES } from "./gguf.mjs";
 import { primaryGpu, probeGpus, usableBytesOf } from "./gpu.mjs";
-import { applyLaunchOverrides, tokenizeCommandLine } from "./engine-processes.mjs";
+import { drawerLaunchArgs, launchBaseArgs, tokenizeCommandLine } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -473,9 +473,16 @@ function vramLedgerFor(engine, gpus) {
   // budgeting against the raw capacity overstates headroom by most of a
   // gigabyte and recommends a context that gets evicted.
   const cardBytes = usableBytesOf(card);
-  const budget = estimateVramBudget({ shape: facts, weightsBytes: facts.fileBytes, contextTokens, cardBytes });
+  // What this engine is actually caching at. An unrecognised value falls back
+  // to f16 rather than to NaN, but it is read rather than assumed: a q8_0
+  // engine budgeted as f16 overstates its own KV by half the cache, which on
+  // this machine was 2.4 GiB of headroom reported as spent when it was free.
+  const running = engine?.launch?.cacheTypeK;
+  const kvType = KV_ELEMENT_BYTES[running] ? running : "f16";
+  const budget = estimateVramBudget({ shape: facts, weightsBytes: facts.fileBytes, contextTokens, cardBytes, kvType });
   return {
     ...budget,
+    kvType,
     contextTokens,
     card: card ? { name: card.name, vendor: card.vendor, totalBytes: cardBytes, capacityBytes: card.totalBytes } : null,
     // Everything a slider needs to recompute the budget as it moves, so
@@ -484,14 +491,14 @@ function vramLedgerFor(engine, gpus) {
     recommendedHeadroom: RECOMMENDED_HEADROOM_BYTES,
     minimumHeadroom: MINIMUM_HEADROOM_BYTES,
     trainedContext: facts.trainedContext || 0,
-    contextLadder: CONTEXT_LADDER.filter((rung) => !facts.trainedContext || rung <= facts.trainedContext),
+    contextLadder: contextLadderFor(facts.trainedContext),
     // What it should be instead, so a tight configuration comes with an answer
     // rather than only a complaint.
-    recommendedContext: cardBytes ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes }) : 0,
+    recommendedContext: cardBytes ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes, kvType }) : 0,
     // How far the slider may be dragged: past the recommendation, but not past
     // the point where the configuration certainly fails.
     maxContext: cardBytes
-      ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes, headroomBytes: MINIMUM_HEADROOM_BYTES })
+      ? maxContextFor({ shape: facts, weightsBytes: facts.fileBytes, cardBytes, kvType, headroomBytes: MINIMUM_HEADROOM_BYTES })
       : 0,
   };
 }
@@ -2130,6 +2137,11 @@ export function createApp(services = createServices()) {
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
         vram: vramLedgerFor(engine, gpus),
+        // The engine's own argv with the tuning drawer's settings taken out.
+        // The drawer appends its three choices to this rather than composing a
+        // line from the handful of flags it knows the names of, which is how
+        // its "start it with" came to omit eight flags that Apply preserves.
+        launchBase: engine.cmdline ? launchBaseArgs(tokenizeCommandLine(engine.cmdline).slice(1)) : null,
       })).map((engine) => ({ ...engine, warnings: engineWarnings(engine) }));
       // An engine that was connected and has since been stopped still belongs on
       // the page. Dropping it would leave a profile published against a server
@@ -2300,13 +2312,9 @@ export function createApp(services = createServices()) {
         },
       });
     }
-    const args = applyLaunchOverrides(tokenizeCommandLine(running.cmdline).slice(1), {
-      ctxSize: Number(contextTokens) || undefined,
-      parallel: Number(sessions) || undefined,
-      cacheTypeK: kvType && kvType !== "f16" ? kvType : undefined,
-      cacheTypeV: kvType && kvType !== "f16" ? kvType : undefined,
-      kvUnified: true,
-    });
+    // The same function whose two halves the drawer's preview is built from,
+    // so what is spawned and what was shown cannot be different lines.
+    const args = drawerLaunchArgs(tokenizeCommandLine(running.cmdline).slice(1), { contextTokens, sessions, kvType });
     try {
       process.kill(running.pid);
     } catch (error) {
@@ -2314,10 +2322,32 @@ export function createApp(services = createServices()) {
       return res.status(502).json({ error: { type: "stop_failed", message: error.message } });
     }
     // The port does not free instantly, and starting a second copy onto a held
-    // port is the failure this waits out.
-    for (let i = 0; i < 40; i += 1) {
-      if (!(await (services.discoverEngines || discoverLocalEngines)({})).some((found) => found.pid === running.pid)) break;
+    // port is the failure this waits out. Running out of patience is not the
+    // same as the port coming free: the old loop left by the same door either
+    // way and spawned regardless, so a process that refused to die produced a
+    // second one that could not bind, and the reply still said started: true.
+    const stopTimeoutMs = Number(services.stopTimeoutMs) || 10_000;
+    // A real deadline rather than a count of turns: every pass through this
+    // loop is a full port scan, so "40 iterations of 250ms" is not ten seconds
+    // and the message below would be quoting a number nothing measured.
+    const deadline = Date.now() + stopTimeoutMs;
+    let stopped = false;
+    while (Date.now() < deadline) {
+      if (!(await (services.discoverEngines || discoverLocalEngines)({})).some((found) => found.pid === running.pid)) {
+        stopped = true;
+        break;
+      }
       await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!stopped) {
+      recordConfigAction(metrics, `local_apply_${engine}`, { ok: false, error: "stop_timeout" });
+      return res.status(502).json({
+        error: {
+          type: "stop_timeout",
+          message: `The engine is still holding its port ${Math.round(stopTimeoutMs / 1000)}s after being asked to stop. `
+            + "Nothing was started; stop it by hand and try again.",
+        },
+      });
     }
     try {
       const logDir = path.join(os.tmpdir(), "modeldock");

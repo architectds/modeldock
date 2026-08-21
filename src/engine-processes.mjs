@@ -189,16 +189,41 @@ const OVERRIDE_FLAGS = {
   cacheTypeV: ["-ctv", "--cache-type-v"],
 };
 
+// Presence-only switches: there is no value token to step over, and the two
+// spellings are opposites rather than aliases.
+const OVERRIDE_SWITCHES = {
+  kvUnified: {
+    on: "--kv-unified",
+    off: "--no-kv-unified",
+    spellings: ["--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"],
+  },
+};
+
+// Three states per key, not two. `undefined` means the caller does not own this
+// setting and whatever is on the command line stays. Any other value - `null`
+// included - means the caller owns it, so the existing flag comes off first and
+// is rewritten only if there is something to write.
+//
+// The distinction is the whole fix. Choosing f16 in the drawer passes no cache
+// type, which under the old rule skipped the key entirely, so an existing
+// `-ctk q8_0` survived a restart whose own preview line said f16 - the engine
+// came back running something the UI had just told the user it was leaving. The
+// switch had the mirror bug: it was stripped unconditionally, so a user's
+// deliberate `--no-kv-unified` disappeared on a restart that only moved the
+// context slider.
 export function applyLaunchOverrides(args, overrides = {}) {
   const out = [];
   const drop = new Set();
+  const dropSwitch = new Set();
   for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined || value === null) continue;
+    if (value === undefined) continue;
     for (const flag of OVERRIDE_FLAGS[key] || []) drop.add(flag);
+    for (const flag of OVERRIDE_SWITCHES[key]?.spellings || []) dropSwitch.add(flag);
   }
   const source = Array.isArray(args) ? args : [];
   for (let i = 0; i < source.length; i += 1) {
     const token = source[i];
+    if (dropSwitch.has(token)) continue;
     if (drop.has(token)) {
       // Skip the flag and the value that belongs to it, but never swallow the
       // next flag when this one was written without a value.
@@ -206,8 +231,6 @@ export function applyLaunchOverrides(args, overrides = {}) {
       if (next !== undefined && !next.startsWith("-")) i += 1;
       continue;
     }
-    // Switches we are about to set ourselves, so a second copy cannot appear.
-    if (token === "--kv-unified" || token === "-kvu" || token === "--no-kv-unified" || token === "-no-kvu") continue;
     out.push(token);
   }
   if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
@@ -217,8 +240,55 @@ export function applyLaunchOverrides(args, overrides = {}) {
   // Slots that each see the whole window rather than a reserved slice. Written
   // explicitly because llama.cpp only defaults it on when the slot count is
   // auto, so setting --parallel silently turns it off.
-  if (overrides.kvUnified) out.push("--kv-unified");
+  if (typeof overrides.kvUnified === "boolean") {
+    out.push(overrides.kvUnified ? OVERRIDE_SWITCHES.kvUnified.on : OVERRIDE_SWITCHES.kvUnified.off);
+  }
   return out;
+}
+
+// The settings the tuning drawer owns, and the only place they are named.
+//
+// The drawer has to show the command its own Apply would run, and for a while
+// it built that line from scratch out of a short list of flags it knew about.
+// A real llama-server is started with a dozen: the alias the model is served
+// under, -fa, --jinja, -mg/-sm pinning it to a card. None of those were in the
+// list, so the line under "start it with" was missing eight flags that Apply
+// itself preserves - harmless if pressed, silently different if pasted.
+//
+// So the page no longer composes anything. The server strips exactly these
+// keys from the real argv and sends the remainder; the page appends its three
+// choices to it. Adding a knob means adding it here, and the test next to
+// `drawerLaunchTail` fails until both halves know about it.
+const DRAWER_OWNED = { ctxSize: null, parallel: null, cacheTypeK: null, cacheTypeV: null, kvUnified: null };
+
+// Everything the engine was started with except what the drawer decides.
+export function launchBaseArgs(args) {
+  return applyLaunchOverrides(args, DRAWER_OWNED);
+}
+
+// The drawer's three choices as flags, in the order applyLaunchOverrides
+// writes them. This is the half the page duplicates, so it is kept to a shape
+// with no branching worth getting wrong, and pinned by a test.
+export function drawerLaunchTail({ contextTokens, sessions, kvType } = {}) {
+  const tail = [];
+  if (Number(contextTokens)) tail.push("-c", String(Number(contextTokens)));
+  if (Number(sessions)) tail.push("--parallel", String(Number(sessions)));
+  // f16 is llama.cpp's default, so it is expressed by writing nothing.
+  if (kvType && kvType !== "f16") tail.push("-ctk", String(kvType), "-ctv", String(kvType));
+  tail.push("--kv-unified");
+  return tail;
+}
+
+// What Apply runs. The one caller that actually spawns, and the definition the
+// preview above is measured against.
+export function drawerLaunchArgs(args, choices = {}) {
+  return applyLaunchOverrides(args, {
+    ctxSize: Number(choices.contextTokens) || undefined,
+    parallel: Number(choices.sessions) || undefined,
+    cacheTypeK: choices.kvType && choices.kvType !== "f16" ? choices.kvType : null,
+    cacheTypeV: choices.kvType && choices.kvType !== "f16" ? choices.kvType : null,
+    kvUnified: true,
+  });
 }
 
 // llama-server's command line is a complete adoption spec. Parsing it is what
@@ -236,6 +306,12 @@ const LLAMA_FLAGS = [
   ["mainGpu", ["-mg", "--main-gpu"]],
   ["splitMode", ["-sm", "--split-mode"]],
   ["slotSavePath", ["--slot-save-path"]],
+  // Read, not just written: without these the KV precision an engine is
+  // actually running was invisible, so the budget assumed f16 for a cache that
+  // was half that size, and the "KV quantization is broken here" warning could
+  // never fire because its condition was permanently undefined.
+  ["cacheTypeK", ["-ctk", "--cache-type-k"]],
+  ["cacheTypeV", ["-ctv", "--cache-type-v"]],
 ];
 
 // Splits on whitespace but keeps quoted runs together, so a model path with a

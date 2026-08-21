@@ -856,6 +856,11 @@ body { padding-left: 88px; }
 /* --- Trade-off sliders ------------------------------------------------- */
 .tune { margin: 16px 0 0; display: grid; gap: 10px; }
 .tune[hidden] { display: none; }
+/* `hidden` has to beat the grid display, or a row hidden in JS still shows. */
+.tune-row[hidden] { display: none; }
+/* Not a warning about a setting - a statement that there is nothing to set. */
+.tune-unfit { margin: 0; color: var(--amber); font-size: 11px; line-height: 1.4; }
+.tune-unfit[hidden] { display: none; }
 .tune-row { display: grid; grid-template-columns: 118px 1fr 64px; align-items: center; gap: 10px; }
 .tune-label { color: var(--muted); font-size: 11px; }
 .tune-value { color: var(--text); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }

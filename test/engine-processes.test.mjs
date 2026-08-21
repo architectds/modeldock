@@ -4,6 +4,9 @@ import {
   listEngineListeners,
   looksLikeEngineProcess,
   parseLlamaArgs,
+  launchBaseArgs,
+  drawerLaunchTail,
+  drawerLaunchArgs,
   parsePosixListeners,
   parsePosixProcesses,
   parseWindowsInspection,
@@ -13,7 +16,10 @@ import {
 } from "../src/engine-processes.mjs";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
 // Verbatim from this machine on 2026-08-19: a llama-server the fixed candidate
@@ -288,4 +294,110 @@ test("an existing unified switch is replaced, not doubled", () => {
   // And the opposite switch cannot survive alongside it.
   const flipped = applyLaunchOverrides(["--no-kv-unified", "-ngl", "99"], { kvUnified: true });
   assert.ok(!flipped.includes("--no-kv-unified"));
+});
+
+test("the KV precision an engine is running is readable, not just writable", () => {
+  // The two flags were in the override table but not in the parse table, so
+  // `launch.cacheTypeK` was permanently undefined: every ledger budgeted f16
+  // for a cache that might be half or a quarter of that, and the warning that
+  // fires on quantized KV could never see a reason to.
+  const spec = parseLlamaArgs("llama-server -m m.gguf -c 80000 -ctk q8_0 -ctv q8_0 -ngl 99");
+  assert.equal(spec.cacheTypeK, "q8_0");
+  assert.equal(spec.cacheTypeV, "q8_0");
+  assert.equal(parseLlamaArgs("llama-server -m m.gguf --cache-type-k q4_0").cacheTypeK, "q4_0");
+  assert.equal(parseLlamaArgs("llama-server -m m.gguf -c 8192").cacheTypeK, undefined, "absent stays absent");
+});
+
+test("choosing the default precision takes the flag off, rather than leaving it", () => {
+  // f16 is written by saying nothing, which is why this is not symmetric with
+  // setting q8_0: the caller has to be able to say "I own this and the answer
+  // is the default". null says that; undefined says "not mine".
+  const running = ["-m", "m.gguf", "-ctk", "q8_0", "-ctv", "q8_0", "-c", "80000"];
+  const back = applyLaunchOverrides(running, { ctxSize: 48000, cacheTypeK: null, cacheTypeV: null, kvUnified: true });
+  assert.ok(!back.includes("-ctk"), "the engine would have come back on q8_0 behind an f16 preview");
+  assert.ok(!back.includes("-ctv"));
+  assert.ok(back.includes("48000"));
+});
+
+test("a setting the caller does not own is left where the user put it", () => {
+  // Moving only the context slider must not rewrite unrelated choices. The
+  // switch used to be stripped unconditionally, so a deliberate
+  // --no-kv-unified vanished on a restart that never mentioned it.
+  const kept = applyLaunchOverrides(["-m", "m.gguf", "--no-kv-unified", "-ctk", "q8_0", "-c", "80000"], { ctxSize: 48000 });
+  assert.ok(kept.includes("--no-kv-unified"), "an unowned switch survives");
+  assert.ok(kept.includes("-ctk"), "an unowned flag survives with its value");
+  assert.deepEqual(kept.filter((t) => t === "-c"), ["-c"]);
+});
+
+test("the unified switch can be turned off as well as on", () => {
+  const off = applyLaunchOverrides(["--kv-unified", "-ngl", "99"], { kvUnified: false });
+  assert.ok(off.includes("--no-kv-unified"));
+  assert.ok(!off.includes("--kv-unified"));
+});
+
+// --- the drawer's preview is the line Apply runs ---------------------------
+
+// public/app.js is a browser script, so the page cannot import the module the
+// server builds launch arguments with. It carries its own copy of the tail
+// half instead, and this reads that copy out of the file and runs it. Without
+// this the two drift silently, which is exactly how the preview came to be
+// missing eight flags in the first place: nothing compared them.
+function pageFunction(name) {
+  const source = readFileSync(path.join(root, "public/app.js"), "utf8").replace(/\r\n/g, "\n");
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `${name} is gone from public/app.js`);
+  const end = source.indexOf("\n}\n", start);
+  assert.ok(end > start, `${name} in public/app.js is not a top-level function any more`);
+  return source.slice(start, end + 2);
+}
+
+const REAL_ARGV = tokenizeCommandLine(REAL_CMDLINE).slice(1);
+
+test("the page's copy of the launch tail is the server's copy", () => {
+  const { tuneTail } = new Function(`${pageFunction("tuneTail")}\nreturn { tuneTail };`)();
+  for (const contextTokens of [16000, 48000, 262144]) {
+    for (const sessions of [1, 4]) {
+      for (const kvType of ["f16", "q8_0", "q4_0"]) {
+        const state = { context: contextTokens, sessions, kv: kvType };
+        assert.deepEqual(
+          tuneTail(state),
+          drawerLaunchTail({ contextTokens, sessions, kvType }),
+          `public/app.js tuneTail drifted at ${contextTokens}/${sessions}/${kvType} - `
+          + "a setting was added to one half of the drawer and not the other",
+        );
+      }
+    }
+  }
+});
+
+test("base plus tail is exactly what Apply spawns", () => {
+  // The split only holds if stripping and rewriting are the same operation
+  // seen from two sides. If they ever are not, the preview is a different
+  // command from the one the button runs - which is the whole defect.
+  for (const choices of [
+    { contextTokens: 48000, sessions: 1, kvType: "f16" },
+    { contextTokens: 16000, sessions: 4, kvType: "q8_0" },
+    { contextTokens: 262144, sessions: 2, kvType: "q4_0" },
+  ]) {
+    assert.deepEqual(
+      [...launchBaseArgs(REAL_ARGV), ...drawerLaunchTail(choices)],
+      drawerLaunchArgs(REAL_ARGV, choices),
+      `preview and spawn disagree at ${JSON.stringify(choices)}`,
+    );
+  }
+});
+
+test("the preview keeps every flag the restart keeps", () => {
+  // The eight this engine carries that the old composed line dropped. -a is
+  // the one that bites hardest: it is the model id the engine serves under, so
+  // pasting a line without it brings the engine back under a different name
+  // and ModelDock's own connection no longer matches.
+  const base = launchBaseArgs(REAL_ARGV);
+  for (const flag of ["-a", "-fa", "--context-shift", "--reasoning-budget", "-ngl", "--jinja", "-t", "-mg", "-sm"]) {
+    assert.ok(base.includes(flag), `${flag} is not in the line the drawer shows`);
+  }
+  // And none of the five the drawer decides, because it appends those itself.
+  for (const flag of ["-c", "--ctx-size", "-np", "--parallel", "-ctk", "-ctv", "--kv-unified", "--no-kv-unified"]) {
+    assert.ok(!base.includes(flag), `${flag} would appear twice`);
+  }
 });

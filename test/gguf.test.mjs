@@ -232,3 +232,53 @@ test("what we recommend and how far the slider goes are different numbers", asyn
   const atCeiling = estimateVramBudget({ shape, weightsBytes: QWEN38_WEIGHTS, contextTokens: ceiling, cardBytes: usable });
   assert.ok(atCeiling.headroom >= MINIMUM_HEADROOM_BYTES);
 });
+
+test("a card that cannot reach the smallest rung says so, instead of naming the largest", () => {
+  // 12 GiB card, 8 GiB of weights: about 2,400 tokens actually fit, which is
+  // below the ladder's first rung. The answer is zero.
+  //
+  // It used to be 128,000. `affordable || trainedCap` read a zero budget as
+  // "no opinion" and fell through to the model's own trained length, so the
+  // tightest cards received the largest recommendation - and the advice line,
+  // which only appears when the suggestion is below the running context, stayed
+  // hidden exactly when the bar had gone red.
+  const shape = modelShape({
+    meta: {
+      "general.architecture": "llama",
+      "llama.block_count": 32,
+      "llama.attention.head_count": 32,
+      "llama.attention.head_count_kv": 32,
+      "llama.embedding_length": 4096,
+      "llama.context_length": 128000,
+    },
+  });
+  assert.equal(maxContextFor({ shape, weightsBytes: 8 * GiB, cardBytes: 12 * GiB }), 0);
+  // Cheaper KV is a real escape from that zero rather than a rounding of it,
+  // which is what lets the drawer keep the precision control on screen after
+  // the context slider has run out of rungs to offer.
+  assert.equal(maxContextFor({ shape, weightsBytes: 8 * GiB, cardBytes: 13 * GiB }), 0);
+  assert.equal(maxContextFor({ shape, weightsBytes: 8 * GiB, cardBytes: 13 * GiB, kvType: "q4_0" }), 16000);
+});
+
+test("a model trained below the ladder still has to fit before it is offered", () => {
+  const shape = modelShape({ meta: { ...QWEN38, "qwen35.context_length": 8192 } });
+  assert.equal(maxContextFor({ shape, weightsBytes: QWEN38_WEIGHTS, cardBytes: 80 * GiB }), 8192);
+  // Same model, a card with no room left: its trained length is not a licence.
+  assert.equal(maxContextFor({ shape, weightsBytes: QWEN38_WEIGHTS, cardBytes: 14 * GiB }), 0);
+});
+
+test("every model gets a ladder with at least one rung on it", async () => {
+  const { contextLadderFor, CONTEXT_LADDER } = await import("../src/gguf.mjs");
+  // Filtering the ladder by a trained length leaves nothing at all for a 4K or
+  // 8K model - and 4K and 8K GGUFs are ordinary. The empty array reached the
+  // slider as `rungs[index] === undefined`, which rendered as the string
+  // "undefined" and made the whole budget NaN.
+  assert.deepEqual(contextLadderFor(4096), [4096]);
+  assert.deepEqual(contextLadderFor(8192), [8192]);
+  assert.deepEqual(contextLadderFor(0), CONTEXT_LADDER, "an unknown length is not a limit");
+  assert.deepEqual(contextLadderFor(32000), [16000, 24000, 32000]);
+  assert.ok(contextLadderFor(262144).length >= 5, "a long-context model gets the whole ladder");
+  for (const trained of [0, 4096, 8192, 16000, 32000, 131072, 262144]) {
+    assert.ok(contextLadderFor(trained).length > 0, `${trained} left the slider with no rungs`);
+  }
+});

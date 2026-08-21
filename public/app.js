@@ -2344,23 +2344,50 @@ function tuneRungs(ledger, kvType) {
   const card = ledger.card?.totalBytes || 0;
   if (!perToken || !card) return [];
   const spare = card - ledger.minimumHeadroom - ledger.weights - ledger.overhead;
-  const rungs = (ledger.contextLadder || []).filter((rung) => rung * perToken <= spare);
-  // Always offer the smallest rung: a card too small for even that has a
-  // problem the slider cannot express, and an empty control explains nothing.
-  return rungs.length ? rungs : (ledger.contextLadder || []).slice(0, 1);
+  // Empty is an answer: this card cannot hold this model at this precision.
+  // The old fallback handed back the smallest rung anyway, which put a window
+  // the card demonstrably cannot allocate under the slider - and for a model
+  // trained below the ladder the ladder itself was empty, so `.slice(0, 1)`
+  // was empty too and `rungs[index]` reached the page as `undefined`.
+  return (ledger.contextLadder || []).filter((rung) => rung * perToken <= spare);
 }
 
-// llama.cpp's own argument order, so the line can be pasted as-is.
+// The three settings this drawer owns, as flags. The mirror of
+// drawerLaunchTail in src/engine-processes.mjs - a test runs both and fails if
+// they drift, which is the price of the page not being able to import it.
+function tuneTail(state) {
+  const tail = [];
+  if (Number(state.context)) tail.push("-c", String(Number(state.context)));
+  if (Number(state.sessions)) tail.push("--parallel", String(Number(state.sessions)));
+  // f16 is llama.cpp's default, so it is expressed by writing nothing.
+  if (state.kv && state.kv !== "f16") tail.push("-ctk", String(state.kv), "-ctv", String(state.kv));
+  tail.push("--kv-unified");
+  return tail;
+}
+
+// The line Apply would run, not a line assembled from the flags this page
+// happens to know the names of.
+//
+// It used to be the latter, and a real llama-server carries a dozen flags this
+// page has never heard of: -a, which decides the model id the engine serves
+// under and therefore whether ModelDock can still find it; -fa; --jinja;
+// -mg/-sm pinning it to one of two cards. All of them survive Apply and none
+// of them appeared here, so the label "start it with" invited the user to
+// paste a line that quietly started a different engine.
+//
+// The server now sends the engine's own argv with this drawer's settings taken
+// out, and the only thing left to do is put them back.
 function tuneCommand(state) {
+  const quote = (token) => (/\s/.test(token) ? `"${token}"` : token);
   const spec = state.launch || {};
-  const parts = [];
-  if (spec.model) parts.push(`-m ${/\s/.test(spec.model) ? `"${spec.model}"` : spec.model}`);
-  parts.push(`-c ${state.context}`);
-  if (state.kv !== "f16") parts.push(`-ctk ${state.kv} -ctv ${state.kv}`);
-  parts.push(`--parallel ${state.sessions}`, "--kv-unified");
-  if (spec.gpuLayers) parts.push(`-ngl ${spec.gpuLayers}`);
-  if (spec.port) parts.push(`--host 127.0.0.1 --port ${spec.port}`);
-  return `llama-server ${parts.join(" ")}`;
+  // No argv means the process could not be attributed, so there is nothing to
+  // preserve; what little was learned about it stands in.
+  const base = state.launchBase || [
+    ...(spec.model ? ["-m", spec.model] : []),
+    ...(spec.gpuLayers ? ["-ngl", String(spec.gpuLayers)] : []),
+    ...(spec.port ? ["--host", "127.0.0.1", "--port", String(spec.port)] : []),
+  ];
+  return [state.binary || "llama-server", ...base, ...tuneTail(state)].map(quote).join(" ");
 }
 
 // The settings a community sweep would pick for this card, applied to the
@@ -2379,11 +2406,25 @@ function optimizedConfig(ledger) {
     kv,
     // A cushion, not the ceiling: the recommendation is the largest rung that
     // still survives something else on the desktop wanting memory.
-    context: rungs.length ? rungs[rungs.length - 1] : (ledger.contextLadder || [])[0],
+    context: rungs.length ? rungs[rungs.length - 1] : tuneRungs(ledger, kv)[0] || 0,
     // One session gets the whole window. Concurrency is a choice the user makes
     // against a known cost, not something an optimizer should spend for them.
     sessions: 1,
   };
+}
+
+// Precision stops: unavailable on this vendor, or too expensive at the current
+// context. Locked reads "not available" and nothing more.
+function renderKvStops(stops, locked) {
+  for (const stop of stops) {
+    const kv = stop.dataset.kv;
+    const unusable = locked && kv !== "f16";
+    stop.disabled = unusable;
+    stop.classList.toggle("is-active", kv === tuneState?.kv);
+    stop.title = unusable ? t("tune.kvUnavailable") : "";
+  }
+  const note = $("tune-kv-note");
+  if (note) note.textContent = locked ? t("tune.kvLocked") : "";
 }
 
 function renderTune() {
@@ -2405,6 +2446,33 @@ function renderTune() {
   // Context moves between fixed rungs, so the slider indexes the ladder rather
   // than carrying token counts. Nothing has to round.
   const rungs = tuneRungs(ledger, tuneState.kv);
+  const locked = ledger.card?.vendor === "amd";
+  const stops = [...document.querySelectorAll("#tune-kv .tune-stop")];
+  // A precision this card could still afford a rung at. When the current one
+  // affords none, that control is the only way out of the dead end, so it
+  // stays on screen after the other two have gone.
+  const escape = !rungs.length && stops.some((stop) => {
+    if (locked && stop.dataset.kv !== "f16") return false;
+    return tuneRungs(ledger, stop.dataset.kv).length > 0;
+  });
+  const unfit = $("tune-unfit");
+  if (unfit) {
+    unfit.hidden = rungs.length > 0;
+    if (!rungs.length) unfit.textContent = escape ? t("tune.unfitKv") : t("tune.unfit");
+  }
+  for (const row of box.querySelectorAll(".tune-row")) {
+    row.hidden = !rungs.length && !(escape && row.contains($("tune-kv")));
+  }
+  if (!rungs.length) {
+    // The bar still draws, at what is actually running: it is the evidence for
+    // the sentence above it, and hiding it would leave a claim with no figure.
+    if (optimize) optimize.hidden = true;
+    renderVramBar(tuneBudget(ledger, ledger.contextTokens, tuneState.kv));
+    const dead = $("tune-command");
+    if (dead) dead.hidden = true;
+    renderKvStops(stops, locked);
+    return;
+  }
   let index = rungs.indexOf(tuneState.context);
   if (index < 0) {
     // The running configuration may sit off the ladder, or above what this
@@ -2437,24 +2505,15 @@ function renderTune() {
       : String(tuneState.sessions);
   }
 
-  // Precision stops: unavailable on this vendor, or too expensive at the
-  // current context. Locked reads "not available" and nothing more.
-  const locked = ledger.card?.vendor === "amd";
-  for (const stop of document.querySelectorAll("#tune-kv .tune-stop")) {
-    const kv = stop.dataset.kv;
-    const unusable = locked && kv !== "f16";
-    stop.disabled = unusable;
-    stop.classList.toggle("is-active", kv === tuneState.kv);
-    stop.title = unusable ? t("tune.kvUnavailable") : "";
-  }
-  const note = $("tune-kv-note");
-  if (note) note.textContent = locked ? t("tune.kvLocked") : "";
+  renderKvStops(stops, locked);
 
   renderVramBar(tuneBudget(ledger, tuneState.context, tuneState.kv));
 
   const command = $("tune-command");
   const text = $("tune-command-text");
-  const changed = tuneState.context !== ledger.contextTokens || tuneState.kv !== "f16";
+  const changed = tuneState.context !== ledger.contextTokens
+    || tuneState.kv !== (ledger.kvType || "f16")
+    || tuneState.sessions !== Math.max(1, Number(tuneState.launch?.parallel) || 1);
   if (command) command.hidden = !changed;
   if (text && changed) text.textContent = tuneCommand(tuneState);
 }
@@ -2472,9 +2531,14 @@ function startTune(found) {
   tuneState = {
     ledger,
     launch: found.launch || {},
+    launchBase: found.launchBase || null,
+    binary: found.binary || "",
     context: ledger.contextTokens,
     sessions: Math.max(1, Number(found.launch?.parallel) || 1),
-    kv: "f16",
+    // The precision the engine is actually using. Hard-coding f16 here meant
+    // opening the drawer on a q8_0 engine, nudging only the context slider and
+    // pressing Apply silently downgraded the cache the user had chosen.
+    kv: ledger.kvType || "f16",
   };
   renderTune();
 }
