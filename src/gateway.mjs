@@ -2979,7 +2979,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
-      body: JSON.stringify({ ...summarizeBody, model: upstreamModel }),
+      body: JSON.stringify({ ...upstreamSummarizeBody, model: upstreamModel }),
       signal,
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
