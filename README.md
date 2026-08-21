@@ -116,104 +116,23 @@ main model with a MiMo vision model, for example. Switching the main provider
 preserves your current vision pick if it remains reachable. Providers with no
 vision-capable model show `None`.
 
-**Upstreams** - seven providers are supported:
-- **OpenCode Go** — `OPENCODE_GO_TOKEN`; large catalog including free models.
-- **DeepSeek official** — `DEEPSEEK_API_KEY`; has built-in web search.
-- **xAI (Grok)** — sign in with a SuperGrok or X Premium account from Settings.
-  Usage counts against that subscription rather than an API balance.
-- **Custom** — any Responses-compatible endpoint, configured in Settings.
-- **Ollama**, **llama.cpp**, **vLLM** — engines already running on this machine.
-  Found by scanning rather than configured; see *Local models* below.
+**Add models** - open Settings and add the service or local engine you use.
+ModelDock supports OpenCode Go, DeepSeek, Grok, custom Responses endpoints, and
+local Ollama, llama.cpp, or vLLM. Pick the model in Codex; the dashboard shows
+what is connected.
 
-Every model id carries a provider suffix — for example
-`deepseek-v4-flash@deepseek-official` — that selects the upstream and is
-stripped before the request reaches the API. Native GPT models stay in the
-Codex model picker; ModelDock never accesses, stores, copies, or replays
-OpenAI credentials.
+**Local models** - press **Rescan** to find an engine already running on your
+machine. The drawer shows whether the model fits, recommends practical settings,
+and can restart llama.cpp with the settings you choose.
 
-The setup guide accepts any configured provider or connected local engine for
-ON mode. On a DeepSeek-only install it selects
-`deepseek-v4-flash@deepseek-official`; on a Grok-only install it selects the
-available Grok model; and on a local-only install it selects the connected
-engine. Each route persists across restarts, with `None` for vision when that
-provider has no vision-capable model.
+**Tools** - web search, image understanding, image generation, memory, speech,
+and video are available to the model when configured. For voice, turn TTS or
+STT on in the dashboard. Choose a dedicated sub-agent model there when you want
+one.
 
-**Local models** - an engine already running on this machine is found rather
-than configured. Press **Rescan** on the dashboard's local engines panel: the
-scan reads the machine's listening sockets and the process behind each one, so
-an engine is found on whatever port it was started with, not only the default.
-On a reachable engine the label at the right of its row turns blue; pressing
-the row opens that engine's drawer.
-
-Ollama connects and there is nothing else to decide. A llama-server gets the
-rest of the drawer, because its command line is what decides whether the model
-fits on the card at all:
-
-- **The memory bar** stacks weights, KV cache, a fixed overhead, and what is
-  left over. The numbers come from the model file's own header, read once during
-  the scan and cached — opening the drawer reads nothing, and the figures still
-  answer after the engine stops, which is when you want them. A hybrid model
-  keeps a growing cache on only some of its layers, so counting every layer
-  overstates KV several times over; the reader counts the layers that actually
-  pay. Card capacity comes from the driver rather than from `AdapterRAM`, which
-  is 32-bit and reports every card above 4 GB as exactly 4 GB.
-- **Total context** moves between fixed rungs. The recommendation keeps 2 GiB
-  spare; the slider reaches further, down to 1.2 GiB, and the bar reports the
-  band it has entered. Where a card cannot hold the model at all, the drawer
-  says so instead of offering a window that cannot be allocated.
-- **Concurrent sessions** are slots that each see the whole window rather than a
-  reserved slice. The cap is the working room a session needs, not memory: below
-  about 15K a session has nothing left after the per-turn overhead.
-- **KV precision** is 4, 8 or 16. Stops that this card cannot be trusted with are
-  greyed out, and refused when a restart is applied — a broken cache is wrong
-  answers rather than slow ones.
-- **Optimize** sets the three controls to what community sweeps recommend for
-  this card. It is a recipe, not a benchmark run on your machine.
-- **Restart with these** stops the engine and starts it again with what you
-  chose, editing the command line it was already running instead of composing a
-  fresh one, so a flag you needed and we did not think of is not dropped. The
-  line shown above the button is exactly what will run. If the old process will
-  not release its port, nothing is started.
-
-Warnings above the drawer name settings that are on and doing nothing —
-`--context-shift` on a model whose state cannot be shifted, a quantized KV cache
-on a card that does not do it reliably, prediction blocks the backend ignores.
-Nothing is broken when one appears; the configuration is saying something that
-is not true.
-
-**Sub-agent** - choose a dedicated model for the sub-agent role from the
-dashboard. The picker includes models from all enabled providers plus native
-GPT models from your signed-in Codex account.
-
-**Speech** - open the TTS / STT tile on the dashboard and toggle TTS or STT on.
-The `speak` and `hear` tools become available to the model.
-
-**MCP tools** - web search, vision, image generation, speech, and memory reach
-Codex as tools that survive gateway restarts. The connection Codex opens to
-them goes stale on a restart and the client never re-establishes it, so a tool
-that starts failing with a connection error (`fetch failed`, `ECONNREFUSED`,
-`unsupported call`) will not heal on its own. Call the tools directly from the
-shell — `search`, `vision`, `image`, `speak`, `hear`, `recall`, `store` — for
-example:
-`node scripts/mcp-call.mjs search "..."` or
-`node scripts/mcp-call.mjs vision <path> <question>`.
-On Linux/macOS installs where `node` is not on PATH, use the bundled-runtime
-wrapper: `sh scripts/mcp-call.sh <command> <args>`. The injected base
-instructions already tell the model to switch to the shell fallback when an MCP
-call fails, so you normally do not have to repeat it.
-
-**Language** - the dashboard speaks English, 简体中文, and 日本語. Change it
-anytime under Settings -> Interface language.
-
-**Autostart & updates** - Model Dock starts hidden at every login by default;
-flip the Autostart toggle in Settings to change that. A green Update button
-appears when a new release is ready - one click moves directly to the latest
-release, migrates the managed Node runtime when needed, restarts, and reloads.
-
-If the version in the header does not change after an update, the download
-succeeded and only the restart did not: the new files are already installed and
-just are not running yet. Run `scripts/restart.ps1` (Windows) or
-`scripts/restart.sh` (macOS/Linux) once from your install directory.
+**Updates** - ModelDock starts at login by default and shows an **Update**
+button when a new release is ready. Change autostart or interface language in
+Settings.
 
 ---
 
