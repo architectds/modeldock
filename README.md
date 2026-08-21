@@ -1,13 +1,22 @@
 # Model Dock For Codex
 
-Keep everything in Codex - and add the models it does not ship with. Give
-DeepSeek, Qwen, or a model running on your own machine eyes, ears, a voice, a
-web search, and a memory, without leaving Codex.
+> **ModelDock makes the AI tools you already own work together.**
+
+Keep working in Codex. Use DeepSeek, Qwen, and the models you choose alongside
+web search, image understanding, voice, memory, and video - without manually
+moving prompts, files, or results between apps.
+
+**Work in one place. Get things done everywhere.**
 
 A thin local Responses bridge for OpenCode Go, DeepSeek official, and local
 engines - Ollama, llama.cpp, and vLLM are detected on loopback, and any other
 OpenAI-compatible endpoint can be added by URL - with native GPT passthrough
 and live token, latency, and trace observability.
+
+ModelDock currently connects models and capabilities inside a Codex task. The
+next step is Connectors: user-authorized local tools that run through their own
+official CLIs, work in an isolated job, and return a result and reviewable diff
+to the task. Connectors are planned; they are not part of the current release.
 
 <p align="center">
   English ·
