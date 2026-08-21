@@ -201,13 +201,6 @@
         </div>
         <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
       </label>
-      <label class="field">
-        <div class="field-head">
-          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
-          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-        </div>
-        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-      </label>
       <div class="field" id="xai-section">
         <div class="field-head">
           <span data-i18n="xai.title">xAI (Grok) subscription</span>
@@ -226,8 +219,8 @@
         <p id="xai-error" class="custom-error" aria-live="polite" hidden></p>
       </div>
         <div class="settings-actions">
-          <span id="settings-status" aria-live="polite"></span>
-          <button id="settings-save" type="button" data-i18n="settings.save">Save</button>
+          <span id="settings-status" class="save-status" aria-live="polite"></span>
+          <button id="settings-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
         </div>
         </section>
       </div>
@@ -236,10 +229,21 @@
         <section class="panel page-panel">
           <p class="eyebrow" data-i18n="nav.api">Custom endpoint</p>
           <h2 data-i18n="page.apiTitle">Custom endpoint</h2>
-      <div class="field" id="endpoint-list-field">
-        <div class="field-head"><span data-i18n="endpoints.title">Configured endpoints</span></div>
-        <ul id="endpoint-list" class="endpoint-list"></ul>
-        <p id="endpoint-list-note" class="custom-hint" aria-live="polite"></p>
+      <div class="field-head" id="endpoint-list-head">
+        <span data-i18n="endpoints.title">Configured endpoints</span>
+        <span id="endpoint-list-note" class="custom-hint" aria-live="polite"></span>
+      </div>
+      <label class="field" id="deepseek-field">
+        <div class="field-head">
+          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+        </div>
+        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+      </label>
+      <div id="endpoint-list" class="endpoint-list"></div>
+      <div class="settings-actions">
+        <span id="endpoint-save-status" class="save-status" aria-live="polite"></span>
+        <button id="endpoint-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
       </div>
       <details id="custom-add" class="custom-add">
         <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
@@ -299,43 +303,126 @@
       <div class="field" id="ollama-section">
         <div class="field-head">
           <span data-i18n="ollama.title">Ollama Configuration</span>
-          <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" data-i18n="ollama.download">No Ollama, download here</a>
+          <span class="engine-head-tail">
+            <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" data-i18n="ollama.download">No Ollama, download here</a>
+            <button id="ollama-toggle" type="button" class="section-toggle" aria-expanded="true" aria-controls="ollama-body" data-i18n-title="local.collapse">&rsaquo;</button>
+          </span>
         </div>
+        <div class="engine-body" id="ollama-body">
         <div class="custom-row">
-          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
+          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
           <button id="ollama-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="ollama-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
+        </div>
       </div>
       <div class="field" id="llamacpp-section">
         <div class="field-head">
           <span data-i18n="llamacpp.title">llama.cpp Configuration</span>
-          <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer" data-i18n="llamacpp.download">No llama.cpp, get it here</a>
+          <span class="engine-head-tail">
+            <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener noreferrer" data-i18n="llamacpp.download">No llama.cpp, get it here</a>
+            <button id="llamacpp-toggle" type="button" class="section-toggle" aria-expanded="true" aria-controls="llamacpp-body" data-i18n-title="local.collapse">&rsaquo;</button>
+          </span>
         </div>
+        <div class="engine-body" id="llamacpp-body">
         <div class="custom-row">
-          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
+          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
           <button id="llamacpp-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="llamacpp-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="llamacpp-error" class="custom-error" aria-live="polite" hidden></p>
+        </div>
       </div>
       <div class="field" id="vllm-section">
         <div class="field-head">
           <span data-i18n="vllm.title">vLLM Configuration</span>
-          <a href="https://docs.vllm.ai/en/latest/getting_started/installation.html" target="_blank" rel="noopener noreferrer" data-i18n="vllm.download">No vLLM, get it here</a>
+          <span class="engine-head-tail">
+            <a href="https://docs.vllm.ai/en/latest/getting_started/installation.html" target="_blank" rel="noopener noreferrer" data-i18n="vllm.download">No vLLM, get it here</a>
+            <button id="vllm-toggle" type="button" class="section-toggle" aria-expanded="true" aria-controls="vllm-body" data-i18n-title="local.collapse">&rsaquo;</button>
+          </span>
         </div>
+        <div class="engine-body" id="vllm-body">
         <div class="custom-row">
-          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configure port</button>
+          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
           <button id="vllm-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="vllm-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="vllm-error" class="custom-error" aria-live="polite" hidden></p>
+        </div>
       </div>
         </section>
+        <aside id="local-drawer" class="local-drawer" hidden aria-labelledby="local-config-title">
+      <div class="settings-card local-drawer-card">
+        <div class="settings-head">
+          <div><p class="eyebrow" data-i18n="local.portEyebrow">LOCAL ENGINE</p><h2 id="local-config-title">Engine</h2></div>
+          <button id="local-config-close" type="button" class="settings-close" aria-label="Close" title="Close">&times;</button>
+        </div>
+        <label class="field">
+          <div class="field-head"><span data-i18n="local.port">Port on this machine</span></div>
+          <input id="local-config-port" class="lang-select" type="number" min="1" max="65535" inputmode="numeric" placeholder="11435" />
+        </label>
+        <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
+        <ul id="local-warnings" class="engine-warnings" hidden></ul>
+        <div id="local-optimize" class="optimize" hidden>
+          <button id="tune-optimize" type="button" class="custom-action primary" data-i18n="tune.optimize">Optimize</button>
+          <span class="optimize-note" data-i18n="tune.optimizeNote">based on community recommendations</span>
+        </div>
+        <p id="tune-optimize-result" class="optimize-result" aria-live="polite" hidden></p>
+        <div id="local-tune" class="tune" hidden>
+          <p id="tune-unfit" class="tune-unfit" hidden></p>
+          <label class="tune-row">
+            <span class="tune-label" data-i18n="tune.context">Total context</span>
+            <input id="tune-context" type="range" min="0" max="4" step="1" />
+            <output id="tune-context-value" class="tune-value"></output>
+          </label>
+          <label class="tune-row">
+            <span class="tune-label" data-i18n="tune.sessions">Concurrent sessions</span>
+            <input id="tune-sessions" type="range" min="1" max="4" step="1" />
+            <output id="tune-sessions-value" class="tune-value"></output>
+          </label>
+          <div class="tune-row">
+            <span class="tune-label" data-i18n="tune.kv">KV precision</span>
+            <div id="tune-kv" class="tune-stops" role="radiogroup" aria-label="KV precision">
+              <button type="button" class="tune-stop" data-kv="q4_0">4</button>
+              <button type="button" class="tune-stop" data-kv="q8_0">8</button>
+              <button type="button" class="tune-stop" data-kv="f16">16</button>
+            </div>
+            <output id="tune-kv-note" class="tune-value"></output>
+          </div>
+        </div>
+        <div id="local-vram" class="vram" hidden>
+          <div class="vram-bar" role="img" aria-labelledby="local-vram-caption">
+            <span class="vram-seg is-weights" id="vram-weights"></span>
+            <span class="vram-seg is-kv" id="vram-kv"></span>
+            <span class="vram-seg is-overhead" id="vram-overhead"></span>
+            <span class="vram-seg is-headroom" id="vram-headroom"></span>
+          </div>
+          <p id="local-vram-caption" class="vram-caption"></p>
+          <p id="local-vram-advice" class="vram-advice" hidden></p>
+          <div id="tune-command" class="tune-command" hidden>
+            <p class="tune-command-label" data-i18n="tune.commandLabel">Start it with</p>
+            <code id="tune-command-text"></code>
+            <div class="custom-row tune-apply-row">
+              <button id="tune-apply" type="button" class="custom-action primary" data-i18n="tune.apply">Restart with these</button>
+              <p id="tune-apply-status" class="custom-status" aria-live="polite" hidden></p>
+            </div>
+          </div>
+        </div>
+        <label class="chip-toggle" id="local-config-vision-row">
+          <input id="local-config-vision" type="checkbox" />
+          <span data-i18n="local.vision">Takes images</span>
+        </label>
+        <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
+        <div class="custom-row local-config-actions">
+          <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
+          <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
+        </div>
+      </div>
+        </aside>
       </div>
 
       <div class="view" data-view="models">
@@ -359,28 +446,6 @@
          an engine that was not found opens the same dialog empty so there is
          always a way in. No API key field: a local engine is reachable only on
          loopback, which is the whole reason it needs no credential. -->
-    <dialog id="local-config-dialog" class="settings-dialog">
-      <div class="settings-card local-config-card">
-        <div class="settings-head">
-          <div><p class="eyebrow" data-i18n="local.portEyebrow">LOCAL ENGINE</p><h2 id="local-config-title">Engine</h2></div>
-          <button id="local-config-close" type="button" class="settings-close" aria-label="Close" title="Close">&times;</button>
-        </div>
-        <label class="field">
-          <div class="field-head"><span data-i18n="local.port">Port on this machine</span></div>
-          <input id="local-config-port" class="lang-select" type="number" min="1" max="65535" inputmode="numeric" placeholder="11435" />
-        </label>
-        <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
-        <label class="chip-toggle" id="local-config-vision-row">
-          <input id="local-config-vision" type="checkbox" />
-          <span data-i18n="local.vision">Takes images</span>
-        </label>
-        <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
-        <div class="custom-row local-config-actions">
-          <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
-          <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
-        </div>
-      </div>
-    </dialog>
     <dialog id="settings-dialog" class="settings-dialog">
       <div class="settings-card">
         <div class="settings-head">

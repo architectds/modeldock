@@ -430,8 +430,13 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   width: auto;
 }
 
+/* Keyed to the role, not to one element's id. The same row exists on the
+   subscriptions page and the API page; styling it as #settings-save meant the
+   second one rendered as an unstyled native button, which is what it did.
+   A button here that is not the primary action carries its own class and is
+   unaffected. */
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: -2px; }
-.settings-actions #settings-save {
+.settings-actions .save-action {
   appearance: none;
   border: 1px solid var(--blue, #4f8cff);
   min-width: 82px;
@@ -450,10 +455,10 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   order: 3;
   margin-left: auto;
 }
-.settings-actions #settings-save:hover:not(:disabled) { border-color: #78cbff; background: linear-gradient(180deg, #78cbff, #5cbcff); box-shadow: 0 10px 22px rgba(80,183,255,.24); }
-.settings-actions #settings-save:active:not(:disabled) { transform: translateY(1px); }
-.settings-actions #settings-save:disabled { opacity: .5; cursor: wait; box-shadow: none; }
-.settings-actions #settings-status { order: 2; min-width: 0; flex: 1; font-size: 11px; line-height: 1.35; color: var(--muted, #8b90a0); }
+.settings-actions .save-action:hover:not(:disabled) { border-color: #78cbff; background: linear-gradient(180deg, #78cbff, #5cbcff); box-shadow: 0 10px 22px rgba(80,183,255,.24); }
+.settings-actions .save-action:active:not(:disabled) { transform: translateY(1px); }
+.settings-actions .save-action:disabled { opacity: .5; cursor: wait; box-shadow: none; }
+.settings-actions .save-status { order: 2; min-width: 0; flex: 1; font-size: 11px; line-height: 1.35; color: var(--muted, #8b90a0); }
 
 dialog.settings-dialog .settings-wizard-link {
   appearance: none;
@@ -674,8 +679,16 @@ body { padding-left: 88px; }
 /* Settings that used to sit in the dialog now render as full pages, so they
    need the padding the dialog card gave them. */
 .page-panel { padding: 26px 26px 24px; max-width: 760px; }
+/* The eyebrow and the heading read as one unit, and this outweighs the block
+   rhythm below on specificity, so the pair keeps its own tighter spacing. */
 .page-panel h2 { margin: 6px 0 18px; }
-.page-panel .field + .field, .page-panel .field + .custom-add, .page-panel .custom-add + .field { margin-top: 16px; }
+/* A block in a page panel is spaced from whatever precedes it. This used to
+   enumerate the class pairs it knew about - .field + .field and two more - so
+   a block of any other kind fell out of the rhythm entirely. The API page
+   added two (the endpoints heading and the endpoint list) and both collapsed
+   against their neighbours; nothing was wrong with them, they simply were not
+   on the list. There is no list now. */
+.page-panel > * + * { margin-top: 16px; }
 .page-panel .settings-actions { margin-top: 20px; }
 
 /* Discovered local engines. */
@@ -747,11 +760,18 @@ body { padding-left: 88px; }
 
 /* Configured endpoints: a list, because there can be more than one. */
 .endpoint-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.endpoint-row { position: relative; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
-.endpoint-head { display: flex; align-items: baseline; gap: 10px; }
 .endpoint-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .endpoint-facts { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-.endpoint-remove { position: absolute; top: 10px; right: 12px; }
+/* The address and the delete control sit at the right end of the heading, so
+   the key field below spans the same width as the preset one above it - the
+   two are the same kind of thing, one of which simply cannot be removed.
+   Beside the input the button both narrowed this field and, being absolute
+   against a wrapper the renderer had stopped emitting, resolved against the
+   page and rendered in the corner of the window. */
+.endpoint-head-tail { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.endpoint-remove { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font: 15px/1 inherit; cursor: pointer; flex: none; }
+.endpoint-remove:hover { color: var(--text); border-color: #365064; }
+.endpoint-remove:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 /* The sign-in row sits where a token input sits, so the three providers read
    as one list: a name above, one control below. */
@@ -797,3 +817,113 @@ body { padding-left: 88px; }
 .roster-table th.is-sorted::after { content: ""; display: inline-block; width: 0; height: 0; margin-left: 6px; vertical-align: middle; border-left: 3.5px solid transparent; border-right: 3.5px solid transparent; }
 .roster-table th.is-sorted[data-direction="desc"]::after { border-top: 4px solid var(--blue); }
 .roster-table th.is-sorted[data-direction="asc"]::after { border-bottom: 4px solid var(--blue); }
+
+/* Each engine section can be folded away. Three of them open at once is a
+   long page for someone who came to look at one. */
+.engine-head-tail { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.section-toggle { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font: 15px/1 inherit; cursor: pointer; flex: none; transition: transform .15s ease, color .15s ease, border-color .15s ease; }
+.section-toggle:hover { color: var(--text); border-color: #365064; }
+.section-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Points down while the section is open and right while it is closed, so the
+   glyph says which way pressing it will go. */
+.section-toggle[aria-expanded="true"] { transform: rotate(90deg); }
+.engine-body[hidden] { display: none; }
+
+/* --- Local Hosts: engine row + right-hand detail drawer --- */
+/* The drawer is a flex sibling of the 760px panel rather than a fixed overlay,
+   so its right edge lands on the shell edge - the same edge the top-right
+   Settings button sits on - without computing any offsets. */
+.view[data-view="local"].is-active { display: flex; align-items: flex-start; gap: 20px; }
+.view[data-view="local"] > .page-panel { flex: 0 0 760px; }
+.local-drawer { flex: 1 1 0; min-width: 0; position: sticky; top: 48px; }
+.local-drawer[hidden] { display: none; }
+.local-drawer-card { max-width: none; }
+
+/* The three engine sections are labelled actions inside a field, not rows in a
+   list - the discovered engines are the list, and they carry .local-engine.
+   They briefly wore a row component built for a click-the-whole-row
+   interaction: the row took cursor: pointer without ever getting a handler,
+   the chevron only appeared on hover, and the button gave up .custom-action,
+   so at rest there was no button, no affordance, and a pointer cursor over
+   something that did nothing. The component is gone; these are buttons. */
+
+/* Under the existing breakpoint there is no room beside the panel, so the
+   drawer covers it instead of squeezing both. */
+@media (max-width: 1200px) {
+  .view[data-view="local"].is-active { display: block; }
+  .view[data-view="local"] { position: relative; }
+  .view[data-view="local"] > .page-panel { flex: none; }
+  .local-drawer { position: absolute; inset: 0 0 auto 0; z-index: 5; }
+}
+
+/* Blue = a probe answered. Carried by the row now that the trigger is the row
+   rather than a button, so the state reads without a second control. */
+.custom-action.is-open { border-color: var(--blue); background: rgba(80,183,255,.12); }
+
+/* --- VRAM ledger: one bar, four segments, widths proportional to the card --- */
+.vram { margin: 14px 0 0; }
+.vram[hidden] { display: none; }
+.vram-bar { display: flex; width: 100%; height: 22px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
+.vram-seg { display: block; height: 100%; transition: width .18s ease; }
+.vram-seg.is-weights { background: var(--blue); }
+.vram-seg.is-kv { background: var(--violet); }
+.vram-seg.is-overhead { background: var(--muted); opacity: .55; }
+/* Headroom is the point of the whole picture, so it reads as empty space until
+   there is too little of it, and then it is the thing that turns red. */
+.vram-seg.is-headroom { background: repeating-linear-gradient(45deg, rgba(137,160,175,.14) 0 6px, transparent 6px 12px); }
+.vram-swatch.is-headroom { background: none; border: 1px solid rgba(137,160,175,.5); }
+.vram.is-tight .vram-swatch.is-headroom { background: rgba(255,107,107,.28); border-color: rgba(255,107,107,.5); }
+.vram.is-tight .vram-seg.is-headroom { background: rgba(255,107,107,.28); }
+.vram-caption { margin: 7px 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+/* A legend rather than a list: each term wears the colour of the band it
+   names, so the bar can be read without counting segments left to right. */
+.vram-term { display: inline-flex; align-items: center; gap: 6px; }
+.vram-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.vram-advice { margin: 5px 0 0; color: var(--amber); font-size: 11px; }
+.vram-advice[hidden] { display: none; }
+/* The same numbers, one line, on the discovery row - so a card in trouble can
+   be spotted without opening anything. */
+
+/* --- Trade-off sliders ------------------------------------------------- */
+.tune { margin: 16px 0 0; display: grid; gap: 10px; }
+.tune[hidden] { display: none; }
+/* `hidden` has to beat the grid display, or a row hidden in JS still shows. */
+.tune-row[hidden] { display: none; }
+/* Not a warning about a setting - a statement that there is nothing to set. */
+.tune-unfit { margin: 0; color: var(--amber); font-size: 11px; line-height: 1.4; }
+.tune-unfit[hidden] { display: none; }
+.tune-row { display: grid; grid-template-columns: 118px 1fr 64px; align-items: center; gap: 10px; }
+.tune-label { color: var(--muted); font-size: 11px; }
+.tune-value { color: var(--text); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
+.tune-row input[type="range"] { width: 100%; accent-color: var(--blue); }
+.tune-row input[type="range"]:disabled { opacity: .45; }
+/* Three stops rather than a continuous range: the only meaningful values are
+   the three cache types, and a slider that lands between them would be lying. */
+.tune-stops { display: flex; gap: 4px; }
+.tune-stop { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 5px 0; background: var(--panel-2); color: var(--muted); font-family: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+.tune-stop:hover:not(:disabled) { color: var(--text); border-color: #365064; }
+.tune-stop.is-active { border-color: var(--blue); color: var(--blue); background: rgba(80,183,255,.12); }
+.tune-stop:disabled { opacity: .38; cursor: not-allowed; }
+.tune-stop:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Applying a chosen configuration needs ownership of the engine process, which
+   this does not have yet, so the honest deliverable is the command to run. */
+.tune-command { margin: 10px 0 0; }
+.tune-command[hidden] { display: none; }
+.tune-command-label { margin: 0 0 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.tune-command code { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
+
+/* The button claims nothing on its own; the note says where the settings came
+   from, because they were measured on someone else's hardware, not this one. */
+.optimize { display: flex; align-items: center; gap: 10px; margin: 16px 0 0; }
+.optimize[hidden] { display: none; }
+.optimize-note { color: var(--muted); font-size: 10px; line-height: 1.3; }
+/* What pressing it did, in the flags it chose. */
+.optimize-result { margin: 8px 0 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.optimize-result[hidden] { display: none; }
+.tune-apply-row { margin-top: 10px; }
+
+/* Settings that are on and doing nothing. Amber rather than red: nothing is
+   broken right now, but the configuration says something untrue. */
+.engine-warnings { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.engine-warnings[hidden] { display: none; }
+.engine-warnings li { padding: 7px 10px; border: 1px solid rgba(247,185,85,.32); border-radius: 8px; background: rgba(247,185,85,.07); color: var(--amber); font-size: 11px; line-height: 1.4; }
