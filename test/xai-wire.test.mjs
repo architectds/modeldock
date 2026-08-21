@@ -33,9 +33,38 @@ function codexTools() {
       name: "computer",
       tools: [{ type: "function", name: "click", description: "click a point", parameters: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"] } }],
     },
-    { type: "web_search" },
+    // Codex currently attaches its OpenAI-only hosted-web option here. xAI
+    // supports the tool itself but rejects this descriptor field.
+    { type: "web_search", external_web_access: true },
     { type: "tool_search" },
   ];
+}
+
+// This envelope mirrors the failed Codex Desktop request captured from the live
+// gateway: streamed, four message items, the normal Responses controls, and a
+// hosted web_search descriptor whose OpenAI-only option xAI rejects.
+function capturedCodexStreamingRequest() {
+  return {
+    model: "grok-4.6@xai",
+    instructions: "You are a coding agent. Use tools when useful and reply concisely.",
+    input: [
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "Follow the workspace rules." }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect the current project." }] },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "I will inspect it." }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "What model are you?" }] },
+    ],
+    tools: codexTools(),
+    tool_choice: "auto",
+    parallel_tool_calls: true,
+    reasoning: { effort: "high", summary: "auto" },
+    store: false,
+    stream: true,
+    stream_options: { include_usage: true },
+    include: ["reasoning.encrypted_content"],
+    prompt_cache_key: "codex-streaming-fixture",
+    text: { format: { type: "text" } },
+    external_web_access: true,
+  };
 }
 
 const answer = (text) => ({
@@ -65,7 +94,7 @@ function fakeXai(queue) {
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     seen.push(body);
-    if (body.external_web_access !== undefined) {
+    if (body.external_web_access !== undefined || (body.tools || []).some((tool) => tool?.external_web_access !== undefined)) {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "Argument not supported: external_web_access" }));
       return;
@@ -76,8 +105,14 @@ function fakeXai(queue) {
       res.end(JSON.stringify({ error: `Failed to deserialize the JSON body into the target type: tools[].type: unknown variant \`${bad.type}\`` }));
       return;
     }
+    const response = queue.shift() || answer("ok");
+    if (body.stream) {
+      res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+      res.end(`data: ${JSON.stringify({ type: "response.completed", response })}\n\ndata: [DONE]\n\n`);
+      return;
+    }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify(queue.shift() || answer("ok")));
+    res.end(JSON.stringify(response));
   });
   return { server, seen };
 }
@@ -172,6 +207,7 @@ test("a Grok tool round trip bridges Codex namespace and freeform patch tools", 
     // Grok runs this one itself; stripping it made the gate pay Exa to redo a
     // search the subscription already covers.
     assert.ok(types.includes("web_search"), `turn ${index + 1}: hosted search is left for Grok`);
+    assert.equal((body.tools || []).some((tool) => tool?.external_web_access !== undefined), false, `turn ${index + 1}: xAI receives no OpenAI-only hosted-web option`);
     // tool_search is answered by this gate, not by xAI.
     assert.equal(types.includes("tool_search"), false, `turn ${index + 1}: tool_search is ours`);
     assert.equal(body.model, "grok-4.5", "the upstream sees the bare id, not the routing suffix");
@@ -228,6 +264,27 @@ test("a Grok request drops Codex's OpenAI-only external web access flag", async 
   assert.equal(response.status, 200, "xAI rejects the unfiltered flag with HTTP 400");
   assert.equal(seen.length, 1);
   assert.equal(seen[0].external_web_access, undefined, "the xAI wire contains no OpenAI-only transport flag");
+});
+
+test("a captured Codex streaming envelope keeps xAI web search but removes its OpenAI-only option", async (t) => {
+  const { base, seen } = await startGrokApp(t, [answer("I am Grok.")]);
+  const response = await fetch(`${base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(capturedCodexStreamingRequest()),
+  });
+
+  assert.equal(response.status, 200, "the exact streamed Codex-shaped request reaches xAI");
+  assert.match(await response.text(), /response\.completed/, "the streamed response reaches Codex");
+  assert.equal(seen.length, 1);
+  const outbound = seen[0];
+  assert.equal(outbound.model, "grok-4.6");
+  assert.equal(outbound.stream, true);
+  assert.equal(outbound.input.length, 4, "the complete message envelope survives");
+  assert.deepEqual(outbound.include, ["reasoning.encrypted_content"]);
+  assert.equal(outbound.external_web_access, undefined, "the top-level OpenAI-only option is removed");
+  assert.equal((outbound.tools || []).some((tool) => tool?.external_web_access !== undefined), false, "the nested OpenAI-only option is removed");
+  assert.ok((outbound.tools || []).some((tool) => tool?.type === "web_search"), "Grok keeps its native web search capability");
 });
 
 test("a visual Grok compaction keeps image evidence and returns a Codex handoff", async (t) => {
