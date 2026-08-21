@@ -973,14 +973,25 @@ export function normalizeXaiInput(input) {
 }
 
 // Codex uses this OpenAI-native flag to grant its own backend web access. xAI
-// does not implement the field and rejects the whole Responses request when it
-// appears, even for a simple text turn. Its supported web_search/x_search tools
-// are handled by the xAI tool policy instead, so remove only this incompatible
-// transport hint on the xAI leg.
+// does not implement it and rejects the whole Responses request when it appears
+// either at the payload top level or on a hosted-tool descriptor. Its supported
+// web_search/x_search tools are handled by the xAI tool policy instead, so
+// remove only this incompatible transport option on the xAI leg. Do not recurse
+// into a function's parameters: a user tool can legitimately have a parameter
+// with this name.
 export function normalizeXaiPayload(payload) {
-  if (!payload || typeof payload !== "object" || !("external_web_access" in payload)) return payload;
-  const { external_web_access: _externalWebAccess, ...normalized } = payload;
-  return normalized;
+  if (!payload || typeof payload !== "object") return payload;
+  const hasPayloadExternalWebAccess = Object.prototype.hasOwnProperty.call(payload, "external_web_access");
+  const { external_web_access: _externalWebAccess, tools, ...normalized } = payload;
+  if (!Array.isArray(tools)) return hasPayloadExternalWebAccess ? normalized : payload;
+  let changed = hasPayloadExternalWebAccess;
+  const xaiTools = tools.map((tool) => {
+    if (!tool || typeof tool !== "object" || !Object.prototype.hasOwnProperty.call(tool, "external_web_access")) return tool;
+    changed = true;
+    const { external_web_access: _toolExternalWebAccess, ...cleanTool } = tool;
+    return cleanTool;
+  });
+  return changed ? { ...normalized, tools: xaiTools } : payload;
 }
 
 // llama.cpp's /v1/responses parses function_call.arguments with a strict JSON
@@ -3291,6 +3302,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (trimLocalTools) {
     normalizedPayload.instructions = stripLocalInstructions(normalizedPayload.instructions);
   }
+  // applyToolPolicy can preserve hosted tool descriptors verbatim. Normalize
+  // again after that policy so Codex's web_search { external_web_access: true }
+  // option never reaches xAI on the final wire.
+  if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
 
   const target = upstreamTargetFor(config, normalizedPayload.model);
   // The upstream sees the bare model id; the route model (possibly owner-suffixed)
