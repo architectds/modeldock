@@ -36,7 +36,7 @@ import { applyContextOverrides, contextOverridesPath, readContextOverrides, vali
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
-import { foldUsageFile, readRollup, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
+import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -1998,7 +1998,14 @@ export function createApp(services = createServices()) {
         free: Boolean(entry.free),
         speedTier: entry.speedTier || "",
         quota5h: entry.quota5h || 0,
-        usage: totals[entry.id] || null,
+        // Keyed the way the rollup keyed it when the traffic was recorded. A
+        // native entry's id is bare and its usage is filed under
+        // "<id>@openai", so reading it by id alone showed the models with the
+        // most traffic on a signed-in machine as never used at all - blank
+        // requests, blank tps, blank cache, and last in a table that sorts by
+        // requests. rollupKey is the same function that wrote the key, so the
+        // two cannot drift apart.
+        usage: totals[rollupKey({ model: entry.id, provider: entry.provider })] || null,
         // published: reaches Codex's picker. locked: the gateway is pointed at
         // it, so it is published whatever the file says and the row cannot be
         // switched off from here.

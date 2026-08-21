@@ -335,3 +335,30 @@ test("the periodic pass tidies too, not just the boot that started the gateway",
   assert.ok(parked.length > 0, "the periodic pass parked what the boot pass would have");
   assert.ok(readLifecycle(app.services.modelLifecycleFile).lastTidyAt, "and recorded the run");
 });
+
+test("the roster shows a native model's traffic, which is filed under its provider", async (t) => {
+  const app = await startApp();
+  t.after(app.stop);
+  await writeFile(
+    path.join(app.dir, "native-catalog.json"),
+    JSON.stringify({ models: [{ slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", input_modalities: ["text"] }] }),
+    "utf8",
+  );
+  await writeFile(path.join(app.dir, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");
+  // Exactly how the relay records a native turn: a bare model plus provider
+  // "openai", which rollupKey joins into "gpt-5.6-sol@openai".
+  writeFileSync(app.services.usageRollupFile, JSON.stringify({
+    version: 2,
+    lastFoldedAt: new Date().toISOString(),
+    days: {
+      [new Date().toISOString().slice(0, 10)]: {
+        "gpt-5.6-sol@openai": { requests: 1959, ok: 1959, in: 100, out: 50, cached: 0, ms: 1000, okOut: 50, okMs: 1000 },
+      },
+    },
+  }), "utf8");
+
+  const roster = await (await fetch(`${app.base}/api/models/roster`)).json();
+  const sol = roster.models.find((entry) => entry.id === "gpt-5.6-sol");
+  assert.ok(sol, "fixture check: the native model is listed");
+  assert.equal(sol.usage?.requests, 1959, "its traffic is found, not read as never used");
+});
