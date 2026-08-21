@@ -1579,14 +1579,6 @@ function vramIsTight(vram) {
   return Boolean(vram && vram.headroom !== null && vram.headroom < VRAM_TIGHT_BYTES);
 }
 
-// The row line: enough to spot a card in trouble without opening the drawer.
-function vramSummaryLine(vram) {
-  if (!vram?.card) return "";
-  const used = `${gib(vram.total)} / ${gib(vram.card.totalBytes)} GiB`;
-  if (vram.headroom === null) return used;
-  return `${used} · ${t("vram.headroom", { gib: gib(vram.headroom) })}`;
-}
-
 // The drawer's stacked bar. Segment widths are shares of the CARD, not of the
 // total, so an over-committed configuration visibly runs past the end instead
 // of quietly rescaling to fit its own frame.
@@ -1627,12 +1619,24 @@ function renderVramBar(vram) {
   box.classList.toggle("is-tight", vramIsTight(vram));
   const caption = $("local-vram-caption");
   if (caption) {
-    caption.textContent = [
-      t("vram.weights", { gib: gib(vram.weights) }),
-      t("vram.kv", { gib: gib(vram.kv) }),
-      t("vram.overhead", { gib: gib(vram.overhead) }),
-      t("vram.headroom", { gib: gib(Math.max(0, vram.headroom || 0)) }),
-    ].join(" · ");
+    caption.textContent = "";
+    const terms = [
+      ["is-weights", t("vram.weights", { gib: gib(vram.weights) })],
+      ["is-kv", t("vram.kv", { gib: gib(vram.kv) })],
+      ["is-overhead", t("vram.overhead", { gib: gib(vram.overhead) })],
+      ["is-headroom", t("vram.headroom", { gib: gib(Math.max(0, vram.headroom || 0)) })],
+    ];
+    for (const [segment, text] of terms) {
+      const term = document.createElement("span");
+      term.className = "vram-term";
+      const swatch = document.createElement("i");
+      // The same class the bar's segment carries, so the two cannot drift:
+      // recolour a band and its entry in the legend recolours with it.
+      swatch.className = `vram-swatch ${segment}`;
+      swatch.setAttribute("aria-hidden", "true");
+      term.append(swatch, document.createTextNode(text));
+      caption.append(term);
+    }
   }
   // A tight configuration comes with the answer, not just the complaint.
   const advice = $("local-vram-advice");
@@ -1703,43 +1707,11 @@ async function renderLocalEngines() {
         ? engine.models.join(", ")
         : t("local.noModels");
       item.append(head, models);
-      // What the operating system already knows about the process behind this
-      // port: the model file actually loaded, the context it was started with,
-      // and which build is running. Read rather than asked for, so it cannot
-      // disagree with the engine. Absent for a port we could not attribute
-      // (inside WSL or a container), and that row simply stays shorter.
-      const spec = engine.launch;
-      if (spec || engine.binary) {
-        const runtime = document.createElement("p");
-        runtime.className = "local-engine-runtime";
-        const parts = [];
-        if (spec?.model) parts.push(spec.model.split(/[\\/]/).pop());
-        if (spec?.ctxSize) parts.push(t("local.ctxTokens", { tokens: formatContextSize(spec.ctxSize) }));
-        if (spec?.parallel) parts.push(t("local.slots", { count: spec.parallel }));
-        if (engine.binary) parts.push(engine.binary);
-        runtime.textContent = parts.join(" · ");
-        item.append(runtime);
-      }
-      // What this configuration costs on the card it is running on, read at
-      // scan time from the model file's own header.
-      const summary = vramSummaryLine(engine.vram);
-      if (summary) {
-        const line = document.createElement("p");
-        line.className = "local-engine-vram";
-        line.classList.toggle("is-tight", vramIsTight(engine.vram));
-        line.textContent = summary;
-        item.append(line);
-      }
-      // A marker on the row, not only inside the drawer: someone who does not
-      // already suspect a problem will never open the drawer to find one.
-      if (engine.warnings?.length) {
-        const flag = document.createElement("p");
-        flag.className = "local-engine-flag";
-        flag.textContent = engine.warnings.length === 1
-          ? warningText(engine.warnings[0].code)
-          : t("warn.count", { n: engine.warnings.length });
-        item.append(flag);
-      }
+      // The scan names a server and the model it is serving, and stops there.
+      // It used to carry the model file, the context, the slot count, the binary
+      // path, the memory ledger and the warnings as well - six lines per engine,
+      // stacked before anyone had asked a question. All of it is in
+      // Configurations, which is where you go when you have one.
       // A scan result, not a control. Every engine connects from its own
       // section below, so this list stays one shape for all three.
       const state = document.createElement("p");
@@ -1865,7 +1837,23 @@ function endpointField(endpoint) {
   where.target = "_blank";
   where.rel = "noopener noreferrer";
   where.textContent = endpoint.baseUrl;
-  head.append(name, where);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "endpoint-remove";
+  remove.textContent = "×";
+  // An icon needs its name somewhere a pointer and a screen reader can both
+  // reach; the glyph is not one.
+  remove.title = t("endpoints.remove");
+  remove.setAttribute("aria-label", t("endpoints.remove"));
+  // The address and the control travel together at the right end, so the
+  // heading stays a two-part row rather than spreading into three - and the
+  // key field below is left free to span the same width as the preset one
+  // above it, which is the whole reason the button is not beside it.
+  const tail = document.createElement("span");
+  tail.className = "endpoint-head-tail";
+  tail.append(where, remove);
+  head.append(name, tail);
 
   const row = document.createElement("div");
   row.className = "settings-row";
@@ -1878,10 +1866,6 @@ function endpointField(endpoint) {
   // one is set, and leaving it blank keeps it - the same contract the preset
   // key fields have always had.
   key.placeholder = t(endpoint.apiKeyConfigured ? "settings.configured" : "settings.required");
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "custom-action endpoint-remove";
-  remove.textContent = t("endpoints.remove");
   remove.addEventListener("click", async (event) => {
     event.preventDefault();
     remove.disabled = true;
@@ -1902,7 +1886,7 @@ function endpointField(endpoint) {
       remove.disabled = false;
     }
   });
-  row.append(key, remove);
+  row.append(key);
 
   field.append(head, row);
   return field;
@@ -2266,16 +2250,20 @@ function localEngineLabel(engine) {
 }
 
 function paintEngineButton(engine) {
-  const label = $(`${engine}-configure`);
-  if (!label) return;
+  const button = $(`${engine}-configure`);
+  if (!button) return;
   // Reachable means a probe answered - discovery answers /props and /v1/models
   // before reporting an engine, and a hand-typed port only counts once connect
   // accepted it. The colour therefore always means "this really responds".
+  //
+  // Carried on the button rather than on its row. The row briefly wore both
+  // states while the drawer work was in flight, which left the control itself
+  // unstyled: a filled button says "this one is live" at rest, where tinting
+  // the text of a borderless one said nothing until you looked for it.
   const reachable = Boolean(localDiscovery.has(engine) || localConnectedState.get(engine));
-  const row = $(`${engine}-row`);
-  row?.classList.toggle("is-reachable", reachable);
-  row?.classList.toggle("is-open", localConfigEngine === engine);
-  label.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
+  button.classList.toggle("primary", reachable);
+  button.classList.toggle("is-open", localConfigEngine === engine);
+  button.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
 }
 
 function localShow(engine, text, isError) {
@@ -2544,6 +2532,8 @@ function startTune(found) {
     renderTune();
     return;
   }
+  const optimized = $("tune-optimize-result");
+  if (optimized) optimized.hidden = true;
   tuneState = {
     ledger,
     launch: found.launch || {},
@@ -2625,6 +2615,14 @@ $("tune-optimize")?.addEventListener("click", () => {
   if (!tuneState) return;
   Object.assign(tuneState, optimizedConfig(tuneState.ledger));
   renderTune();
+  // Pressing it moved three controls and nothing said so - on a configuration
+  // already at the recommendation it moved none, and the button read as dead.
+  // One line, and it is the flags themselves rather than a claim about them.
+  const result = $("tune-optimize-result");
+  if (result) {
+    result.hidden = false;
+    result.textContent = tuneTail(tuneState).join(" ");
+  }
 });
 $("tune-kv")?.addEventListener("click", (event) => {
   const stop = event.target.closest(".tune-stop");
@@ -2800,6 +2798,22 @@ for (const engineId of localEngineIds) {
 }
 $("local-config-close")?.addEventListener("click", closeLocalConfig);
 $("local-config-save")?.addEventListener("click", () => { submitLocalConfig("connect").catch(() => {}); });
+// Folding a section away. The button carries the state on aria-expanded, so
+// the stylesheet turns the glyph and assistive technology reads the same fact
+// from the same place rather than from a class that has to be kept in step.
+for (const engineId of localEngineIds) {
+  const toggle = $(`${engineId}-toggle`);
+  const body = $(`${engineId}-body`);
+  if (!toggle || !body) continue;
+  toggle.addEventListener("click", () => {
+    const open = toggle.getAttribute("aria-expanded") !== "false";
+    toggle.setAttribute("aria-expanded", open ? "false" : "true");
+    toggle.title = t(open ? "local.expand" : "local.collapse");
+    body.hidden = open;
+  });
+}
+
+
 $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
 
 
