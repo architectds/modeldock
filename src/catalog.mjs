@@ -204,6 +204,11 @@ function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null))
     // Older CLI builds (0.130.x) require this field on every catalog model;
     // native GPT models all support reasoning summaries.
     supports_reasoning_summaries: model.supports_reasoning_summaries ?? true,
+    // Captures from older Codex builds do not have this field, but current
+    // Codex makes it required while loading every entry in model_catalog_json.
+    // A single stale native entry otherwise prevents the whole app from
+    // starting, even though every routed ModelDock entry already declares it.
+    supports_parallel_tool_calls: model.supports_parallel_tool_calls ?? false,
   };
 }
 

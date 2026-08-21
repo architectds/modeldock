@@ -963,6 +963,15 @@ function normalizeStandardToolItem(item) {
   return item;
 }
 
+// xAI accepts the standard Responses tool-call items but not Codex's
+// custom_tool_call dialect. The catalog must keep apply_patch as "freeform" so
+// Codex can load it, therefore this is the wire bridge for the xAI leg only.
+// The response path restores custom_tool_call before the item reaches Codex.
+export function normalizeXaiInput(input) {
+  if (!Array.isArray(input)) return input;
+  return normalizeGatewayInput(input).map(normalizeStandardToolItem);
+}
+
 // llama.cpp's /v1/responses parses function_call.arguments with a strict JSON
 // parser. Codex's custom_tool_call.input is often a double-encoded string
 // (e.g. apply_patch content starting with a quote) that is not a JSON object.
@@ -1251,6 +1260,9 @@ function normalizeInputForRoute(config, model, input, localPayload = null) {
   if (routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go") {
     return normalizeOpenCodeFlashInput(input);
   }
+  if (routedProvider === "xai") {
+    return normalizeXaiInput(input);
+  }
   return localPayload ? localPayload.input : normalizeGatewayInput(input);
 }
 
@@ -1371,6 +1383,32 @@ function normalizeFunctionTool(tool) {
 const trimNamespaceTail = (value) => String(value).replace(/_+$/, "");
 const joinNamespace = (namespace, name) => `${trimNamespaceTail(namespace)}__${name}`;
 
+// xAI function names cannot carry Codex's namespace punctuation. Keep MCP's
+// established spelling on other routes, but give the xAI wire a stable,
+// reversible-safe name for every namespace Codex declares, not only MCP ones.
+const safeFunctionNamePart = (value) => String(value)
+  .replace(/[^A-Za-z0-9_-]/g, (character) => `_x${character.codePointAt(0).toString(16)}_`);
+const safeNamespaceFunctionName = (namespace, name) => `${safeFunctionNamePart(trimNamespaceTail(namespace))}__${safeFunctionNamePart(name)}`;
+
+function functionForCustomTool(tool) {
+  return normalizeFunctionTool({
+    type: "function",
+    name: tool.name,
+    description: tool.description || `Run the ${tool.name} tool. Put its exact custom-tool input in the input field.`,
+    parameters: {
+      type: "object",
+      properties: {
+        input: {
+          type: "string",
+          description: "Exact input for the original custom tool.",
+        },
+      },
+      required: ["input"],
+      additionalProperties: false,
+    },
+  });
+}
+
 // Tool policy: keep standard function/custom tools, flatten MCP namespaces so
 // text models see plain functions, and strip hosted schemas plus tools the model
 // cannot use. Returns the filtered list and a report of what was removed.
@@ -1389,12 +1427,16 @@ export function applyToolPolicy(tools, {
   allowToolNames,
   blockedToolTypes,
   hostedToolTypes,
+  customToolsAsFunctions,
+  flattenAllNamespaces = false,
+  safeNamespaceFunctionNames = false,
 } = {}) {
-  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map() };
+  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map(), customToolNames: new Set() };
   const hidden = new Set(hiddenToolNames || []);
   const allow = allowToolNames ? new Set(allowToolNames) : null;
   const blocked = new Set(blockedToolTypes || []);
   const hostedOk = new Set(hostedToolTypes || []);
+  const customFunctions = new Set(customToolsAsFunctions || []);
   const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0, blockedType: 0 };
   // Reverse map for the flattening below: flat wire name -> { name, namespace }.
   // Codex resolves an incoming function_call by (namespace, name), so the
@@ -1402,6 +1444,7 @@ export function applyToolPolicy(tools, {
   // from. Splitting the flat name back apart is not possible: the namespace and
   // the tool name both contain "__" separators of their own.
   const namespaces = new Map();
+  const customToolNames = new Set();
   const out = [];
   const allowed = (name) => !allow || allow.has(name);
   for (const tool of tools) {
@@ -1409,7 +1452,7 @@ export function applyToolPolicy(tools, {
     if (
       tool.type === "namespace"
       && typeof tool.name === "string"
-      && (tool.name.startsWith("mcp__") || tool.name.startsWith("namespace:mcp__"))
+      && (flattenAllNamespaces || tool.name.startsWith("mcp__") || tool.name.startsWith("namespace:mcp__"))
     ) {
       const children = Array.isArray(tool.tools) ? tool.tools : [];
       for (const child of children) {
@@ -1417,7 +1460,9 @@ export function applyToolPolicy(tools, {
         // The allowlist is written in flat names (mcp__modeldock__recall_memory)
         // because that is what the model and every other caller see; the child
         // carries only its bare name, so qualify before testing membership.
-        const flatName = joinNamespace(tool.name, child.name);
+        const flatName = safeNamespaceFunctionNames
+          ? safeNamespaceFunctionName(tool.name, child.name)
+          : joinNamespace(tool.name, child.name);
         if (hidden.has(child.name) || hidden.has(flatName)) {
           stripped.hidden += 1;
           continue;
@@ -1429,6 +1474,15 @@ export function applyToolPolicy(tools, {
         stripped.namespaceChildren += 1;
         namespaces.set(flatName, { name: child.name, namespace: tool.name });
         out.push(normalizeFunctionTool({ ...structuredClone(child), type: "function", name: flatName }));
+      }
+      continue;
+    }
+    if (tool.type === "custom" && typeof tool.name === "string" && customFunctions.has(tool.name)) {
+      if (allowed(tool.name)) {
+        out.push(functionForCustomTool(tool));
+        customToolNames.add(tool.name);
+      } else {
+        stripped.allowlist += 1;
       }
       continue;
     }
@@ -1464,7 +1518,7 @@ export function applyToolPolicy(tools, {
     }
     out.push(tool.type === "function" ? normalizeFunctionTool(structuredClone(tool)) : structuredClone(tool));
   }
-  return { tools: out, stripped, namespaces };
+  return { tools: out, stripped, namespaces, customToolNames };
 }
 
 // Codex splits an MCP tool call across two fields: `name` is the bare tool name
@@ -1519,6 +1573,38 @@ export function restoreNamespaceOutput(output, namespaces) {
     return next;
   });
   return changed ? out : output;
+}
+
+function customToolInput(argumentsValue) {
+  if (typeof argumentsValue !== "string") return JSON.stringify(argumentsValue ?? "");
+  try {
+    const parsed = JSON.parse(argumentsValue);
+    if (parsed && typeof parsed === "object" && Object.hasOwn(parsed, "input")) {
+      return typeof parsed.input === "string" ? parsed.input : JSON.stringify(parsed.input);
+    }
+  } catch {}
+  return argumentsValue;
+}
+
+// xAI receives a normal function declaration for Codex's freeform patch tool.
+// Put its call back into Codex's custom-tool dialect before it leaves the gate,
+// or Codex has no grammar/input payload with which to invoke apply_patch.
+export function restoreCustomToolCall(item, customToolNames) {
+  if (!customToolNames?.has?.(item?.name) || item?.type !== "function_call") return item;
+  const next = { ...item, type: "custom_tool_call", input: customToolInput(item.arguments) };
+  delete next.arguments;
+  return next;
+}
+
+export function restoreCustomToolOutput(output, customToolNames) {
+  if (!customToolNames?.size || !Array.isArray(output)) return output;
+  let changed = false;
+  const restored = output.map((item) => {
+    const next = restoreCustomToolCall(item, customToolNames);
+    if (next !== item) changed = true;
+    return next;
+  });
+  return changed ? restored : output;
 }
 
 // Resolve the upstream for a model. The owning provider decides the base URL and
@@ -1656,7 +1742,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
 // re-frames such streams into the standard sequence, synthesizing missing
 // lifecycle events and the completed response's output array. Streams that
 // already carry the full lifecycle pass through event-for-event.
-export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null) {
+export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null, customToolNames = null) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
@@ -1682,19 +1768,51 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   let preludeResponse = null;
   const writeOut = (text) => res.write(text);
   const sseEvent = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
-  // Restore the (name, namespace) pair on every event shape that can carry a
-  // function_call: the item lifecycle events and the final output array.
-  // Returns the argument unchanged when there is nothing to rewrite.
+  // Restore the (name, namespace) pair and any custom-tool bridge on every
+  // event shape that can carry a function_call. Returns the argument unchanged
+  // when there is nothing to rewrite.
+  const customItemIds = new Set();
+  const customCallIds = new Set();
+  const restoreCall = (item) => {
+    const namespaced = restoreNamespaceCall(item, namespaces);
+    const custom = restoreCustomToolCall(namespaced, customToolNames);
+    if (custom !== item) {
+      if (custom.type === "custom_tool_call") {
+        if (custom.id) customItemIds.add(custom.id);
+        if (custom.call_id) customCallIds.add(custom.call_id);
+      }
+      return custom;
+    }
+    return item;
+  };
+  const restoreOutput = (output) => {
+    if (!Array.isArray(output)) return output;
+    let changed = false;
+    const restored = output.map((item) => {
+      const next = restoreCall(item);
+      if (next !== item) changed = true;
+      return next;
+    });
+    return changed ? restored : output;
+  };
   const restoreStreamEvent = (event) => {
-    if (!namespaces?.size || !event || typeof event !== "object") return event;
+    if ((!namespaces?.size && !customToolNames?.size) || !event || typeof event !== "object") return event;
     if (event.item?.type === "function_call") {
-      const item = restoreNamespaceCall(event.item, namespaces);
+      const item = restoreCall(event.item);
       if (item !== event.item) return { ...event, item };
-      return event;
     }
     if (Array.isArray(event.response?.output)) {
-      const output = restoreNamespaceOutput(event.response.output, namespaces);
+      const output = restoreOutput(event.response.output);
       if (output !== event.response.output) return { ...event, response: { ...event.response, output } };
+    }
+    const customCall = customItemIds.has(event.item_id) || customCallIds.has(event.call_id);
+    if (customCall && event.type === "response.function_call_arguments.delta") {
+      return { ...event, type: "response.custom_tool_call_input.delta" };
+    }
+    if (customCall && event.type === "response.function_call_arguments.done") {
+      const next = { ...event, type: "response.custom_tool_call_input.done", input: customToolInput(event.arguments) };
+      delete next.arguments;
+      return next;
     }
     return event;
   };
@@ -3106,7 +3224,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
   const routedProfile = profileById(routedProvider);
-  const { tools, stripped, namespaces } = applyToolPolicy(normalizedPayload.tools, {
+  const { tools, stripped, namespaces, customToolNames } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
@@ -3114,6 +3232,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     hiddenToolNames: routedProfile.hiddenToolNames,
     blockedToolTypes: routedProfile.blockedToolTypes,
     hostedToolTypes: routedProfile.hostedToolTypes,
+    customToolsAsFunctions: routedProfile.customToolsAsFunctions,
+    flattenAllNamespaces: routedProfile.flattenAllNamespaces,
+    safeNamespaceFunctionNames: routedProfile.safeNamespaceFunctionNames,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
   // The declarations above were flattened; the replayed history has to use the
@@ -3287,8 +3408,23 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // (Go, Official, Z.AI, Kimi, custom) arrives here. The pipe inspects the
       // SSE shape: a sparse/bare tool stream is re-framed; a full Responses
       // lifecycle passes through event-for-event. Do not key this on provider.
+      if (normalizedPayload.stream !== true && (customToolNames.size || namespaces.size)) {
+        const raw = await upstream.text();
+        try {
+          const parsed = JSON.parse(raw);
+          const restoredNamespaces = restoreNamespaceOutput(parsed?.output, namespaces);
+          const restored = restoreCustomToolOutput(restoredNamespaces, customToolNames);
+          if (restored !== parsed?.output) {
+            upstreamBody = Readable.toWeb(Readable.from([Buffer.from(JSON.stringify({ ...parsed, output: restored }))]));
+          } else {
+            upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
+          }
+        } catch {
+          upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
+        }
+      }
       const piped = normalizedPayload.stream === true
-        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces)
+        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces, customToolNames)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
       if (piped.completedResponse) completedResponse = piped.completedResponse;

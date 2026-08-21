@@ -3752,6 +3752,36 @@ test("pipeNormalizedStream restores the namespace on a full-lifecycle tool call"
   assert.ok(!forwarded.includes("mcp__modeldock__web_search_exa"), "the flattened name never reaches Codex");
 });
 
+test("pipeNormalizedStream restores xAI's bridged patch call to Codex custom-tool events", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const call = { id: "item_patch", type: "function_call", name: "apply_patch", call_id: "call_patch", arguments: "{\"input\":\"*** Begin Patch\"}" };
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('data: {"id":"resp_patch","type":"response.created","response":{"id":"resp_patch","model":"grok-4.5"}}\n\n'));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_patch", type: "response.output_item.added", item: { ...call, arguments: "" } })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_patch", type: "response.function_call_arguments.delta", item_id: "item_patch", call_id: "call_patch", delta: "*** Begin Patch" })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_patch", type: "response.function_call_arguments.done", item_id: "item_patch", call_id: "call_patch", arguments: call.arguments })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_patch", type: "response.output_item.done", item: { ...call, status: "completed" } })}\n\n`));
+      controller.enqueue(Buffer.from(`data: ${JSON.stringify({ id: "resp_patch", type: "response.completed", response: { id: "resp_patch", model: "grok-4.5", output: [call] } })}\n\n`));
+      controller.close();
+    },
+  });
+  await pipeNormalizedStream(body, res, null, () => {}, null, new Set(["apply_patch"]));
+  const events = Buffer.concat(sink.chunks).toString("utf8")
+    .split(/\r\n\r\n/)
+    .flatMap((block) => block.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => JSON.parse(line.slice(5))));
+  const added = events.find((event) => event.type === "response.output_item.added");
+  assert.equal(added.item.type, "custom_tool_call");
+  assert.equal(added.item.input, "");
+  assert.ok(events.some((event) => event.type === "response.custom_tool_call_input.delta"));
+  const done = events.find((event) => event.type === "response.custom_tool_call_input.done");
+  assert.equal(done.input, "*** Begin Patch");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(completed.response.output[0].type, "custom_tool_call");
+  assert.equal(completed.response.output[0].input, "*** Begin Patch");
+});
+
 test("pipeNormalizedStream forwards a stream with no namespaced call untouched", async () => {
   const sink = collectStream();
   const res = responseStub(sink);

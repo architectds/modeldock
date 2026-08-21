@@ -468,35 +468,18 @@ const XAI_PROFILE = {
   // No environment variable: this credential cannot be pasted, only signed in
   // for, so an .env entry would be a place for a stale token to hide.
   tokenEnvName: "",
-  // Measured against api.x.ai/v1/responses on 2026-08-21. The endpoint answers
-  // 422 and refuses the WHOLE request on an unknown tool variant, so one
-  // `custom` tool costs the turn, not the tool: "unknown variant `custom`,
-  // expected one of function, web_search, x_search, image_generation,
-  // collections_search, file_search, code_execution, code_interpreter, mcp,
-  // shell". Codex emits apply_patch as `custom` whenever the catalog says
-  // freeform, which is why this entry also publishes applyPatchToolType
-  // "function" below - this set is the second line, for anything else Codex
-  // starts sending in that shape.
+  // Codex only loads the catalog when apply_patch_tool_type is "freeform", but
+  // xAI rejects the corresponding `custom` declaration. The gateway converts
+  // that one declaration to a function for xAI and converts its calls back to
+  // custom_tool_call before returning them to Codex, retaining apply_patch on
+  // both sides of the bridge.
   blockedToolTypes: new Set(["custom"]),
-  // NOT "function". That was tried on 2026-08-21 and it stopped Codex from
-  // starting at all: config_load, the whole app, no models, no gate.
-  //
-  // apply_patch_tool_type is a closed serde enum on Codex's side, the same
-  // shape as reasoning_effort - see the comment above allowedEffortsFor in
-  // catalog.mjs, which records the identical failure for `max`. Codex's own
-  // bundled catalog uses exactly one value, "freeform", on every entry of
-  // every model (checked against 0.149.0-alpha.4), and an unknown variant
-  // anywhere in model_catalog_json fails the load rather than the entry.
-  //
-  // So the freeform tool still reaches Codex, still arrives as a `custom` tool,
-  // and blockedToolTypes drops it before it reaches xAI. Grok therefore has no
-  // apply_patch tool - it edits through shell like any model whose provider
-  // cannot take the freeform one. That is a real loss and the right trade: a
-  // missing patch tool is a slower turn, and a catalog Codex refuses to load
-  // is no Codex.
-  //
-  // Reopening this needs evidence about which variants that enum accepts,
-  // from the Codex build in use, not from the field's name.
+  customToolsAsFunctions: new Set(["apply_patch"]),
+  // Codex also emits generic namespace declarations (not only MCP ones).
+  // xAI rejects the wrapper type, so flatten every child to a safe function
+  // name and restore the original namespace on the response path.
+  flattenAllNamespaces: true,
+  safeNamespaceFunctionNames: true,
   // Grok runs these itself. Measured the same day: a request carrying
   // { type: "web_search" } and one carrying { type: "x_search" } both return
   // 200. The gate strips hosted tools by default because most upstreams have

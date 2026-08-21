@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "../src/profiles.mjs";
@@ -18,6 +19,17 @@ function configStub() {
     // Never read a real ~/.modeldock/native-catalog.json capture in tests.
     nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
   };
+}
+
+function staleNativeEntry() {
+  // Capture a complete current shape, then remove exactly the field absent from
+  // the user's 0.149 native cache. This is a realistic old capture, not a
+  // fabricated partial model whose unrelated omissions obscure the parser test.
+  const entry = structuredClone(catalogFor(configStub()).models[0]);
+  entry.slug = "gpt-5.6-sol";
+  entry.display_name = "GPT-5.6 Sol";
+  delete entry.supports_parallel_tool_calls;
+  return entry;
 }
 
 test("catalogFor keeps a text-only main model text-only", () => {
@@ -40,6 +52,59 @@ test("catalogFor writes per-model base instructions for vision capability", () =
   assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
   assert.deepEqual(flashVision.input_modalities, ["text", "image"], "OpenCode Go Flash Vision Exp declares image input");
   assert.ok(!flashVision.base_instructions.includes("TEXT-ONLY"), "OpenCode Go Flash Vision Exp receives direct-vision instructions");
+});
+
+test("a stale native capture is upgraded to the current required catalog schema", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-catalog-"));
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  writeFileSync(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.149.0",
+    models: [staleNativeEntry()],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile });
+    const native = catalog.models.find((entry) => entry.slug === "gpt-5.6-sol");
+    assert.equal(native?.supports_parallel_tool_calls, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the generated catalog is accepted by the installed Codex parser", (t) => {
+  const probe = spawnSync("codex", ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30_000 });
+  if (probe.error?.code === "ENOENT") {
+    t.skip("Codex is not installed on this test host");
+    return;
+  }
+  assert.equal(probe.status, 0, probe.stderr || probe.stdout);
+
+  const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-codex-catalog-"));
+  const catalogFile = path.join(home, "model-catalog.json");
+  const nativeCatalogFile = path.join(home, "native-catalog.json");
+  writeFileSync(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.149.0",
+    models: [staleNativeEntry()],
+  }), "utf8");
+  writeFileSync(catalogFile, JSON.stringify(catalogFor({ ...configStub(), nativeCatalogFile })), "utf8");
+  writeFileSync(
+    path.join(home, "config.toml"),
+    `model = "gpt-5.6-sol"\nmodel_catalog_json = ${JSON.stringify(catalogFile.replace(/\\/g, "/"))}\n`,
+    "utf8",
+  );
+  try {
+    const parsed = spawnSync("codex", ["debug", "models"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 30_000,
+      env: { ...process.env, CODEX_HOME: home },
+    });
+    assert.equal(parsed.status, 0, parsed.stderr || parsed.stdout);
+    const models = JSON.parse(parsed.stdout).models || [];
+    assert.ok(models.some((model) => model.slug === "deepseek-v4-flash@opencode-go"));
+    assert.ok(models.some((model) => model.slug === "gpt-5.6-sol"));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("catalogFor keeps the main model first with the profile comp hash", () => {
