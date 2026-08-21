@@ -52,22 +52,27 @@ test("catalog.mjs still contains every span the gateway compresses", () => {
 });
 
 test("stripLocalInstructions compresses the real instructions, not just fixtures", () => {
-  const text = baseInstructionsFor(CONFIG);
-  const out = stripLocalInstructions(text);
-  for (const [span, probe, replacement] of SPANS) {
+  for (const [kind, text] of [
+    ["text", baseInstructionsFor(CONFIG)],
+    ["vision", baseInstructionsFor(CONFIG, { supportsVision: true })],
+  ]) {
+    const out = stripLocalInstructions(text);
+    const spans = kind === "vision" ? SPANS.filter(([span]) => span !== "vision guidance") : SPANS;
+    for (const [span, probe, replacement] of spans) {
+      assert.ok(
+        !out.includes(probe),
+        `${kind} ${span}: survived stripping, so its regex no longer matches the catalog.mjs wording.`,
+      );
+      assert.ok(out.includes(replacement), `${kind} ${span}: the short replacement is missing.`);
+    }
+    // The bound is loose enough to survive prose edits and tight enough that a
+    // regex quietly falling off still trips it for either catalog variant.
+    const maximumRatio = kind === "vision" ? 0.75 : 0.7;
     assert.ok(
-      !out.includes(probe),
-      `${span}: survived stripping, so its regex no longer matches the catalog.mjs wording.`,
+      out.length < text.length * maximumRatio,
+      `${kind}: expected the real instructions to compress enough to remove its long guidance (got ${text.length} -> ${out.length} chars)`,
     );
-    assert.ok(out.includes(replacement), `${span}: the short replacement is missing.`);
   }
-  // Measured at 60.3% off the vision-less base when this was written. The bound is
-  // loose enough to survive prose edits and tight enough that a regex quietly
-  // falling off still trips it.
-  assert.ok(
-    out.length < text.length * 0.7,
-    `expected the real instructions to compress by >30% (got ${text.length} -> ${out.length} chars)`,
-  );
 });
 
 test("compression keeps what a small model still needs", () => {

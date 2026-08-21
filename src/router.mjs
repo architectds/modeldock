@@ -39,6 +39,10 @@ function hasImage(items) {
   return items.some((item) => parts(item).some((part) => part?.type === "input_image" && typeof part.image_url === "string"));
 }
 
+export function currentTurnHasImage(input) {
+  return hasImage(currentTurnItems(input));
+}
+
 // An agentic Responses payload already has tool/reasoning items. Escalating that
 // whole history onto the vision model is not how "see" works: pasted-image chat
 // can swap models, but a coding loop must stay on the text model and inspect
@@ -100,9 +104,14 @@ export class RouteAffinity {
   }
 }
 
-export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision = false }) {
+export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision = false, modelSupportsVision } = {}) {
   const current = currentTurnItems(source?.input);
   const requested = source?.model;
+  const supportsVision = (model) => {
+    if (typeof modelSupportsVision === "function") return Boolean(modelSupportsVision(model));
+    return model === visionModel || (mainModelSupportsVision && model === mainModel);
+  };
+  const requestedKnown = Boolean(requested && knownModels?.has(requested));
   const pinned = affinity?.consumeFrom(current);
   // An explicit, known client model reclaims the wheel from a stale cross-model
   // pin. Without this, one visual turn routed to the vision model (e.g. Luna) pins
@@ -110,21 +119,25 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   // returning to the model the user actually selected. When the client sends the
   // same model or no known model, the pin still holds, so a single model's own
   // multi-step tool loop stays coherent.
-  const clientOverridesPin = pinned && requested && requested !== pinned.model && knownModels?.has(requested);
+  const clientOverridesPin = pinned && requestedKnown && requested !== pinned.model;
   if (pinned && !clientOverridesPin) {
-    // A continuation carries no new image, so directVision here only matters when a
-    // vision-capable main model is itself the pinned model (its own multi-step loop
-    // still hands it the image bytes rather than a rewritten ref).
-    const directVision = pinned.model === visionModel
-      || (mainModelSupportsVision && pinned.model === mainModel);
+    const directVision = supportsVision(pinned.model);
     return { model: pinned.model, reason: "tool_continuation", directVision, pinnedCallId: pinned.callId };
   }
   if (source?.model === visionModel && source?.model !== mainModel) {
     return { model: visionModel, reason: "vision_model_requested", directVision: true };
   }
   if (hasImage(current) && !isAgenticHistory(source?.input)) {
+    // A picker selection wins when it can read the attached image. A text-only
+    // selection still escalates to the configured vision model below.
+    if (requestedKnown && supportsVision(requested)) {
+      return { model: requested, reason: "current_turn_image", directVision: true };
+    }
     if (mainModelSupportsVision) {
       return { model: mainModel, reason: "current_turn_image", directVision: true };
+    }
+    if (!visionModel) {
+      return { model: mainModel, reason: "vision_unavailable", directVision: false };
     }
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
@@ -133,7 +146,7 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   // and let the caller sync the dashboard to match. Anything unrecognised (a stale id, a
   // provider default) falls back to the dashboard selection rather than being forwarded
   // to an upstream that would reject it.
-  if (requested && requested !== mainModel && knownModels?.has(requested)) {
+  if (requestedKnown && requested !== mainModel) {
     return { model: requested, reason: "client_selected", directVision: false };
   }
   return { model: mainModel, reason: "default_main", directVision: false };

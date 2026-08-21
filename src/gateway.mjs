@@ -8,7 +8,7 @@ import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
-import { RouteAffinity, routeResponsesRequest, isAssistantMarker } from "./router.mjs";
+import { RouteAffinity, currentTurnHasImage, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
@@ -1095,7 +1095,7 @@ const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating mem
 const VERBOSE_VISION_GUIDANCE =
   /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
 const VERBOSE_DESIGN_FIRST =
-  /Design-first workflow \(MANDATORY for frontend\/UI work\):[\s\S]*?read it with vision_inspect instead\./g;
+  /Design-first workflow \(MANDATORY for frontend\/UI work\):[\s\S]*?instead\./g;
 const VERBOSE_ACTION_RULE =
   /IMPORTANT: To perform any action[\s\S]*?re-emit the call\./g;
 const VERBOSE_RESTART =
@@ -1254,33 +1254,10 @@ function normalizeInputForRoute(config, model, input, localPayload = null) {
   return localPayload ? localPayload.input : normalizeGatewayInput(input);
 }
 
-// A message is "current" when it follows the last assistant turn. In the
-// Responses wire an assistant turn is not always a role:"assistant" message: an
-// agentic turn is frequently a bare function_call / reasoning item. This mirrors
-// router.mjs's isAssistantMarker so the rewrite's notion of "current" matches the
-// turn that triggered vision escalation.
-function currentTurnStart(input) {
-  if (!Array.isArray(input)) return 0;
-  let start = 0;
-  for (let index = 0; index < input.length; index += 1) {
-    if (isAssistantMarker(input[index])) start = index + 1;
-  }
-  return start;
-}
-
-export function currentTurnStartForTesting(input) {
-  return currentTurnStart(input);
-}
-
-// Replace input_image parts with a lightweight image_ref placeholder so a text
-// main model never re-receives image bytes. By default every input_image is
-// rewritten (no turn gating), which keeps the text model's history byte-stable:
-// an image serializes the same way whether it sits in the current turn or an
-// older one, so the upstream prefix cache is not invalidated as turns advance.
-// preserveCurrentImages=true keeps current-turn images (index >= turnStart) as
-// real input_image parts for the vision escalation path, which must see the
-// bytes. Without a media store the rewrite is a no-op, so a partial services stub
-// stays safe.
+// Replace input_image parts with a lightweight image_ref placeholder only when
+// the final upstream cannot see images. Text-only histories remain byte-stable,
+// while a vision-capable model keeps every image it may need after tool calls or
+// compaction. Without a media store the rewrite degrades to a text placeholder.
 // Codex always sends `image_url` as a string. MiMo's Responses endpoint rejects
 // that form and requires an object - measured against opencode.ai/zen/go/v1 with
 // mimo-v2.5 and a 1x1 PNG data URL: the string form returns 400 "Param
@@ -1304,12 +1281,10 @@ export function adaptImageUrlShape(input, shape) {
   });
 }
 
-export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImages = false } = {}) {
-  if (!Array.isArray(input)) return input;
-  const turnStart = currentTurnStart(input);
-  return input.map((item, index) => {
+export function rewriteHistoricalImages(input, mediaStore, { preserveImages = false } = {}) {
+  if (!Array.isArray(input) || preserveImages) return input;
+  return input.map((item) => {
     if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
-    if (preserveCurrentImages && index >= turnStart) return item;
     let changed = false;
     const content = item.content.map((part) => {
       if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
@@ -1330,6 +1305,48 @@ export function rewriteHistoricalImages(input, mediaStore, { preserveCurrentImag
     });
     return changed ? { ...item, content } : item;
   });
+}
+
+// A compact_v2 item can return only text, so local CPU compaction preserves an
+// attachment as the image_ref wording above. When a later route can actually
+// read images, hydrate that durable reference back into an input_image instead
+// of making the visual model ask a separate model to describe its own picture.
+// Text routes never call this helper and retain the lightweight reference.
+// A period is accepted for summaries emitted before the explicit image_ref
+// wording was introduced, so an already-compacted conversation can recover
+// after this upgrade too.
+const IMAGE_ATTACHMENT_REF_RE = /\[Image attachment (img_[A-Za-z0-9_-]+)(?::|\.)/g;
+
+export function hydrateImageRefsForVision(input, mediaStore) {
+  if (!Array.isArray(input) || !mediaStore?.get) return input;
+  const hydrated = new Set();
+  let changed = false;
+  const output = input.map((item) => {
+    if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
+    const refs = new Set();
+    for (const part of item.content) {
+      if (part?.type !== "input_text" || typeof part.text !== "string") continue;
+      IMAGE_ATTACHMENT_REF_RE.lastIndex = 0;
+      for (const match of part.text.matchAll(IMAGE_ATTACHMENT_REF_RE)) refs.add(match[1]);
+    }
+    const images = [];
+    for (const ref of refs) {
+      if (hydrated.has(ref)) continue;
+      let media;
+      try {
+        media = mediaStore.get(ref);
+      } catch {
+        continue;
+      }
+      if (typeof media?.imageUrl !== "string" || !media.imageUrl) continue;
+      hydrated.add(ref);
+      images.push({ type: "input_image", image_url: media.imageUrl });
+    }
+    if (!images.length) return item;
+    changed = true;
+    return { ...item, content: [...item.content, ...images] };
+  });
+  return changed ? output : input;
 }
 
 // OpenCode Go rejects function tools whose parameters schema is missing or not
@@ -1483,8 +1500,8 @@ export function upstreamTargetFor(config, model) {
   return profileById(providerForModel(config, model)).target(config, model);
 }
 
-export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision }) {
-  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision });
+export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision }) {
+  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision });
 }
 
 export { RouteAffinity };
@@ -2614,13 +2631,12 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
-  // Compact is a text handoff for the coding model. Vision escalation is for
-  // pasted-image chat turns, not for summarizing a tool/reasoning history.
-  const compactModel = (
-    requestedModel
-    && knownModels?.has(requestedModel)
-    && !modelEntryFor(config, requestedModel)?.supportsVision
-  ) ? requestedModel : mainModel;
+  // A compact is a handoff for the model the user selected, not a new vision
+  // escalation. Keeping a selected vision model matters: it can summarize the
+  // visual evidence in its own long-running conversation.
+  const compactModel = requestedModel && knownModels?.has(requestedModel)
+    ? requestedModel
+    : mainModel;
   const route = {
     model: compactModel,
     reason: "compact_summarize",
@@ -2651,6 +2667,22 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     }
   }
   const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
+  const localBackend = isLocalBackend(config, route.model);
+  const targetSupportsVision = Boolean(modelEntryFor(config, route.model)?.supportsVision);
+  // The v2 compaction response can carry only its text summary, not an
+  // input_image item. A local CPU summary must therefore keep an image_ref for
+  // every attachment, including when the local model itself can see images;
+  // otherwise compaction silently loses the only way to revisit the image.
+  // Remote visual summaries keep bytes and let their selected model describe
+  // the image directly before that text-only handoff is written.
+  const visualInput = targetSupportsVision
+    ? hydrateImageRefsForVision(normalizedInput, mediaStore)
+    : normalizedInput;
+  const summarizeInput = rewriteHistoricalImages(
+    visualInput,
+    mediaStore,
+    { preserveImages: !localBackend && targetSupportsVision },
+  );
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -2659,11 +2691,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     tool_choice: "none",
     input: [
       ...adaptImageUrlShape(
-        rewriteHistoricalImages(
-          normalizedInput,
-          mediaStore,
-          { preserveCurrentImages: false },
-        ),
+        summarizeInput,
         modelEntryFor(config, route.model)?.imageUrlShape,
       ),
       messageItem(COMPACT_PROMPT),
@@ -2684,8 +2712,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // history is tiny and is exactly what a handoff of it should look like.
   let compressionInfo = null;
   let directSummary = null;
-  if (isLocalBackend(config, route.model)) {
-    const compressed = compressConversation(normalizedInput);
+  if (localBackend) {
+    const compressed = compressConversation(summarizeInput);
     if (compressed.compressedChars < compressed.originalChars * 0.95) {
       compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
     }
@@ -2694,7 +2722,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // Small-context local backends do not need the heavy creative skills; drop
   // their entries from the instructions so the summarize call (which replays
   // the full history) carries less dead weight.
-  if (isLocalBackend(config, route.model)) {
+  if (localBackend) {
     summarizeBody.instructions = stripLocalInstructions(summarizeBody.instructions);
   }
   delete summarizeBody.previous_response_id;
@@ -2956,13 +2984,31 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   }
   const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
+  const modelSupportsVision = (model) => Boolean(modelEntryFor(config, model)?.supportsVision);
   const route = routeGatewayRequest(payload, {
     mainModel,
     visionModel,
     affinity: routeAffinity,
     knownModels,
-    mainModelSupportsVision: Boolean(modelEntryFor(config, mainModel)?.supportsVision),
+    mainModelSupportsVision: modelSupportsVision(mainModel),
+    modelSupportsVision,
   });
+  // Vision=None is an explicit supported setup. Never forward an image to a
+  // text-only model, and never serialize an empty model id to an upstream.
+  // This also catches an image added mid-tool-loop, where the router correctly
+  // avoids a whole-history model swap but no vision service exists to inspect it.
+  if (currentTurnHasImage(payload.input) && !modelSupportsVision(route.model) && !visionModel) {
+    const error = {
+      error: {
+        type: "configuration_error",
+        message: "This is a text-only model and no vision model is configured. Select a vision-capable model in ModelDock Settings before sending an image.",
+      },
+    };
+    res.statusCode = 503;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(error));
+    return { ok: false, httpStatus: 503, route, error };
+  }
   recordDerivedFallback(services, sessionId, route);
   // A no-model request can fall back to the native default (gpt-5.6-sol) until
   // the session has seen a routed main request. That model must reach the
@@ -2992,9 +3038,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     ...(localPayload || payload),
     input: adaptImageUrlShape(
       rewriteHistoricalImages(
-        normalizedInput,
+        modelSupportsVision(route.model)
+          ? hydrateImageRefsForVision(normalizedInput, mediaStore)
+          : normalizedInput,
         mediaStore,
-        { preserveCurrentImages: route.directVision },
+        { preserveImages: modelSupportsVision(route.model) },
       ),
       modelEntryFor(config, route.model)?.imageUrlShape,
     ),

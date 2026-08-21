@@ -10,12 +10,12 @@ import {
   applyToolPolicy,
   compactFailureReport,
   createUsageTee,
-  currentTurnStartForTesting,
   decodeCompactionSummary,
   describeInputShape,
   dropUnpairedToolItems,
   encodeCompactionSummary,
   freeResponseFailure,
+  hydrateImageRefsForVision,
   hoistLocalSystem,
   isCompactV1Request,
   isCompactV2Request,
@@ -747,24 +747,6 @@ test("normalizeGatewayInput repairs the real severed compact history shape", () 
   }
 });
 
-test("currentTurnStart is the item after the last assistant turn (or agentic marker)", () => {
-  const input = [
-    { type: "message", role: "user", content: [] },
-    { type: "message", role: "assistant", content: [] },
-    { type: "message", role: "user", content: [] },
-  ];
-  assert.equal(currentTurnStartForTesting(input), 2);
-  assert.equal(currentTurnStartForTesting([{ type: "message", role: "user", content: [] }]), 0);
-  assert.equal(
-    currentTurnStartForTesting([
-      { type: "message", role: "user", content: [] },
-      { type: "function_call", name: "shell_command", arguments: "{}" },
-      { type: "message", role: "user", content: [] },
-    ]),
-    2,
-  );
-});
-
 test("rewriteHistoricalImages replaces all images with refs by default", () => {
   const mediaStore = {
     put: (url) => `img_${url.length}`,
@@ -775,7 +757,7 @@ test("rewriteHistoricalImages replaces all images with refs by default", () => {
     { type: "message", role: "user", content: [{ type: "input_text", text: "current" }, { type: "input_image", image_url: "data:image/png;base64,BBBB" }] },
   ];
   const rewritten = rewriteHistoricalImages(input, mediaStore);
-  assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+\./);
+  assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+: use vision_inspect with image_ref/);
   assert.equal(rewritten[0].content[1].type, "input_text");
   assert.equal(rewritten[2].content[1].type, "input_text", "current-turn image is also replaced by default");
   assert.equal(rewritten[1], input[1], "assistant history is untouched");
@@ -784,7 +766,7 @@ test("rewriteHistoricalImages replaces all images with refs by default", () => {
   assert.doesNotMatch(rewritten[0].content[1].text, /spawn_agent's prompt/);
 });
 
-test("rewriteHistoricalImages preserves current images when requested", () => {
+test("rewriteHistoricalImages preserves all image bytes for a vision-capable target", () => {
   const mediaStore = {
     put: (url) => `img_${url.length}`,
   };
@@ -793,9 +775,37 @@ test("rewriteHistoricalImages preserves current images when requested", () => {
     { type: "message", role: "assistant", content: [{ type: "output_text", text: "handled" }] },
     { type: "message", role: "user", content: [{ type: "input_text", text: "current" }, { type: "input_image", image_url: "data:image/png;base64,BBBB" }] },
   ];
-  const rewritten = rewriteHistoricalImages(input, mediaStore, { preserveCurrentImages: true });
-  assert.equal(rewritten[0].content[0].type, "input_text", "historical image is replaced");
-  assert.equal(rewritten[2].content[1].type, "input_image", "current-turn image stays untouched");
+  const rewritten = rewriteHistoricalImages(input, mediaStore, { preserveImages: true });
+  assert.equal(rewritten, input, "the complete visual history reaches a vision-capable target");
+  assert.equal(rewritten[0].content[0].type, "input_image", "an image before an assistant turn stays readable");
+  assert.equal(rewritten[2].content[1].type, "input_image", "a newer image also stays readable");
+});
+
+test("hydrateImageRefsForVision restores a stored image only for a visual route", () => {
+  const dataUrl = "data:image/png;base64,AAAA";
+  const input = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: '[Image attachment img_visual_ref: use vision_inspect with image_ref "img_visual_ref" if visual evidence is needed.]' }],
+  }];
+  const output = hydrateImageRefsForVision(input, {
+    get: (ref) => {
+      assert.equal(ref, "img_visual_ref");
+      return { imageUrl: dataUrl };
+    },
+  });
+  assert.notEqual(output, input);
+  assert.equal(output[0].content.at(-1).type, "input_image");
+  assert.equal(output[0].content.at(-1).image_url, dataUrl);
+  assert.equal(hydrateImageRefsForVision(input, undefined), input, "a text route leaves references as text");
+
+  const legacy = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "[Image attachment img_legacy_ref. Its visual contents were handled earlier.]" }],
+  }];
+  const restoredLegacy = hydrateImageRefsForVision(legacy, { get: () => ({ imageUrl: dataUrl }) });
+  assert.equal(restoredLegacy[0].content.at(-1).image_url, dataUrl, "pre-upgrade compaction hints also recover their image");
 });
 
 test("rewriteHistoricalImages degrades to a plain placeholder without a media store", () => {
@@ -1853,6 +1863,47 @@ test("relayResponses rejects requests without a configured upstream token", asyn
   assert.match(body, /configuration_error/);
 });
 
+test("relayResponses rejects a current image when a text-only tool loop has Vision=None", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return summaryResponse("must not be called");
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash@opencode-go",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "start" }] },
+          { type: "function_call", call_id: "call_text", name: "shell_command", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_text", output: "ready" },
+          { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        visionModel: "",
+        config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go", visionModel: "" },
+        knownModels: new Set(["deepseek-v4-flash@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 503);
+    assert.equal(result.route.model, "deepseek-v4-flash@opencode-go");
+    assert.equal(fetchCalls, 0, "an image is never forwarded to the text-only upstream");
+    assert.match(Buffer.concat(sink.chunks).toString("utf8"), /no vision model is configured/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("isNativeModel distinguishes catalog slugs from native GPT ids", () => {
   const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna"]);
   assert.equal(isNativeModel("gpt-5.6-sol", known), true);
@@ -2656,6 +2707,51 @@ test("relayCompaction keeps the main model when recent history still carries an 
   }
 });
 
+test("relayCompaction keeps a picked vision model and its image evidence", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("compact visual evidence");
+  };
+  try {
+    const selected = "mimo-v2.5@opencode-go";
+    const result = await relayCompaction(
+      {
+        model: selected,
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [
+            { type: "input_text", text: "review this chart" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        visionModel: "gpt-5.6-luna@opencode-go",
+        config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go" },
+        knownModels: new Set(["deepseek-v4-flash@opencode-go", selected, "gpt-5.6-luna@opencode-go"]),
+      },
+      {},
+      true,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, selected, "compact stays with the picked visual model");
+    assert.equal(calls[0].model, "mimo-v2.5");
+    const image = calls[0].input.flatMap((item) => item.content || []).find((part) => part.type === "input_image");
+    assert.ok(image, "the compact model receives the image it must summarize");
+    assert.deepEqual(image.image_url, { url: "data:image/png;base64,AAAA" }, "MiMo's image wire shape still applies on compact");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("relayCompaction applies the Pro duplicate-call repair before summarizing", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -2772,6 +2868,107 @@ test("relayCompaction hands the CPU extract straight back for a local backend (n
     const summary = decodeCompactionSummary(body.output[0].encrypted_content);
     assert.ok(summary.includes("USER: first user turn"), "the extract keeps the user asks");
     assert.ok(summary.includes("USER: later user turn"), "the extract keeps later user asks");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local CPU compaction preserves image refs instead of silently dropping visual evidence", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("compact summary");
+  };
+  try {
+    const imageUrl = "data:image/png;base64,AAAA";
+    const services = {
+      ...compactServices(),
+      mainModel: "qwen-vl@custom",
+      config: {
+        ...configStub(),
+        mainModel: "qwen-vl@custom",
+        customBaseUrl: "http://127.0.0.1:11435/v1",
+        customModel: "qwen-vl",
+        profile: { availableModels: [{ id: "qwen-vl", supportsVision: true }] },
+        tokens: { ...configStub().tokens, custom: "local-key" },
+      },
+      knownModels: new Set(["qwen-vl@custom"]),
+      mediaStore: {
+        put: (url) => {
+          assert.equal(url, imageUrl, "the original attachment is saved before CPU compression");
+          return "img_local_visual";
+        },
+      },
+      requestUrl: "/v1/responses",
+    };
+    const result = await relayResponses(
+      {
+        model: "qwen-vl@custom",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "review this chart" }, { type: "input_image", image_url: imageUrl }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      services,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 0, "the compact path remains CPU-only for a local model");
+    const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    const summary = decodeCompactionSummary(body.output[0].encrypted_content);
+    assert.match(summary, /Image attachment img_local_visual: use vision_inspect with image_ref/);
+    assert.match(summary, /vision_inspect with image_ref "img_local_visual"/);
+    assert.doesNotMatch(summary, /data:image\/png;base64,AAAA/, "raw image bytes cannot fit in the text compaction contract");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a local visual model receives its compacted image again on the next turn", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  const dataUrl = "data:image/png;base64,AAAA";
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("continued visual review");
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "qwen-vl@custom",
+        stream: false,
+        input: [
+          { type: "compaction", encrypted_content: encodeCompactionSummary('[Image attachment img_local_visual: use vision_inspect with image_ref "img_local_visual" if visual evidence is needed.]') },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue the chart review" }] },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "qwen-vl@custom",
+        config: {
+          ...configStub(),
+          mainModel: "qwen-vl@custom",
+          customBaseUrl: "http://127.0.0.1:11435/v1",
+          customModel: "qwen-vl",
+          profile: { availableModels: [{ id: "qwen-vl", supportsVision: true }] },
+          tokens: { ...configStub().tokens, custom: "local-key" },
+        },
+        knownModels: new Set(["qwen-vl@custom"]),
+        mediaStore: { get: (ref) => (ref === "img_local_visual" ? { imageUrl: dataUrl } : undefined) },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    const image = calls[0].input.flatMap((item) => item.content || []).find((part) => part.type === "input_image");
+    assert.ok(image, "the visual model receives the attachment that compact_v2 represented by reference");
+    assert.equal(image.image_url, dataUrl);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3156,6 +3353,95 @@ test("relayResponses leaves the string image_url alone for models that want it",
     const image = parts.find((part) => part.type === "input_image");
     assert.ok(image, "the image reaches the upstream");
     assert.equal(image.image_url, dataUrl, "the string form is untouched");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses keeps an original image through a vision model tool continuation", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("continued visual work");
+  };
+  try {
+    const selected = "gpt-5.6-luna@opencode-go";
+    const affinity = new RouteAffinity();
+    affinity.register("call_visual", selected);
+    const result = await relayResponses(
+      {
+        model: selected,
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+          { type: "function_call", call_id: "call_visual", name: "recall_memory", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_visual", output: "memory result" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        routeAffinity: affinity,
+        mainModel: selected,
+        visionModel: "mimo-v2.5@opencode-go",
+        config: { ...configStub(), mainModel: selected, visionModel: "mimo-v2.5@opencode-go" },
+        knownModels: new Set([selected, "mimo-v2.5@opencode-go", "deepseek-v4-flash@opencode-go"]),
+        mediaStore: { put: () => "img_should_not_be_used" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.reason, "tool_continuation");
+    const image = calls[0].input[0].content.find((part) => part.type === "input_image");
+    assert.ok(image, "an image before the tool marker remains visible to the continuation");
+    assert.equal(image.image_url, "data:image/png;base64,AAAA");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses keeps a new image for a picked vision model during an agentic loop", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("picked visual model");
+  };
+  try {
+    const selected = "mimo-v2.5@opencode-go";
+    const result = await relayResponses(
+      {
+        model: selected,
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "start the review" }] },
+          { type: "function_call", call_id: "call_shell", name: "shell_command", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_shell", output: "ready" },
+          { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        visionModel: "gpt-5.6-luna@opencode-go",
+        config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go" },
+        knownModels: new Set(["deepseek-v4-flash@opencode-go", selected, "gpt-5.6-luna@opencode-go"]),
+        mediaStore: { put: () => "img_should_not_be_used" },
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.reason, "client_selected");
+    assert.equal(result.route.directVision, false, "agentic history intentionally skips image escalation");
+    const image = calls[0].input.at(-1).content.find((part) => part.type === "input_image");
+    assert.ok(image, "target capability, not directVision telemetry, preserves image bytes");
+    assert.deepEqual(image.image_url, { url: "data:image/png;base64,AAAA" });
   } finally {
     globalThis.fetch = originalFetch;
   }

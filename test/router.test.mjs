@@ -18,6 +18,31 @@ test("a vision-capable main model reads the image itself instead of escalating t
   assert.deepEqual(route, { model: "gpt-5.6-luna", reason: "current_turn_image", directVision: true });
 });
 
+test("a text-only model with Vision=None reports unavailable instead of routing an empty model", () => {
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash",
+    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+  }, {
+    mainModel: "deepseek-v4-flash",
+    visionModel: "",
+    knownModels: new Set(["deepseek-v4-flash"]),
+  });
+  assert.deepEqual(route, { model: "deepseek-v4-flash", reason: "vision_unavailable", directVision: false });
+});
+
+test("a picked vision-capable model reads a new image itself", () => {
+  const route = routeResponsesRequest({
+    model: "grok-4.5",
+    input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+  }, {
+    mainModel: "deepseek-v4-flash",
+    visionModel: "gpt-5.6-luna",
+    knownModels: new Set(["deepseek-v4-flash", "grok-4.5", "gpt-5.6-luna"]),
+    modelSupportsVision: (model) => model === "grok-4.5" || model === "gpt-5.6-luna",
+  });
+  assert.deepEqual(route, { model: "grok-4.5", reason: "current_turn_image", directVision: true });
+});
+
 test("text-only requests never route to Luna, even with visual wording", () => {
   for (const input of ["Inspect this screenshot carefully", "\u770B\u4E00\u4E0B\u8FD9\u4E2A\u6309\u94AE\u4E3A\u4EC0\u4E48\u88AB\u906E\u6321", "\u8FD9\u5F20\u622A\u56FE\u91CC\u663E\u793A\u4EC0\u4E48", "\u7528\u6D4F\u89C8\u5668\u622A\u56FE\u770B\u524D\u7AEF"]) {
     const route = routeResponsesRequest({ input }, models);
@@ -159,6 +184,24 @@ test("a same-model tool continuation still pins so the tool loop stays coherent"
   const route = routeResponsesRequest(source, { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna", knownModels: known, affinity });
   assert.equal(route.model, "deepseek-v4-flash");
   assert.equal(route.reason, "tool_continuation", "same-model pin still applies");
+});
+
+test("a picked vision-capable model keeps visual affinity through a tool continuation", () => {
+  const affinity = new RouteAffinity();
+  affinity.register("call_visual", "grok-4.5");
+  const route = routeResponsesRequest({
+    model: "grok-4.5",
+    input: [{ type: "function_call_output", call_id: "call_visual", output: "done" }],
+  }, {
+    mainModel: "deepseek-v4-flash",
+    visionModel: "gpt-5.6-luna",
+    knownModels: new Set(["deepseek-v4-flash", "grok-4.5", "gpt-5.6-luna"]),
+    affinity,
+    modelSupportsVision: (model) => model === "grok-4.5" || model === "gpt-5.6-luna",
+  });
+  assert.equal(route.model, "grok-4.5");
+  assert.equal(route.reason, "tool_continuation");
+  assert.equal(route.directVision, true);
 });
 
 test("a pin with no client model still holds (continuation without a picker model)", () => {
