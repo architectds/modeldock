@@ -2356,12 +2356,17 @@ function tuneRungs(ledger, kvType) {
 // drawerLaunchTail in src/engine-processes.mjs - a test runs both and fails if
 // they drift, which is the price of the page not being able to import it.
 function tuneTail(state) {
+  // Two settings this vendor is not trusted with. The stops are already
+  // disabled here, but the line has to agree with what the server will build:
+  // it refuses them whatever the page asks for.
+  const amd = state.ledger?.card?.vendor === "amd";
   const tail = [];
   if (Number(state.context)) tail.push("-c", String(Number(state.context)));
   if (Number(state.sessions)) tail.push("--parallel", String(Number(state.sessions)));
   // f16 is llama.cpp's default, so it is expressed by writing nothing.
-  if (state.kv && state.kv !== "f16") tail.push("-ctk", String(state.kv), "-ctv", String(state.kv));
+  if (!amd && state.kv && state.kv !== "f16") tail.push("-ctk", String(state.kv), "-ctv", String(state.kv));
   tail.push("--kv-unified");
+  if (amd) tail.push("--no-context-shift");
   return tail;
 }
 
@@ -2377,8 +2382,7 @@ function tuneTail(state) {
 //
 // The server now sends the engine's own argv with this drawer's settings taken
 // out, and the only thing left to do is put them back.
-function tuneCommand(state) {
-  const quote = (token) => (/\s/.test(token) ? `"${token}"` : token);
+function tuneCommandArgs(state) {
   const spec = state.launch || {};
   // No argv means the process could not be attributed, so there is nothing to
   // preserve; what little was learned about it stands in.
@@ -2387,7 +2391,12 @@ function tuneCommand(state) {
     ...(spec.gpuLayers ? ["-ngl", String(spec.gpuLayers)] : []),
     ...(spec.port ? ["--host", "127.0.0.1", "--port", String(spec.port)] : []),
   ];
-  return [state.binary || "llama-server", ...base, ...tuneTail(state)].map(quote).join(" ");
+  return [...base, ...tuneTail(state)];
+}
+
+function tuneCommand(state) {
+  const quote = (token) => (/\s/.test(token) ? `"${token}"` : token);
+  return [state.binary || "llama-server", ...tuneCommandArgs(state)].map(quote).join(" ");
 }
 
 // The settings a community sweep would pick for this card, applied to the
@@ -2511,9 +2520,15 @@ function renderTune() {
 
   const command = $("tune-command");
   const text = $("tune-command-text");
-  const changed = tuneState.context !== ledger.contextTokens
-    || tuneState.kv !== (ledger.kvType || "f16")
-    || tuneState.sessions !== Math.max(1, Number(tuneState.launch?.parallel) || 1);
+  // Not a field-by-field comparison: the drawer refuses settings on some cards
+  // regardless of what the controls say, so an engine can differ from what a
+  // restart would produce without any control having moved. Comparing the two
+  // argvs asks the only question that matters, and cannot fall behind the set
+  // of flags the drawer owns.
+  const next = tuneCommandArgs(tuneState);
+  const changed = tuneState.launchArgs
+    ? JSON.stringify(next) !== JSON.stringify(tuneState.launchArgs)
+    : tuneState.context !== ledger.contextTokens || tuneState.kv !== (ledger.kvType || "f16");
   if (command) command.hidden = !changed;
   if (text && changed) text.textContent = tuneCommand(tuneState);
 }
@@ -2531,6 +2546,7 @@ function startTune(found) {
   tuneState = {
     ledger,
     launch: found.launch || {},
+    launchArgs: found.launchArgs || null,
     launchBase: found.launchBase || null,
     binary: found.binary || "",
     context: ledger.contextTokens,

@@ -358,15 +358,52 @@ test("the page's copy of the launch tail is the server's copy", () => {
   for (const contextTokens of [16000, 48000, 262144]) {
     for (const sessions of [1, 4]) {
       for (const kvType of ["f16", "q8_0", "q4_0"]) {
-        const state = { context: contextTokens, sessions, kv: kvType };
-        assert.deepEqual(
-          tuneTail(state),
-          drawerLaunchTail({ contextTokens, sessions, kvType }),
-          `public/app.js tuneTail drifted at ${contextTokens}/${sessions}/${kvType} - `
-          + "a setting was added to one half of the drawer and not the other",
-        );
+        for (const vendor of ["amd", "nvidia", "intel", undefined]) {
+          const state = { context: contextTokens, sessions, kv: kvType, ledger: { card: { vendor } } };
+          assert.deepEqual(
+            tuneTail(state),
+            drawerLaunchTail({ contextTokens, sessions, kvType, vendor }),
+            `public/app.js tuneTail drifted at ${contextTokens}/${sessions}/${kvType}/${vendor} - `
+            + "a setting was added to one half of the drawer and not the other",
+          );
+        }
       }
     }
+  }
+});
+
+test("what one card cannot be trusted with, another can", () => {
+  // The refusals belong to this vendor, not to the product. Quantized KV
+  // returns wrong answers on the AMD stack here, and llama.cpp disables
+  // context shifting for this model anyway - "KV cache shifting is not
+  // supported for this context, disabling KV cache shifting" is the engine's
+  // own line in the log. Neither is true of an NVIDIA card, and a rule written
+  // as "we do not do this" rather than "this card cannot" would have taken a
+  // working feature away from everyone.
+  const running = ["-m", "m.gguf", "-fa", "auto", "--context-shift", "-c", "80000", "--parallel", "1"];
+  const wants = { contextTokens: 48000, sessions: 1, kvType: "q8_0" };
+
+  const nvidia = drawerLaunchArgs(running, { ...wants, vendor: "nvidia" });
+  assert.ok(nvidia.includes("-ctk") && nvidia.includes("q8_0"), "a quantized cache is honoured");
+  assert.ok(nvidia.includes("--context-shift"), "the user's own context shifting is left alone");
+  assert.ok(!nvidia.includes("--no-context-shift"));
+
+  const amd = drawerLaunchArgs(running, { ...wants, vendor: "amd" });
+  assert.ok(!amd.includes("-ctk") && !amd.includes("-ctv"), "refused whatever the request asked for");
+  assert.ok(!amd.includes("--context-shift"), "and written off rather than left to a default");
+  assert.ok(amd.includes("--no-context-shift"));
+
+  // Everything the drawer does not own survives on both.
+  for (const argv of [nvidia, amd]) {
+    assert.ok(argv.includes("-fa") && argv.includes("auto"));
+    assert.ok(argv.includes("48000"));
+  }
+
+  // An unknown or absent vendor is not quietly treated as the restricted one.
+  for (const vendor of ["intel", "unknown", undefined]) {
+    const other = drawerLaunchArgs(running, { ...wants, vendor });
+    assert.ok(other.includes("-ctk"), `${vendor} lost its cache setting`);
+    assert.ok(other.includes("--context-shift"), `${vendor} lost its context shifting`);
   }
 });
 
@@ -379,11 +416,14 @@ test("base plus tail is exactly what Apply spawns", () => {
     { contextTokens: 16000, sessions: 4, kvType: "q8_0" },
     { contextTokens: 262144, sessions: 2, kvType: "q4_0" },
   ]) {
-    assert.deepEqual(
-      [...launchBaseArgs(REAL_ARGV), ...drawerLaunchTail(choices)],
-      drawerLaunchArgs(REAL_ARGV, choices),
-      `preview and spawn disagree at ${JSON.stringify(choices)}`,
-    );
+    for (const vendor of ["amd", "nvidia", "intel", undefined]) {
+      const withVendor = { ...choices, vendor };
+      assert.deepEqual(
+        [...launchBaseArgs(REAL_ARGV, { vendor }), ...drawerLaunchTail(withVendor)],
+        drawerLaunchArgs(REAL_ARGV, withVendor),
+        `preview and spawn disagree at ${JSON.stringify(withVendor)}`,
+      );
+    }
   }
 });
 
@@ -392,7 +432,7 @@ test("the preview keeps every flag the restart keeps", () => {
   // the one that bites hardest: it is the model id the engine serves under, so
   // pasting a line without it brings the engine back under a different name
   // and ModelDock's own connection no longer matches.
-  const base = launchBaseArgs(REAL_ARGV);
+  const base = launchBaseArgs(REAL_ARGV, { vendor: "nvidia" });
   for (const flag of ["-a", "-fa", "--context-shift", "--reasoning-budget", "-ngl", "--jinja", "-t", "-mg", "-sm"]) {
     assert.ok(base.includes(flag), `${flag} is not in the line the drawer shows`);
   }

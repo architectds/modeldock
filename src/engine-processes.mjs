@@ -197,6 +197,16 @@ const OVERRIDE_SWITCHES = {
     off: "--no-kv-unified",
     spellings: ["--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"],
   },
+  // Turned off by writing the negative form rather than by removing the
+  // positive one. llama.cpp has flipped this default once already, so a
+  // configuration that means it has to say it; both spellings are present in
+  // the builds this targets, and the older ones that only ever had
+  // --no-context-shift are the ones where the default was the wrong way round.
+  contextShift: {
+    on: "--context-shift",
+    off: "--no-context-shift",
+    spellings: ["--context-shift", "--no-context-shift"],
+  },
 };
 
 // Three states per key, not two. `undefined` means the caller does not own this
@@ -243,6 +253,9 @@ export function applyLaunchOverrides(args, overrides = {}) {
   if (typeof overrides.kvUnified === "boolean") {
     out.push(overrides.kvUnified ? OVERRIDE_SWITCHES.kvUnified.on : OVERRIDE_SWITCHES.kvUnified.off);
   }
+  if (typeof overrides.contextShift === "boolean") {
+    out.push(overrides.contextShift ? OVERRIDE_SWITCHES.contextShift.on : OVERRIDE_SWITCHES.contextShift.off);
+  }
   return out;
 }
 
@@ -261,33 +274,60 @@ export function applyLaunchOverrides(args, overrides = {}) {
 // `drawerLaunchTail` fails until both halves know about it.
 const DRAWER_OWNED = { ctxSize: null, parallel: null, cacheTypeK: null, cacheTypeV: null, kvUnified: null };
 
-// Everything the engine was started with except what the drawer decides.
-export function launchBaseArgs(args) {
-  return applyLaunchOverrides(args, DRAWER_OWNED);
+// Two settings this stack cannot be trusted with, refused rather than offered.
+//
+// Quantized KV returns wrong answers here rather than slow ones, and context
+// shifting is turned off because it is not something we are willing to have
+// running on this vendor. Both are enforced where the argv is built, not in
+// the page: greying a control out stops the dashboard from asking for it and
+// stops nothing else, and /api/local/apply takes its settings from a request
+// body that need never have come from the page.
+export function vendorRefusals(vendor) {
+  const amd = String(vendor || "").toLowerCase() === "amd";
+  return { quantizedKv: amd, contextShift: amd };
+}
+
+// Everything the engine was started with except what the drawer decides. The
+// vendor matters because a refusal is a setting the drawer owns too - it has
+// to come off the base, or the preview would show a flag the restart removes.
+export function launchBaseArgs(args, { vendor } = {}) {
+  const refuse = vendorRefusals(vendor);
+  return applyLaunchOverrides(args, {
+    ...DRAWER_OWNED,
+    ...(refuse.contextShift ? { contextShift: null } : {}),
+  });
 }
 
 // The drawer's three choices as flags, in the order applyLaunchOverrides
 // writes them. This is the half the page duplicates, so it is kept to a shape
 // with no branching worth getting wrong, and pinned by a test.
-export function drawerLaunchTail({ contextTokens, sessions, kvType } = {}) {
+export function drawerLaunchTail({ contextTokens, sessions, kvType, vendor } = {}) {
+  const refuse = vendorRefusals(vendor);
   const tail = [];
   if (Number(contextTokens)) tail.push("-c", String(Number(contextTokens)));
   if (Number(sessions)) tail.push("--parallel", String(Number(sessions)));
   // f16 is llama.cpp's default, so it is expressed by writing nothing.
-  if (kvType && kvType !== "f16") tail.push("-ctk", String(kvType), "-ctv", String(kvType));
+  if (!refuse.quantizedKv && kvType && kvType !== "f16") tail.push("-ctk", String(kvType), "-ctv", String(kvType));
   tail.push("--kv-unified");
+  if (refuse.contextShift) tail.push("--no-context-shift");
   return tail;
 }
 
 // What Apply runs. The one caller that actually spawns, and the definition the
 // preview above is measured against.
 export function drawerLaunchArgs(args, choices = {}) {
+  const refuse = vendorRefusals(choices.vendor);
+  // A refused setting is not a default the caller may override: whatever the
+  // request asked for, the cache comes back to f16 and context shifting is
+  // written off, so a body that never came from the page cannot get around it.
+  const cache = !refuse.quantizedKv && choices.kvType && choices.kvType !== "f16" ? choices.kvType : null;
   return applyLaunchOverrides(args, {
     ctxSize: Number(choices.contextTokens) || undefined,
     parallel: Number(choices.sessions) || undefined,
-    cacheTypeK: choices.kvType && choices.kvType !== "f16" ? choices.kvType : null,
-    cacheTypeV: choices.kvType && choices.kvType !== "f16" ? choices.kvType : null,
+    cacheTypeK: cache,
+    cacheTypeV: cache,
     kvUnified: true,
+    contextShift: refuse.contextShift ? false : undefined,
   });
 }
 

@@ -448,12 +448,18 @@ function engineWarnings(engine) {
   const launch = engine?.launch;
   const facts = engine?.modelFacts;
   if (!launch || !facts) return warnings;
-  if (launch.contextShift && facts.hybrid) {
+  const vendor = engine?.vram?.card?.vendor;
+  if (launch.contextShift && vendor === "amd") {
+    // Refused on this stack, so the flag is not merely idle - a restart takes
+    // it off. Reported ahead of the architecture case because it is the one
+    // that changes what happens next.
+    warnings.push({ code: "context_shift_refused" });
+  } else if (launch.contextShift && facts.hybrid) {
     warnings.push({ code: "context_shift_ineffective" });
   }
   // KV quantization is broken on this AMD stack, and a broken cache is wrong
   // answers rather than slow ones.
-  if ((launch.cacheTypeK || launch.cacheTypeV) && engine?.vram?.card?.vendor === "amd") {
+  if ((launch.cacheTypeK || launch.cacheTypeV) && vendor === "amd") {
     warnings.push({ code: "kv_quant_unsupported" });
   }
   // The weights carry MTP blocks the running backend ignores; the log says so
@@ -2137,11 +2143,18 @@ export function createApp(services = createServices()) {
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
         vram: vramLedgerFor(engine, gpus),
-        // The engine's own argv with the tuning drawer's settings taken out.
-        // The drawer appends its three choices to this rather than composing a
-        // line from the handful of flags it knows the names of, which is how
-        // its "start it with" came to omit eight flags that Apply preserves.
-        launchBase: engine.cmdline ? launchBaseArgs(tokenizeCommandLine(engine.cmdline).slice(1)) : null,
+        // The engine's own argv, and the same argv with the tuning drawer's
+        // settings taken out. The drawer appends its choices to the second
+        // rather than composing a line from the handful of flags it knows the
+        // names of, which is how its "start it with" came to omit eight flags
+        // that Apply preserves; it compares the result against the first to
+        // decide whether anything has actually changed.
+        launchArgs: engine.cmdline ? tokenizeCommandLine(engine.cmdline).slice(1) : null,
+        launchBase: engine.cmdline
+          ? launchBaseArgs(tokenizeCommandLine(engine.cmdline).slice(1), {
+            vendor: primaryGpu(gpus, { mainGpu: Number(engine?.launch?.mainGpu) })?.vendor,
+          })
+          : null,
       })).map((engine) => ({ ...engine, warnings: engineWarnings(engine) }));
       // An engine that was connected and has since been stopped still belongs on
       // the page. Dropping it would leave a profile published against a server
@@ -2267,7 +2280,7 @@ export function createApp(services = createServices()) {
       // that dies on a missing model file, a held port, or a driver fault says
       // so on stderr and nowhere else - and this button is pressed precisely
       // when the engine has already failed once.
-      const logDir = path.join(os.tmpdir(), "modeldock");
+      const logDir = services.engineLogDir || path.join(os.tmpdir(), "modeldock");
       mkdirSync(logDir, { recursive: true });
       const logFile = path.join(logDir, `engine-${engine}.log`);
       const log = openSync(logFile, "a");
@@ -2313,8 +2326,17 @@ export function createApp(services = createServices()) {
       });
     }
     // The same function whose two halves the drawer's preview is built from,
-    // so what is spawned and what was shown cannot be different lines.
-    const args = drawerLaunchArgs(tokenizeCommandLine(running.cmdline).slice(1), { contextTokens, sessions, kvType });
+    // so what is spawned and what was shown cannot be different lines - and
+    // the same one that refuses quantized KV and context shifting on the
+    // vendor they are not reliable on, which is why the card is probed here
+    // rather than trusted from the request.
+    const card = primaryGpu(await (services.probeGpus || probeGpus)({}), { mainGpu: Number(running.launch?.mainGpu) });
+    const args = drawerLaunchArgs(tokenizeCommandLine(running.cmdline).slice(1), {
+      contextTokens,
+      sessions,
+      kvType,
+      vendor: card?.vendor,
+    });
     try {
       process.kill(running.pid);
     } catch (error) {
@@ -2350,7 +2372,7 @@ export function createApp(services = createServices()) {
       });
     }
     try {
-      const logDir = path.join(os.tmpdir(), "modeldock");
+      const logDir = services.engineLogDir || path.join(os.tmpdir(), "modeldock");
       mkdirSync(logDir, { recursive: true });
       const logFile = path.join(logDir, `engine-${engine}.log`);
       const log = openSync(logFile, "a");

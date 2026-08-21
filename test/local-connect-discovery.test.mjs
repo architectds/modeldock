@@ -65,6 +65,7 @@ async function startApp(t, { discoverEngines }) {
   const services = createServices(config);
   services.discoverEngines = discoverEngines;
   services.localEnginesFile = path.join(dir, "local-engines.json");
+  services.engineLogDir = path.join(dir, "engine-logs");
   const { app } = createApp(services);
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -207,7 +208,7 @@ test("restart reports where the engine's output went", async (t) => {
     baseUrl: "http://127.0.0.1:11435/v1",
     models: [{ id: "a" }],
     // Something harmless that exists on every platform and exits immediately.
-    launch: { binary: process.execPath, args: ["-e", "process.stderr.write('engine boot\n')"] },
+    launch: { binary: process.execPath, args: ["-e", "process.stderr.write('engine boot\\n')"] },
   });
   const response = await fetch(`${base}/api/local/restart`, {
     method: "POST",
@@ -221,7 +222,13 @@ test("restart reports where the engine's output went", async (t) => {
   // Give the detached child a moment to write and exit.
   await new Promise((resolve) => setTimeout(resolve, 1200));
   const written = await readFile(payload.logFile, "utf8");
-  assert.match(written, /engine boot/, "stderr reached the log instead of /dev/null");
+  // Not just "the string is in there": this test's own -e script carried an
+  // escape that JS resolved before the spawn, so node received a real newline
+  // inside a quoted string, refused to parse it, and echoed the offending
+  // source line - which contains "engine boot" - into the log. The assertion
+  // passed on a crash traceback. The child has to have actually run.
+  assert.doesNotMatch(written, /SyntaxError|Invalid or unexpected token/, "the child never ran");
+  assert.match(written, /^engine boot\s*$/, "stderr reached the log instead of /dev/null");
 });
 
 test("apply starts nothing when the old engine will not let go of the port", async (t) => {
@@ -337,4 +344,66 @@ test("an engine on the default cache is not warned about, and is budgeted at f16
   assert.equal(Math.round(engine.vram.kv / (1024 ** 3) * 100) / 100, 4.88);
   assert.equal(Math.round(engine.vram.headroom / (1024 ** 3) * 100) / 100, 0.52);
   assert.ok(!engine.warnings.some((warning) => warning.code === "kv_quant_unsupported"));
+});
+
+const CARD = {
+  amd: { name: "AMD Radeon RX 7900 XT", vendor: "amd", totalBytes: Math.round(19.98 * 1024 ** 3) },
+  nvidia: { name: "NVIDIA GeForce RTX 4090", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 0 },
+};
+
+function shiftingEngine() {
+  const engine = quantizedEngine();
+  engine.cmdline = "llama-server -m D:/models/q3.gguf -c 80000 -ctk q8_0 -ctv q8_0"
+    + " -fa auto --context-shift -ngl 99 --port 11435";
+  engine.launch = parseLlamaArgs(engine.cmdline);
+  return engine;
+}
+
+test("an NVIDIA card keeps the settings the AMD one refuses", async (t) => {
+  // The refusals are the AMD stack's, not the product's opinion. Written the
+  // other way round they would have taken a working quantized cache away from
+  // every card, which is the failure mode of a rule phrased as policy instead
+  // of as a property of the hardware.
+  const { base, services } = await startApp(t, { discoverEngines: async () => [shiftingEngine()] });
+  services.probeGpus = async () => [CARD.nvidia];
+
+  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
+  const engine = engines.find((found) => found.port === 11435);
+
+  assert.equal(engine.vram.kvType, "q8_0", "the quantized cache is budgeted, not refused");
+  const codes = engine.warnings.map((warning) => warning.code);
+  assert.ok(!codes.includes("kv_quant_unsupported"), "nothing is refused on this card");
+  assert.ok(!codes.includes("context_shift_refused"));
+  // But the architecture warning is not a vendor warning and still applies:
+  // this model keeps recurrent state on three layers in four, so context
+  // shifting has nothing to slide - reproduced once with -ngl 0, where no GPU
+  // is involved at all. Guarding it as an AMD quirk would have missed it here.
+  assert.ok(codes.includes("context_shift_ineffective"), `warnings were ${JSON.stringify(codes)}`);
+  assert.ok(engine.launchBase.includes("--context-shift"), "the user's context shifting stands");
+  assert.ok(engine.launchBase.includes("-fa"));
+  // The restart honours the request rather than overriding it.
+  const preview = engine.launchBase.join(" ");
+  assert.ok(!preview.includes("--no-context-shift"));
+});
+
+test("the AMD card refuses both, in the preview as well as the restart", async (t) => {
+  const { base, services } = await startApp(t, { discoverEngines: async () => [shiftingEngine()] });
+  services.probeGpus = async () => [CARD.amd];
+
+  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
+  const engine = engines.find((found) => found.port === 11435);
+
+  // The ledger still reports what is running - refusing it is not the same as
+  // pretending it is not there.
+  assert.equal(engine.vram.kvType, "q8_0");
+  const codes = engine.warnings.map((warning) => warning.code);
+  assert.ok(codes.includes("kv_quant_unsupported"));
+  assert.ok(codes.includes("context_shift_refused"), `warnings were ${JSON.stringify(codes)}`);
+  assert.ok(!codes.includes("context_shift_ineffective"), "one reason, and it is the one acted on");
+
+  // And the line the drawer shows is the line a restart produces: neither
+  // setting is in it, and everything else is.
+  assert.ok(!engine.launchBase.includes("-ctk"));
+  assert.ok(!engine.launchBase.includes("--context-shift"));
+  assert.ok(engine.launchBase.includes("-fa") && engine.launchBase.includes("-ngl"));
 });
