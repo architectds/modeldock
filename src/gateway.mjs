@@ -3111,6 +3111,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
+    hiddenToolNames: routedProfile.hiddenToolNames,
     blockedToolTypes: routedProfile.blockedToolTypes,
     hostedToolTypes: routedProfile.hostedToolTypes,
   });

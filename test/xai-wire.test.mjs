@@ -26,6 +26,7 @@ process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 function codexTools() {
   return [
     { type: "function", name: "shell", description: "run a command", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } },
+    { type: "function", name: "view_image", description: "inspect a local image", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
     { type: "custom", name: "apply_patch", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" } },
     { type: "web_search" },
     { type: "tool_search" },
@@ -152,6 +153,7 @@ test("a Grok tool round trip keeps every turn's tool list on the wire xAI accept
     const types = (body.tools || []).map((tool) => tool.type);
     assert.equal(types.includes("custom"), false, `turn ${index + 1}: the variant xAI has no name for`);
     assert.ok(types.includes("function"), `turn ${index + 1}: the ordinary tools survive`);
+    assert.ok((body.tools || []).some((tool) => tool.name === "view_image"), `turn ${index + 1}: visual Grok keeps its image tool`);
     // Grok runs this one itself; stripping it made the gate pay Exa to redo a
     // search the subscription already covers.
     assert.ok(types.includes("web_search"), `turn ${index + 1}: hosted search is left for Grok`);

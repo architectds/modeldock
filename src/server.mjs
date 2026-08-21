@@ -292,7 +292,7 @@ function onModeSelection(services) {
   const currentProvider = providerForModel(config, modelSelection.mainModel);
   const providerId = providerTokenConfigured(config, currentProvider)
     ? currentProvider
-    : ["opencode-go", "deepseek-official", "custom"]
+    : profileOptions().map((provider) => provider.id)
       .find((id) => providerTokenConfigured(config, id));
   if (!providerId) return null;
 
