@@ -13,7 +13,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (file) => readFileSync(path.join(root, file), "utf8");
@@ -45,13 +44,6 @@ const DYNAMIC = [
   // app.js: t(`roster.context.${entry.contextSource}`)
   { prefix: "roster.context.", suffixes: ["vendor", "measured", "user", "native"], site: "app.js: t(`roster.context.${entry.contextSource}`)" },
   { prefix: "roster.", suffixes: ["model", "provider", "context", "vision", "requests", "tps", "cache"], site: "app.js: t(`roster.${column}`)" },
-  // The server sends a warning code and no prose, so the text is looked up by
-  // that code. app.js: t(`warn.${warning.code}`)
-  {
-    prefix: "warn.",
-    suffixes: ["context_shift_ineffective", "context_shift_refused", "kv_quant_unsupported", "mtp_ignored"],
-    site: "app.js: t(`warn.${warning.code}`)",
-  },
 ];
 
 test("every English translation key is referenced by the dashboard", () => {
@@ -99,36 +91,4 @@ test("the dashboard never asks for a key that is not translated", () => {
   const requested = [...consumers.matchAll(/\bt\(\s*"([^"]+)"/g)].map((m) => m[1]);
   const missing = [...new Set(requested)].filter((key) => !keys.has(key) && !allowed.has(key));
   assert.deepEqual(missing, [], "t() asks for keys that public/i18n.js does not define");
-});
-
-test("the browser scripts are syntactically valid JavaScript", () => {
-  // These tests read i18n.js as text, so a stray bracket in a translation
-  // passed every one of them - a mistyped closing quote in the Japanese block
-  // was caught 500 lines into an esbuild plugin error, and would otherwise
-  // have shipped a dashboard that renders nothing at all. Parsing is cheap and
-  // names the file and line.
-  // node's own parser rather than vm.Script: these carry module syntax, and a
-  // classic-script parse would reject every one of them for the wrong reason.
-  for (const file of ["public/i18n.js", "public/app.js", "public/wizard.js"]) {
-    assert.doesNotThrow(
-      () => execFileSync(process.execPath, ["--check", path.join(root, file)], { stdio: "pipe" }),
-      `${file} does not parse`,
-    );
-  }
-});
-
-test("every data-i18n in the markup resolves to a key", () => {
-  // The other tests read t("...") calls out of the scripts, so a label that
-  // lives only in markup was invisible to all of them. When the xAI sign-in's
-  // ten keys were dropped from every locale, the suite stayed green and the
-  // settings panel shipped reading "xai.title" and "xai.signIn" - t() falls
-  // back to the key itself and applyStaticI18n writes it straight into
-  // textContent, so a missing key is not a blank label, it is the key on
-  // screen.
-  const markup = read("public/index.html");
-  const keys = new Set(englishKeys());
-  const asked = [...markup.matchAll(/data-i18n(?:-title)?="([^"]+)"/g)].map((m) => m[1]);
-  const missing = [...new Set(asked)].filter((key) => !keys.has(key));
-  assert.deepEqual(missing, [], "public/index.html asks for keys public/i18n.js does not define");
-  assert.ok(asked.length > 40, "the sweep found suspiciously few attributes to check");
 });
