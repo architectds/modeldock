@@ -431,8 +431,21 @@ test("the AMD card refuses both, in the preview as well as the restart", async (
 // observe. The gap is a POSIX one - SIGTERM asks, and llama.cpp answers after
 // it has finished unloading - so this runs where the defect can exist.
 test("an engine that has stopped answering but is still running is not treated as stopped", { skip: process.platform === "win32" && "process.kill terminates on Windows, so the gap this guards cannot occur" }, async (t) => {
-  const live = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+  // The child says when it is ready, and this waits for that. spawn returns
+  // before node has booted, so a SIGTERM sent in that window takes the default
+  // action and kills it - the process would then be genuinely gone, the route
+  // would be right to proceed, and the test would be asserting nothing. That
+  // race is invisible on the platform where this test is skipped.
+  const live = spawn(
+    process.execPath,
+    ["-e", "process.on('SIGTERM', () => {}); console.log('ready'); setTimeout(() => {}, 60000)"],
+    { stdio: ["ignore", "pipe", "ignore"] },
+  );
   t.after(() => { try { live.kill("SIGKILL"); } catch { /* already gone */ } });
+  await new Promise((resolve, reject) => {
+    live.stdout.once("data", resolve);
+    live.once("exit", () => reject(new Error("the stand-in engine exited before it was ready")));
+  });
   const cmdline = `${process.execPath} -m D:/models/q3.gguf -c 80000 --port 11435`;
   let scans = 0;
   const { base, services } = await startApp(t, {
