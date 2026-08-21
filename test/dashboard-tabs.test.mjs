@@ -107,22 +107,41 @@ async function openBrowser(t, chromePath) {
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}`);
   const chrome = spawn(chromePath, [
     "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox",
+    // A CI container gets a 64 MB /dev/shm, and Chrome puts its renderer's
+    // shared memory there: without this it dies during startup and the only
+    // symptom upstairs is a debugging port that never answers.
+    "--disable-dev-shm-usage",
     `--remote-debugging-port=${port}`, "--window-size=1500,1000",
     `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: "ignore" });
+  ], { stdio: ["ignore", "ignore", "pipe"] });
+
+  // Chrome says why it failed on stderr, and this used to be thrown away - so a
+  // startup crash arrived as "exposed no page target", which names the symptom
+  // and not one cause. Kept and quoted in the failure instead.
+  let stderr = "";
+  chrome.stderr.on("data", (chunk) => { stderr += String(chunk); });
+  let exited = null;
+  chrome.on("exit", (code, signal) => { exited = signal || code; });
 
   let ws;
   t.after(() => { try { ws?.close(); } catch { /* closing a closed socket */ } chrome.kill(); });
 
   let target = null;
-  for (let i = 0; i < 40 && !target; i += 1) {
+  // 30s rather than 10. A cold CI runner is not a warm laptop, and the previous
+  // budget was tight enough that this test failed on the runner while passing
+  // everywhere else - a flake, which in a render check is worse than useless
+  // because it teaches people to re-run it.
+  for (let i = 0; i < 120 && !target; i += 1) {
     await sleep(250);
+    if (exited !== null) break;
     try {
       const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
       target = list.find((entry) => entry.type === "page");
     } catch { /* not listening yet */ }
   }
-  assert.ok(target, "Chrome exposed no page target");
+  assert.ok(target, exited !== null
+    ? `Chrome exited (${exited}) before exposing a page target: ${stderr.trim().slice(-600) || "no output"}`
+    : `Chrome exposed no page target within 30s: ${stderr.trim().slice(-600) || "no output"}`);
 
   ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
