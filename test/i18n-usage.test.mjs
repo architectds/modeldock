@@ -116,3 +116,19 @@ test("the browser scripts are syntactically valid JavaScript", () => {
     );
   }
 });
+
+test("every data-i18n in the markup resolves to a key", () => {
+  // The other tests read t("...") calls out of the scripts, so a label that
+  // lives only in markup was invisible to all of them. When the xAI sign-in's
+  // ten keys were dropped from every locale, the suite stayed green and the
+  // settings panel shipped reading "xai.title" and "xai.signIn" - t() falls
+  // back to the key itself and applyStaticI18n writes it straight into
+  // textContent, so a missing key is not a blank label, it is the key on
+  // screen.
+  const markup = read("public/index.html");
+  const keys = new Set(englishKeys());
+  const asked = [...markup.matchAll(/data-i18n(?:-title)?="([^"]+)"/g)].map((m) => m[1]);
+  const missing = [...new Set(asked)].filter((key) => !keys.has(key));
+  assert.deepEqual(missing, [], "public/index.html asks for keys public/i18n.js does not define");
+  assert.ok(asked.length > 40, "the sweep found suspiciously few attributes to check");
+});
