@@ -15,6 +15,36 @@ function safeErrorBody(text) {
   return String(text || "").replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]").slice(0, 1_000);
 }
 
+// The answer out of an SSE body, as a response-shaped object the ordinary
+// extractor can read.
+//
+// The text has to be accumulated from the deltas: this backend sends
+// response.completed with an EMPTY output array, so a reader that waits for the
+// finished object gets a 200 and no answer. The deltas are the only place the
+// words appear.
+export function streamedResponse(body) {
+  let text = "";
+  let completed = null;
+  for (const line of String(body || "").split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") continue;
+    let event;
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      continue;   // a partial or non-JSON line is not an answer
+    }
+    if (event?.type === "response.output_text.delta" && typeof event.delta === "string") text += event.delta;
+    if (event?.type === "response.completed" && event.response) completed = event.response;
+  }
+  // Prefer whatever the finished object carries, for a backend that does fill
+  // it in; fall back to the text we collected on the way past.
+  if (completed?.output?.length) return completed;
+  if (!text && !completed) return null;
+  return { ...(completed || {}), output: [{ type: "message", content: [{ type: "output_text", text }] }] };
+}
+
 export function extractOutputText(response) {
   const texts = [];
   for (const item of response?.output || []) {
@@ -236,6 +266,24 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     // Send the bare id upstream; the @provider suffix is a routing address for this
     // gate, never part of the model name an upstream API knows.
     const common = { model: bareModelId(model), max_output_tokens: 4_096, stream: false };
+    // The ChatGPT backend refuses a request that does not say so: every native
+    // call it accepts carries store:false, which is why the main relay sends it
+    // too. Without this line the native vision leg answered 400 "Store must be
+    // set to false" for every model, so selecting any native vision model
+    // failed - the routing was right and the body was not.
+    // The ChatGPT backend refuses anything else: it answers 400 "Store must be
+    // set to false" and then 400 "Stream must be set to true" until a request
+    // says both. The main relay already sends this pair; the vision leg did
+    // not, so selecting any native vision model failed outright - the routing
+    // was right and the body was not.
+    if (native) {
+      common.store = false;
+      common.stream = true;
+      // It rejects a cap it does not implement ("Unsupported parameter:
+      // max_output_tokens"). The prompt asks for one short answer, so there is
+      // nothing to bound here anyway.
+      delete common.max_output_tokens;
+    }
     if (style === "responses") {
       const content = [{ type: "input_text", text: prompt }];
       for (const image of images) content.push({ type: "input_image", image_url: image.imageUrl });
@@ -262,10 +310,19 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     const raw = await response.text();
     if (!response.ok) throw new Error(`${model} returned ${response.status}: ${safeErrorBody(raw)}`);
     let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      throw new Error(`${model} returned invalid JSON`);
+    if (native) {
+      // One shot, so the stream is read whole and only its last word matters:
+      // response.completed carries the finished response object, which is the
+      // same shape the non-streaming route returns. Accumulating deltas would
+      // buy nothing here - nobody is watching this answer arrive.
+      parsed = streamedResponse(raw);
+      if (!parsed) throw new Error(`${model} streamed no response`);
+    } else {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        throw new Error(`${model} returned invalid JSON`);
+      }
     }
     const answer = style === "responses"
       ? extractOutputText(parsed)

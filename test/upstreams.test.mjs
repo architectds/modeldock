@@ -446,10 +446,14 @@ test("a native vision model is sent to the ChatGPT backend on the Codex sign-in"
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     called = { url: String(url), headers: options.headers, body: JSON.parse(options.body) };
-    return new Response(
-      JSON.stringify({ id: "resp_v", output: [{ type: "message", content: [{ type: "output_text", text: "a chart" }] }] }),
-      { status: 200 },
-    );
+    // Shaped the way the backend actually answers: the words are in the
+    // deltas and response.completed carries an empty output array.
+    return new Response([
+      'data: {"type":"response.output_text.delta","delta":"a chart"}',
+      'data: {"type":"response.completed","response":{"id":"resp_v","output":[]}}',
+      "data: [DONE]",
+      "",
+    ].join("\n"), { status: 200 });
   };
 
   const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
@@ -482,6 +486,12 @@ test("a native vision model is sent to the ChatGPT backend on the Codex sign-in"
   assert.equal(called.headers["chatgpt-account-id"], "acct-9", "the native account header rides along");
   assert.equal(called.body.model, "gpt-5.6-terra");
   assert.equal(called.body.input[0].content[1].type, "input_image", "the native leg speaks the Responses wire");
+  // The three the backend refuses a request without, each learned from its own
+  // 400: "Store must be set to false", "Stream must be set to true", and
+  // "Unsupported parameter: max_output_tokens".
+  assert.equal(called.body.store, false);
+  assert.equal(called.body.stream, true);
+  assert.equal(called.body.max_output_tokens, undefined);
 });
 
 test("an owner-qualified twin of a native slug stays on its routed camp", async (t) => {
@@ -542,4 +552,33 @@ test("the @openai suffix does not route: it is a picker label, not an owner", as
   assert.equal(providerForModel(config, "gpt-5.6-terra"), "opencode-go");
   assert.equal(providerForModel(config, "gpt-5.6-terra@openai"), "opencode-go");
   assert.equal(tokenFor(config, "gpt-5.6-terra@openai"), "go-token");
+});
+
+// This backend answers `response.completed` with an EMPTY output array and puts
+// the words only in the deltas, so a reader that waits for the finished object
+// gets a 200 and no answer - which is what "returned no output text" was.
+test("a streamed native answer is read from its deltas, not its completed event", async () => {
+  const { streamedResponse } = await import("../src/upstreams.mjs");
+  const sse = [
+    'data: {"type":"response.created","response":{"id":"r1"}}',
+    'data: {"type":"response.output_text.delta","delta":"solid "}',
+    'data: {"type":"response.output_text.delta","delta":"blue"}',
+    'data: {"type":"response.completed","response":{"id":"r1","output":[]}}',
+    "data: [DONE]",
+    "",
+  ].join("\n");
+  const parsed = streamedResponse(sse);
+  assert.equal(extractOutputText(parsed), "solid blue");
+  assert.equal(parsed.id, "r1", "the finished object's own fields survive");
+
+  // A backend that does fill the array in is believed over the deltas.
+  const filled = streamedResponse([
+    'data: {"type":"response.output_text.delta","delta":"ignored"}',
+    'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"from the object"}]}]}}',
+    "",
+  ].join("\n"));
+  assert.equal(extractOutputText(filled), "from the object");
+
+  assert.equal(streamedResponse(""), null, "an empty body is not an answer");
+  assert.equal(streamedResponse("data: not json\n"), null, "and neither is noise");
 });

@@ -46,11 +46,15 @@ test("a native vision model reaches the ChatGPT backend through the real service
         account: req.headers["chatgpt-account-id"],
         body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
       });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        id: "resp_e2e",
-        output: [{ type: "message", content: [{ type: "output_text", text: "a red bar chart" }] }],
-      }));
+      // The real backend streams, and puts the words only in the deltas: its
+      // response.completed carries an empty output array.
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end([
+        'data: {"type":"response.output_text.delta","delta":"a red bar chart"}',
+        'data: {"type":"response.completed","response":{"id":"resp_e2e","output":[]}}',
+        "data: [DONE]",
+        "",
+      ].join("\n"));
     });
   });
   await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
