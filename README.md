@@ -107,11 +107,14 @@ main model with a MiMo vision model, for example. Switching the main provider
 preserves your current vision pick if it remains reachable. Providers with no
 vision-capable model show `None`.
 
-**Upstreams** - four providers are supported:
+**Upstreams** - seven providers are supported:
 - **OpenCode Go** — `OPENCODE_GO_TOKEN`; large catalog including free models.
 - **DeepSeek official** — `DEEPSEEK_API_KEY`; has built-in web search.
+- **xAI (Grok)** — sign in with a SuperGrok or X Premium account from Settings.
+  Usage counts against that subscription rather than an API balance.
 - **Custom** — any Responses-compatible endpoint, configured in Settings.
-- **Ollama** — local models; connect from Settings and pick from the list.
+- **Ollama**, **llama.cpp**, **vLLM** — engines already running on this machine.
+  Found by scanning rather than configured; see *Local models* below.
 
 Every model id carries a provider suffix — for example
 `deepseek-v4-flash@deepseek-official` — that selects the upstream and is
@@ -122,6 +125,49 @@ OpenAI credentials.
 The setup guide accepts any configured provider token for ON mode. On a
 DeepSeek-only install it selects `deepseek-v4-flash@deepseek-official` as the
 main model and `None` for vision, and persists that route across restarts.
+
+**Local models** - an engine already running on this machine is found rather
+than configured. Press **Rescan** on the dashboard's local engines panel: the
+scan reads the machine's listening sockets and the process behind each one, so
+an engine is found on whatever port it was started with, not only the default.
+On a reachable engine the label at the right of its row turns blue; pressing
+the row opens that engine's drawer.
+
+Ollama connects and there is nothing else to decide. A llama-server gets the
+rest of the drawer, because its command line is what decides whether the model
+fits on the card at all:
+
+- **The memory bar** stacks weights, KV cache, a fixed overhead, and what is
+  left over. The numbers come from the model file's own header, read once during
+  the scan and cached — opening the drawer reads nothing, and the figures still
+  answer after the engine stops, which is when you want them. A hybrid model
+  keeps a growing cache on only some of its layers, so counting every layer
+  overstates KV several times over; the reader counts the layers that actually
+  pay. Card capacity comes from the driver rather than from `AdapterRAM`, which
+  is 32-bit and reports every card above 4 GB as exactly 4 GB.
+- **Total context** moves between fixed rungs. The recommendation keeps 2 GiB
+  spare; the slider reaches further, down to 1.2 GiB, and the bar reports the
+  band it has entered. Where a card cannot hold the model at all, the drawer
+  says so instead of offering a window that cannot be allocated.
+- **Concurrent sessions** are slots that each see the whole window rather than a
+  reserved slice. The cap is the working room a session needs, not memory: below
+  about 15K a session has nothing left after the per-turn overhead.
+- **KV precision** is 4, 8 or 16. Stops that this card cannot be trusted with are
+  greyed out, and refused when a restart is applied — a broken cache is wrong
+  answers rather than slow ones.
+- **Optimize** sets the three controls to what community sweeps recommend for
+  this card. It is a recipe, not a benchmark run on your machine.
+- **Restart with these** stops the engine and starts it again with what you
+  chose, editing the command line it was already running instead of composing a
+  fresh one, so a flag you needed and we did not think of is not dropped. The
+  line shown above the button is exactly what will run. If the old process will
+  not release its port, nothing is started.
+
+Warnings above the drawer name settings that are on and doing nothing —
+`--context-shift` on a model whose state cannot be shifted, a quantized KV cache
+on a card that does not do it reliably, prediction blocks the backend ignores.
+Nothing is broken when one appears; the configuration is saying something that
+is not true.
 
 **Sub-agent** - choose a dedicated model for the sub-agent role from the
 dashboard. The picker includes models from all enabled providers plus native
@@ -286,12 +332,46 @@ Responses 端点，或连接 Ollama 使用本地模型。
 主模型与 MiMo 视觉模型配对使用。切换主 provider 时，只要当前视觉模型仍然
 可达，选择会自动保留。
 
-**上游** - 支持四个 provider：**OpenCode Go**（`OPENCODE_GO_TOKEN`，包含免费模型）、
-**DeepSeek 官方**（`DEEPSEEK_API_KEY`，自带网络搜索）、**自定义**（任意兼容
-Responses 接口的端点，在设置中配置）和 **Ollama**（本地模型，在设置中连接）。
+**上游** - 支持七个 provider：**OpenCode Go**（`OPENCODE_GO_TOKEN`，包含免费模型）、
+**DeepSeek 官方**（`DEEPSEEK_API_KEY`，自带网络搜索）、**xAI（Grok）**（用
+SuperGrok 或 X Premium 账号在设置中登录，用量计入该订阅而非 API 余额）、
+**自定义**（任意兼容 Responses 接口的端点，在设置中配置），以及
+**Ollama**、**llama.cpp**、**vLLM**（本机上已经在跑的引擎，靠扫描发现而不是手工
+配置，见下面的「本地模型」）。
 每个模型 id 都带有 provider 后缀（例如 `deepseek-v4-flash@deepseek-official`），
 用于选择上游，请求到达 API 前后缀会自动去除。原生 GPT 模型保留在 Codex 的模型
 选单中；ModelDock 从不访问、存储、复制或回放 OpenAI 凭证。
+
+**本地模型** - 本机上已经在跑的引擎是被「找到」的，不是被配置的。在面板的本地引擎
+区域按 **Rescan**：扫描读取本机的监听端口和每个端口背后的进程，所以引擎用哪个端口
+启动就能在哪个端口被找到，不限于默认端口。可达的引擎，行右侧的标签会变蓝；
+点这一行就打开该引擎的抽屉。
+
+Ollama 连上就没有别的可调了。llama-server 会得到抽屉的其余部分，因为它的命令行
+才是决定这个模型能不能装进显卡的东西：
+
+- **显存条** 依次堆叠权重、KV 缓存、固定开销和剩余量。这些数字来自模型文件自己的
+  头部，在扫描时读一次并缓存 —— 打开抽屉不读任何文件，而且引擎停掉之后数字依然
+  能回答，那正是你需要它的时候。混合架构的模型只有一部分层保有会增长的缓存，按
+  所有层去算会把 KV 高估好几倍；读取器只数真正付出代价的那些层。显卡容量取自驱动
+  而不是 `AdapterRAM` —— 后者是 32 位的，任何 4 GB 以上的卡都会报成正好 4 GB。
+- **总上下文** 在固定档位之间移动。推荐值保留 2 GiB 余量；滑杆可以往前拖到只剩
+  1.2 GiB，显存条会报告它进入了哪一段。如果这张卡根本装不下这个模型，抽屉会直说，
+  而不是给出一个分配不出来的窗口。
+- **并行会话** 是若干个槽位，每个槽位看到的是**整个**窗口而不是切走的一片。上限由
+  一个会话需要的工作空间决定，不是由显存决定：低于约 15K，一个会话在付完每轮的
+  固定开销后就没有余地了。
+- **KV 精度** 是 4、8、16 三档。这张卡上不可信的档位会灰掉，并且在重启时被拒绝 ——
+  坏掉的缓存给出的是错的答案，不是慢的答案。
+- **Optimize** 把三个控件设成社区实测推荐的值。那是一份配方，不是在你机器上跑出来
+  的基准测试。
+- **用这些参数重启** 会停掉引擎再用你选的参数启动，做法是**编辑它原本就在跑的那条
+  命令行**而不是重新拼一条，所以你需要、而我们没想到的旗标不会被丢掉。按钮上方
+  显示的那一行就是将要执行的那一行。如果旧进程不肯释放端口，则什么都不会启动。
+
+抽屉上方的警告会点名那些「开着但不起作用」的设置 —— 对状态无法滑动的模型设了
+`--context-shift`、在做不可靠的卡上设了 KV 量化、权重里带着后端会忽略的预测层。
+出现警告不代表现在坏了；它代表这份配置在说一件不真的事。
 
 **子代理** - 在仪表盘为子代理角色单独选择一个模型。选择器包含所有已启用
 provider 的模型以及你 Codex 账号中的原生 GPT 模型。
@@ -429,12 +509,56 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 と MiMo のビジョンモデルを組み合わせることができます。メインプロバイダーを
 切り替えても、現在のビジョン選択がまだ到達可能であれば保持されます。
 
-**上流** - 4つのプロバイダーをサポートします：**OpenCode Go**（`OPENCODE_GO_TOKEN`、
+**上流** - 7つのプロバイダーをサポートします：**OpenCode Go**（`OPENCODE_GO_TOKEN`、
 無料モデルを含む）、**DeepSeek 公式**（`DEEPSEEK_API_KEY`、ウェブ検索内蔵）、
-**カスタム**（Responses 互換エンドポイント、設定画面で設定）、**Ollama**（ローカルモデル、
-設定画面から接続）。すべてのモデル ID はプロバイダーサフィックスを持ちます（例：
+**xAI（Grok）**（SuperGrok または X Premium アカウントで設定画面からサインイン。
+使用量は API 残高ではなくそのサブスクリプションに計上されます）、
+**カスタム**（Responses 互換エンドポイント、設定画面で設定）、そして
+**Ollama**・**llama.cpp**・**vLLM**（このマシンで既に動いているエンジン。設定では
+なくスキャンで見つかります。下の「ローカルモデル」を参照）。すべてのモデル ID はプロバイダーサフィックスを持ちます（例：
 `deepseek-v4-flash@deepseek-official`）。ネイティブ GPT モデルは Codex の
 モデルピッカーに残ります。ModelDock は OpenAI の認証情報にアクセスしません。
+
+**ローカルモデル** - このマシンで既に動いているエンジンは、設定するものではなく
+「見つかる」ものです。ダッシュボードのローカルエンジン欄で **Rescan** を押すと、
+待ち受けソケットとその背後のプロセスを読み取るため、既定のポートに限らず起動時に
+指定したポートで見つかります。到達可能なエンジンは行右端のラベルが青くなり、
+行を押すとそのエンジンのドロワーが開きます。
+
+Ollama は接続すればそれ以上決めることはありません。llama-server にはドロワーの
+残りが用意されています。そのコマンドラインこそが、モデルがカードに収まるかどうかを
+決めているからです：
+
+- **メモリバー** は重み・KV キャッシュ・固定オーバーヘッド・残量を積み上げます。
+  数値はモデルファイル自身のヘッダーから、スキャン時に一度だけ読んでキャッシュ
+  されます。ドロワーを開いてもファイルは読まれず、エンジンを止めた後でも数値は
+  答えられます — 必要になるのはまさにその時です。ハイブリッドなモデルは一部の層
+  だけが増え続けるキャッシュを持つため、全層で数えると KV を数倍に見積もって
+  しまいます。読み取り側は実際に費用を払う層だけを数えます。カード容量は
+  `AdapterRAM` ではなくドライバーから取得します — 前者は 32 ビットで、4 GB を
+  超えるカードはすべて正確に 4 GB と報告されるためです。
+- **総コンテキスト** は固定の段の間を動きます。推奨値は 2 GiB の余裕を残し、
+  スライダーはさらに 1.2 GiB まで進めます。バーはどの帯域に入ったかを示します。
+  カードがそのモデルを収められない場合、確保できないウィンドウを提示せず、
+  そう明言します。
+- **同時セッション** は、それぞれがウィンドウ全体を見るスロットです。上限はメモリ
+  ではなく一つのセッションに必要な作業領域で決まります。約 15K を下回ると、
+  1ターンあたりの固定オーバーヘッドを払った後に何も残りません。
+- **KV 精度** は 4・8・16 です。このカードで信頼できない段はグレーアウトされ、
+  再起動時にも拒否されます — 壊れたキャッシュは遅い答えではなく誤った答えを
+  返します。
+- **最適化** は 3 つのコントロールをコミュニティ推奨値に設定します。これはレシピ
+  であり、あなたのマシンで実行したベンチマークではありません。
+- **この設定で再起動** はエンジンを停止し、選んだ設定で起動し直します。新しい
+  コマンドラインを組み立てるのではなく、既に動いていたコマンドラインを編集する
+  ため、あなたに必要でこちらが思い至らなかったフラグが落ちることはありません。
+  ボタンの上に表示される行が、実際に実行される行そのものです。古いプロセスが
+  ポートを解放しない場合、何も起動されません。
+
+ドロワー上部の警告は「有効だが何もしていない」設定を名指しします — 状態を
+シフトできないモデルへの `--context-shift`、確実に動作しないカードでの KV 量子化、
+バックエンドが無視する予測ブロックなど。警告が出ても今壊れているわけではなく、
+設定が事実でないことを述べている、という意味です。
 
 **サブエージェント** - ダッシュボードでサブエージェント専用モデルを選択できます。
 すべての有効なプロバイダーのモデルと、Codex アカウントのネイティブ GPT モデルが
