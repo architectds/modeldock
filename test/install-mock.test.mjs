@@ -277,6 +277,12 @@ function writeFakeLaunchctl(binDir, logPath) {
     path.join(binDir, "launchctl"),
     `#!/bin/sh
 echo "$*" >> "$MODELDOCK_FAKE_LAUNCHCTL_LOG"
+if [ "$1" = "print" ]; then
+  # This shim records plist setup but cannot actually launch a daemon. Report
+  # no managed service so restart.sh exercises its real POSIX stop/start path
+  # instead of accepting a fake launchctl kickstart as readiness.
+  exit 1
+fi
 if [ "$1" = "list" ]; then
   echo "-	0	com.modeldock.gateway"
 fi
