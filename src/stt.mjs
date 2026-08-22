@@ -5,7 +5,7 @@
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,7 +103,7 @@ async function runPowerShell(script, vars = {}) {
 export async function sttTranscribe({ file = "", language = "auto", output = "" } = {}) {
   if (!file) throw new Error("hear requires a file path");
   if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
-  if (process.platform === "darwin") return transcribeWithMacHelper({ file, language });
+  if (process.platform === "darwin") return transcribeWithMacHelper({ file, language, output });
   const cultures = await probeSapi();
   if (!cultures.length) throw new Error("no Windows SAPI recognizer available");
   // Only ever hand PowerShell a culture we actually resolved, or a well-formed BCP-47
@@ -174,7 +174,7 @@ async function findMacHelper() {
   return null;
 }
 
-async function transcribeWithMacHelper({ file, language }) {
+async function transcribeWithMacHelper({ file, language, output }) {
   const helper = await findMacHelper();
   if (!helper) {
     throw new Error(
@@ -182,10 +182,18 @@ async function transcribeWithMacHelper({ file, language }) {
     );
   }
   const culture = macLocale(String(language || "auto"));
-  const { stdout } = await run(helper, [file, culture], {
-    timeout: MAC_HELPER_TIMEOUT_MS,
-    maxBuffer: 16 * 1024 * 1024,
-  });
+  const prepared = await prepareMacAudio(file, output);
+  let stdout;
+  try {
+    ({ stdout } = await run(helper, [prepared.file, culture], {
+      timeout: MAC_HELPER_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+    }));
+  } finally {
+    if (prepared.temporary) {
+      try { unlinkSync(prepared.file); } catch { /* temp cleanup is best effort */ }
+    }
+  }
   let result;
   try {
     result = JSON.parse(String(stdout || "{}"));
@@ -197,6 +205,24 @@ async function transcribeWithMacHelper({ file, language }) {
     confidence: Number(result.confidence) || 0,
     language: String(result.language || culture),
   };
+}
+
+async function prepareMacAudio(file, output) {
+  // AVAudioFile handles WAV, AIFF, CAF, M4A and MP3 directly. It does not
+  // decode the WebM/Opus format emitted by the local `speak` tool, so preserve
+  // that public hear contract by converting only those formats through ffmpeg.
+  const extension = path.extname(file).toLowerCase();
+  if (!new Set([".webm", ".opus", ".ogg"]).has(extension)) return { file, temporary: false };
+  const ffmpeg = await findFfmpegPath();
+  if (!ffmpeg) {
+    throw new Error("ffmpeg is required to transcribe WebM/Opus audio on macOS; install it (for example: brew install ffmpeg) and retry");
+  }
+  const wav = output || path.join(tmpdir(), `modeldock-stt-${Date.now()}-${process.pid}.wav`);
+  await run(ffmpeg, ["-y", "-i", file, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav], {
+    timeout: 120_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return { file: wav, temporary: !output };
 }
 
 function macLocale(language) {
@@ -212,7 +238,8 @@ function macLocale(language) {
 
 async function findFfmpegPath() {
   try {
-    const { stdout } = await run("where.exe", ["ffmpeg"], { timeout: 10_000, windowsHide: true });
+    const [command, args] = process.platform === "win32" ? ["where.exe", ["ffmpeg"]] : ["which", ["ffmpeg"]];
+    const { stdout } = await run(command, args, { timeout: 10_000, windowsHide: true });
     return stdout.split(/\r?\n/)[0].trim() || null;
   } catch {
     return null;

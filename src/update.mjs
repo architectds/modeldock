@@ -41,6 +41,7 @@ const MAX_ROLLBACK_SNAPSHOTS = 2;
 const DEPLOY_TARGETS = {
   "modeldock.mjs": { dest: ["dist", "modeldock.mjs"] },
   "mcp-standalone.mjs": { dest: ["dist", "mcp-standalone.mjs"] },
+  "modeldock-stt-helper": { dest: ["dist", "modeldock-stt-helper"], platforms: ["darwin"], mode: 0o755 },
   "start-hidden.ps1": { dest: ["scripts", "start-hidden.ps1"], platforms: ["win32"] },
   "restart.ps1": { dest: ["scripts", "restart.ps1"], platforms: ["win32"] },
   "recover.ps1": { dest: ["scripts", "recover.ps1"], platforms: ["win32"] },
@@ -181,12 +182,11 @@ function backupPath(target) {
   return `${target}.${process.pid}.update-backup`;
 }
 
-function writeStagedFile(body, target) {
+function writeStagedFile(body, target, mode = 0o644) {
   const tmp = stagedPath(target);
-  // Keep POSIX launchers executable after an update. The installer chmods these
+  // Keep executables executable after an update. The installer chmods these
   // files, but replacing a file with a newly-created temp file would otherwise
   // silently drop that mode bit.
-  const mode = target.endsWith(".sh") ? 0o755 : 0o644;
   removeFileIfPresent(tmp);
   writeFileSync(tmp, body, { mode });
   return tmp;
@@ -210,7 +210,7 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
       if (existsSync(item.dest) && !statSync(item.dest).isFile()) {
         throw new Error(`Update destination is not a file: ${item.dest}`);
       }
-      const stage = writeStagedFile(item.body, item.dest);
+      const stage = writeStagedFile(item.body, item.dest, item.mode || (item.dest.endsWith(".sh") ? 0o755 : 0o644));
       const backup = backupPath(item.dest);
       const existed = existsSync(item.dest);
       const preparedItem = { ...item, stage, backup, existed };

@@ -60,6 +60,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: node --test test/stt-mac-helper.test.mjs
       # Lifecycle test (native macOS install.sh + fake launchctl sandbox).
       # tee the test output and surface the tail in the run summary on failure:
       # summaries are readable without signing in, job logs are not, and this

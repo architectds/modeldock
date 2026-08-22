@@ -5,7 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="$ROOT/dist/modeldock-stt-helper"
 
 mkdir -p "$ROOT/dist"
-swiftc -parse-as-library -O -o "$OUT" "$ROOT/scripts/stt-mac-helper.swift" \
+swiftc -parse-as-library -O -arch arm64 -arch x86_64 -o "$OUT" "$ROOT/scripts/stt-mac-helper.swift" \
   -framework Speech \
   -framework AVFoundation
 

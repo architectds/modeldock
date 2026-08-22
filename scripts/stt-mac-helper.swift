@@ -72,13 +72,19 @@ struct ModelDockSTTMac {
       throw HelperError("could not determine an analyzer audio format")
     }
     let (inputSequence, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
+    // Start consuming before feeding. Creating the analysis task after the
+    // file loop would make AsyncStream retain every decoded block for a long
+    // recording, despite the per-block allocation below being bounded.
+    let analysisTask = Task {
+      try await analyzer.analyzeSequence(inputSequence)
+    }
     let audioFile = try AVAudioFile(forReading: fileURL)
     guard let audioConverter = AVAudioConverter(from: audioFile.processingFormat, to: analyzerFormat) else {
       throw HelperError("could not create audio converter")
     }
 
-    // Feed the analyzer in bounded chunks so long files do not have to be
-    // materialized as a single buffer in memory.
+    // Each decoded block is bounded, and the analyzer consumes the stream as
+    // it is fed, so a long recording is not materialized as one PCM buffer.
     let chunkFrames: AVAudioFrameCount = 44_100 * 15
     while audioFile.framePosition < audioFile.length {
       let remaining = AVAudioFrameCount(audioFile.length - audioFile.framePosition)
@@ -101,7 +107,7 @@ struct ModelDockSTTMac {
     }
     inputContinuation.finish()
 
-    let lastSampleTime = try await analyzer.analyzeSequence(inputSequence)
+    let lastSampleTime = try await analysisTask.value
 
     if let lastSampleTime {
       try await analyzer.finalizeAndFinish(through: lastSampleTime)

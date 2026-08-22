@@ -21,6 +21,7 @@
 #   MODELDOCK_ROOT          install directory             (default: ~/.modeldock)
 #   MODELDOCK_REPO          GitHub repo                   (default: architectds/modeldock)
 #   MODELDOCK_RELEASE_URL   direct asset URL (overrides MODELDOCK_REPO)
+#   MODELDOCK_STT_HELPER_URL direct macOS STT helper asset URL
 #   MODELDOCK_PORT          dashboard port                (default: 4097)
 #   MODELDOCK_NODE_PATH     absolute path to a node executable to prefer
 #   MODELDOCK_FORCE_NODE_DOWNLOAD  set to "1" to always (re)install the bundled node
@@ -251,6 +252,14 @@ BRIDGE="$ROOT/dist/mcp-standalone.mjs"
 echo "  downloading MCP stdio bridge..."
 curl -fL --progress-bar "$BRIDGE_URL" -o "$BRIDGE"
 echo "  saved $BRIDGE"
+MAC_STT_HELPER=""
+if [ "$(uname -s)" = "Darwin" ]; then
+  MAC_STT_HELPER="$ROOT/dist/modeldock-stt-helper"
+  MAC_STT_HELPER_URL="${MODELDOCK_STT_HELPER_URL:-https://github.com/$REPO/releases/latest/download/modeldock-stt-helper}"
+  echo "  downloading macOS speech helper..."
+  curl -fL --progress-bar "$MAC_STT_HELPER_URL" -o "$MAC_STT_HELPER"
+  echo "  saved $MAC_STT_HELPER"
+fi
 
 # Integrity: releases publish a SHA256SUMS covering every asset. Verify the two
 # files just downloaded against it and refuse to leave a corrupt install behind.
@@ -281,6 +290,10 @@ verify_download() {
 }
 verify_download "$BUNDLE" "modeldock.mjs"
 verify_download "$BRIDGE" "mcp-standalone.mjs"
+if [ -n "$MAC_STT_HELPER" ]; then
+  verify_download "$MAC_STT_HELPER" "modeldock-stt-helper"
+  chmod +x "$MAC_STT_HELPER"
+fi
 echo "  release assets verified against SHA256SUMS"
 
 # Background launcher (same content as the repo's scripts/start-hidden.sh). Written by

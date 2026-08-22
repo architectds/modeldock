@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically, scheduleRestart } from "../src/update.mjs";
@@ -223,6 +223,7 @@ test("createUpdater.apply refuses a tampered migration installer without changin
   const bridgeAssets = {
     "modeldock.mjs": "new",
     "mcp-standalone.mjs": "new bridge",
+    "modeldock-stt-helper": "new Mac helper",
     "install.sh": "tampered installer",
     "start-hidden.sh": "new launcher",
     "restart.sh": "new restart",
@@ -383,6 +384,56 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   for (const relative of manifest.files.map((file) => file.path)) {
     assert.equal(readFileSync(path.join(rollbackDir, relative), "utf8"), oldFiles[relative], `${relative} should have a rollback copy`);
   }
+});
+
+test("createUpdater.apply deploys the macOS STT helper atomically and keeps it executable", async (t) => {
+  const rootDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-mac-stt-"));
+  t.after(() => rmSync(rootDir, { recursive: true, force: true }));
+  writeFileSync(path.join(rootDir, "package.json"), JSON.stringify({ version: "0.2.5" }));
+  mkdirSync(path.join(rootDir, "dist"));
+  mkdirSync(path.join(rootDir, "scripts"));
+  const original = {
+    "dist/modeldock.mjs": "old gateway",
+    "dist/mcp-standalone.mjs": "old bridge",
+    "dist/modeldock-stt-helper": "old helper",
+    "scripts/start-hidden.sh": "old launcher",
+    "scripts/restart.sh": "old restart",
+    "scripts/recover.sh": "old recovery",
+  };
+  for (const [relative, body] of Object.entries(original)) writeFileSync(path.join(rootDir, relative), body);
+  const assets = {
+    "modeldock.mjs": "new gateway".repeat(20_000),
+    "mcp-standalone.mjs": "new bridge",
+    "modeldock-stt-helper": "new helper",
+    "start-hidden.sh": "new launcher",
+    "restart.sh": "new restart",
+    "recover.sh": "new recovery",
+  };
+  const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
+  const fetchImpl = async (url) => {
+    if (url.includes("api.github.com")) return releaseResponse("0.2.6", assets, sums);
+    if (url.endsWith("/SHA256SUMS")) return responseBody(sums);
+    return responseBody(assets[url.split("/").pop()]);
+  };
+  let restarts = 0;
+  const updater = createUpdater({
+    fetchImpl,
+    restartImpl: () => { restarts += 1; },
+    rootDir,
+    platform: "darwin",
+  });
+
+  await updater.check();
+  await updater.apply();
+  assert.equal(restarts, 1);
+  const helper = path.join(rootDir, "dist", "modeldock-stt-helper");
+  assert.equal(readFileSync(helper, "utf8"), assets["modeldock-stt-helper"]);
+  if (process.platform !== "win32") {
+    assert.ok((statSync(helper).mode & 0o111) !== 0, "the downloaded helper must remain executable after rename");
+  }
+  const rollbackName = readFileSync(path.join(rootDir, ".modeldock-rollback", "current"), "utf8").trim();
+  const manifest = JSON.parse(readFileSync(path.join(rootDir, ".modeldock-rollback", rollbackName, "manifest.json"), "utf8"));
+  assert.ok(manifest.files.some((file) => file.path === "dist/modeldock-stt-helper"), "the helper belongs to the same rollback generation");
 });
 
 test("createUpdater.apply leaves an installed layout untouched when a helper is missing", async (t) => {

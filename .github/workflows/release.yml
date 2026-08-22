@@ -10,10 +10,37 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  mac-stt-helper:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Build universal macOS STT helper
+        run: sh scripts/build-stt-mac.sh
+      - name: Smoke test compiled macOS STT helper
+        shell: bash
+        run: |
+          lipo -archs dist/modeldock-stt-helper | grep -qw arm64
+          lipo -archs dist/modeldock-stt-helper | grep -qw x86_64
+          if dist/modeldock-stt-helper >/tmp/modeldock-stt-helper.out 2>/tmp/modeldock-stt-helper.err; then
+            echo "helper accepted a missing audio path" >&2
+            exit 1
+          fi
+          grep -q "usage: modeldock-stt-helper" /tmp/modeldock-stt-helper.err
+      - uses: actions/upload-artifact@v4
+        with:
+          name: modeldock-stt-helper
+          path: dist/modeldock-stt-helper
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: mac-stt-helper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: modeldock-stt-helper
+          path: dist
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -33,7 +60,8 @@ jobs:
           fi
       - name: Generate checksums
         run: |
-          cd dist && sha256sum modeldock.mjs mcp-standalone.mjs > SHA256SUMS
+          chmod +x dist/modeldock-stt-helper
+          cd dist && sha256sum modeldock.mjs mcp-standalone.mjs modeldock-stt-helper > SHA256SUMS
           cd ../scripts && sha256sum install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh >> ../dist/SHA256SUMS
           cd ../dist && cat SHA256SUMS
       # Re-tagging an existing version must refresh its assets rather than fail:
@@ -43,7 +71,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ASSETS="dist/modeldock.mjs dist/mcp-standalone.mjs dist/SHA256SUMS scripts/install.ps1 scripts/install.sh scripts/start-hidden.ps1 scripts/restart.ps1 scripts/recover.ps1 scripts/start-hidden.sh scripts/restart.sh scripts/recover.sh"
+          ASSETS="dist/modeldock.mjs dist/mcp-standalone.mjs dist/modeldock-stt-helper dist/SHA256SUMS scripts/install.ps1 scripts/install.sh scripts/start-hidden.ps1 scripts/restart.ps1 scripts/recover.ps1 scripts/start-hidden.sh scripts/restart.sh scripts/recover.sh"
           # Delete any existing release first (the tag itself is kept). Uploading into
           # one is not safe: deleting a tag turns its release into a draft, and a draft
           # keeps accepting asset uploads while serving 404 on the public download URLs -
@@ -56,7 +84,7 @@ jobs:
             --title "ModelDock $GITHUB_REF_NAME" \
             --generate-notes
           # A green workflow is not proof the assets are reachable - verify.
-          for f in modeldock.mjs mcp-standalone.mjs SHA256SUMS install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh; do
+          for f in modeldock.mjs mcp-standalone.mjs modeldock-stt-helper SHA256SUMS install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh; do
             gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -qx "$f" \
               || { echo "asset $f missing from the published release" >&2; exit 1; }
           done

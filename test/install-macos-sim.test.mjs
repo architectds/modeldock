@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFileSync, existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:http";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -56,13 +56,14 @@ function writeFakeMacTools(binDir) {
 
 // Env shared by the install.sh sandbox. `fakeBin` must already exist and be
 // executable on the POSIX side before install.sh runs.
-function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, port }) {
+function sandboxEnv({ root, fakeBin, launchctlLog, releaseUrl, bridgeUrl, helperUrl, sumsUrl, port }) {
   return {
     MODELDOCK_ROOT: root,
     MODELDOCK_STATE_DIR: `${root}/.modeldock`,
     MODELDOCK_AUTOSTART_PLIST_DIR: `${root}/LaunchAgents`,
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: bridgeUrl,
+    MODELDOCK_STT_HELPER_URL: helperUrl,
     MODELDOCK_SUMS_URL: sumsUrl,
     MODELDOCK_CODEX_HOME: `${root}/codex-home`,
     MODELDOCK_SKIP_OPEN: "1",
@@ -81,14 +82,17 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
 
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const bridge = readFileSync(path.join(repoRoot, "dist", "mcp-standalone.mjs"));
+  const helper = Buffer.from("mac stt helper fixture");
   const assetServer = createServer((req, res) => {
     let data = null;
     if (req.url === "/modeldock.mjs") data = bundle;
     else if (req.url === "/mcp-standalone.mjs") data = bridge;
+    else if (req.url === "/modeldock-stt-helper") data = helper;
     else if (req.url === "/SHA256SUMS") {
       data = Buffer.from(
-        `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
-          `${createHash("sha256").update(bridge).digest("hex")}  mcp-standalone.mjs\n`,
+          `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
+          `${createHash("sha256").update(bridge).digest("hex")}  mcp-standalone.mjs\n` +
+          `${createHash("sha256").update(helper).digest("hex")}  modeldock-stt-helper\n`,
       );
     }
     if (!data) {
@@ -110,6 +114,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   const installer = path.join(repoRoot, "scripts", "install.sh");
   const releaseUrl = `http://127.0.0.1:${assetPort}/modeldock.mjs`;
   const bridgeUrl = `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`;
+  const helperUrl = `http://127.0.0.1:${assetPort}/modeldock-stt-helper`;
   const sumsUrl = `http://127.0.0.1:${assetPort}/SHA256SUMS`;
   const probe = createServer();
   const appPort = await listen(probe);
@@ -120,7 +125,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   let err = "";
   const env = isWindows
     ? undefined
-    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, sumsUrl, port: appPort }) };
+    : { ...process.env, ...sandboxEnv({ root: installDir, fakeBin, launchctlLog, releaseUrl, bridgeUrl, helperUrl, sumsUrl, port: appPort }) };
   if (isWindows) {
     // Drive install.sh from inside WSL: the sandbox dir is on the Windows side,
     // and the fake node/uname/launchctl shims live there too. The runner script
@@ -136,6 +141,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
       launchctlLog: wslLaunchctlLog,
       releaseUrl,
       bridgeUrl,
+      helperUrl,
       sumsUrl,
       port: appPort,
     });
@@ -192,6 +198,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
         launchctlLog: toWslPath(launchctlLog),
         releaseUrl,
         bridgeUrl,
+        helperUrl,
         sumsUrl,
         port: appPort,
       }),
@@ -233,6 +240,11 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
     "runtime-only migration should keep the selected Node binary in the plist");
 
   assert.ok(existsSync(path.join(installDir, ".modeldock", "autostart-initialized")), "installer should record the decision marker");
+  const installedHelper = path.join(installDir, "dist", "modeldock-stt-helper");
+  assert.ok(existsSync(installedHelper), "macOS install should include the verified STT helper");
+  if (!isWindows) {
+    assert.ok((statSync(installedHelper).mode & 0o111) !== 0, "macOS STT helper must stay executable");
+  }
 
   // Reinstall with the decision marker already present: start at login must be
   // (re-)enabled on every install, not only on a first install.
@@ -254,6 +266,7 @@ test("install.sh macOS branch: plist, launchctl, marker (WSL or direct)", async 
   for (const file of [
     path.join(installDir, "dist", "modeldock.mjs"),
     path.join(installDir, "dist", "mcp-standalone.mjs"),
+    path.join(installDir, "dist", "modeldock-stt-helper"),
     path.join(installDir, "scripts", "start-hidden.sh"),
     path.join(installDir, "scripts", "restart.ps1"),
     path.join(installDir, "scripts", "restart.sh"),
