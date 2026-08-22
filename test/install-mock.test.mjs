@@ -538,6 +538,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   //    fake OpenCode upstream that proves routing relays end to end.
   const asset = readFileSync(bundle);
   const bridgeAsset = readFileSync(bridge);
+  const macSttHelper = Buffer.from("mock macOS STT helper\n");
   const assetServer = createServer((req, res) => {
     if (req.url === "/modeldock.mjs") {
       res.writeHead(200, {
@@ -551,10 +552,17 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
         "content-length": bridgeAsset.length,
       });
       res.end(bridgeAsset);
+    } else if (req.url === "/modeldock-stt-helper") {
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": macSttHelper.length,
+      });
+      res.end(macSttHelper);
     } else if (req.url === "/SHA256SUMS") {
       const text =
         `${createHash("sha256").update(asset).digest("hex")}  modeldock.mjs\n` +
-        `${createHash("sha256").update(bridgeAsset).digest("hex")}  mcp-standalone.mjs\n`;
+        `${createHash("sha256").update(bridgeAsset).digest("hex")}  mcp-standalone.mjs\n` +
+        `${createHash("sha256").update(macSttHelper).digest("hex")}  modeldock-stt-helper\n`;
       // GitHub serves extension-less release assets as application/octet-stream,
       // and Windows PowerShell 5.1 then returns .Content as byte[] - the
       // installer must decode it as text or the checksum lookup fails.
@@ -606,6 +614,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: releaseUrl,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${assetPort}/mcp-standalone.mjs`,
+    MODELDOCK_STT_HELPER_URL: `http://127.0.0.1:${assetPort}/modeldock-stt-helper`,
     MODELDOCK_SUMS_URL: `http://127.0.0.1:${assetPort}/SHA256SUMS`,
     MODELDOCK_CODEX_HOME: codexHome,
     MODELDOCK_PORT: String(appPort),
@@ -643,6 +652,9 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   // 4. Assert the layout the installer creates.
   const installedBundle = path.join(installDir, "dist", "modeldock.mjs");
   assert.ok(existsSync(path.join(installDir, "dist", "mcp-standalone.mjs")), "dist/mcp-standalone.mjs should be downloaded");
+  if (process.platform === "darwin") {
+    assert.ok(existsSync(path.join(installDir, "dist", "modeldock-stt-helper")), "macOS should install the verified STT helper");
+  }
   const launcher = path.join(installDir, "scripts", launcherName);
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
@@ -830,6 +842,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
 test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) => {
   const bundle = readFileSync(path.join(repoRoot, "dist", "modeldock.mjs"));
   const fakeBridge = Buffer.from("// fake mcp bridge\n");
+  const macSttHelper = Buffer.from("mock macOS STT helper\n");
   const nodeVer = "24.5.0";
   const distName = "v" + nodeVer;
 
@@ -880,10 +893,14 @@ test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) 
     } else if (url === "/mcp-standalone.mjs") {
       res.writeHead(200, { "content-type": "application/octet-stream", "content-length": fakeBridge.length });
       res.end(fakeBridge);
+    } else if (url === "/modeldock-stt-helper") {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-length": macSttHelper.length });
+      res.end(macSttHelper);
     } else if (url === "/SHA256SUMS") {
       const text =
         `${createHash("sha256").update(bundle).digest("hex")}  modeldock.mjs\n` +
-        `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n`;
+        `${createHash("sha256").update(fakeBridge).digest("hex")}  mcp-standalone.mjs\n` +
+        `${createHash("sha256").update(macSttHelper).digest("hex")}  modeldock-stt-helper\n`;
       res.writeHead(200, { "content-type": "application/octet-stream" });
       res.end(text);
     } else if (url === "/index.json") {
@@ -935,6 +952,7 @@ test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) 
     MODELDOCK_ROOT: installDir,
     MODELDOCK_RELEASE_URL: `http://127.0.0.1:${serverPort}/modeldock.mjs`,
     MODELDOCK_BRIDGE_URL: `http://127.0.0.1:${serverPort}/mcp-standalone.mjs`,
+    MODELDOCK_STT_HELPER_URL: `http://127.0.0.1:${serverPort}/modeldock-stt-helper`,
     MODELDOCK_SUMS_URL: `http://127.0.0.1:${serverPort}/SHA256SUMS`,
     MODELDOCK_NODE_BASE_URL: `http://127.0.0.1:${serverPort}`,
     MODELDOCK_NODE_PATH: oldBundledNode,
