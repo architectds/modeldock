@@ -3,10 +3,39 @@
 # Prefers the built single-file bundle (dist/modeldock.mjs), rebuilding it first when a
 # source checkout has drifted ahead; falls back to the source entry in a git checkout.
 $ErrorActionPreference = "Stop"
+# See restart.ps1: a failed preflight verifier is an expected branch, not a
+# terminating PowerShell error. Its numeric exit code decides whether to launch.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
+function Invoke-GatewayVerifier([string[]]$VerifierArgs, [switch]$Quiet) {
+  try {
+    if ($Quiet) { & $nodeExe @VerifierArgs *> $null }
+    else { & $nodeExe @VerifierArgs }
+    return $LASTEXITCODE
+  } catch {
+    # PowerShell 7 can still surface a non-zero native exit as an exception in
+    # a host that overrides PSNativeCommandUseErrorActionPreference. The exit
+    # code is the verifier contract; only rethrow a genuine PowerShell failure.
+    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+    throw
+  }
+}
 $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
+$envFile = Join-Path $root ".env"
+$port = 4097
+$envPort = 0
+if ($env:MODELDOCK_PORT -and [int]::TryParse($env:MODELDOCK_PORT, [ref]$envPort) -and $envPort -gt 0) { $port = $envPort }
+if (Test-Path -LiteralPath $envFile) {
+  $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
+  $parsed = 0
+  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
+}
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
 # downloads Node 24 LTS there when none is on PATH), then PATH.
@@ -45,6 +74,13 @@ if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path 
 # Re-pick after the potential rebuild so a freshly built bundle wins over src.
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
 
+# A correctly running gateway without a provider deliberately reports 503 from
+# /healthz, so use the shared status/owner verifier rather than treating that
+# normal setup state as down. It also prevents a second hidden launch from
+# masking a foreign listener as our gateway.
+$preflightExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
+if ($preflightExit -eq 0) { exit 0 }
+
 # Log instead of discarding: a hidden start that dies (node missing, port taken, bad
 # bundle) is otherwise completely silent. cmd.exe does the redirection so Start-Process
 # stays on the ShellExecute path - its -RedirectStandard* parameters switch to
@@ -65,4 +101,10 @@ if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 
     Write-Output "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
   }
 }
+$startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
+if ($verifyExit -ne 0) {
+  Write-Output "ERROR: Gateway did not verify after hidden start. Check $log."
+  exit 1
+}

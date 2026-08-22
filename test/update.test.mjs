@@ -722,13 +722,13 @@ test("createUpdater.apply keeps only the two most recent rollback snapshots", as
   assert.equal(current, snapshots[1], "the marker still points at the newest snapshot");
 });
 
-// The Windows restart script stops the gateway that spawned it, so it only
+// The Windows recovery supervisor stops the gateway that spawned it, so it only
 // finishes if it outlives that parent. Measured on Windows 11, a plain child
 // does not: kill or exit the parent right after the spawn and the script is
 // torn down before its Start-Process, which is the "restarting..." that never
 // comes back with the listener gone. Going through cmd's `start` re-parents it.
 // This test pins the spawn shape, since that is the entire fix.
-test("the Windows restart is re-parented so it survives stopping its own parent", () => {
+test("the Windows update supervisor is re-parented and enables verified rollback", () => {
   const calls = [];
   const rootDir = ["C:", "Users", "Chen Bao", ".modeldock"].join(path.sep);
   scheduleRestart(rootDir, {
@@ -744,17 +744,18 @@ test("the Windows restart is re-parented so it survives stopping its own parent"
   assert.equal(command, "cmd.exe", "a direct powershell child dies with the gateway it stops");
   assert.deepEqual(args.slice(0, 4), ["/c", "start", "", "/b"], "start needs its empty window-title argument");
   assert.ok(args.includes("powershell.exe"));
+  assert.ok(args.includes("-RollbackOnFailure"), "the update path must supervise verified failure and rollback");
   assert.ok(args.includes("-Force"), "the takeover flag still reaches the script");
   // A path with a space must arrive as one argument; cmd would otherwise split
   // it and powershell would report a script it cannot find.
   assert.ok(
-    args.some((arg) => arg === path.join(rootDir, "scripts", "restart.ps1")),
+    args.some((arg) => arg === path.join(rootDir, "scripts", "recover.ps1")),
     "the script path stays a single argument",
   );
   assert.notEqual(options.detached, true, "a detached powershell never executes the script on Windows");
 });
 
-test("the POSIX restart stays detached rather than going through cmd", () => {
+test("the POSIX update supervisor stays detached and enables verified rollback", () => {
   const calls = [];
   scheduleRestart("/home/u/.modeldock", {
     spawnImpl: (command, args, options) => {
@@ -764,5 +765,7 @@ test("the POSIX restart stays detached rather than going through cmd", () => {
     platform: "linux",
   });
   assert.equal(calls[0].command, "sh");
+  assert.ok(calls[0].args.includes("--rollback-on-failure"));
+  assert.ok(calls[0].args.includes("--force"));
   assert.equal(calls[0].options.detached, true, "detach is the POSIX way to outlive the parent");
 });

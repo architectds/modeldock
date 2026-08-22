@@ -33,16 +33,28 @@ test("recovery restores a complete version snapshot through the canonical restar
   assert.match(windows, /\.modeldock-rollback/);
   assert.match(windows, /manifest\.json/);
   assert.match(windows, /restored the complete previous version set/);
+  assert.match(windows, /RollbackOnFailure/, "the updater must be able to run recovery non-interactively");
+  assert.match(windows, /File\]::Replace\(\$item\.Stage, \$item\.Target, \$item\.Current\)/, "Windows rollback must retain an atomic backup");
+  assert.match(posix, /--rollback-on-failure/, "POSIX update recovery must be non-interactive too");
   assert.doesNotMatch(windows, /modeldock\.mjs\.prev/);
 });
 
-test("restart.sh cascades listener discovery and refuses an unidentified healthy port", () => {
+test("restart scripts prove the newly launched owner serves the status API", () => {
   const restart = readFileSync(new URL("../scripts/restart.sh", import.meta.url), "utf8");
+  const windows = readFileSync(new URL("../scripts/restart.ps1", import.meta.url), "utf8");
   assert.match(restart, /if command -v lsof[\s\S]*if command -v ss[\s\S]*if command -v fuser/);
   assert.doesNotMatch(restart, /elif command -v ss/);
   assert.match(restart, /refusing a fake restart/);
   assert.match(restart, /started gateway from \$ROOT using \$SERVER/);
-  assert.doesNotMatch(restart, /did not become healthy/, "restart.sh no longer polls healthz after launch");
+  assert.match(restart, /--verify-gateway/);
+  assert.match(restart, /--started-after-ms/);
+  assert.match(windows, /--verify-gateway/);
+  assert.match(windows, /--started-after-ms/);
+  assert.match(windows, /Gateway did not verify/);
+  const hiddenWindows = readFileSync(new URL("../scripts/start-hidden.ps1", import.meta.url), "utf8");
+  const hiddenPosix = readFileSync(new URL("../scripts/start-hidden.sh", import.meta.url), "utf8");
+  assert.match(hiddenWindows, /--verify-gateway/, "the installer/login launcher must use the same verifier");
+  assert.match(hiddenPosix, /--verify-gateway/, "the POSIX launcher must use the same verifier");
   assert.match(
     restart,
     /setsid/,

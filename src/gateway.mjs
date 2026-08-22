@@ -1084,9 +1084,14 @@ function normalizeXaiReasoningItem(item) {
 export function normalizeXaiPayload(payload) {
   if (!payload || typeof payload !== "object") return payload;
   const hasPayloadExternalWebAccess = Object.prototype.hasOwnProperty.call(payload, "external_web_access");
-  const { external_web_access: _externalWebAccess, tools, ...normalized } = payload;
-  if (!Array.isArray(tools)) return hasPayloadExternalWebAccess ? normalized : payload;
-  let changed = hasPayloadExternalWebAccess;
+  // Codex asks OpenAI for opaque reasoning blobs through this include option.
+  // xAI returns a different blob that Codex cannot decode on replay. Its normal
+  // reasoning summary still arrives without the option, so omit it on xAI from
+  // the first turn rather than stripping a bad blob only after it is persisted.
+  const hasInclude = Object.prototype.hasOwnProperty.call(payload, "include");
+  const { external_web_access: _externalWebAccess, include: _include, tools, ...normalized } = payload;
+  if (!Array.isArray(tools)) return hasPayloadExternalWebAccess || hasInclude ? normalized : payload;
+  let changed = hasPayloadExternalWebAccess || hasInclude;
   const xaiTools = tools.map((tool) => {
     if (!tool || typeof tool !== "object" || !Object.prototype.hasOwnProperty.call(tool, "external_web_access")) return tool;
     changed = true;
@@ -1299,7 +1304,7 @@ function stripLocalInstructionText(text) {
     .replace(VERBOSE_ACTION_RULE, "IMPORTANT: perform any action by emitting a function_call in this turn; never describe an action in text.")
     .replace(VERBOSE_RESTART, (match) => {
       const path = match.match(/"([^"]+\\restart\.ps1)"/)?.[1] || "scripts/restart.ps1";
-      return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for the "started gateway" line.`;
+      return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for the "verified gateway" line.`;
     })
     .replace(AGENT_BLOCK_RE, "")
     .replace(APPS_INSTRUCTIONS_RE, "")

@@ -841,7 +841,27 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
   await assertGatewayMcpTools(appPort, callerKey);
 
-  // 9. Stop the final gateway so cleanup can remove the temp install dir.
+  // 9. Run the exact installed restart helper. This is intentionally not a
+  // string assertion: it proves a release-like bundle creates its fresh owner,
+  // serves /api/status, and reports verified only after the full handoff.
+  const installedRestart = path.join(installDir, "scripts", restartScriptName);
+  const restarted = isWindows
+    ? spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installedRestart], { env, stdio: ["ignore", "pipe", "pipe"] })
+    : spawn("/bin/sh", [installedRestart], { env, stdio: ["ignore", "pipe", "pipe"] });
+  let restartOut = "";
+  let restartErr = "";
+  restarted.stdout.on("data", (d) => (restartOut += d));
+  restarted.stderr.on("data", (d) => (restartErr += d));
+  const restartExit = await new Promise((resolve) => restarted.on("close", resolve));
+  assert.equal(restartExit, 0, `installed restart should verify the replacement\n${restartOut}\n${restartErr}`);
+  assert.match(restartOut + restartErr, /verified gateway/i, "restart must not claim success before verification");
+  const restartHealth = await waitForHealth(appPort);
+  assert.ok(restartHealth.up, `gateway should stay up after verified restart\n${restartOut}\n${restartErr}`);
+  assert.equal(restartHealth.status, 200);
+  await assertRoutingWorks(appPort, "modeldock-relay-ok", callerKey);
+  await assertGatewayMcpTools(appPort, callerKey);
+
+  // 10. Stop the final gateway so cleanup can remove the temp install dir.
   killByPort(appPort);
   assert.ok(await waitForPortFree(appPort), "final gateway should stop");
 });
@@ -1231,4 +1251,39 @@ test("recover menu repairs a lost autostart Run key", async (t) => {
   const untouched = runRecover();
   assert.ok(!untouched.includes("re-enabled"), "no decision mark means no decision; recover must not enable autostart");
   assert.equal(readWinRunValue(keyPath, "ModelDock"), null, "no Run key should be written without a decision mark");
+});
+
+test("update recovery restores the complete snapshot after verified restart failure", (t) => {
+  if (!isWindows) {
+    t.skip("the Windows recovery supervisor is covered natively on this runner");
+    return;
+  }
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-update-recover-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scripts = path.join(root, "scripts");
+  const dist = path.join(root, "dist");
+  const snapshot = path.join(root, ".modeldock-rollback", "before-update");
+  mkdirSync(scripts, { recursive: true });
+  mkdirSync(dist, { recursive: true });
+  mkdirSync(path.join(snapshot, "scripts"), { recursive: true });
+  mkdirSync(path.join(snapshot, "dist"), { recursive: true });
+  writeFileSync(path.join(scripts, "recover.ps1"), readFileSync(path.join(repoRoot, "scripts", "recover.ps1"), "utf8"));
+  writeFileSync(path.join(dist, "modeldock.mjs"), "new broken gateway");
+  writeFileSync(path.join(scripts, "restart.ps1"), "exit 1\n");
+  writeFileSync(path.join(snapshot, "dist", "modeldock.mjs"), "old working gateway");
+  writeFileSync(path.join(snapshot, "scripts", "restart.ps1"), "exit 0\n");
+  writeFileSync(path.join(snapshot, "manifest.json"), JSON.stringify({ files: [
+    { path: "dist/modeldock.mjs", existed: true },
+    { path: "scripts/restart.ps1", existed: true },
+  ] }));
+  writeFileSync(path.join(root, ".modeldock-rollback", "current"), "before-update\n");
+
+  const output = execFileSync(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(scripts, "recover.ps1"), "-RollbackOnFailure"],
+    { env: { ...process.env, MODELDOCK_STATE_DIR: path.join(root, "state") }, encoding: "utf8" },
+  );
+  assert.match(output, /restored the complete previous version set/i);
+  assert.equal(readFileSync(path.join(dist, "modeldock.mjs"), "utf8"), "old working gateway");
+  assert.equal(readFileSync(path.join(scripts, "restart.ps1"), "utf8"), "exit 0\n");
 });

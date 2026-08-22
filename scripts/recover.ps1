@@ -1,7 +1,17 @@
-# ModelDock manual recovery menu.
-# Choose gateway restart or restore the last native Codex configuration.
+# ModelDock recovery. Without switches it shows the manual menu; the updater
+# uses -RollbackOnFailure to supervise a newly deployed version silently.
+
+param(
+  [switch]$RollbackOnFailure,
+  [switch]$Force
+)
 
 $ErrorActionPreference = "Stop"
+# Restart failures are inspected through $LASTEXITCODE so this supervisor can
+# restore the snapshot. Do not let PowerShell 7 convert them into a throw first.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 $root = Split-Path -Parent $PSScriptRoot
 # Seed from the environment before consulting .env, matching recover.sh and
 # restart.ps1. Reading only .env meant a gateway told to use another port by
@@ -83,9 +93,12 @@ function Restore-PreviousUpdate {
       $current = "$target.rollback-current-$PID"
       Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
       [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
-      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
-      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
       $restore = [bool]$entry.existed
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      # File.Replace creates the backup itself when restoring over an existing
+      # file. For a deletion rollback we still need an explicit copy because
+      # there is no replacement operation to generate one.
+      if ($currentExisted -and -not $restore) { Copy-Item -LiteralPath $target -Destination $current -Force }
       if ($restore) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
         if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -99,7 +112,7 @@ function Restore-PreviousUpdate {
     foreach ($item in $prepared) {
       if ($item.Restore) {
         if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
-          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+          [System.IO.File]::Replace($item.Stage, $item.Target, $item.Current)
         } else {
           Move-Item -LiteralPath $item.Stage -Destination $item.Target
         }
@@ -129,8 +142,16 @@ function Restart-Gateway {
   if (-not (Test-Path -LiteralPath $restart)) {
     throw "restart.ps1 is missing from $root"
   }
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
-  if ($LASTEXITCODE -ne 0) {
+  $restartArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $restart)
+  if ($Force) { $restartArgs += "-Force" }
+  & powershell @restartArgs
+  $restartExit = $LASTEXITCODE
+  if ($restartExit -ne 0) {
+    # A refusal means we never established ownership of the listener. Do not
+    # replace a version set while an unrelated process may still be serving.
+    if ($restartExit -eq 2 -or $restartExit -eq 3) {
+      throw "gateway restart was refused before a replacement could be verified"
+    }
     # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
     # the complete snapshot transactionally before retrying the old restart.
     if (Restore-PreviousUpdate) {
@@ -193,6 +214,16 @@ function Restore-Native {
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
+}
+
+if ($RollbackOnFailure) {
+  try {
+    Restart-Gateway
+  } catch {
+    Write-Error $_.Exception.Message
+    exit 1
+  }
+  exit 0
 }
 
 Write-Output ""

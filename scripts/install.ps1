@@ -245,10 +245,39 @@ $launcher = Join-Path $root "scripts\start-hidden.ps1"
 # Prefers the built single-file bundle (dist/modeldock.mjs), rebuilding it first when a
 # source checkout has drifted ahead; falls back to the source entry in a git checkout.
 $ErrorActionPreference = "Stop"
+# See restart.ps1: a failed preflight verifier is an expected branch, not a
+# terminating PowerShell error. Its numeric exit code decides whether to launch.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
+
+function Invoke-GatewayVerifier([string[]]$VerifierArgs, [switch]$Quiet) {
+  try {
+    if ($Quiet) { & $nodeExe @VerifierArgs *> $null }
+    else { & $nodeExe @VerifierArgs }
+    return $LASTEXITCODE
+  } catch {
+    # PowerShell 7 can still surface a non-zero native exit as an exception in
+    # a host that overrides PSNativeCommandUseErrorActionPreference. The exit
+    # code is the verifier contract; only rethrow a genuine PowerShell failure.
+    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+    throw
+  }
+}
 $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
+$envFile = Join-Path $root ".env"
+$port = 4097
+$envPort = 0
+if ($env:MODELDOCK_PORT -and [int]::TryParse($env:MODELDOCK_PORT, [ref]$envPort) -and $envPort -gt 0) { $port = $envPort }
+if (Test-Path -LiteralPath $envFile) {
+  $line = Select-String -Path $envFile -Pattern '^MODELDOCK_PORT=' | Select-Object -First 1
+  $parsed = 0
+  if ($line -and [int]::TryParse(($line.Line -replace '^MODELDOCK_PORT=', ''), [ref]$parsed) -and $parsed -gt 0) { $port = $parsed }
+}
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
 
 # Prefer an explicit path, then a bundled Node under <root>\node (the installer
 # downloads Node 24 LTS there when none is on PATH), then PATH.
@@ -287,6 +316,13 @@ if ((Test-Path -LiteralPath (Join-Path $root "src\server.mjs")) -and (Test-Path 
 # Re-pick after the potential rebuild so a freshly built bundle wins over src.
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
 
+# A correctly running gateway without a provider deliberately reports 503 from
+# /healthz, so use the shared status/owner verifier rather than treating that
+# normal setup state as down. It also prevents a second hidden launch from
+# masking a foreign listener as our gateway.
+$preflightExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
+if ($preflightExit -eq 0) { exit 0 }
+
 # Log instead of discarding: a hidden start that dies (node missing, port taken, bad
 # bundle) is otherwise completely silent. cmd.exe does the redirection so Start-Process
 # stays on the ShellExecute path - its -RedirectStandard* parameters switch to
@@ -307,7 +343,13 @@ if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 
     Write-Output "WARNING: could not rotate modeldock.log: $($_.Exception.Message)"
   }
 }
+$startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
+if ($verifyExit -ne 0) {
+  Write-Output "ERROR: Gateway did not verify after hidden start. Check $log."
+  exit 1
+}
 '@ | Out-File -FilePath $launcher -Encoding ascii
 
 # Restart script (same content as the repo's scripts/restart.ps1). Written by the
@@ -328,9 +370,19 @@ $restart = Join-Path $root "scripts\restart.ps1"
 #   5. Prints where the gateway started and exits; runtime logs go to modeldock.log.
 
 $ErrorActionPreference = "Stop"
+# PowerShell 7 turns any non-zero native exit into a terminating error when
+# this preference is enabled. The verifier intentionally returns non-zero to
+# let this script print the recovery-safe diagnostic below, so keep its exit
+# code observable through $LASTEXITCODE on hosts that expose this setting.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
+$forceTakeover = $args -contains "-Force"
+$oldPid = 0
 
 # Status lines go to both stdout and stderr. Callers (CI, the model shell, the
 # dashboard) sometimes capture only one stream; a hidden launcher must never
@@ -338,6 +390,18 @@ $envFile = Join-Path $root ".env"
 function Write-Status($message) {
   Write-Output $message
   [Console]::Error.WriteLine($message)
+}
+
+function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
+  try {
+    & $nodeExe @VerifierArgs *> $null
+    return $LASTEXITCODE
+  } catch {
+    # See start-hidden.ps1: an overriding PowerShell host can throw for the
+    # verifier's deliberate non-zero result. Preserve the numeric contract.
+    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+    throw
+  }
 }
 
 # Seed from the environment before consulting .env, matching restart.sh. This script
@@ -373,9 +437,7 @@ if ($listener) {
   # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
   # Must match ownerFilePath() in src/instance-owner.mjs, including the
   # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
-  $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  $forceTakeover = $args -contains "-Force"
   if (-not $forceTakeover) {
     # The listener command line is the ground truth: a listener that provably
     # runs this install's gateway is ours no matter what the owner record says.
@@ -562,6 +624,10 @@ try {
   # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
   # the >> redirection so stdout and stderr share the same log file as the
   # start-hidden launcher (and the "check modeldock.log" guidance).
+  # Record the handoff boundary before the child is launched. The verifier
+  # refuses a stale owner record or the listener from the process we just
+  # stopped, so a previous healthy gateway cannot make this restart look good.
+  $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
@@ -572,17 +638,46 @@ try {
   }
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
+Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
+$verifyArgs = @(
+  $server,
+  "--verify-gateway",
+  "--root", $root,
+  "--port", "$port",
+  "--state-dir", $stateDir,
+  "--started-after-ms", "$startedAfterMs",
+  "--timeout-ms", "15000"
+)
+if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs
+if ($verifyExit -ne 0) {
+  Write-Status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $log."
+  if ($stoppedGateway) {
+    Write-Status "The old gateway was stopped and no verified replacement is serving on port $port."
+  }
+  exit 1
+}
+Write-Status "restart.ps1: verified gateway from $root (logs: $log)"
 exit 0
 '@ | Out-File -FilePath $restart -Encoding ascii
 
 # Manual recovery menu: restart the gateway or restore the native Codex route.
 $recover = Join-Path $root "scripts\recover.ps1"
 @'
-# ModelDock manual recovery menu.
-# Choose gateway restart or restore the last native Codex configuration.
+# ModelDock recovery. Without switches it shows the manual menu; the updater
+# uses -RollbackOnFailure to supervise a newly deployed version silently.
+
+param(
+  [switch]$RollbackOnFailure,
+  [switch]$Force
+)
 
 $ErrorActionPreference = "Stop"
+# Restart failures are inspected through $LASTEXITCODE so this supervisor can
+# restore the snapshot. Do not let PowerShell 7 convert them into a throw first.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 $root = Split-Path -Parent $PSScriptRoot
 # Seed from the environment before consulting .env, matching recover.sh and
 # restart.ps1. Reading only .env meant a gateway told to use another port by
@@ -664,9 +759,12 @@ function Restore-PreviousUpdate {
       $current = "$target.rollback-current-$PID"
       Remove-Item -LiteralPath $stage, $current -Force -ErrorAction SilentlyContinue
       [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($target)) | Out-Null
-      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
-      if ($currentExisted) { Copy-Item -LiteralPath $target -Destination $current -Force }
       $restore = [bool]$entry.existed
+      $currentExisted = Test-Path -LiteralPath $target -PathType Leaf
+      # File.Replace creates the backup itself when restoring over an existing
+      # file. For a deletion rollback we still need an explicit copy because
+      # there is no replacement operation to generate one.
+      if ($currentExisted -and -not $restore) { Copy-Item -LiteralPath $target -Destination $current -Force }
       if ($restore) {
         $source = [System.IO.Path]::GetFullPath((Join-Path $rollbackDir $relative))
         if (-not $source.StartsWith($rollbackPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -680,7 +778,7 @@ function Restore-PreviousUpdate {
     foreach ($item in $prepared) {
       if ($item.Restore) {
         if (Test-Path -LiteralPath $item.Target -PathType Leaf) {
-          [System.IO.File]::Replace($item.Stage, $item.Target, $null)
+          [System.IO.File]::Replace($item.Stage, $item.Target, $item.Current)
         } else {
           Move-Item -LiteralPath $item.Stage -Destination $item.Target
         }
@@ -710,8 +808,16 @@ function Restart-Gateway {
   if (-not (Test-Path -LiteralPath $restart)) {
     throw "restart.ps1 is missing from $root"
   }
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $restart
-  if ($LASTEXITCODE -ne 0) {
+  $restartArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $restart)
+  if ($Force) { $restartArgs += "-Force" }
+  & powershell @restartArgs
+  $restartExit = $LASTEXITCODE
+  if ($restartExit -ne 0) {
+    # A refusal means we never established ownership of the listener. Do not
+    # replace a version set while an unrelated process may still be serving.
+    if ($restartExit -eq 2 -or $restartExit -eq 3) {
+      throw "gateway restart was refused before a replacement could be verified"
+    }
     # A bundle and its bridge/lifecycle helpers are one versioned unit. Restore
     # the complete snapshot transactionally before retrying the old restart.
     if (Restore-PreviousUpdate) {
@@ -774,6 +880,16 @@ function Restore-Native {
   Move-Item -LiteralPath $tmp -Destination $statePath -Force
   Write-Output "Codex native route restored from $backup"
   Write-Output "Fully quit and restart Codex."
+}
+
+if ($RollbackOnFailure) {
+  try {
+    Restart-Gateway
+  } catch {
+    Write-Error $_.Exception.Message
+    exit 1
+  }
+  exit 0
 }
 
 Write-Output ""

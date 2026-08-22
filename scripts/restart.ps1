@@ -11,9 +11,19 @@
 #   5. Prints where the gateway started and exits; runtime logs go to modeldock.log.
 
 $ErrorActionPreference = "Stop"
+# PowerShell 7 turns any non-zero native exit into a terminating error when
+# this preference is enabled. The verifier intentionally returns non-zero to
+# let this script print the recovery-safe diagnostic below, so keep its exit
+# code observable through $LASTEXITCODE on hosts that expose this setting.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
+$forceTakeover = $args -contains "-Force"
+$oldPid = 0
 
 # Status lines go to both stdout and stderr. Callers (CI, the model shell, the
 # dashboard) sometimes capture only one stream; a hidden launcher must never
@@ -21,6 +31,18 @@ $envFile = Join-Path $root ".env"
 function Write-Status($message) {
   Write-Output $message
   [Console]::Error.WriteLine($message)
+}
+
+function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
+  try {
+    & $nodeExe @VerifierArgs *> $null
+    return $LASTEXITCODE
+  } catch {
+    # See start-hidden.ps1: an overriding PowerShell host can throw for the
+    # verifier's deliberate non-zero result. Preserve the numeric contract.
+    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+    throw
+  }
 }
 
 # Seed from the environment before consulting .env, matching restart.sh. This script
@@ -56,9 +78,7 @@ if ($listener) {
   # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
   # Must match ownerFilePath() in src/instance-owner.mjs, including the
   # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
-  $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  $forceTakeover = $args -contains "-Force"
   if (-not $forceTakeover) {
     # The listener command line is the ground truth: a listener that provably
     # runs this install's gateway is ours no matter what the owner record says.
@@ -245,6 +265,10 @@ try {
   # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
   # the >> redirection so stdout and stderr share the same log file as the
   # start-hidden launcher (and the "check modeldock.log" guidance).
+  # Record the handoff boundary before the child is launched. The verifier
+  # refuses a stale owner record or the listener from the process we just
+  # stopped, so a previous healthy gateway cannot make this restart look good.
+  $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
@@ -255,5 +279,24 @@ try {
   }
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
+Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
+$verifyArgs = @(
+  $server,
+  "--verify-gateway",
+  "--root", $root,
+  "--port", "$port",
+  "--state-dir", $stateDir,
+  "--started-after-ms", "$startedAfterMs",
+  "--timeout-ms", "15000"
+)
+if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs
+if ($verifyExit -ne 0) {
+  Write-Status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $log."
+  if ($stoppedGateway) {
+    Write-Status "The old gateway was stopped and no verified replacement is serving on port $port."
+  }
+  exit 1
+}
+Write-Status "restart.ps1: verified gateway from $root (logs: $log)"
 exit 0

@@ -95,6 +95,19 @@ function Gateway-LogTail {
   }
 }
 
+function Verify-InstalledGateway($label) {
+  $bundle = Join-Path $root "dist\modeldock.mjs"
+  if (-not (Test-Path -LiteralPath $bundle)) { throw "installed bundle is missing: $bundle" }
+  $nodeExe = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+  if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction Stop).Source }
+  # This is the same verifier every lifecycle path uses. It validates the
+  # fresh owner and /api/status; /healthz remains a separate provider-ready
+  # check below because a tokenless gateway is still a valid running install.
+  & $nodeExe $bundle --verify-gateway --root $root --port "$port" --state-dir $stateDir --timeout-ms 15000
+  if ($LASTEXITCODE -ne 0) { throw "gateway did not pass shared verification after $label`n$(Gateway-LogTail)" }
+  Write-Step "gateway verified after $label"
+}
+
 try {
   $installer = Join-Path $work "install.ps1"
   $installerUrl = "https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1"
@@ -127,6 +140,7 @@ try {
   if (-not $healthy) {
     throw "gateway did not become healthy at $healthUrl`n$(Gateway-LogTail)"
   }
+  Verify-InstalledGateway "install"
   Write-Step "gateway healthy"
 
   # The installer enables start-at-login by default; assert the Run key entry
@@ -163,6 +177,7 @@ try {
   $restartText = ($restartOut -join "`n").Trim()
   Write-Step $restartText
   if ($restartExit -ne 0) { throw "restart.ps1 exited $restartExit`n$restartText" }
+  Verify-InstalledGateway "restart"
 
   $healthy = $false
   for ($i = 0; $i -lt 40; $i += 1) {
@@ -223,6 +238,7 @@ try {
   $restartText = ($restartOut -join "`n").Trim()
   Write-Step $restartText
   if ($restartExit -ne 0) { throw "restart.ps1 exited $restartExit`n$restartText" }
+  Verify-InstalledGateway "stream-probe restart"
 
   $healthy = $false
   for ($i = 0; $i -lt 40; $i += 1) {

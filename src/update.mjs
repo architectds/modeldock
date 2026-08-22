@@ -375,14 +375,11 @@ export function deployFilesAtomically(items, rootDir, { afterReplace } = {}) {
   }
 }
 
-// Relaunch through the platform restart script, which is the supervisor for an
-// upgrade: it stops the old listener, starts the new gateway, and prints
-// every step. The updater is the gateway itself, so the
-// script is spawned unref'd with -Force (deliberate takeover of our own port;
-// the owner guard's CIM command-line probe can come back empty for elevated
-// processes). No process.exit() here: the restart script stops the old
-// process, and if spawning it fails the current gateway keeps serving instead
-// of leaving the port dead.
+// Relaunch through the platform recovery supervisor. It first runs the shared
+// verified restart, then restores the complete pre-update snapshot if that
+// fresh gateway does not become usable. The updater is the gateway itself, so
+// the supervisor is spawned unref'd and must outlive the process it stops. No
+// process.exit() here: if spawning fails the current gateway keeps serving.
 //
 // stdio is fully detached ("ignore") on every platform. The restart script
 // writes the new gateway's logs to modeldock.log itself, so nothing here needs
@@ -404,9 +401,9 @@ export function scheduleRestart(rootDir, {
   };
   try {
     const [command, args] = platform === "win32"
-      ? ["cmd.exe", ["/c", "start", "", "/b", "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(rootDir, "scripts", "restart.ps1"), "-Force"]]
-      : ["sh", [path.join(rootDir, "scripts", "restart.sh"), "-Force"]];
-    // The restart script's first act is to stop this gateway - its own parent -
+      ? ["cmd.exe", ["/c", "start", "", "/b", "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(rootDir, "scripts", "recover.ps1"), "-RollbackOnFailure", "-Force"]]
+      : ["sh", [path.join(rootDir, "scripts", "recover.sh"), "--rollback-on-failure", "--force"]];
+    // The recovery supervisor's first act is to stop this gateway - its own parent -
     // so it only runs to completion if it outlives us. Measured on Windows 11: a
     // plain spawnImpl child does NOT. With the parent alive the script finishes;
     // with the parent exiting right after the spawn the same child is torn down

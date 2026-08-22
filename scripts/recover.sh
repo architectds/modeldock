@@ -1,10 +1,17 @@
 #!/bin/sh
-# ModelDock manual recovery menu.
-# Choose gateway restart, restore the last native Codex configuration, or repair
-# the start-at-login entry.
+# ModelDock recovery. Without switches it shows the manual menu; the updater
+# uses --rollback-on-failure to supervise a newly deployed version silently.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROLLBACK_ON_FAILURE=0
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --rollback-on-failure) ROLLBACK_ON_FAILURE=1 ;;
+    --force|-Force|-f) FORCE=1 ;;
+  esac
+done
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
@@ -99,7 +106,13 @@ restart_gateway() {
     echo "restart.sh is missing from $ROOT" >&2
     exit 1
   fi
-  if "$restart"; then return; else restart_status=$?; fi
+  if [ "$FORCE" -eq 1 ]; then
+    if "$restart" --force; then return; else restart_status=$?; fi
+  elif "$restart"; then
+    return
+  else
+    restart_status=$?
+  fi
   # Codes 2 and 3 are ownership/PID-safety refusals, not a bad release. Never
   # replace files while a listener we cannot safely stop may still be running.
   if [ "$restart_status" -eq 2 ] || [ "$restart_status" -eq 3 ]; then exit "$restart_status"; fi
@@ -238,6 +251,11 @@ PLISTEOF
     exit 1
   fi
 }
+
+if [ "$ROLLBACK_ON_FAILURE" -eq 1 ]; then
+  restart_gateway
+  exit $?
+fi
 
 echo ""
 echo "ModelDock manual recovery"

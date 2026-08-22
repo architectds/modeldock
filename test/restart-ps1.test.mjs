@@ -119,17 +119,47 @@ test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting"
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(path.join(root, "rebuilt.txt"))}, "1");\n`,
     "utf8",
   );
-  // The fake bundle answers /healthz and records its pid for cleanup.
+  // The fake bundle models the shared verifier protocol as well as the
+  // gateway: a fresh owner plus /api/status, not merely a successful spawn.
   writeFileSync(
     path.join(root, "dist", "modeldock.mjs"),
     `import http from "node:http";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 const port = Number(process.env.MODELDOCK_PORT);
+const stateDir = process.env.MODELDOCK_STATE_DIR;
+const ownerFile = path.join(stateDir, \`owner-\${port}.json\`);
+const args = process.argv.slice(2);
+if (args.includes("--verify-gateway")) {
+  const root = args[args.indexOf("--root") + 1];
+  const startedAfter = Number(args[args.indexOf("--started-after-ms") + 1] || 0);
+  let last = "owner_missing";
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      const owner = JSON.parse(readFileSync(ownerFile, "utf8"));
+      const valid = owner.root === root && owner.port === port && Date.parse(owner.startedAt) >= startedAfter;
+      const status = await fetch(\`http://127.0.0.1:\${port}/api/status\`);
+      if (valid && status.ok) process.exit(0);
+      last = JSON.stringify({ owner, root, startedAfter, valid, status: status.status });
+    } catch (error) {
+      last = String(error?.stack || error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  writeFileSync(${JSON.stringify(path.join(root, "verify-error.txt"))}, last);
+  process.exit(1);
+}
 writeFileSync(${JSON.stringify(path.join(root, "started.txt"))}, String(process.pid));
+writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, root: ${JSON.stringify(root)}, port, startedAt: new Date().toISOString() }));
 http.createServer((req, res) => {
   if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+  if (req.url === "/api/status") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ config: {}, runtime: {} }));
     return;
   }
   res.writeHead(404); res.end();
@@ -151,16 +181,16 @@ http.createServer((req, res) => {
   restart.stdout.on("data", (chunk) => (output += chunk));
   restart.stderr.on("data", (chunk) => (output += chunk));
   const exitCode = await new Promise((resolve) => restart.on("close", resolve));
-  assert.equal(exitCode, 0, output);
-  assert.match(output, /started gateway/);
+  const verifyError = path.join(root, "verify-error.txt");
+  assert.equal(exitCode, 0, `${output}\n${existsSync(verifyError) ? readFileSync(verifyError, "utf8") : ""}`);
+  assert.match(output, /verified gateway/);
   assert.equal(
     existsSync(path.join(root, "rebuilt.txt")),
     true,
     "restart.ps1 must rebuild a stale bundle (src newer than dist) before launching",
   );
-  // restart.ps1 no longer waits for healthz, so the fake gateway may still be
-  // booting when the script exits. Wait for its pid marker before the cleanup
-  // hook tries to kill it, so the temp dir is never held open mid-start.
+  // The verifier has already confirmed readiness, but wait for the marker too
+  // so cleanup can kill the exact fake child it launched.
   const started = path.join(root, "started.txt");
   for (let i = 0; i < 40 && !existsSync(started); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 100));

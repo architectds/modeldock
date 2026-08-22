@@ -14,9 +14,7 @@ if [ -f "$ROOT/.env" ]; then
   ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
-if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
-  exit 0
-fi
+STATE_DIR="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
 NODE_BIN="${MODELDOCK_NODE_PATH:-}"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   # Bundled Node installed by install.sh (or a previous run) wins over PATH so the
@@ -58,6 +56,13 @@ fi
 if [ -f "$ROOT/dist/modeldock.mjs" ]; then
   SERVER="$ROOT/dist/modeldock.mjs"
 fi
+# A correctly running gateway without a provider deliberately reports 503 from
+# /healthz, so use the shared status/owner verifier rather than treating that
+# normal setup state as down. It also prevents a second hidden launch from
+# masking a foreign listener as our gateway.
+if "$NODE_BIN" "$SERVER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
+  exit 0
+fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
@@ -74,7 +79,15 @@ fi
 # with a clean startup block and no error. setsid escapes the session; plain
 # terminals keep working through the nohup fallback.
 if command -v setsid >/dev/null 2>&1; then
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   setsid "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 < /dev/null &
 else
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+fi
+if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+  --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
+  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+  echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2
+  exit 1
 fi

@@ -316,9 +316,7 @@ if [ -f "$ROOT/.env" ]; then
   ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
-if curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz"; then
-  exit 0
-fi
+STATE_DIR="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
 NODE_BIN="${MODELDOCK_NODE_PATH:-}"
 if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
   # Bundled Node installed by install.sh (or a previous run) wins over PATH so the
@@ -360,6 +358,13 @@ fi
 if [ -f "$ROOT/dist/modeldock.mjs" ]; then
   SERVER="$ROOT/dist/modeldock.mjs"
 fi
+# A correctly running gateway without a provider deliberately reports 503 from
+# /healthz, so use the shared status/owner verifier rather than treating that
+# normal setup state as down. It also prevents a second hidden launch from
+# masking a foreign listener as our gateway.
+if "$NODE_BIN" "$SERVER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
+  exit 0
+fi
 cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
@@ -376,9 +381,17 @@ fi
 # with a clean startup block and no error. setsid escapes the session; plain
 # terminals keep working through the nohup fallback.
 if command -v setsid >/dev/null 2>&1; then
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   setsid "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 < /dev/null &
 else
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
+fi
+if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+  --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
+  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+  echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2
+  exit 1
 fi
 EOF
 chmod +x "$LAUNCHER"
@@ -401,9 +414,19 @@ cat > "$RESTART" <<'EOF'
 #   5. Prints where the gateway started and exits; runtime logs go to modeldock.log.
 
 $ErrorActionPreference = "Stop"
+# PowerShell 7 turns any non-zero native exit into a terminating error when
+# this preference is enabled. The verifier intentionally returns non-zero to
+# let this script print the recovery-safe diagnostic below, so keep its exit
+# code observable through $LASTEXITCODE on hosts that expose this setting.
+if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
+$stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
+$forceTakeover = $args -contains "-Force"
+$oldPid = 0
 
 # Status lines go to both stdout and stderr. Callers (CI, the model shell, the
 # dashboard) sometimes capture only one stream; a hidden launcher must never
@@ -411,6 +434,18 @@ $envFile = Join-Path $root ".env"
 function Write-Status($message) {
   Write-Output $message
   [Console]::Error.WriteLine($message)
+}
+
+function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
+  try {
+    & $nodeExe @VerifierArgs *> $null
+    return $LASTEXITCODE
+  } catch {
+    # See start-hidden.ps1: an overriding PowerShell host can throw for the
+    # verifier's deliberate non-zero result. Preserve the numeric contract.
+    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
+    throw
+  }
 }
 
 # Seed from the environment before consulting .env, matching restart.sh. This script
@@ -446,9 +481,7 @@ if ($listener) {
   # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
   # Must match ownerFilePath() in src/instance-owner.mjs, including the
   # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
-  $stateDir = if ($env:MODELDOCK_STATE_DIR) { $env:MODELDOCK_STATE_DIR } else { Join-Path $env:USERPROFILE ".modeldock" }
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  $forceTakeover = $args -contains "-Force"
   if (-not $forceTakeover) {
     # The listener command line is the ground truth: a listener that provably
     # runs this install's gateway is ours no matter what the owner record says.
@@ -635,6 +668,10 @@ try {
   # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
   # the >> redirection so stdout and stderr share the same log file as the
   # start-hidden launcher (and the "check modeldock.log" guidance).
+  # Record the handoff boundary before the child is launched. The verifier
+  # refuses a stale owner record or the listener from the process we just
+  # stopped, so a previous healthy gateway cannot make this restart look good.
+  $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
@@ -645,7 +682,26 @@ try {
   }
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root using $server (logs: $log)"
+Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
+$verifyArgs = @(
+  $server,
+  "--verify-gateway",
+  "--root", $root,
+  "--port", "$port",
+  "--state-dir", $stateDir,
+  "--started-after-ms", "$startedAfterMs",
+  "--timeout-ms", "15000"
+)
+if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs
+if ($verifyExit -ne 0) {
+  Write-Status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $log."
+  if ($stoppedGateway) {
+    Write-Status "The old gateway was stopped and no verified replacement is serving on port $port."
+  }
+  exit 1
+}
+Write-Status "restart.ps1: verified gateway from $root (logs: $log)"
 exit 0
 EOF
 
@@ -689,6 +745,7 @@ if [ -f "$ENV_FILE" ]; then
     *) [ "$ENV_PORT" -gt 0 ] && PORT="$ENV_PORT" ;;
   esac
 fi
+STATE_DIR="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
 
 find_listener_pid() {
   pid=""
@@ -850,10 +907,35 @@ try_launchd_restart() {
   launchctl kickstart -k "$label" >/dev/null 2>&1
 }
 
+# A successful process launch is not a successful restart: the child can bind
+# briefly and then die, or an old listener can survive the handoff. Invoke the
+# verifier embedded in the same bundle that was just launched so Windows,
+# POSIX, installer recovery, and release verification share one definition of
+# ready: a fresh owner from this install plus a working local status API.
+verify_gateway() {
+  if [ -n "$OLD_PID" ]; then
+    if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+      --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
+      --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000 \
+      --previous-pid "$OLD_PID"; then
+      status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
+      return 1
+    fi
+  elif ! "$NODE_BIN" "$SERVER" --verify-gateway \
+    --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
+    --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+    status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
+    return 1
+  fi
+}
+
 check_owner
 
+STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
 if try_launchd_restart; then
-  status "restart.sh: launchd service com.modeldock.gateway restarted"
+  status "restart.sh: launchd service com.modeldock.gateway restarted; verifying readiness"
+  verify_gateway
+  status "restart.sh: verified launchd gateway from $ROOT"
   exit 0
 fi
 
@@ -900,11 +982,15 @@ fi
 # moves the child into a fresh session the reaper cannot reach; a normal
 # terminal keeps working through the nohup fallback.
 if command -v setsid >/dev/null 2>&1; then
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   setsid "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 < /dev/null &
 else
+  STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
 fi
-status "restart.sh: started gateway from $ROOT using $SERVER (logs: $LOG)"
+status "restart.sh: started gateway from $ROOT using $SERVER; verifying readiness (logs: $LOG)"
+verify_gateway
+status "restart.sh: verified gateway from $ROOT (logs: $LOG)"
 exit 0
 EOF
 chmod +x "$RESTART_SH"
@@ -913,12 +999,19 @@ chmod +x "$RESTART_SH"
 RECOVER="$ROOT/scripts/recover.sh"
 cat > "$RECOVER" <<'EOF'
 #!/bin/sh
-# ModelDock manual recovery menu.
-# Choose gateway restart, restore the last native Codex configuration, or repair
-# the start-at-login entry.
+# ModelDock recovery. Without switches it shows the manual menu; the updater
+# uses --rollback-on-failure to supervise a newly deployed version silently.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROLLBACK_ON_FAILURE=0
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --rollback-on-failure) ROLLBACK_ON_FAILURE=1 ;;
+    --force|-Force|-f) FORCE=1 ;;
+  esac
+done
 STATE_DIR="${MODELDOCK_STATE_DIR:-$ROOT}"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
@@ -1013,7 +1106,13 @@ restart_gateway() {
     echo "restart.sh is missing from $ROOT" >&2
     exit 1
   fi
-  if "$restart"; then return; else restart_status=$?; fi
+  if [ "$FORCE" -eq 1 ]; then
+    if "$restart" --force; then return; else restart_status=$?; fi
+  elif "$restart"; then
+    return
+  else
+    restart_status=$?
+  fi
   # Codes 2 and 3 are ownership/PID-safety refusals, not a bad release. Never
   # replace files while a listener we cannot safely stop may still be running.
   if [ "$restart_status" -eq 2 ] || [ "$restart_status" -eq 3 ]; then exit "$restart_status"; fi
@@ -1152,6 +1251,11 @@ PLISTEOF
     exit 1
   fi
 }
+
+if [ "$ROLLBACK_ON_FAILURE" -eq 1 ]; then
+  restart_gateway
+  exit $?
+fi
 
 echo ""
 echo "ModelDock manual recovery"

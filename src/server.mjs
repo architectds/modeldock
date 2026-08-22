@@ -23,6 +23,7 @@ import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { createDerivedFallback } from "./derived-fallback.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
+import { runGatewayVerifierCli } from "./gateway-verifier.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
@@ -2967,6 +2968,10 @@ export async function startServer(config = loadConfig()) {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     },
   };
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) && process.argv.includes("--verify-gateway")) {
+  process.exit(await runGatewayVerifierCli());
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
