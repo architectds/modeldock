@@ -1,7 +1,7 @@
-// Step through a real Codex dump from the very first item, replaying each
-// growing prefix as a real request (real inference) to find exactly where the
-// local 32K model stops fitting. Each row is one real attempt - the history is
-// never thrown at the model in one go.
+// Step through a captured gateway history from the first item, replaying each
+// growing prefix as a local-model diagnostic to find where a 32K model stops
+// fitting. This changes the target and adds a probe turn, so it is not a Codex
+// compatibility replay. Each row is one real local-inference attempt.
 //
 // Usage: node scripts/replay-progressive.mjs
 import { readFileSync, readdirSync } from "node:fs";

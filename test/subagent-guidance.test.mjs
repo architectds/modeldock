@@ -42,7 +42,7 @@ test("promoteCollaborationNewTask is a no-op when the user turn already has the 
   assert.equal(promoteCollaborationNewTask(input), input);
 });
 
-// Live Codex 0.148 spawn: the NEW_TASK header is plaintext, the spawn
+// Observed Codex 0.148 spawn item fragment: the NEW_TASK header is plaintext, the spawn
 // `message` is a sibling encrypted_content part. Native GPT decrypts that
 // channel; DeepSeek only reads part.text, so the promoter used to no-op.
 test("promoteCollaborationNewTask joins a split NEW_TASK header and encrypted payload", () => {

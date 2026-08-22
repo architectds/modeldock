@@ -111,7 +111,7 @@ async function rpcMcp(url, method, params) {
 }
 
 // The installed stdio bridge (dist/mcp-standalone.mjs) is what Codex spawns for
-// [mcp_servers.modeldock]; talk to it over JSON-RPC exactly like Codex does.
+// [mcp_servers.modeldock]; exercise the standard JSON-RPC lifecycle Codex uses.
 function startBridge(bridgePath, gatewayUrl, extraEnv = {}) {
   const child = spawn(process.execPath, [bridgePath], {
     env: { ...process.env, MODELDOCK_GATEWAY_URL: gatewayUrl, MODELDOCK_MEMORY: "0", ...extraEnv },

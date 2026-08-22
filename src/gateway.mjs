@@ -631,8 +631,8 @@ function relocateToolOutputs(items) {
 
 // The only input rewriting the gateway is allowed to do. Everything else in the
 // history must pass through untouched. Tool items are additionally paired so a
-// sliced compact history (call without output, or output without call) cannot
-// fail the whole request under Go's strict validation; paired history survives.
+// sliced compact history (call without output, output without call, or a
+// duplicate call id) cannot fail the whole request under strict validation.
 // Reasoning items get a content-stable id when Codex omitted one: native OpenAI
 // tolerates id-less reasoning, but opencode's deepseek-v4-pro route deserializes
 // each replayed reasoning item as a chat message and rejects the whole history
@@ -697,12 +697,12 @@ function fillProToolCallIds(input) {
   return changed ? out : input;
 }
 
-// A hybrid sparse/full Console Go stream can make Codex persist the same tool
-// call more than once. Replaying that poisoned history fails before the model
-// runs because call_id is globally unique within a Responses request. Keep the
-// first occurrence; normalizeGatewayInput has already retained and relocated
-// only the first matching output, restoring one valid call/output pair.
-function dedupeProToolCalls(input) {
+// A hybrid sparse/full upstream stream can make Codex persist the same tool
+// call more than once. A call_id is globally unique within a Responses request,
+// so every routed provider retains only the first occurrence. The pairing pass
+// has already kept and relocated the first matching output, restoring one valid
+// call/output pair.
+function dedupeToolCalls(input) {
   if (!Array.isArray(input)) return input;
   const seen = new Set();
   let changed = false;
@@ -780,7 +780,7 @@ function appendProToolContinuation(input) {
   // Go translates the history to DeepSeek chat but omits that continuation
   // boundary, so thinking mode rejects the assistant tool-call row for missing
   // reasoning_content. An explicit internal user turn restores the boundary;
-  // the same exact Codex harness payload then continues and produces its final
+  // the observed persisted tool-history shape then continues and produces its final
   // answer. This is strictly Pro+Go input normalization.
   const identity = input
     .filter(isToolOutputItem)
@@ -926,7 +926,7 @@ export async function relayOpaqueCollaboration(input, services, { signal } = {})
 
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
-  const rewritten = dropUnpairedToolItems(input)
+  const rewritten = dedupeToolCalls(dropUnpairedToolItems(input))
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
@@ -969,7 +969,34 @@ function normalizeStandardToolItem(item) {
 // The response path restores custom_tool_call before the item reaches Codex.
 export function normalizeXaiInput(input) {
   if (!Array.isArray(input)) return input;
-  return normalizeGatewayInput(input).map(normalizeStandardToolItem);
+  return normalizeGatewayInput(input).map(normalizeStandardToolItem).map(normalizeXaiReasoningItem);
+}
+
+// A reasoning item Codex replays carries `content: null`, and xAI reads a null
+// there as a different item shape: it tries to decode the item as a compaction
+// blob and answers 400 "Could not decode the compaction blob. Ensure it is
+// unmodified from the compact response" - a message about a feature the turn
+// never used, on a turn whose only fault is a null where an empty list belongs.
+//
+// Isolated on 2026-08-21 by replaying a real thirteen-item history from a
+// session that died on it, against the live endpoint. As captured: 400. The
+// same history with this item's content set to []: 200. With content deleted:
+// 200. With Codex's private passthrough field removed but the null kept: 400
+// again, so the null is the whole of it.
+//
+// The encrypted reasoning blob is not touched. Dropping it was considered and
+// is wrong twice over: xAI replays its own reasoning statelessly without
+// complaint - measured across five replay shapes, all 200 - and DeepSeek's
+// thinking routes require reasoning to come back at all. Losing a working chain
+// of thought to route around a null would be a bad trade in both directions.
+//
+// Applied on every turn rather than only where a null appears, so the history
+// serialises the same way as turns advance and the upstream prefix cache is not
+// invalidated: the same reason rewriteHistoricalImages does not gate on the
+// current turn.
+function normalizeXaiReasoningItem(item) {
+  if (item?.type !== "reasoning" || item.content !== null) return item;
+  return { ...item, content: [] };
 }
 
 // Codex uses this OpenAI-native flag to grant its own backend web access. xAI
@@ -993,6 +1020,7 @@ export function normalizeXaiPayload(payload) {
   });
   return changed ? { ...normalized, tools: xaiTools } : payload;
 }
+
 
 // llama.cpp's /v1/responses parses function_call.arguments with a strict JSON
 // parser. Codex's custom_tool_call.input is often a double-encoded string
@@ -1259,8 +1287,7 @@ export function normalizeOpenCodeFlashInput(input) {
 export function normalizeOpenCodeProInput(input) {
   if (!Array.isArray(input)) return input;
   const normalized = normalizeGatewayInput(input);
-  const deduped = dedupeProToolCalls(normalized);
-  const interleaved = interleaveToolOutputs(deduped);
+  const interleaved = interleaveToolOutputs(normalized);
   const withToolCallIds = fillProToolCallIds(interleaved);
   const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);

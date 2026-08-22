@@ -1,7 +1,6 @@
-// Replay a real Codex request dump through the gate to the local llama.cpp
-// custom endpoint. This is the honest verification: a request Codex actually
-// sent (MODELDOCK_DUMP_ALL=1 captures every body), replayed verbatim except
-// for the model id.
+// Reuse an xAI-bound gateway capture to diagnose a local llama.cpp endpoint.
+// This deliberately changes model, stream, prompt_cache_key, and text, so it
+// is not a verbatim Codex replay and cannot verify Codex compatibility.
 //
 // Usage: node scripts/replay-real-dump.mjs [model]
 import { readFileSync, readdirSync } from "node:fs";

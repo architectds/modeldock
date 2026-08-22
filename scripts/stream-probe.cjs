@@ -7,8 +7,9 @@
 //   client --gateway <url> --keyfile <path>
 //                                POST /c/<key>/v1/responses to the gateway,
 //                                read the SSE stream until response.completed,
-//                                then close the connection exactly like Codex
-//                                does, and finally assert via /api/status that
+//                                then close the connection after the terminal
+//                                event, exercising that gateway state transition,
+//                                and finally assert via /api/status that
 //                                the gateway recorded the request as 200 - not
 //                                as a 499 client-disconnect.
 "use strict";

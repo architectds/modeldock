@@ -231,6 +231,34 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   assert.deepEqual(normalized, input);
 });
 
+test("normalizeGatewayInput keeps one complete pair for a repeated call id", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+    { type: "function_call", id: "fc_first", call_id: "call_duplicate", name: "shell_command", arguments: "{\"command\":\"dir\"}" },
+    { type: "function_call", id: "fc_repeated", call_id: "call_duplicate", name: "shell_command", arguments: "{\"command\":\"dir\"}" },
+    { type: "function_call_output", id: "fco_first", call_id: "call_duplicate", output: "first result" },
+    { type: "function_call_output", id: "fco_repeated", call_id: "call_duplicate", output: "repeated result" },
+  ];
+  const normalized = normalizeGatewayInput(input);
+  assert.deepEqual(
+    normalized.filter((item) => item.call_id === "call_duplicate").map((item) => [item.type, item.id]),
+    [["function_call", "fc_first"], ["function_call_output", "fco_first"]],
+  );
+});
+
+test("normalizeOpenCodeFlashInput inherits duplicate call-id repair", () => {
+  const normalized = normalizeOpenCodeFlashInput([
+    { type: "function_call", id: "fc_first", call_id: "call_duplicate", name: "shell_command", arguments: "{}" },
+    { type: "function_call", id: "fc_repeated", call_id: "call_duplicate", name: "shell_command", arguments: "{}" },
+    { type: "function_call_output", id: "fco_first", call_id: "call_duplicate", output: "first result" },
+    { type: "function_call_output", id: "fco_repeated", call_id: "call_duplicate", output: "repeated result" },
+  ]);
+  assert.deepEqual(
+    normalized.filter((item) => item.call_id === "call_duplicate").map((item) => [item.type, item.id]),
+    [["function_call", "fc_first"], ["function_call_output", "fco_first"]],
+  );
+});
+
 test("normalizeOpenCodeProInput fills reasoning ids missing from Codex's wire input", () => {
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },

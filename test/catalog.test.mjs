@@ -22,9 +22,9 @@ function configStub() {
 }
 
 function staleNativeEntry() {
-  // Capture a complete current shape, then remove exactly the field absent from
-  // the user's 0.149 native cache. This is a realistic old capture, not a
-  // fabricated partial model whose unrelated omissions obscure the parser test.
+  // Start with a complete generated schema, then remove exactly the field that
+  // older native-catalog files lack. This isolates the migration behavior from
+  // unrelated omissions; it is not a captured Codex catalog.
   const entry = structuredClone(catalogFor(configStub()).models[0]);
   entry.slug = "gpt-5.6-sol";
   entry.display_name = "GPT-5.6 Sol";
@@ -54,7 +54,7 @@ test("catalogFor writes per-model base instructions for vision capability", () =
   assert.ok(!flashVision.base_instructions.includes("TEXT-ONLY"), "OpenCode Go Flash Vision Exp receives direct-vision instructions");
 });
 
-test("a stale native capture is upgraded to the current required catalog schema", () => {
+test("a native catalog entry missing an older field is upgraded to the current schema", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-catalog-"));
   const nativeCatalogFile = path.join(dir, "native-catalog.json");
   writeFileSync(nativeCatalogFile, JSON.stringify({
@@ -297,7 +297,7 @@ test("catalogFor publishes the free models alongside the paid ones", () => {
   assert.ok(slugs.includes("mimo-v2.5-free@opencode-go"));
 });
 
-test("mergeNativeCatalog caps native reasoning levels for an old Codex capture", () => {
+test("mergeNativeCatalog caps native reasoning levels for an old catalog version", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
@@ -332,7 +332,7 @@ test("mergeNativeCatalog caps native reasoning levels for an old Codex capture",
   }
 });
 
-test("mergeNativeCatalog keeps max but withholds ultra on a 0.138-0.143 capture", () => {
+test("mergeNativeCatalog keeps max but withholds ultra on catalog versions 0.138-0.143", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
@@ -366,7 +366,7 @@ test("mergeNativeCatalog keeps max but withholds ultra on a 0.138-0.143 capture"
   }
 });
 
-test("mergeNativeCatalog publishes native max and ultra on a current capture", () => {
+test("mergeNativeCatalog publishes native max and ultra on a current catalog version", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
