@@ -38,7 +38,7 @@ const SPANS = [
   ["action rule", "Never say 'let me read X'", "emitting a function_call"],
   ["vision guidance", "you are a TEXT-ONLY model", "use vision_inspect for any visual task"],
   ["design-first workflow", "image_gen output is a reference", "only run image_gen when the user asks"],
-  ["restart instructions", "starts a fresh detached instance", 'wait for the "started gateway" line'],
+  ["restart instructions", "starts a fresh detached instance", 'wait for the "verified gateway" line'],
 ];
 
 test("catalog.mjs still contains every span the gateway compresses", () => {
