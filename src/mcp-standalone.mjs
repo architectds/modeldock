@@ -37,6 +37,7 @@ const recallScope = (args) => {
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
   inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
+  generateXaiVideo: (args) => callMcpTool("grok_video_gen", args, baseUrl),
   ...(config.memoryEnabled
     ? {
         recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl),

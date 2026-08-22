@@ -74,6 +74,58 @@ test("generateImage fails with a readable error when there is no session token",
   }
 });
 
+test("generateXaiVideo returns xAI's completed temporary URL without copying the video", async () => {
+  const calls = [];
+  const upstreams = createUpstreams({
+    config: { tokens: { xai: "grok-subscription-token" } },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    if (String(url).endsWith("/generations")) {
+      return new Response(JSON.stringify({ request_id: "video_request_1" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (String(url).endsWith("/video_request_1")) {
+      return new Response(JSON.stringify({ status: "done", video: { url: "https://vidgen.x.ai/test.mp4", duration: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected URL ${url}`);
+  };
+  try {
+    const result = await upstreams.generateXaiVideo({
+      prompt: "a blue circle", duration: 1, aspect_ratio: "1:1", resolution: "480p", wait_seconds: 0,
+    });
+    assert.deepEqual(result, { status: "done", request_id: "video_request_1", url: "https://vidgen.x.ai/test.mp4", duration_seconds: 1 });
+    assert.equal(calls.length, 2, "one start and one status request");
+    assert.equal(calls[0].url, "https://api.x.ai/v1/videos/generations");
+    assert.equal(calls[0].init.headers.authorization, "Bearer grok-subscription-token");
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      model: "grok-imagine-video-1.5", prompt: "a blue circle", duration: 1, aspect_ratio: "1:1", resolution: "480p",
+    });
+    assert.equal(calls[1].url, "https://api.x.ai/v1/videos/video_request_1");
+    assert.equal(calls[1].init.headers.authorization, "Bearer grok-subscription-token");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("generateXaiVideo exposes a pending request for a later status call", async () => {
+  const upstreams = createUpstreams({
+    config: { tokens: { xai: "grok-subscription-token" } },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ status: "pending" }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const result = await upstreams.generateXaiVideo({ action: "status", request_id: "video_request_pending" });
+    assert.deepEqual(result, { status: "pending", request_id: "video_request_pending" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("parseMcpTextResult parses a plain JSON tools/call result", () => {
   const body = JSON.stringify({
     jsonrpc: "2.0",

@@ -101,6 +101,35 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
         },
       );
 
+      if (typeof upstreams.generateXaiVideo === "function") {
+        server.registerTool(
+          "grok_video_gen",
+          {
+            title: "Grok Video Generation",
+            description:
+              "Generate a video with the signed-in xAI Grok Imagine service. Generation is asynchronous: this tool waits briefly and returns the temporary video URL when ready, or returns request_id and pending status for a later status call. ModelDock does not copy the video locally.",
+            inputSchema: z.object({
+              action: z.enum(["generate", "status"]).optional().describe("generate starts a video; status checks a pending request"),
+              prompt: z.string().min(1).optional().describe("Video prompt; required for generate"),
+              request_id: z.string().min(1).optional().describe("Pending request id; required for status"),
+              model: z.enum(["grok-imagine-video", "grok-imagine-video-1.5"]).optional().describe("Defaults to grok-imagine-video-1.5"),
+              duration: z.number().int().min(1).max(15).optional().describe("Seconds; defaults to 5"),
+              aspect_ratio: z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]).optional().describe("Defaults to 16:9"),
+              resolution: z.enum(["480p", "720p", "1080p"]).optional().describe("Defaults to 480p"),
+              wait_seconds: z.number().int().min(0).max(300).optional().describe("How long to poll before returning pending; defaults to 60"),
+            }),
+            annotations: { readOnlyHint: false, openWorldHint: false },
+          },
+          async (args) => {
+            try {
+              return textResult(await upstreams.generateXaiVideo(args));
+            } catch (error) {
+              return errorResult(error);
+            }
+          },
+        );
+      }
+
       server.registerTool(
         "speak",
         {

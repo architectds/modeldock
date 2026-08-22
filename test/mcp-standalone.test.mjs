@@ -84,7 +84,7 @@ async function stopBridge(bridge) {
   if (bridge.child.exitCode === null) bridge.child.kill();
 }
 
-test("stdio bridge lists the four tools locally without a gateway round trip", async () => {
+test("stdio bridge lists the media and web tools locally without a gateway round trip", async () => {
   const gateway = await startMockGateway();
   const bridge = startBridge(gateway.url);
   try {
@@ -97,7 +97,7 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
     notify(bridge, "notifications/initialized", {});
     const listed = await rpc(bridge, 2, "tools/list", {});
     const names = listed.result.tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
+    assert.deepEqual(names.sort(), ["grok_video_gen", "hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
     const search = listed.result.tools.find((tool) => tool.name === "web_search_exa");
     assert.equal(
@@ -114,6 +114,8 @@ test("stdio bridge lists the four tools locally without a gateway round trip", a
       false,
       "hear writes an intermediate WAV, so it must not be annotated read-only",
     );
+    const video = listed.result.tools.find((tool) => tool.name === "grok_video_gen");
+    assert.equal(video.annotations?.readOnlyHint, false, "video generation has an external side effect");
   } finally {
     await stopBridge(bridge);
     await gateway.close();

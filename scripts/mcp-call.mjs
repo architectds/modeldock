@@ -10,6 +10,8 @@
 //   node scripts/mcp-call.mjs search <query> [numResults]
 //   node scripts/mcp-call.mjs vision <path> <question> [mode]
 //   node scripts/mcp-call.mjs image <prompt> [size] [model]
+//   node scripts/mcp-call.mjs video <prompt> [duration] [aspect_ratio] [resolution] [wait_seconds]
+//   node scripts/mcp-call.mjs video --status <request_id>
 //   node scripts/mcp-call.mjs speak <text>
 //   node scripts/mcp-call.mjs hear <file>
 //   node scripts/mcp-call.mjs recall <query> [scope_dir] [limit]
@@ -170,12 +172,23 @@ if (command === "tools") {
   if (rest[1]) args.size = rest[1];
   if (rest[2]) args.model = rest[2];
   console.log(await callMcpTool("image_gen", args));
+} else if (command === "video") {
+  const args = rest[0] === "--status"
+    ? { action: "status", request_id: rest[1] }
+    : { action: "generate", prompt: rest[0] };
+  if (args.action === "generate") {
+    if (rest[1]) args.duration = Number(rest[1]);
+    if (rest[2]) args.aspect_ratio = rest[2];
+    if (rest[3]) args.resolution = rest[3];
+    if (rest[4]) args.wait_seconds = Number(rest[4]);
+  }
+  console.log(JSON.stringify(await callMcpTool("grok_video_gen", args), null, 2));
 } else if (command === "speak") {
   console.log(await callMcpTool("speak", { text: rest[0] }));
 } else if (command === "hear") {
   console.log(await callMcpTool("hear", { file: rest[0] }));
 } else {
-  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|speak|hear|recall|store|learn> ...");
+  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|video|speak|hear|recall|store|learn> ...");
   process.exitCode = 2;
 }
 
@@ -184,6 +197,7 @@ function exampleFor(toolName) {
     web_search_exa: 'search "query"',
     vision_inspect: 'vision <path> "question"',
     image_gen: 'image "prompt" [size]',
+    grok_video_gen: 'video "prompt" [duration] [aspect_ratio] [resolution] [wait_seconds]',
     speak: 'speak "text"',
     hear: "hear <file>",
     recall_memory: 'recall "query" [scope_dir]',

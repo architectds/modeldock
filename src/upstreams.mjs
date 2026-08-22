@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readCodexAuth } from "./codex-auth.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
+import { readXaiAuth } from "./xai-auth.mjs";
 import os from "node:os";
 import path from "node:path";
 function upstreamUrl(baseUrl, path) {
@@ -90,6 +91,22 @@ export function parseMcpTextResult(body) {
 // uses for the main relay; the two must name the same host or a native model would
 // answer on the relay and 404 in the harness.
 const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+const XAI_VIDEO_BASE = "https://api.x.ai/v1/videos";
+const XAI_VIDEO_MODELS = new Set(["grok-imagine-video", "grok-imagine-video-1.5"]);
+
+function xaiVideoToken(config) {
+  return config.tokens?.xai || readXaiAuth(config.xaiAuthFile)?.accessToken || "";
+}
+
+function videoResult(body, requestId = "") {
+  const status = String(body?.status || "pending");
+  const result = { status, request_id: requestId };
+  if (status === "done" && typeof body?.video?.url === "string" && body.video.url) {
+    result.url = body.video.url;
+    if (Number.isFinite(Number(body.video.duration))) result.duration_seconds = Number(body.video.duration);
+  }
+  return result;
+}
 
 export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache, getNativeSlugs = () => null }) {
   async function generateImage(args) {
@@ -134,6 +151,87 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       writeFileSync(file, Buffer.from(b64, "base64"));
       finish({ ok: true, httpStatus: response.status, outputBytes: b64.length });
       return `Generated image saved to ${file}`;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
+  // Grok Imagine video is deliberately a small asynchronous bridge rather than
+  // a fake Responses model. The start request gives xAI time to render; status
+  // can be checked later with the returned request id, and a finished job gives
+  // Codex the temporary URL without copying the video into ModelDock storage.
+  async function generateXaiVideo(args = {}) {
+    const action = args.action === "status" ? "status" : "generate";
+    const token = xaiVideoToken(config);
+    if (!token) {
+      throw new Error("No xAI session is connected. Sign in to Grok from the ModelDock dashboard first.");
+    }
+    const finish = metrics.begin("vision", { operation: "grok_video_gen", action, model: String(args.model || "grok-imagine-video-1.5") });
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const requestId = String(args.request_id || "").trim();
+    const readStatus = async (id) => {
+      const response = await fetch(`${XAI_VIDEO_BASE}/${encodeURIComponent(id)}`, {
+        headers: { authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await response.text();
+      let body = {};
+      try { body = JSON.parse(text); } catch { /* reported below */ }
+      if (!response.ok) throw new Error(`Grok video status returned ${response.status}: ${safeErrorBody(text)}`);
+      return body;
+    };
+    try {
+      if (action === "status") {
+        if (!requestId) throw new Error("request_id is required when action is status.");
+        const body = await readStatus(requestId);
+        const result = videoResult(body, requestId);
+        finish.markFirstResponse();
+        finish({ ok: true, status: result.status });
+        return result;
+      }
+
+      const prompt = String(args.prompt || "").trim();
+      if (!prompt) throw new Error("prompt is required when action is generate.");
+      const model = String(args.model || "grok-imagine-video-1.5");
+      if (!XAI_VIDEO_MODELS.has(model)) throw new Error(`Unsupported Grok video model: ${model}.`);
+      const duration = Number(args.duration ?? 5);
+      if (!Number.isInteger(duration) || duration < 1 || duration > 15) {
+        throw new Error("duration must be an integer from 1 to 15 seconds.");
+      }
+      const waitSeconds = Math.max(0, Math.min(300, Number(args.wait_seconds ?? 60) || 0));
+      const response = await fetch(`${XAI_VIDEO_BASE}/generations`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model,
+          prompt,
+          duration,
+          aspect_ratio: args.aspect_ratio || "16:9",
+          resolution: args.resolution || "480p",
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const text = await response.text();
+      let started = {};
+      try { started = JSON.parse(text); } catch { /* reported below */ }
+      if (!response.ok || typeof started.request_id !== "string" || !started.request_id) {
+        throw new Error(`Grok video start returned ${response.status}: ${safeErrorBody(text)}`);
+      }
+      finish.markFirstResponse();
+      const id = started.request_id;
+      const deadline = Date.now() + waitSeconds * 1_000;
+      let body = await readStatus(id);
+      while (body.status === "pending" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        body = await readStatus(id);
+      }
+      const result = videoResult(body, id);
+      if (result.status === "failed" || result.status === "expired") {
+        throw new Error(`Grok video generation ${result.status}.`);
+      }
+      finish({ ok: true, status: result.status, durationSeconds: result.duration_seconds });
+      return result;
     } catch (error) {
       finish({ ok: false, error: error.message });
       throw error;
@@ -434,5 +532,5 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     return { model, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
   }
 
-  return { searchWeb, inspectVision, generateImage, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
+  return { searchWeb, inspectVision, generateImage, generateXaiVideo, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
 }
