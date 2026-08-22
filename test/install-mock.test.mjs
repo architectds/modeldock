@@ -416,6 +416,14 @@ async function waitForPortFree(port, tries = 20) {
   return false;
 }
 
+async function cleanupMockInstall(port, installDir) {
+  killByPort(port);
+  await waitForPortFree(port);
+  // A hidden Windows launcher can release its redirected log handle shortly
+  // after the listener disappears. Let rmSync absorb that normal hand-off.
+  rmSync(installDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+}
+
 function sha256(buf) {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -587,10 +595,9 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   const probe = createServer();
   const appPort = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
-  // Cleanup order matters: stop the background gateway first (it holds the install
-  // dir open), then remove the dir.
-  t.after(() => killByPort(appPort));
-  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  // Keep stop and removal in one hook: t.after hooks run LIFO, so separate
+  // registrations here had deleted the directory before killing the gateway.
+  t.after(() => cleanupMockInstall(appPort, installDir));
   // MODELDOCK_STATE_DIR (below) keeps the owner record inside installDir, but the
   // gateway is stopped with a hard kill, so nothing here can rely on its shutdown
   // hook running. Sweep the real home path too: if the redirect ever regresses,
@@ -933,8 +940,7 @@ test("mock install: upgrades an existing bundled Node 22 to Node 24", async (t) 
   const probe = createServer();
   const appPort = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
-  t.after(() => killByPort(appPort));
-  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  t.after(() => cleanupMockInstall(appPort, installDir));
   const autostartEnv = installAutostartEnv(installDir);
   if (isWindows) t.after(() => deleteWinRegistryKey(autostartEnv.MODELDOCK_AUTOSTART_KEY));
   const oldBundledNode = isWindows
@@ -1097,8 +1103,7 @@ test("mock install: rejects a Node download whose SHA256 does not match", async 
   const probe = createServer();
   const appPort = await listen(probe);
   await new Promise((resolve) => probe.close(resolve));
-  t.after(() => killByPort(appPort));
-  t.after(() => rmSync(installDir, { recursive: true, force: true }));
+  t.after(() => cleanupMockInstall(appPort, installDir));
   const autostartEnv = installAutostartEnv(installDir);
   if (isWindows) t.after(() => deleteWinRegistryKey(autostartEnv.MODELDOCK_AUTOSTART_KEY));
 

@@ -1,8 +1,8 @@
 // Startup update check + one-click apply.
 //
 // Source of truth is the newest GitHub Release of MODELDOCK_UPDATE_REPO (default
-// architectds/modeldock). The check runs once at startup (fire-and-forget); the
-// dashboard shows a small Update button when a newer version exists. Applying:
+// architectds/modeldock). The check runs at startup and periodically thereafter;
+// the dashboard shows a small Update button when a newer version exists. Applying:
 //   - git checkout (a .git directory next to src/): `git pull --ff-only`
 //   - installed bundle: download and atomically deploy the complete platform
 //     layout from the newest release
@@ -119,6 +119,54 @@ function updateRepo() {
 // button reliable. Without a token the check still runs anonymously.
 function updateToken() {
   return process.env.MODELDOCK_GITHUB_TOKEN || process.env.GITHUB_TOKEN || "";
+}
+
+function latestDownloadUrl(repo, asset) {
+  return `https://github.com/${repo}/releases/latest/download/${asset}`;
+}
+
+// The public GitHub API limits anonymous callers to 60 requests/hour per IP.
+// `releases/latest/download/<asset>` is the official CDN-backed release route
+// and its first redirect carries the immutable tag we need to build the same
+// verified asset URLs. It is only a fallback for anonymous API rate limits;
+// configured tokens keep the API as their sole source of truth.
+export function parseLatestDownloadRedirect(location, repo) {
+  if (!location) return null;
+  let url;
+  try {
+    url = new URL(location, "https://github.com");
+  } catch {
+    return null;
+  }
+  if (url.origin !== "https://github.com") return null;
+  const prefix = `/${repo}/releases/download/v`;
+  const suffix = `/${SUMS_NAME}`;
+  if (!url.pathname.startsWith(prefix) || !url.pathname.endsWith(suffix)) return null;
+  const version = decodeURIComponent(url.pathname.slice(prefix.length, -suffix.length));
+  if (!/^\d+(?:\.\d+){1,3}$/.test(version)) return null;
+  const releaseBase = `https://github.com/${repo}/releases/download/v${version}`;
+  const assets = Object.fromEntries(Object.keys(DEPLOY_TARGETS).map((asset) => [asset, `${releaseBase}/${asset}`]));
+  return {
+    available: false,
+    latestVersion: version,
+    assetUrl: assets[ASSET_NAME],
+    sumsUrl: `${releaseBase}/${SUMS_NAME}`,
+    notesUrl: `https://github.com/${repo}/releases/tag/v${version}`,
+    assets,
+  };
+}
+
+async function checkLatestDownloadRedirect(repo, fetchImpl) {
+  const response = await fetchImpl(latestDownloadUrl(repo, SUMS_NAME), {
+    redirect: "manual",
+    signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
+    headers: { "user-agent": "modeldock-updater" },
+  });
+  const parsed = parseLatestDownloadRedirect(response.headers?.get?.("location"), repo);
+  if (!parsed || response.status < 300 || response.status >= 400) {
+    throw new Error(`Release fallback check: HTTP ${response.status}`);
+  }
+  return parsed;
 }
 
 function isGitCheckout(rootDir) {
@@ -470,12 +518,20 @@ export function createUpdater({
       };
       const token = updateToken();
       if (token) headers.authorization = `Bearer ${token}`;
-      const response = await fetchImpl(`https://api.github.com/repos/${updateRepo()}/releases/latest`, {
+      const repo = updateRepo();
+      const response = await fetchImpl(`https://api.github.com/repos/${repo}/releases/latest`, {
         signal: AbortSignal.timeout(CHECK_TIMEOUT_MS),
         headers,
       });
-      if (!response.ok) throw new Error(`Release check: HTTP ${response.status}`);
-      const parsed = parseLatestRelease(await response.json(), state.currentVersion);
+      let parsed;
+      if (response.ok) {
+        parsed = parseLatestRelease(await response.json(), state.currentVersion);
+      } else if (!token && (response.status === 403 || response.status === 429)) {
+        parsed = await checkLatestDownloadRedirect(repo, fetchImpl);
+      } else {
+        throw new Error(`Release check: HTTP ${response.status}`);
+      }
+      parsed.available = compareVersions(parsed.latestVersion, state.currentVersion) > 0;
       state.available = parsed.available;
       state.latestVersion = parsed.latestVersion || "";
       state.notesUrl = parsed.notesUrl || "";

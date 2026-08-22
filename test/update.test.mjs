@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { compareVersions, parseLatestRelease, parseSumsFile, localVersion, createUpdater, deployFilesAtomically, scheduleRestart } from "../src/update.mjs";
+import { compareVersions, parseLatestRelease, parseLatestDownloadRedirect, parseSumsFile, localVersion, createUpdater, deployFilesAtomically, scheduleRestart } from "../src/update.mjs";
 
 function responseBody(body) {
   const bytes = Buffer.from(body);
@@ -62,6 +62,21 @@ test("parseLatestRelease flags newer releases with the bundle asset", () => {
   assert.equal(parsed.assetUrl, "https://example.com/modeldock.mjs");
   assert.equal(parsed.sumsUrl, "https://example.com/SHA256SUMS");
   assert.equal(parsed.notesUrl, "https://github.com/x/y/releases/tag/v0.2.0");
+});
+
+test("parseLatestDownloadRedirect accepts only the official immutable release redirect", () => {
+  const parsed = parseLatestDownloadRedirect(
+    "https://github.com/architectds/modeldock/releases/download/v0.3.29/SHA256SUMS",
+    "architectds/modeldock",
+  );
+  assert.equal(parsed.latestVersion, "0.3.29");
+  assert.equal(parsed.assetUrl, "https://github.com/architectds/modeldock/releases/download/v0.3.29/modeldock.mjs");
+  assert.equal(parsed.assets["restart.ps1"], "https://github.com/architectds/modeldock/releases/download/v0.3.29/restart.ps1");
+  assert.equal(
+    parseLatestDownloadRedirect("https://release-assets.githubusercontent.com/asset", "architectds/modeldock"),
+    null,
+    "signed asset redirects do not establish a release version",
+  );
 });
 
 test("parseSumsFile reads sha256sum output", () => {
@@ -127,6 +142,29 @@ test("createUpdater.check records errors without throwing", async () => {
   const state = await updater.check();
   assert.equal(state.available, false);
   assert.match(state.error, /503/);
+});
+
+test("createUpdater.check falls back to GitHub latest-download after an anonymous rate limit", async () => {
+  const seen = [];
+  const updater = createUpdater({
+    rootDir: path.join(os.tmpdir(), "modeldock-not-a-checkout"),
+    fetchImpl: async (url, options) => {
+      seen.push({ url, options });
+      if (url.includes("api.github.com")) return { ok: false, status: 403 };
+      return {
+        ok: false,
+        status: 302,
+        headers: { get: (name) => name === "location" ? "https://github.com/architectds/modeldock/releases/download/v99.0.0/SHA256SUMS" : null },
+      };
+    },
+  });
+  const state = await updater.check();
+  assert.equal(state.available, true);
+  assert.equal(state.latestVersion, "99.0.0");
+  assert.equal(state.error, "");
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].url, "https://github.com/architectds/modeldock/releases/latest/download/SHA256SUMS");
+  assert.equal(seen[1].options.redirect, "manual");
 });
 
 test("createUpdater.apply never falls back to cached release assets when the latest recheck fails", async () => {
