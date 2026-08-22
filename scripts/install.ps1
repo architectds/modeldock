@@ -243,13 +243,22 @@ $verifier = Join-Path $root "scripts\gateway-verifier.mjs"
 // Shared lifecycle verifier. It is deliberately independent of modeldock.mjs:
 // an installer or updater can verify an older released bundle before this
 // version of the bundle itself has been published.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 function normalizedPath(value, platform = process.platform) {
-  const resolved = path.resolve(value);
+  let resolved = path.resolve(value);
+  // Windows can expose the same installed directory once through its long
+  // name and once through an 8.3 name (for example, a launcher inherited from
+  // SYSTEM). The owner record and the installer then name one directory but
+  // string comparison sees two. Canonicalize an existing root before checking
+  // ownership; a missing value still falls back to the diagnostic resolve.
+  try {
+    resolved = realpathSync.native(resolved);
+  } catch {
+    // Let the normal owner-root diagnostic describe a nonexistent path.
+  }
   return platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
@@ -359,7 +368,11 @@ export async function runGatewayVerifierCli(args = process.argv.slice(2), output
   return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Do not derive direct execution from import.meta.url: Node can expose a
+// launched installer helper through a platform-normalized path that differs
+// textually from the module URL (notably on macOS). This flag is exclusive to
+// the lifecycle CLI; imports from the gateway have no such argument.
+if (process.argv.includes("--verify-gateway")) {
   process.exit(await runGatewayVerifierCli());
 }
 '@ | Out-File -FilePath $verifier -Encoding ascii

@@ -63,7 +63,7 @@ test("gateway verifier rejects a stale owner before trusting a listener", async 
   assert.deepEqual(result, { ok: false, reason: "owner_stale" });
 });
 
-test("the built bundle carries the migration verifier for an updater that cannot yet deploy the helper", async (t) => {
+test("the standalone helper and built bundle both carry the migration verifier", async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-verify-bundle-root-"));
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-verify-bundle-state-"));
   const server = http.createServer((req, res) => {
@@ -84,14 +84,19 @@ test("the built bundle carries the migration verifier for an updater that cannot
     startedAt: new Date().toISOString(),
   }));
 
-  const child = spawn(process.execPath, [
-    path.join(repoRoot, "dist", "modeldock.mjs"), "--verify-gateway",
-    "--root", root, "--port", String(port), "--state-dir", stateDir, "--timeout-ms", "500",
-  ], { stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output += chunk; });
-  child.stderr.on("data", (chunk) => { output += chunk; });
-  const code = await new Promise((resolve) => child.on("close", resolve));
-  assert.equal(code, 0, output);
-  assert.match(output, /Gateway verified/);
+  for (const entry of [
+    path.join(repoRoot, "scripts", "gateway-verifier.mjs"),
+    path.join(repoRoot, "dist", "modeldock.mjs"),
+  ]) {
+    const child = spawn(process.execPath, [
+      entry, "--verify-gateway",
+      "--root", root, "--port", String(port), "--state-dir", stateDir, "--timeout-ms", "500",
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    const code = await new Promise((resolve) => child.on("close", resolve));
+    assert.equal(code, 0, `${entry}: ${output}`);
+    assert.match(output, /Gateway verified/);
+  }
 });
