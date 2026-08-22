@@ -9,7 +9,7 @@
 // Usage: node scripts/build.mjs   (or: npm run build)
 
 import { build, transform } from "esbuild";
-import { readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,7 @@ const TEXT_EXTENSIONS = new Set([".html", ".js", ".css", ".svg", ".json", ".txt"
 
 // Only these top-level assets ship in the bundle. Vision eval images stay on disk and
 // are dev-only: loadTaskImage returns null when they are absent and the eval skips.
-const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico", "icon.svg"];
+const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico", "icon.svg", "favicon.png", "favicon.ico"];
 
 // Minify an inlined text asset before it becomes a string literal in the
 // bundle. esbuild's own minify never touches string literals, so without this
@@ -120,4 +120,19 @@ for (const { name, entry } of entries) {
   if (result.errors.length) process.exit(1);
   const size = statSync(out).size;
   console.log(`built ${path.relative(root, out)} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+}
+
+// Build the optional native Mac STT helper when we are on macOS. The helper is
+// a tiny Swift CLI around SpeechAnalyzer/SpeechTranscriber; it is not bundled
+// into the JS bundle, but it should be emitted into dist/ alongside it.
+if (process.platform === "darwin") {
+  const builder = path.join(root, "scripts", "build-stt-mac.sh");
+  if (existsSync(builder)) {
+    const { spawnSync } = await import("node:child_process");
+    const result = spawnSync("sh", ["scripts/build-stt-mac.sh"], {
+      cwd: root,
+      stdio: "inherit",
+    });
+    if (result.status !== 0) process.exit(result.status || 1);
+  }
 }

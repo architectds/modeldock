@@ -1,20 +1,24 @@
-// Local STT (WINDOWS ONLY): transcribe an audio file using the Windows SAPI dictation
-// engine (System.Speech, ships with Windows; no install needed). The audio must be converted
-// to 16kHz mono PCM WAV first; ffmpeg is used when present, otherwise the tool reports
-// that transcription needs ffmpeg. Chinese and English are the primary targets; any
-// installed SAPI recognizer culture works. Non-Windows platforms get available:false.
+// Local STT:
+//   - Windows: Windows SAPI dictation engine (System.Speech).
+//   - macOS: Apple SpeechAnalyzer / SpeechTranscriber via scripts/stt-mac-helper.swift.
+// Other platforms are unavailable by default.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const run = promisify(execFile);
 
 const CHECK_TTL_MS = 10_000;
 let sapiCache = null;
 let sapiCheckedAt = 0;
+let macHelperCache = null;
+let macHelperCheckedAt = 0;
+const MAC_HELPER_TIMEOUT_MS = 180_000;
+const MAC_HELPER_TTL_MS = 10_000;
 
 async function probeSapi() {
   if (process.platform !== "win32") return [];
@@ -32,11 +36,28 @@ async function probeSapi() {
 }
 
 export async function sttStatus() {
-  const cultures = await probeSapi();
   const ffmpeg = await findFfmpeg();
+  if (process.platform === "win32") {
+    const cultures = await probeSapi();
+    return {
+      available: cultures.length > 0,
+      cultures,
+      ffmpeg,
+    };
+  }
+  if (process.platform === "darwin") {
+    const helper = await findMacHelper();
+    return {
+      available: Boolean(helper),
+      cultures: ["auto"],
+      ffmpeg,
+      engine: "speech-analyzer",
+      helper,
+    };
+  }
   return {
-    available: cultures.length > 0,
-    cultures,
+    available: false,
+    cultures: [],
     ffmpeg,
   };
 }
@@ -82,6 +103,7 @@ async function runPowerShell(script, vars = {}) {
 export async function sttTranscribe({ file = "", language = "auto", output = "" } = {}) {
   if (!file) throw new Error("hear requires a file path");
   if (!existsSync(file)) throw new Error(`audio file not found: ${file}`);
+  if (process.platform === "darwin") return transcribeWithMacHelper({ file, language });
   const cultures = await probeSapi();
   if (!cultures.length) throw new Error("no Windows SAPI recognizer available");
   // Only ever hand PowerShell a culture we actually resolved, or a well-formed BCP-47
@@ -123,6 +145,69 @@ export async function sttTranscribe({ file = "", language = "auto", output = "" 
   const text = (out.match(/TEXT:(.*)/) || [])[1]?.trim() || "";
   const conf = parseFloat((out.match(/CONF:(.*)/) || [])[1] || "0");
   return { text, confidence: conf, language: culture };
+}
+
+async function findMacHelper() {
+  if (process.platform !== "darwin") return null;
+  const now = Date.now();
+  if (macHelperCache !== null && now - macHelperCheckedAt < MAC_HELPER_TTL_MS) return macHelperCache;
+  const candidates = [];
+  if (process.env.MODELDOCK_STT_HELPER) candidates.push(String(process.env.MODELDOCK_STT_HELPER));
+  candidates.push(
+    path.join(homedir(), ".modeldock", "dist", "modeldock-stt-helper"),
+    path.join(homedir(), ".modeldock", "bin", "modeldock-stt-helper"),
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "modeldock-stt-helper"),
+  );
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) {
+        macHelperCache = candidate;
+        macHelperCheckedAt = now;
+        return candidate;
+      }
+    } catch {
+      // Keep looking.
+    }
+  }
+  macHelperCache = null;
+  macHelperCheckedAt = now;
+  return null;
+}
+
+async function transcribeWithMacHelper({ file, language }) {
+  const helper = await findMacHelper();
+  if (!helper) {
+    throw new Error(
+      "no Mac STT helper found; build it with swiftc -parse-as-library -O -o dist/modeldock-stt-helper scripts/stt-mac-helper.swift -framework Speech -framework AVFoundation",
+    );
+  }
+  const culture = macLocale(String(language || "auto"));
+  const { stdout } = await run(helper, [file, culture], {
+    timeout: MAC_HELPER_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  let result;
+  try {
+    result = JSON.parse(String(stdout || "{}"));
+  } catch {
+    throw new Error(`Mac STT helper returned invalid JSON: ${String(stdout || "").slice(0, 200)}`);
+  }
+  return {
+    text: String(result.text || "").trim(),
+    confidence: Number(result.confidence) || 0,
+    language: String(result.language || culture),
+  };
+}
+
+function macLocale(language) {
+  const normalized = String(language || "auto").replace(/_/g, "-").toLowerCase();
+  if (normalized === "zh" || normalized.startsWith("zh")) return "zh-CN";
+  if (normalized === "en" || normalized.startsWith("en")) return "en-US";
+  if (/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/i.test(normalized)) {
+    const [lang, region = ""] = normalized.split("-");
+    return region ? `${lang}-${region.toUpperCase()}` : lang;
+  }
+  return "en-US";
 }
 
 async function findFfmpegPath() {
