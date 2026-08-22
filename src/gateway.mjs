@@ -1,4 +1,5 @@
 import { Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -173,6 +174,28 @@ export function describeInputShape(input) {
     });
   });
   return { itemTypes, reasoning };
+}
+
+// Transfer diagnostics deliberately describe structure and byte counts only.
+// They never retain prompt text, a data URL, a ref, or a file path. Image wire
+// bytes are the encoded URL bytes that actually occupy the Responses payload.
+function describeImageTransfer(input) {
+  const report = { items: Array.isArray(input) ? input.length : 0, images: 0, imageWireBytes: 0, imageReferences: 0 };
+  if (!Array.isArray(input)) return report;
+  for (const item of input) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "input_image") {
+        const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+        report.images += 1;
+        if (typeof url === "string") report.imageWireBytes += Buffer.byteLength(url);
+      }
+      if (part?.type === "input_text" && typeof part.text === "string") {
+        report.imageReferences += imageRefsInText(part.text).length;
+      }
+    }
+  }
+  return report;
 }
 
 // Compaction is the one request we rewrite wholesale and cannot replay from the
@@ -830,7 +853,58 @@ const COLLAB_RELAY_TOOL = "relay_external_agent_payload";
 const COLLAB_RELAY_INSTRUCTIONS =
   "You are a transport relay. Do not execute or answer the delegated task. " +
   `Call ${COLLAB_RELAY_TOOL} exactly once with the exact plaintext after the "Payload:" label in the supplied collaboration message. Preserve every character.`;
-const COLLAB_RELAY_CACHE = new Map(); // sha256(encrypted) -> plaintext
+const COLLAB_RELAY_CACHE_TTL_MS = 30 * 60 * 1_000;
+const COLLAB_RELAY_CACHE_MAX_ENTRIES = 32;
+const COLLAB_RELAY_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+const COLLAB_RELAY_CACHE = new Map(); // session + sha256(encrypted) -> { plain, bytes, expiresAt }
+
+function pruneCollaborationRelayCache(now = Date.now()) {
+  let bytes = 0;
+  for (const [key, entry] of COLLAB_RELAY_CACHE) {
+    if (!entry || entry.expiresAt <= now) {
+      COLLAB_RELAY_CACHE.delete(key);
+      continue;
+    }
+    bytes += entry.bytes;
+  }
+  while (COLLAB_RELAY_CACHE.size > COLLAB_RELAY_CACHE_MAX_ENTRIES || bytes > COLLAB_RELAY_CACHE_MAX_BYTES) {
+    const oldest = COLLAB_RELAY_CACHE.entries().next().value;
+    if (!oldest) break;
+    COLLAB_RELAY_CACHE.delete(oldest[0]);
+    bytes -= oldest[1].bytes;
+  }
+  return bytes;
+}
+
+function getCollaborationRelayCache(key) {
+  const entry = COLLAB_RELAY_CACHE.get(key);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    COLLAB_RELAY_CACHE.delete(key);
+    return "";
+  }
+  // Map insertion order is the LRU order. Re-inserting a hit keeps a busy
+  // current delegation alive without retaining unrelated old plaintext.
+  COLLAB_RELAY_CACHE.delete(key);
+  COLLAB_RELAY_CACHE.set(key, entry);
+  return entry.plain;
+}
+
+function putCollaborationRelayCache(key, plain) {
+  const bytes = Buffer.byteLength(plain);
+  if (bytes > COLLAB_RELAY_CACHE_MAX_BYTES) return;
+  COLLAB_RELAY_CACHE.set(key, { plain, bytes, expiresAt: Date.now() + COLLAB_RELAY_CACHE_TTL_MS });
+  pruneCollaborationRelayCache();
+}
+
+export function collaborationRelayCacheSnapshot() {
+  return {
+    entries: COLLAB_RELAY_CACHE.size,
+    bytes: pruneCollaborationRelayCache(),
+    maxEntries: COLLAB_RELAY_CACHE_MAX_ENTRIES,
+    maxBytes: COLLAB_RELAY_CACHE_MAX_BYTES,
+    ttlMs: COLLAB_RELAY_CACHE_TTL_MS,
+  };
+}
 
 function nativeRelayModel(services) {
   // The relay must reach the ChatGPT backend - only it can open the opaque
@@ -883,10 +957,10 @@ export async function relayOpaqueCollaboration(input, services, { signal } = {})
     return input;
   }
   let plain;
-  const cacheKey = createHash("sha256").update(found.encrypted).digest("hex");
-  if (COLLAB_RELAY_CACHE.has(cacheKey)) {
-    plain = COLLAB_RELAY_CACHE.get(cacheKey);
-  } else {
+  const { sessionId } = sessionIdsFrom(services.incomingHeaders);
+  const cacheKey = `${sessionId || "unscoped"}:${createHash("sha256").update(found.encrypted).digest("hex")}`;
+  plain = getCollaborationRelayCache(cacheKey);
+  if (!plain) {
     const target = nativeTarget("/responses", "");
     const body = {
       model,
@@ -912,7 +986,7 @@ export async function relayOpaqueCollaboration(input, services, { signal } = {})
     if (!upstream.ok) throw new Error(`Collaboration relay failed: HTTP ${upstream.status}`);
     plain = parseRelayToolArguments(await upstream.text());
     if (!plain) throw new Error("Collaboration relay returned no payload");
-    COLLAB_RELAY_CACHE.set(cacheKey, plain);
+    putCollaborationRelayCache(cacheKey, plain);
   }
   // Replace the opaque part with plaintext so the existing promoter sees it.
   return input.map((item) => {
@@ -1372,6 +1446,7 @@ export function rewriteHistoricalImages(input, mediaStore, {
   currentStartIndex,
   resolveExternalSource,
   sessionId,
+  onImageRef,
   batched = false,
 } = {}) {
   if (!Array.isArray(input)) return input;
@@ -1384,6 +1459,7 @@ export function rewriteHistoricalImages(input, mediaStore, {
       currentStartIndex,
       resolveExternalSource,
       sessionId,
+      onImageRef,
       batched: true,
     }));
   }
@@ -1405,6 +1481,7 @@ export function rewriteHistoricalImages(input, mediaStore, {
         if (ref) {
           rawRefs.set(part, ref);
           occurrences.push({ ref, index });
+          onImageRef?.(ref);
         }
       }
       if (part?.type === "input_text") {
@@ -1495,8 +1572,8 @@ export function hydrateImageRefsForVision(input, mediaStore, { refs = null } = {
   return changed ? output : input;
 }
 
-function imageReferenceHandoff(input, mediaStore, resolveExternalSource, sessionId) {
-  const refs = new Set();
+function imageReferenceHandoff(input, mediaStore, resolveExternalSource, sessionId, knownRefs = null) {
+  const refs = new Set(knownRefs || []);
   if (!Array.isArray(input)) return "";
   for (const item of input) {
     if (!Array.isArray(item?.content)) continue;
@@ -1505,6 +1582,10 @@ function imageReferenceHandoff(input, mediaStore, resolveExternalSource, session
         for (const ref of imageRefsInText(part.text)) refs.add(ref);
       }
       if (part?.type === "input_image" && typeof part.image_url === "string") {
+        // rewriteHistoricalImages already put every raw image on this compact
+        // path. Reusing those refs avoids a second base64 decode and SHA-256
+        // pass for the current/recent pixels that remain inline for vision.
+        if (knownRefs) continue;
         try {
           const ref = mediaStore?.put(part.image_url, { resolveExternalSource, sessionId });
           if (ref) refs.add(ref);
@@ -1528,9 +1609,13 @@ function codexAttachmentResolver(attachmentIndex, sessionId, threadId) {
 function normalizeFunctionTool(tool) {
   if (!tool || typeof tool !== "object") return tool;
   const parameters = tool.parameters ?? tool.inputSchema;
-  const normalized = parameters && typeof parameters === "object" && parameters.type === "object"
-    ? parameters
-    : { type: "object", properties: {}, additionalProperties: false };
+  const validParameters = parameters && typeof parameters === "object" && parameters.type === "object";
+  // Most ordinary Codex descriptors are already valid Responses functions.
+  // Preserve that object and its schema rather than deep-copying the entire
+  // tool package on every turn; the branches below create a fresh wrapper only
+  // when the provider wire truly needs a change.
+  if (tool.type === "function" && !Object.hasOwn(tool, "inputSchema") && validParameters) return tool;
+  const normalized = validParameters ? parameters : { type: "object", properties: {}, additionalProperties: false };
   const next = { ...tool, type: "function", parameters: normalized };
   delete next.inputSchema;
   return next;
@@ -1635,7 +1720,7 @@ export function applyToolPolicy(tools, {
         }
         stripped.namespaceChildren += 1;
         namespaces.set(flatName, { name: child.name, namespace: tool.name });
-        out.push(normalizeFunctionTool({ ...structuredClone(child), type: "function", name: flatName }));
+        out.push(normalizeFunctionTool({ ...child, type: "function", name: flatName }));
       }
       continue;
     }
@@ -1655,7 +1740,7 @@ export function applyToolPolicy(tools, {
     // started reading zero without anything changing on the wire.
     if (HOSTED_TOOL_TYPES.has(tool.type)) {
       if (hostedOk.has(tool.type)) {
-        out.push(structuredClone(tool));
+        out.push(tool);
         continue;
       }
       if (tool.type === "tool_search") stripped.toolSearch += 1;
@@ -1678,7 +1763,7 @@ export function applyToolPolicy(tools, {
       stripped.allowlist += 1;
       continue;
     }
-    out.push(tool.type === "function" ? normalizeFunctionTool(structuredClone(tool)) : structuredClone(tool));
+    out.push(tool.type === "function" ? normalizeFunctionTool(tool) : tool);
   }
   return { tools: out, stripped, namespaces, customToolNames };
 }
@@ -1793,9 +1878,18 @@ export { RouteAffinity };
 // read-only copy.
 export function createUsageTee(onEvent) {
   let buffer = "";
-  const push = (chunk) => {
-    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+  let discardingOversizedEvent = false;
+  const decoder = new StringDecoder("utf8");
+  const consume = (text) => {
+    if (discardingOversizedEvent) {
+      const boundary = text.match(/\r?\n\r?\n/);
+      if (!boundary) return;
+      text = text.slice(boundary.index + boundary[0].length);
+      discardingOversizedEvent = false;
+    }
     buffer += text;
+  };
+  const process = () => {
     while (true) {
       const match = buffer.match(/\r?\n\r?\n/);
       if (!match) break;
@@ -1812,9 +1906,22 @@ export function createUsageTee(onEvent) {
         }
       }
     }
-    if (buffer.length > 1_000_000) buffer = buffer.slice(-500_000);
+    // Usage observation must never hold an unbounded malformed event. This
+    // affects only telemetry: the client-facing stream is forwarded elsewhere
+    // and is never truncated by this observer.
+    if (Buffer.byteLength(buffer) > 1_000_000) {
+      buffer = "";
+      discardingOversizedEvent = true;
+    }
+  };
+  const push = (chunk) => {
+    const text = typeof chunk === "string" ? chunk : decoder.write(Buffer.from(chunk));
+    consume(text);
+    process();
   };
   const end = () => {
+    consume(decoder.end());
+    process();
     // Non-streaming upstreams return a single JSON body with no SSE framing. When
     // the buffer is a complete JSON object (a stream would leave a partial event
     // or an empty buffer here), surface it as a completed response so usage and
@@ -1910,6 +2017,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
   }
   let bytes = 0;
+  let upstreamBytes = 0;
   let sseBuffer = "";
   let rewrote = false;
   let interrupted = false;
@@ -1928,7 +2036,11 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   let normal = false;
   const prelude = [];
   let preludeResponse = null;
-  const writeOut = (text) => res.write(text);
+  const decoder = new StringDecoder("utf8");
+  const pendingWrites = [];
+  const writeOut = (text) => {
+    if (text) pendingWrites.push(text);
+  };
   const sseEvent = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
   // Restore the (name, namespace) pair and any custom-tool bridge on every
   // event shape that can carry a function_call. Returns the argument unchanged
@@ -2370,59 +2482,103 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       writeOut(sseEvent(parsed));
     }
   };
-  await new Promise((resolve, reject) => {
-    const stream = Readable.fromWeb(upstreamBody);
-    let firstResponseMarked = false;
-    let settled = false;
-    const settle = (error) => {
-      if (settled) return;
-      settled = true;
+  const processBufferedEvents = async (flushWrites) => {
+    while (true) {
+      const match = sseBuffer.match(/\r?\n\r?\n/);
+      if (!match) break;
+      const block = sseBuffer.slice(0, match.index);
+      const delim = match[0];
+      sseBuffer = sseBuffer.slice(match.index + delim.length);
+      processBlock(block, delim);
+      if (!await flushWrites()) return false;
+    }
+    return true;
+  };
+  let reader;
+  let responseError = null;
+  const cancelReader = () => reader?.cancel?.().catch(() => {});
+  const onClose = () => {
+    if (res.writableFinished) return;
+    interrupted = true;
+    cancelReader();
+  };
+  const onError = (error) => {
+    responseError = error;
+    interrupted = true;
+    cancelReader();
+  };
+  const waitForDrain = () => new Promise((resolve, reject) => {
+    if (interrupted || res.destroyed) return resolve(false);
+    const finish = (value, error) => {
+      res.removeListener("drain", onDrain);
+      res.removeListener("close", onDrainedClose);
+      res.removeListener("error", onDrainedError);
       if (error) reject(error);
-      else resolve();
+      else resolve(value);
     };
-    stream.on("data", (chunk) => {
+    const onDrain = () => finish(true);
+    const onDrainedClose = () => finish(false);
+    const onDrainedError = (error) => finish(false, error);
+    res.once("drain", onDrain);
+    res.once("close", onDrainedClose);
+    res.once("error", onDrainedError);
+  });
+  const flushWrites = async () => {
+    while (pendingWrites.length && !interrupted) {
+      const text = pendingWrites.shift();
+      bytes += Buffer.byteLength(text);
+      if (!res.write(text) && !await waitForDrain()) return false;
+    }
+    return !interrupted;
+  };
+  res.once("close", onClose);
+  res.once("error", onError);
+  try {
+    reader = upstreamBody.getReader();
+    let firstResponseMarked = false;
+    while (!interrupted) {
+      const { done, value } = await reader.read();
+      if (done) break;
       if (!firstResponseMarked) {
         firstResponseMarked = true;
         onFirstResponse?.();
       }
-      tee?.push(chunk);
-      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
-      bytes += Buffer.byteLength(text);
+      tee?.push(value);
+      const text = typeof value === "string" ? value : decoder.write(Buffer.from(value));
+      upstreamBytes += value.byteLength || Buffer.byteLength(value);
       sseBuffer += text;
-      while (true) {
-        const match = sseBuffer.match(/\r?\n\r?\n/);
-        if (!match) break;
-        const block = sseBuffer.slice(0, match.index);
-        const delim = match[0];
-        sseBuffer = sseBuffer.slice(match.index + delim.length);
-        processBlock(block, delim);
-      }
-      if (sseBuffer.length > 1_000_000) sseBuffer = sseBuffer.slice(-500_000);
-    });
-    stream.once("end", () => {
+      if (!await processBufferedEvents(flushWrites)) break;
+    }
+    if (responseError) throw responseError;
+    if (!interrupted) {
       tee?.end?.();
+      sseBuffer += decoder.end();
+      await processBufferedEvents(flushWrites);
       flushPrelude();
       if (sseBuffer) writeOut(sseBuffer);
-      if (!sawTerminal && !interrupted) {
+      if (!sawTerminal) {
         responseFailure = "OpenCode Go stream ended before a terminal response event.";
         writeOut(sseEvent(failedCompletion(null, responseFailure)));
         sawTerminal = true;
       }
-      res.end();
-      settle();
-    });
-    stream.once("error", settle);
-    res.once("finish", () => settle());
-    res.once("error", settle);
-    res.once("close", () => {
-      if (!settled) {
-        interrupted = true;
-        stream.destroy();
+      await flushWrites();
+      if (!interrupted) {
+        res.end();
+        if (!res.writableFinished) {
+          await new Promise((resolve, reject) => {
+            res.once("finish", resolve);
+            res.once("close", resolve);
+            res.once("error", reject);
+          });
+        }
       }
-      settle();
-    });
-  });
-  return { bytes, rewrote, interrupted, terminal: sawTerminal, failure: responseFailure, completedResponse };
+    }
+  } finally {
+    res.removeListener("close", onClose);
+    res.removeListener("error", onError);
+    if (interrupted) cancelReader();
+  }
+  return { bytes, upstreamBytes, rewrote, interrupted, terminal: sawTerminal, failure: responseFailure, completedResponse };
 }
 
 // Classify a 200 zen-free response body that silently failed. Returns
@@ -2453,6 +2609,7 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
     return { bytes: 0, empty: false, usage: undefined };
   }
   let bytes = 0;
+  let upstreamBytes = 0;
   let sawOutput = false;
   let holding = false;
   let tail = "";
@@ -2460,7 +2617,9 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
   let responseId = "";
   let usage;
   let outStream = null;
+  const decoder = new StringDecoder("utf8");
   const writeOut = (text) => {
+    bytes += Buffer.byteLength(text);
     if (!res.write(text)) outStream?.pause();
   };
   const processBlock = (block, delim) => {
@@ -2505,7 +2664,7 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
     writeOut(block + delim);
   };
   const push = (chunk) => {
-    const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    const text = typeof chunk === "string" ? chunk : decoder.write(Buffer.from(chunk));
     sseBuffer += text;
     while (true) {
       const match = sseBuffer.match(/\r?\n\r?\n/);
@@ -2515,7 +2674,6 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
       sseBuffer = sseBuffer.slice(match.index + delim.length);
       processBlock(block, delim);
     }
-    if (sseBuffer.length > 1_000_000) sseBuffer = sseBuffer.slice(-500_000);
   };
   await new Promise((resolve, reject) => {
     const stream = Readable.fromWeb(upstreamBody);
@@ -2535,10 +2693,11 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
       }
       tee?.push(chunk);
       push(chunk);
-      bytes += chunk.byteLength || Buffer.byteLength(chunk);
+      upstreamBytes += chunk.byteLength || Buffer.byteLength(chunk);
     });
     stream.once("end", () => {
       tee?.end?.();
+      push(decoder.end());
       if (holding) {
         if (sawOutput || !failedMessage) {
           writeOut(tail);
@@ -2576,7 +2735,7 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
       settle();
     });
   });
-  return { bytes, empty: holding && !sawOutput, usage };
+  return { bytes, upstreamBytes, empty: holding && !sawOutput, usage };
 }
 
 // Every relay records the same envelope on every outcome - which session, how
@@ -2597,6 +2756,7 @@ function noTransform(fields = {}) {
     blocked: { tool_search: 0, web_search: 0 },
     toolChoiceRewritten: false,
     imageRefs: [],
+    imageTransfer: null,
     directVision: false,
     droppedAssistantMessages: 0,
     nativeToolCalls: 0,
@@ -2620,26 +2780,37 @@ function usageTokens(usage) {
   };
 }
 
-// The request body size for the transfer card, taken from the count the
-// transport already made instead of serializing the payload a second time.
-//
-// Codex re-sends the whole conversation every turn (previous_response_id is
-// dropped downstream, deliberately), so on a large session "payload" is the
-// entire history: JSON.stringify(payload) purely to measure it allocated a
-// second full copy of the conversation on every keystroke-turn, for a number
-// on a dashboard card. content-length is that same number, already counted.
-//
-// Only when the body on the wire is the body we parsed: the zstd decoder
-// rewrites content-encoding to identity and content-length to the decoded
-// length, so its requests qualify. A gzip body inflated by the JSON parser
-// does not - its content-length still describes the compressed bytes - and
-// neither does a chunked upload that declared no length. Those fall back to
-// measuring the honest way.
-function requestBytesIn(headers, payload) {
+// Codex re-sends the whole conversation every turn, so measuring a parsed body
+// by JSON.stringify() purely for the dashboard creates a second full copy of
+// the largest object in the process. Use counts the transport already knows;
+// when a chunked or decompressed body has no trustworthy count, report it as
+// unknown instead of allocating the conversation again.
+function requestByteCounts(headers, ingress = null) {
+  if (Number.isFinite(ingress?.wireBytes)) {
+    return {
+      wireBytes: ingress.wireBytes,
+      logicalBytes: Number.isFinite(ingress.logicalBytes) ? ingress.logicalBytes : null,
+    };
+  }
   const encoding = String(headers?.["content-encoding"] || "identity").toLowerCase();
   const declared = Number(headers?.["content-length"]);
-  if (encoding === "identity" && Number.isFinite(declared) && declared >= 0) return declared;
-  return Buffer.byteLength(JSON.stringify(payload));
+  if (!Number.isFinite(declared) || declared < 0) return { wireBytes: 0, logicalBytes: null };
+  return { wireBytes: declared, logicalBytes: encoding === "identity" ? declared : null };
+}
+
+function transferMetrics(transfer, {
+  streaming = false,
+  routeReason,
+  upstreamRequestBytes = 0,
+} = {}) {
+  return {
+    bytesIn: transfer.wireBytes,
+    wireBytes: transfer.wireBytes,
+    logicalBytes: transfer.logicalBytes,
+    upstreamRequestBytes,
+    streaming,
+    routeReason,
+  };
 }
 
 // Serialize once and keep the string: it is both what goes on the wire and
@@ -2658,13 +2829,17 @@ function serializedBody(value) {
 // normalization above and previous_response_id removal apply, then the stream is
 // piped byte-for-byte with the client's signed-in headers.
 export async function relayNativeResponses(payload, res, services, { signal } = {}) {
-  const { incomingHeaders, requestUrl, metrics } = services;
+  const { incomingHeaders, requestUrl, metrics, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const native = { ...payload };
   if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
   delete native.previous_response_id;
-  const bytesIn = requestBytesIn(incomingHeaders, payload);
+  const transfer = requestByteCounts(incomingHeaders, ingressBytes);
   const { body: nativeBody, bytes: upstreamBytes } = serializedBody(native);
+  const imageTransfer = {
+    received: describeImageTransfer(payload.input),
+    forwarded: describeImageTransfer(native.input),
+  };
   const { pathname, search } = splitRequestUrl(requestUrl);
   const target = nativeTarget(pathname, search);
   const finish = metrics?.begin?.("responses", {
@@ -2706,9 +2881,21 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.end(raw);
       }
-      finish?.({ ok: false, httpStatus: upstream.status, upstream: "openai", error: redactBearer(raw).slice(0, 400) });
-      metrics?.recordResponseUsage?.({ bytesOut: 0, usage });
-      metrics?.recordResponseTransform?.(noTransform(), { streaming: false, routeReason: "native_passthrough", bytesIn });
+      const clientBytes = Buffer.byteLength(raw);
+      finish?.({
+        ok: false,
+        httpStatus: upstream.status,
+        upstream: "openai",
+        error: redactBearer(raw).slice(0, 400),
+        ingressWireBytes: transfer.wireBytes,
+        ingressLogicalBytes: transfer.logicalBytes,
+        upstreamRequestBytes: upstreamBytes,
+        upstreamResponseBytes: clientBytes,
+        clientResponseBytes: clientBytes,
+        imageTransfer,
+      });
+      metrics?.recordResponseUsage?.({ bytesOut: clientBytes, upstreamBytes: clientBytes, usage });
+      metrics?.recordResponseTransform?.(noTransform({ imageTransfer }), transferMetrics(transfer, { streaming: false, routeReason: "native_passthrough", upstreamRequestBytes: upstreamBytes }));
       recordUsage({ ...nativeRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
     }
@@ -2740,9 +2927,15 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       // (context, cache rate, reasoning) also sample native passthrough calls.
       cachedTokens: usage?.input_tokens_details?.cached_tokens || 0,
       reasoningTokens: usage?.output_tokens_details?.reasoning_tokens || 0,
+      ingressWireBytes: transfer.wireBytes,
+      ingressLogicalBytes: transfer.logicalBytes,
+      upstreamRequestBytes: upstreamBytes,
+      upstreamResponseBytes: piped.bytes,
+      clientResponseBytes: bytesOut,
+      imageTransfer,
     });
-    metrics?.recordResponseUsage?.({ bytesOut, usage });
-    metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: "native_passthrough", bytesIn });
+    metrics?.recordResponseUsage?.({ bytesOut, upstreamBytes: piped.bytes, usage });
+    metrics?.recordResponseTransform?.(noTransform({ imageTransfer }), transferMetrics(transfer, { streaming: payload.stream !== false, routeReason: "native_passthrough", upstreamRequestBytes: upstreamBytes }));
     recordUsage({
       ...nativeRoute,
       status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
@@ -2921,10 +3114,16 @@ function writeCompactionSse(res, model, summary) {
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
+  let bytes = 0;
   events.forEach(([type, data], sequence) => {
-    res.write(`event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence, ...data })}\n\n`);
+    const event = `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence, ...data })}\n\n`;
+    bytes += Buffer.byteLength(event);
+    res.write(event);
   });
-  res.end("data: [DONE]\n\n");
+  const done = "data: [DONE]\n\n";
+  bytes += Buffer.byteLength(done);
+  res.end(done);
+  return bytes;
 }
 
 // Write a compaction response whose summary already exists (the CPU extract
@@ -2954,8 +3153,7 @@ function writeDirectCompaction(res, payload, summary, v2) {
       res.end(body);
       return Buffer.byteLength(body);
     }
-    writeCompactionSse(res, payload.model, summary);
-    return 0;
+    return writeCompactionSse(res, payload.model, summary);
   }
   const body = JSON.stringify({ output: compactOutput(payload.input, summary) });
   res.statusCode = 200;
@@ -2971,7 +3169,7 @@ function writeDirectCompaction(res, payload, summary, v2) {
 // kcr1: payload. v2 returns a single compaction output item (JSON or SSE);
 // v1 returns replacement history under { output }.
 export async function relayCompaction(payload, res, services, { signal } = {}, v2 = true) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   mediaStore?.touchSession?.(sessionId);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
@@ -3019,6 +3217,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // visual model can still see the 20 newest attachments while it summarizes;
   // every older image survives in the returned text handoff as an img_ref.
   const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
+  const compactImageRefs = new Set();
   const summarizeInput = rewriteHistoricalImages(
     normalizedInput,
     mediaStore,
@@ -3027,9 +3226,10 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       keepRecentImages: !localBackend && targetSupportsVision ? RECENT_IMAGE_WINDOW : 0,
       resolveExternalSource,
       sessionId,
+      onImageRef: (ref) => compactImageRefs.add(ref),
     },
   );
-  const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId);
+  const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId, compactImageRefs);
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -3075,7 +3275,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
   const upstreamSummarizeBody = routedProvider === "xai" ? normalizeXaiPayload(summarizeBody) : summarizeBody;
-  const bytesIn = requestBytesIn(incomingHeaders, payload);
+  const transfer = requestByteCounts(incomingHeaders, ingressBytes);
 
   const target = upstreamTargetFor(config, route.model);
   const upstreamModel = target.model;
@@ -3115,8 +3315,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         bytesOut,
         compression: compressionInfo,
       });
-      metrics?.recordResponseUsage?.({ bytesOut });
-      metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
+      metrics?.recordResponseUsage?.({ bytesOut, upstreamBytes: 0 });
+      metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: payload.stream !== false, routeReason: operation }));
       recordUsage({ ...compactRoute, status: 200, compression: compressionInfo });
       return {
         ok: true,
@@ -3161,10 +3361,11 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     if (config.debug?.dumpAll && config.debug?.dumpDir) {
       dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
     }
+    const upstreamRequest = serializedBody({ ...upstreamSummarizeBody, model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
-      body: JSON.stringify({ ...upstreamSummarizeBody, model: upstreamModel }),
+      body: upstreamRequest.body,
       signal,
     });
     const bytes = Buffer.from(await upstream.arrayBuffer());
@@ -3204,7 +3405,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         requestShape: describeInputShape(payload.input),
         compression: compressionInfo,
       });
-      metrics?.recordResponseTransform?.(noTransform(), { streaming: false, routeReason: operation, bytesIn });
+      metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: false, routeReason: operation, upstreamRequestBytes: upstreamRequest.bytes }));
       recordUsage({ ...compactRoute, status: upstream.status });
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
@@ -3227,37 +3428,43 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     }
     usage = extractResponseUsage(parsed);
     const summary = `${extractResponseText(parsed)}${imageHandoff}`;
+    let clientBytes;
     if (v2) {
       if (payload.stream === false) {
+        const body = JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), usage));
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), usage)));
+        res.end(body);
+        clientBytes = Buffer.byteLength(body);
       } else {
-        writeCompactionSse(res, payload.model, summary);
+        clientBytes = writeCompactionSse(res, payload.model, summary);
       }
     } else {
+      const body = JSON.stringify({ output: compactOutput(payload.input, summary) });
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ output: compactOutput(payload.input, summary) }));
+      res.end(body);
+      clientBytes = Buffer.byteLength(body);
     }
     finish?.({
       ok: true,
       httpStatus: 200,
       upstream: target.provider,
-      bytesOut: bytes.length,
+      bytesOut: clientBytes,
+      upstreamResponseBytes: bytes.length,
       inputTokens: usage?.input_tokens || 0,
       outputTokens: usage?.output_tokens || 0,
       compression: compressionInfo,
     });
-    metrics?.recordResponseUsage?.({ bytesOut: bytes.length, usage });
-    metrics?.recordResponseTransform?.(noTransform(), { streaming: payload.stream !== false, routeReason: operation, bytesIn });
+    metrics?.recordResponseUsage?.({ bytesOut: clientBytes, upstreamBytes: bytes.length, usage });
+    metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: payload.stream !== false, routeReason: operation, upstreamRequestBytes: upstreamRequest.bytes }));
     recordUsage({ ...compactRoute, status: 200, ...usageTokens(usage) });
     return {
       ok: true,
       httpStatus: 200,
       route,
       usage,
-      bytesOut: bytes.length,
+      bytesOut: clientBytes,
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
     };
@@ -3279,7 +3486,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     const error = {
       error: {
@@ -3416,9 +3623,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   delete normalizedPayload.previous_response_id;
   if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
 
-  // Transfer-card "in": the request body bytes the client actually sent this
-  // gate. Re-serializing the parsed payload is the honest post-decode size.
-  const bytesIn = requestBytesIn(incomingHeaders, payload);
+  const transfer = requestByteCounts(incomingHeaders, ingressBytes);
+  const imageTransfer = {
+    received: describeImageTransfer(payload.input),
+    forwarded: describeImageTransfer(normalizedPayload.input),
+  };
 
   // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
@@ -3450,6 +3659,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // again after that policy so Codex's web_search { external_web_access: true }
   // option never reaches xAI on the final wire.
   if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
+  // Tool policy and namespace flattening change declarations/history, not image
+  // parts. The image report above remains the exact before/after visual payload.
+  const transformReport = () => noTransform({
+    blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
+    directVision: route.directVision,
+    imageTransfer,
+  });
 
   const target = upstreamTargetFor(config, normalizedPayload.model);
   // The upstream sees the bare model id; the route model (possibly owner-suffixed)
@@ -3485,7 +3701,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     res.statusCode = 503;
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify(error));
-    metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
+    metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: false, routeReason: route.reason }));
     return { ok: false, httpStatus: 503, route, error };
   }
 
@@ -3503,6 +3719,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const relayRoute = { model: normalizedPayload.model, provider: target.provider, route: route.reason };
   let usage;
   let bytesOut = 0;
+  let upstreamResponseBytes = 0;
   let completedResponse;
   let responseCompleted = false;
   let responseFailure = "";
@@ -3549,8 +3766,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         upstream: target.provider,
         error: translated.body.error.message.slice(0, 400),
         requestShape: describeInputShape(normalizedPayload.input),
+        ingressWireBytes: transfer.wireBytes,
+        ingressLogicalBytes: transfer.logicalBytes,
+        upstreamRequestBytes: upstreamBytes,
       });
-      metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
+      metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: false, routeReason: route.reason, upstreamRequestBytes: upstreamBytes }));
       return { ok: false, httpStatus: upstream.status, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
     }
 
@@ -3588,8 +3808,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           upstream: target.provider,
           error: translated.body.error.message.slice(0, 400),
           requestShape: describeInputShape(normalizedPayload.input),
+          ingressWireBytes: transfer.wireBytes,
+          ingressLogicalBytes: transfer.logicalBytes,
+          upstreamRequestBytes: upstreamBytes,
         });
-        metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: false, routeReason: route.reason, bytesIn });
+        metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: false, routeReason: route.reason, upstreamRequestBytes: upstreamBytes }));
         return { ok: false, httpStatus: errorStatus, route, error: translated.body.error.message.slice(0, 400), upstreamBytes };
       }
       // Real non-stream free response: rebuild the body as a web stream so the
@@ -3606,6 +3829,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     if (target.free && normalizedPayload.stream === true) {
       const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse);
       bytesOut = result.bytes;
+      upstreamResponseBytes = result.upstreamBytes || result.bytes;
       freeEmpty = result.empty;
       if (result.usage) usage = result.usage;
     } else {
@@ -3615,6 +3839,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // lifecycle passes through event-for-event. Do not key this on provider.
       if (normalizedPayload.stream !== true && (customToolNames.size || namespaces.size)) {
         const raw = await upstream.text();
+        upstreamResponseBytes = Buffer.byteLength(raw);
         try {
           const parsed = JSON.parse(raw);
           const restoredNamespaces = restoreNamespaceOutput(parsed?.output, namespaces);
@@ -3632,6 +3857,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces, customToolNames)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
+      upstreamResponseBytes ||= piped.upstreamBytes || piped.bytes;
       if (piped.completedResponse) completedResponse = piped.completedResponse;
       if (piped.failure) responseFailure = piped.failure;
       interrupted = piped.interrupted && !responseCompleted;
@@ -3666,9 +3892,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         outputTokens: traceUsage?.output_tokens || 0,
         cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
         reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
+        ingressWireBytes: transfer.wireBytes,
+        ingressLogicalBytes: transfer.logicalBytes,
+        upstreamRequestBytes: upstreamBytes,
+        upstreamResponseBytes,
+        clientResponseBytes: bytesOut,
+        imageTransfer,
       });
-      metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: true, routeReason: route.reason, bytesIn });
-      metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
+      metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: true, routeReason: route.reason, upstreamRequestBytes: upstreamBytes }));
+      metrics?.recordResponseUsage?.({ bytesOut, upstreamBytes: upstreamResponseBytes, usage: traceUsage });
       recordUsage({ ...relayRoute, status: 429, ...usageTokens(traceUsage) });
       return { ok: false, httpStatus: 429, route, error: errorMessage.slice(0, 400), usage: traceUsage, bytesOut, upstreamBytes, latencyMs: Date.now() - startedAt, upstream: target.provider };
     }
@@ -3688,9 +3920,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // the dashboard's cache-rate wave reads these off the trace records.
       cachedTokens: traceUsage?.input_tokens_details?.cached_tokens || 0,
       reasoningTokens: traceUsage?.output_tokens_details?.reasoning_tokens || 0,
+      ingressWireBytes: transfer.wireBytes,
+      ingressLogicalBytes: transfer.logicalBytes,
+      upstreamRequestBytes: upstreamBytes,
+      upstreamResponseBytes,
+      clientResponseBytes: bytesOut,
+      imageTransfer,
     });
-    metrics?.recordResponseTransform?.(noTransform({ blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch }, directVision: route.directVision }), { streaming: true, routeReason: route.reason, bytesIn });
-    metrics?.recordResponseUsage?.({ bytesOut, usage: traceUsage });
+    metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: true, routeReason: route.reason, upstreamRequestBytes: upstreamBytes }));
+    metrics?.recordResponseUsage?.({ bytesOut, upstreamBytes: upstreamResponseBytes, usage: traceUsage });
     // Injectable so unit tests do not append to the real ~/.modeldock file.
     recordUsage({
       ...relayRoute,

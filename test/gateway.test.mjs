@@ -11,6 +11,7 @@ import {
   adaptImageUrlShape,
   applyToolPolicy,
   compactFailureReport,
+  collaborationRelayCacheSnapshot,
   createUsageTee,
   decodeCompactionSummary,
   describeInputShape,
@@ -919,6 +920,17 @@ test("applyToolPolicy hides view_image for text-only models", () => {
   assert.equal(stripped.hidden, 1);
 });
 
+test("applyToolPolicy reuses an already-valid ordinary function descriptor", () => {
+  const tool = {
+    type: "function",
+    name: "read_file",
+    description: "Read one file.",
+    parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+  };
+  const { tools } = applyToolPolicy([tool]);
+  assert.equal(tools[0], tool, "a provider-ready descriptor is not deep-cloned just to serialize it again");
+});
+
 test("applyToolPolicy flattens MCP namespaces into qualified functions", () => {
   const tools = [
     {
@@ -1480,6 +1492,19 @@ test("createUsageTee extracts usage from response.completed events across chunks
   assert.equal(usages[0].output_tokens, 5);
 });
 
+test("createUsageTee preserves UTF-8 characters split across upstream chunks", () => {
+  const events = [];
+  const tee = createUsageTee((event) => events.push(event));
+  const accentChar = String.fromCharCode(0x00e9);
+  const encoded = Buffer.from('data: {"type":"response.completed","response":{"id":"resp_utf8","output":[{"type":"message","content":[{"type":"output_text","text":"caf' + accentChar + '"}]}]}}\n\n');
+  const accent = encoded.indexOf(Buffer.from([0xc3, 0xa9]));
+  assert.ok(accent > 0, "fixture contains the UTF-8 character to split");
+  tee.push(encoded.subarray(0, accent + 1));
+  tee.push(encoded.subarray(accent + 1));
+  tee.end();
+  assert.equal(events[0].response.output[0].content[0].text, `caf${accentChar}`);
+});
+
 test("createUsageTee extracts usage and output from a full non-streaming JSON body on end", () => {
   const events = [];
   const tee = createUsageTee((event) => events.push(event));
@@ -1659,6 +1684,76 @@ test("pipeNormalizedStream passes a full lifecycle stream through unchanged", as
   assert.equal(forwarded, full, "bytes pass through unchanged");
 });
 
+test("pipeNormalizedStream preserves UTF-8 characters split across upstream chunks", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const accentChar = String.fromCharCode(0x00e9);
+  const full = Buffer.from('data: {"type":"response.completed","response":{"id":"resp_utf8","model":"deepseek-v4-flash","output":[{"id":"msg_utf8","type":"message","role":"assistant","content":[{"type":"output_text","text":"caf' + accentChar + '"}]}]}}\n\n');
+  const accent = full.indexOf(Buffer.from([0xc3, 0xa9]));
+  assert.ok(accent > 0, "fixture contains the UTF-8 character to split");
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(full.subarray(0, accent + 1));
+      controller.enqueue(full.subarray(accent + 1));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks);
+  assert.equal(result.failure, "");
+  assert.equal(forwarded.toString("utf8"), full.toString("utf8"));
+  assert.equal(result.bytes, forwarded.byteLength, "the client-byte counter measures what was actually emitted");
+  assert.equal(result.upstreamBytes, full.byteLength, "the upstream-byte counter remains separately observable");
+});
+
+test("pipeNormalizedStream waits for downstream drain before reading beyond the source prefetch", async () => {
+  let pulls = 0;
+  let pullsBeforeDrain = 0;
+  let drained = false;
+  let sent = 0;
+  const events = [
+    'data: {"type":"response.output_text.delta","delta":"a","response":{"id":"resp_drain"}}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_drain"}}\n\n',
+  ];
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      if (!drained) pullsBeforeDrain += 1;
+      if (sent < events.length) controller.enqueue(Buffer.from(events[sent++]));
+      else controller.close();
+    },
+  });
+  const sink = responseStub(new Writable({
+    highWaterMark: 1,
+    write(_chunk, _encoding, callback) {
+      setTimeout(callback, 5);
+    },
+  }));
+  sink.on("drain", () => { drained = true; });
+  await pipeNormalizedStream(body, sink, null, () => {});
+  assert.equal(pulls, 3, "two source chunks plus the terminal pull are consumed");
+  assert.ok(drained, "the low-water sink exercised backpressure");
+  assert.equal(pullsBeforeDrain, 2, "only the web stream's one-chunk prefetch occurs before drain");
+});
+
+test("pipeNormalizedStream never drops a legal SSE event split past one megabyte", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const delta = "x".repeat(1_100_000);
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(`data: {"type":"response.output_text.delta","delta":"${delta}"}`));
+      controller.enqueue(Buffer.from("\n\n"));
+      controller.enqueue(Buffer.from('data: {"type":"response.completed","response":{"id":"resp_large","model":"deepseek-v4-pro"}}\n\n'));
+      controller.close();
+    },
+  });
+  const result = await pipeNormalizedStream(body, res, null, () => {});
+  const forwarded = Buffer.concat(sink.chunks).toString("utf8");
+  assert.equal(result.failure, "");
+  assert.ok(forwarded.includes(delta), "the full original delta reaches Codex");
+});
+
 test("pipeNormalizedStream frames a sparse function_call stream onto its item", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
@@ -1726,12 +1821,12 @@ test("redactBearer masks upstream tokens in error bodies", () => {
 test("relayResponses forwards a streamed response and records usage", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
-  const blockedReports = [];
+  const transformReports = [];
   const finishResults = [];
   const usageEvents = [];
   const metrics = {
     begin: () => (result) => finishResults.push(result),
-    recordResponseTransform: (report) => blockedReports.push(report.blocked),
+    recordResponseTransform: (report, transfer) => transformReports.push({ report, transfer }),
     recordResponseUsage: () => {},
   };
   const affinity = new RouteAffinity();
@@ -1776,13 +1871,19 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.equal(affinity.snapshot().activeCallIds, 1);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
-    const blocked = blockedReports[blockedReports.length - 1];
+    const transformed = transformReports.at(-1);
+    const blocked = transformed.report.blocked;
     assert.deepEqual(blocked, { tool_search: 0, web_search: 1 }, "web_search is counted separately from tool_search");
     // The dashboard's context-token waveform reads recent[].inputTokens, which
     // comes from the finish() payload - regression guard for the flat-line bug.
     const finished = finishResults[finishResults.length - 1];
     assert.equal(finished.inputTokens, 4, "finish must carry input tokens onto the trace record");
     assert.equal(finished.outputTokens, 2, "finish must carry output tokens onto the trace record");
+    assert.ok(finished.upstreamRequestBytes > 0, "the trace records the exact JSON body sent to the provider");
+    assert.ok(finished.upstreamResponseBytes > 0, "the trace records provider response bytes separately");
+    assert.equal(finished.clientResponseBytes, Buffer.byteLength(forwarded), "the trace records the bytes Codex actually received");
+    assert.equal(transformed.report.imageTransfer.received.images, 1, "the trace records incoming image count without image content");
+    assert.equal(transformed.report.imageTransfer.forwarded.images, 1, "the trace records the visual payload that still reached the selected vision route");
     assert.equal(usageEvents[0].cachedTokens, 3, "usage event must carry cached tokens from the upstream details");
     assert.equal(usageEvents[0].reasoningTokens, 1, "usage event must carry reasoning tokens from the upstream details");
   } finally {
@@ -2052,6 +2153,9 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
+  const finished = [];
+  const transforms = [];
+  const usages = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
@@ -2083,7 +2187,11 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
       res,
       {
         recordUsage: () => {},
-        metrics: { begin: () => () => {}, recordResponseUsage: () => {} },
+        metrics: {
+          begin: () => (result) => finished.push(result),
+          recordResponseTransform: (report, transfer) => transforms.push({ report, transfer }),
+          recordResponseUsage: (usage) => usages.push(usage),
+        },
         incomingHeaders: {
           authorization: "Bearer chatgpt-token",
           "chatgpt-account-id": "acct-1",
@@ -2114,6 +2222,11 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
     assert.equal(result.usage.input_tokens, 9);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
+    assert.equal(finished.at(-1).upstreamResponseBytes, Buffer.byteLength(forwarded), "native trace keeps the provider response leg separate");
+    assert.equal(finished.at(-1).clientResponseBytes, Buffer.byteLength(forwarded), "native trace records the bytes Codex received");
+    assert.ok(finished.at(-1).upstreamRequestBytes > 0, "native trace records its serialized upstream request");
+    assert.equal(transforms.at(-1).report.imageTransfer.received.images, 0);
+    assert.equal(usages.at(-1).upstreamBytes, Buffer.byteLength(forwarded));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2784,6 +2897,7 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
+  let imagePuts = 0;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, options) => {
     calls.push(JSON.parse(options.body));
@@ -2806,7 +2920,7 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
       res,
       {
         ...compactServices(),
-        mediaStore: { put: () => "img_compact_visual" },
+        mediaStore: { put: () => { imagePuts += 1; return "img_compact_visual"; } },
         mainModel: "deepseek-v4-flash@opencode-go",
         visionModel: "gpt-5.6-luna@opencode-go",
         config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go" },
@@ -2821,6 +2935,7 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
     const image = calls[0].input.flatMap((item) => item.content || []).find((part) => part.type === "input_image");
     assert.ok(image, "the compact model receives the image it must summarize");
     assert.deepEqual(image.image_url, { url: "data:image/png;base64,AAAA" }, "MiMo's image wire shape still applies on compact");
+    assert.equal(imagePuts, 1, "compaction derives the image reference once instead of decoding and hashing the same pixels again");
     const compacted = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
     assert.match(decodeCompactionSummary(compacted.output[0].encrypted_content), /Image attachment img_compact_visual/, "the compaction handoff keeps a durable image ref");
   } finally {
@@ -3240,7 +3355,7 @@ test("relayResponses synthesizes v1 replacement history on the compact path", as
   }
 });
 
-test("relayResponses counts the request body bytes as transfer-in", async () => {
+test("relayResponses does not reserialize a chunked request solely to fill a metric", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const transformOptions = [];
@@ -3264,7 +3379,8 @@ test("relayResponses counts the request body bytes as transfer-in", async () => 
     const result = await relayResponses(payload, res, { ...compactServices(), metrics, requestUrl: "/v1/responses" });
     assert.equal(result.ok, true);
     assert.equal(transformOptions.length, 1);
-    assert.equal(transformOptions[0].bytesIn, Buffer.byteLength(JSON.stringify(payload)), "the request body size rides as transfer-in");
+    assert.equal(transformOptions[0].bytesIn, 0, "unknown chunked ingress stays unknown instead of allocating a second full JSON string");
+    assert.equal(transformOptions[0].logicalBytes, null);
     assert.equal(transformOptions[0].streaming, true);
   } finally {
     globalThis.fetch = originalFetch;
@@ -3308,7 +3424,7 @@ async function relayBytes({ headers, sentBodies = [], model = "deepseek-v4-flash
       requestUrl: "/v1/responses",
       ...(headers ? { incomingHeaders: headers } : {}),
     });
-    return { result, payload, bytesIn: transformOptions[0]?.bytesIn };
+    return { result, payload, transfer: transformOptions[0] };
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3317,9 +3433,10 @@ async function relayBytes({ headers, sentBodies = [], model = "deepseek-v4-flash
 test("transfer-in is the length the transport counted, not a second serialization", async () => {
   // A length that cannot have come from measuring this payload: if the number
   // reported is 4242, nobody re-serialized the conversation to get it.
-  const { bytesIn, payload } = await relayBytes({ headers: { "content-length": "4242" } });
+  const { transfer, payload } = await relayBytes({ headers: { "content-length": "4242" } });
   assert.notEqual(4242, Buffer.byteLength(JSON.stringify(payload)), "fixture check: the two disagree");
-  assert.equal(bytesIn, 4242, "read from content-length");
+  assert.equal(transfer.bytesIn, 4242, "read from content-length");
+  assert.equal(transfer.logicalBytes, 4242, "an identity content-length is both wire and logical JSON bytes");
 });
 
 test("transfer-in is measured when the counted length is not the body we parsed", async () => {
@@ -3327,10 +3444,12 @@ test("transfer-in is measured when the counted length is not the body we parsed"
   // compressed bytes and cannot stand in for the parsed size. Same for a
   // chunked upload that declared no length at all.
   const gzipped = await relayBytes({ headers: { "content-length": "4242", "content-encoding": "gzip" } });
-  assert.equal(gzipped.bytesIn, Buffer.byteLength(JSON.stringify(gzipped.payload)), "gzip falls back to measuring");
+  assert.equal(gzipped.transfer.bytesIn, 4242, "compressed ingress keeps its actual wire count");
+  assert.equal(gzipped.transfer.logicalBytes, null, "the gateway does not reserialize a large inflated body merely to estimate logical bytes");
 
   const chunked = await relayBytes({ headers: { "content-type": "application/json" } });
-  assert.equal(chunked.bytesIn, Buffer.byteLength(JSON.stringify(chunked.payload)), "no length falls back to measuring");
+  assert.equal(chunked.transfer.bytesIn, 0, "an uncounted chunked body remains unknown");
+  assert.equal(chunked.transfer.logicalBytes, null);
 });
 
 test("transfer-out counts the bytes that were actually sent upstream", async () => {
@@ -3782,6 +3901,37 @@ test("relayOpaqueCollaboration caches the decrypted payload per encrypted blob",
     await relayOpaqueCollaboration([item], services);
     await relayOpaqueCollaboration([item], services);
     assert.equal(fetches, 1, "a repeated opaque blob relays once");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayOpaqueCollaboration keeps decrypted plaintext in a bounded short-lived cache", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"c1","type":"function_call","name":"relay_external_agent_payload","call_id":"c1","arguments":""}}\n\n' +
+    'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"payload\\":\\"bounded task\\"}"}\n\n',
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+  try {
+    const services = {
+      subagentModel: "gpt-5.6-luna",
+      nativeSlugs: new Set(["gpt-5.6-luna"]),
+      incomingHeaders: { "x-codex-session-id": "019fe9b0-f0b5-7e00-8703-862bf7c16a6d" },
+    };
+    for (let index = 0; index < 40; index += 1) {
+      await relayOpaqueCollaboration([{
+        type: "agent_message",
+        content: [
+          { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+          { type: "encrypted_content", encrypted_content: `gAAAAAbounded_${index}` },
+        ],
+      }], services);
+    }
+    const snapshot = collaborationRelayCacheSnapshot();
+    assert.ok(snapshot.entries <= snapshot.maxEntries);
+    assert.ok(snapshot.bytes <= snapshot.maxBytes);
+    assert.equal(snapshot.ttlMs, 30 * 60 * 1_000);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -84,7 +84,7 @@ test("recordResponseTransform accumulates counters", () => {
       nativeToolOutputs: 3,
       fallbackToolResults: 1,
     },
-    { bytesIn: 100, streaming: true },
+    { bytesIn: 100, logicalBytes: 140, upstreamRequestBytes: 90, streaming: true },
   );
   assert.equal(metrics.responses.filteredToolSearch, 2);
   assert.equal(metrics.responses.filteredWebSearch, 1);
@@ -94,14 +94,19 @@ test("recordResponseTransform accumulates counters", () => {
   assert.equal(metrics.responses.fallbackToolResults, 1);
   assert.equal(metrics.responses.imageAttachments, 3);
   assert.equal(metrics.responses.bytesIn, 100);
+  assert.equal(metrics.responses.ingressWireBytes, 100);
+  assert.equal(metrics.responses.ingressLogicalBytes, 140);
+  assert.equal(metrics.responses.upstreamRequestBytes, 90);
   assert.equal(metrics.responses.streaming, 1);
 });
 
-test("recordResponseUsage accumulates tokens and bytes", () => {
+test("recordResponseUsage distinguishes provider bytes from bytes emitted to Codex", () => {
   const metrics = makeMetrics();
-  metrics.recordResponseUsage({ bytesOut: 512, usage: { input_tokens: 10, output_tokens: 20 } });
+  metrics.recordResponseUsage({ bytesOut: 768, upstreamBytes: 512, usage: { input_tokens: 10, output_tokens: 20 } });
   metrics.recordResponseUsage({ bytesOut: 256, usage: undefined });
-  assert.equal(metrics.responses.bytesOut, 768);
+  assert.equal(metrics.responses.bytesOut, 1024);
+  assert.equal(metrics.responses.clientResponseBytes, 1024);
+  assert.equal(metrics.responses.upstreamResponseBytes, 768);
   assert.equal(metrics.responses.inputTokens, 10);
   assert.equal(metrics.responses.outputTokens, 20);
 });

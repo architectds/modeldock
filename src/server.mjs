@@ -923,6 +923,10 @@ async function relayGatewayRequest(req, res, services) {
     visionModel: modelSelection?.visionModel || config.visionModel,
     // The native passthrough leg forwards these to ChatGPT's backend untouched.
     incomingHeaders: req.headers,
+    // zstdRequestDecoder preserves the original compressed and decoded sizes
+    // before Express sees an identity JSON body. The gateway must receive those
+    // values instead of inferring a second serialized copy for metrics.
+    ingressBytes: req.modeldockIngressBytes,
     requestUrl: req.originalUrl,
     signal: controller.signal,
   });
@@ -1486,6 +1490,10 @@ function zstdRequestDecoder({ callerKey, metrics }) {
         try {
           req.headers["content-encoding"] = "identity";
           req.headers["content-length"] = String(body.length);
+          // Preserve both measurements before exposing the decoded body to the
+          // regular JSON routes. The rewritten headers describe logical JSON;
+          // they must not erase the compressed bytes Codex actually sent.
+          req.modeldockIngressBytes = { wireBytes: compressed.length, logicalBytes: body.length };
           req.body = JSON.parse(body.toString("utf8"));
           next();
         } catch (decodeError) {

@@ -4,6 +4,7 @@ import path from "node:path";
 import { isLoopbackHost } from "./loopback.mjs";
 
 const DATA_URL = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i;
+const ACCESS_PERSIST_INTERVAL_MS = 60_000;
 
 function validSessionId(sessionId) {
   return typeof sessionId === "string" && sessionId.length > 0 && sessionId.length <= 128;
@@ -163,6 +164,7 @@ export class MediaStore {
     this.cleanup();
     const item = this.#items.get(ref);
     if (!item) return undefined;
+    let imageUrl = item.imageUrl;
     if (item.storage === "file") {
       const file = this.#filePath(item.ref);
       if (!existsSync(file)) {
@@ -170,23 +172,33 @@ export class MediaStore {
         this.#markDirty();
         return undefined;
       }
-      item.imageUrl = `data:${item.mime};base64,${readFileSync(file).toString("base64")}`;
+      imageUrl = `data:${item.mime};base64,${readFileSync(file).toString("base64")}`;
     }
     if (item.storage === "external") {
       try {
         const bytes = readFileSync(item.sourcePath);
         const digest = createHash("sha256").update(bytes).digest("hex");
         if (bytes.byteLength !== item.size || digest !== item.digest) throw new Error("source changed");
-        item.imageUrl = `data:${item.mime};base64,${bytes.toString("base64")}`;
+        imageUrl = `data:${item.mime};base64,${bytes.toString("base64")}`;
       } catch {
         this.#items.delete(ref);
         this.#markDirty();
         return undefined;
       }
     }
-    item.lastAccessAt = Date.now();
-    this.#markDirty();
-    return { ...item };
+    const now = Date.now();
+    const persistAccess = now - item.lastAccessAt >= ACCESS_PERSIST_INTERVAL_MS;
+    item.lastAccessAt = now;
+    // Hydrating the 20-image visual window must not rewrite index.json once
+    // per ref on every turn. In-memory LRU remains exact; persisted access is
+    // sampled at the same one-minute cadence as touchSession, which is safely
+    // below the minimum media TTL and avoids turning a read into disk churn.
+    if (persistAccess) this.#markDirty();
+    // File-backed and Codex-owned records deliberately keep only metadata in
+    // the store. The data URL exists for this return value and the one
+    // provider request that consumes it; retaining it on `item` would turn a
+    // reference cache into an unbounded second in-memory image archive.
+    return { ...item, imageUrl };
   }
 
   cleanup(now = Date.now()) {
@@ -238,12 +250,24 @@ export class MediaStore {
     let bytes = 0;
     let storedBytes = 0;
     let externalEntries = 0;
+    let residentImageBytes = 0;
     for (const item of this.#items.values()) {
       bytes += item.size;
       if (item.storage === "file") storedBytes += item.size;
       if (item.storage === "external") externalEntries += 1;
+      if (item.storage === "memory") residentImageBytes += item.size;
     }
-    return { entries: this.#items.size, bytes, storedBytes, externalEntries, ttlMs: this.ttlMs, maxBytesPerImage: this.maxBytes, maxStoredBytes: this.maxStoredBytes };
+    return {
+      entries: this.#items.size,
+      bytes,
+      storedBytes,
+      externalEntries,
+      residentImageBytes,
+      directory: this.#stateDir,
+      ttlMs: this.ttlMs,
+      maxBytesPerImage: this.maxBytes,
+      maxStoredBytes: this.maxStoredBytes,
+    };
   }
 
   #filePath(ref) {

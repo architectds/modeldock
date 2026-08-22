@@ -129,13 +129,20 @@ test("evicts expired entries by lastAccessAt not createdAt", async () => {
 });
 
 test("snapshot reports entry count and bytes", () => {
-  const store = makeStore();
-  store.put(DATA_URL);
-  store.put(DATA_URL_OTHER);
-  const snap = store.snapshot();
-  assert.equal(snap.entries, 2);
-  assert.ok(snap.bytes > 0);
-  assert.equal(snap.maxBytesPerImage, 10 * 1024 * 1024);
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const store = makeStore({ stateDir });
+    store.put(DATA_URL);
+    store.put(DATA_URL_OTHER);
+    const snap = store.snapshot();
+    assert.equal(snap.entries, 2);
+    assert.ok(snap.bytes > 0);
+    assert.equal(snap.directory, stateDir, "the status API can report the actual bounded fallback directory");
+    assert.equal(snap.maxBytesPerImage, 10 * 1024 * 1024);
+    assert.equal(snap.maxStoredBytes, 256 * 1024 * 1024);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });
 
 test("get on unknown ref returns undefined", () => {
@@ -166,6 +173,26 @@ test("persists data images so refs survive a store restart", () => {
   }
 });
 
+test("repeated image ref hydration does not rewrite the persistent index", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  const originalNow = Date.now;
+  try {
+    let now = originalNow();
+    Date.now = () => now;
+    const store = makeStore({ stateDir });
+    const ref = store.put(DATA_URL);
+    now += 60_000;
+    store.get(ref);
+    const firstWrite = readFileSync(path.join(stateDir, "index.json"), "utf8");
+    store.get(ref);
+    const secondRead = readFileSync(path.join(stateDir, "index.json"), "utf8");
+    assert.equal(secondRead, firstWrite, "the same visual window is read from memory without another index write");
+  } finally {
+    Date.now = originalNow;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("uses a byte-identical Codex attachment as a zero-copy image ref", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-codex-attachments-"));
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
@@ -184,6 +211,7 @@ test("uses a byte-identical Codex attachment as a zero-copy image ref", () => {
     assert.equal(describeImageUrl(imageUrl).ref, ref);
     assert.equal(store.get(ref).storage, "external");
     assert.equal(store.get(ref).imageUrl, imageUrl);
+    assert.equal(store.snapshot().residentImageBytes, 0, "reading an external attachment does not retain a decoded base64 copy in the gateway");
     assert.throws(() => readFileSync(path.join(stateDir, `${ref}.bin`)), /ENOENT/, "no duplicate blob is written");
     assert.doesNotMatch(readFileSync(path.join(stateDir, "index.json"), "utf8"), /data:image/, "the index stores a path, not base64");
 
@@ -193,6 +221,18 @@ test("uses a byte-identical Codex attachment as a zero-copy image ref", () => {
     assert.equal(restored.get(ref), undefined, "a removed Codex attachment is never substituted silently");
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("reading a ModelDock-owned image returns a temporary data URL without retaining it", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const store = makeStore({ stateDir });
+    const ref = store.put(DATA_URL);
+    assert.equal(store.get(ref).imageUrl, DATA_URL);
+    assert.equal(store.snapshot().residentImageBytes, 0, "file-backed refs are decoded only for the outbound request");
+  } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
 });

@@ -925,6 +925,41 @@ test("zstd fallback decodes Node 22 request bodies and enforces the output cap",
   );
 });
 
+test("zstd Responses requests retain both ingress byte measurements through the relay", async (t) => {
+  if (typeof zlib.zstdCompressSync !== "function") {
+    t.skip("zstd requires Node 23.8+");
+    return;
+  }
+  const upstream = createServer(async (req, res) => {
+    assert.equal(req.url, "/v1/responses");
+    await jsonBody(req);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
+  t.after(instance.stop);
+
+  const logical = Buffer.from(JSON.stringify({
+    model: "deepseek-v4-flash",
+    stream: false,
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "measure compressed ingress" }] }],
+  }));
+  const compressed = zlib.zstdCompressSync(logical);
+  const response = await fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: compressed,
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).id, "resp_1");
+  const trace = instance.services.metrics.recent.find((item) => item.kind === "responses" && item.operation === "relay");
+  assert.equal(trace?.ingressWireBytes, compressed.length);
+  assert.equal(trace?.ingressLogicalBytes, logical.length);
+  assert.ok(trace?.upstreamRequestBytes > 0);
+});
+
 test("host guard rejects non-loopback Host headers (DNS rebinding)", async (t) => {
   const instance = await startApp({});
   t.after(instance.stop);
