@@ -298,6 +298,16 @@ test("xAI refuses the custom tool type and runs its own search", () => {
   assert.equal(XAI_PROFILE.blockedToolTypes.has("custom"), true);
   assert.equal(XAI_PROFILE.hostedToolTypes.has("web_search"), true);
   assert.equal(XAI_PROFILE.hostedToolTypes.has("x_search"), true);
+  assert.equal(XAI_PROFILE.hostedToolTypes.has("image_generation"), true);
   // tool_search is answered by this gate, not by xAI, so it is not on the list.
   assert.equal(XAI_PROFILE.hostedToolTypes.has("tool_search"), false);
+});
+
+test("xAI Imagine media backends never appear as ordinary Responses models", () => {
+  applyXaiProfile(["grok-4.6", "grok-imagine-image-2.0", "grok-imagine-video-1.5"]);
+  assert.deepEqual(
+    XAI_PROFILE.availableModels.map((model) => model.id),
+    ["grok-4.6"],
+    "Codex has a Grok image tool but no video-generation Responses tool",
+  );
 });
