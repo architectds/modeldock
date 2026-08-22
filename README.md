@@ -198,6 +198,10 @@ authors be liable for any claim, damages, or other liability arising from or in
 connection with the software or its use. Nothing in this repository constitutes
 legal, financial, or professional advice.
 
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
+
 ## 中文
 
 > **ModelDock 让你已经拥有的 AI 工具协同工作。**
