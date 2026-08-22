@@ -19,16 +19,27 @@ export function isAssistantMarker(item) {
     // then keeps older user messages (screenshots included) in the replayed
     // history. If compaction is not a boundary, lastMarker stays -1 and those
     // leftover images look like the current turn forever.
-    || item.type === "compaction";
+    || item.type === "compaction"
+    || item[CURRENT_TURN_MARKER] === true;
 }
 
-function currentTurnItems(input) {
+// Internal only: gateway normalization turns compaction into a user message
+// for providers that cannot read Codex's private compaction item. Retain the
+// turn boundary without serializing a provider-visible field.
+export const CURRENT_TURN_MARKER = Symbol("modeldock.currentTurnMarker");
+
+export function currentTurnStartIndex(input) {
   const items = inputItems(input);
   let lastMarker = -1;
   for (let index = 0; index < items.length; index += 1) {
     if (isAssistantMarker(items[index])) lastMarker = index;
   }
-  return items.slice(lastMarker + 1);
+  return lastMarker + 1;
+}
+
+function currentTurnItems(input) {
+  const items = inputItems(input);
+  return items.slice(currentTurnStartIndex(items));
 }
 
 function parts(item) {

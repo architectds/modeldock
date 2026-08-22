@@ -1,6 +1,7 @@
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { loadConfig } from "./config.mjs";
 import { MediaStore } from "./media-store.mjs";
+import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { createUpstreams } from "./upstreams.mjs";
@@ -21,11 +22,14 @@ export async function startMcpServer(config = loadConfig(), {
   mediaStore: injectedMediaStore = null,
 } = {}) {
   const metrics = injectedMetrics || new Metrics({ recentLimit: config.recentLimit });
+  const attachmentIndex = new CodexAttachmentIndex({ codexHome: config.codexHome });
   const mediaStore = injectedMediaStore || new MediaStore({
     ttlMs: config.mediaTtlMs,
     maxBytes: config.mediaMaxBytes,
     maxEntries: config.mediaMaxEntries,
+    maxStoredBytes: config.mediaMaxStoredBytes,
     stateDir: config.mediaDir,
+    externalRoots: attachmentIndex.roots,
   });
   const memoryStore = injectedUpstreams ? null : memoryStoreFor(config);
   const upstreams = injectedUpstreams || createUpstreams({
@@ -69,7 +73,7 @@ export async function startMcpServer(config = loadConfig(), {
   return {
     app,
     server,
-    services: { config, metrics, mediaStore, upstreams, memoryStore },
+    services: { config, metrics, mediaStore, upstreams, memoryStore, attachmentIndex },
     url: `http://${urlHost(config.host)}:${actualPort}`,
     async stop() {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));

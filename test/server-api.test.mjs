@@ -834,15 +834,79 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
     body: bomb,
   });
   assert.equal(tooBig.status, 413);
+  const bombBody = await tooBig.json();
+  assert.equal(bombBody.error.type, "payload_too_large");
+  assert.deepEqual(bombBody.error.diagnostics, {
+    encoding: "zstd",
+    reason: "decompressed_request",
+    wireBytes: bomb.length,
+    wireLimitBytes: null,
+    decodedBytes: null,
+    decodedBytesAtLeast: 64 * 1024 * 1024 + 1,
+    decodedLimitBytes: 64 * 1024 * 1024,
+    inputItems: null,
+    inputImages: null,
+    inputImageBytes: null,
+  });
 
-  // Incompressible stream that already exceeds the 16MB input cap.
-  const huge = zlib.zstdCompressSync(randomBytes(17 * 1024 * 1024));
+  // A body between the former 16 MiB cap and the new 32 MiB cap reaches the
+  // decoder. It is deliberately not JSON, so 400 proves it was not rejected by
+  // the ingress-size guard before a Codex compaction could be parsed.
+  const admitted = await fetch(`${instance.base}/healthz`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: zlib.zstdCompressSync(randomBytes(17 * 1024 * 1024)),
+  });
+  assert.equal(admitted.status, 400);
+  assert.match((await admitted.json()).error.message, /zstd request decode failed/);
+
+  // Incompressible stream that already exceeds the 32MB input cap.
+  const huge = zlib.zstdCompressSync(randomBytes(33 * 1024 * 1024));
   const tooLong = await fetch(`${instance.base}/healthz`, {
     method: "POST",
     headers: { "content-type": "application/json", "content-encoding": "zstd" },
     body: huge,
   });
   assert.equal(tooLong.status, 413);
+  const longBody = await tooLong.json();
+  assert.equal(longBody.error.diagnostics.reason, "compressed_request");
+  assert.ok(longBody.error.diagnostics.wireBytes > 32 * 1024 * 1024);
+  assert.equal(longBody.error.diagnostics.wireLimitBytes, 32 * 1024 * 1024);
+  assert.equal(longBody.error.diagnostics.inputItems, null);
+  const rejected = instance.services.metrics.recent.filter((item) => item.operation === "payload_too_large");
+  assert.equal(rejected.length, 2);
+  assert.equal(rejected[0].payloadDiagnostics.reason, "compressed_request");
+  assert.equal(rejected[1].payloadDiagnostics.reason, "decompressed_request");
+});
+
+test("JSON parser 413 exposes anonymous payload diagnostics", async (t) => {
+  const instance = await startApp({});
+  t.after(instance.stop);
+  const limit = 25 * 1024 * 1024;
+  const requestBody = JSON.stringify({ input: "x".repeat(limit + 1024) });
+  const requestBytes = Buffer.byteLength(requestBody);
+  const response = await fetch(`${instance.base}/healthz`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: requestBody,
+  });
+  assert.equal(response.status, 413);
+  const body = await response.json();
+  assert.deepEqual(body.error.diagnostics, {
+    encoding: "identity",
+    reason: "json_request",
+    wireBytes: requestBytes,
+    wireLimitBytes: limit,
+    decodedBytes: requestBytes,
+    decodedBytesAtLeast: null,
+    decodedLimitBytes: limit,
+    inputItems: null,
+    inputImages: null,
+    inputImageBytes: null,
+  });
+  const trace = instance.services.metrics.recent.find((item) => item.operation === "payload_too_large");
+  assert.equal(trace?.httpStatus, 413);
+  assert.equal(trace?.payloadDiagnostics.reason, "json_request");
 });
 
 test("zstd fallback decodes Node 22 request bodies and enforces the output cap", async (t) => {
@@ -855,7 +919,9 @@ test("zstd fallback decodes Node 22 request bodies and enforces the output cap",
   assert.deepEqual(await decodeZstdBody(compressed, 1024, null), payload);
   await assert.rejects(
     decodeZstdBody(zlib.zstdCompressSync(Buffer.alloc(2048)), 1024, null),
-    (error) => error?.code === "ERR_BUFFER_TOO_LARGE",
+    (error) => error?.code === "ERR_BUFFER_TOO_LARGE"
+      && error?.decompressedBytes > 1024
+      && error?.decompressedBytesAtLeast === error?.decompressedBytes,
   );
 });
 

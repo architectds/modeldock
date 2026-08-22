@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { MediaStore } from "../src/media-store.mjs";
+import { describeImageUrl, MediaStore } from "../src/media-store.mjs";
+import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 
 function makeStore(overrides = {}) {
   return new MediaStore({
@@ -165,6 +166,37 @@ test("persists data images so refs survive a store restart", () => {
   }
 });
 
+test("uses a byte-identical Codex attachment as a zero-copy image ref", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-codex-attachments-"));
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  const sessionId = "019fe9b0-f0b5-7e00-8703-862bf7c16a6d";
+  const source = path.join(root, "codex-remote-attachments", sessionId, "attachment", "1-Photo-1.png");
+  try {
+    mkdirSync(path.dirname(source), { recursive: true });
+    const bytes = Buffer.from("same image bytes");
+    writeFileSync(source, bytes);
+    const imageUrl = `data:image/png;base64,${bytes.toString("base64")}`;
+    const index = new CodexAttachmentIndex({ codexHome: root });
+    const store = makeStore({ stateDir, externalRoots: index.roots });
+    const ref = store.put(imageUrl, {
+      resolveExternalSource: (image) => index.resolve(sessionId, image),
+    });
+    assert.equal(describeImageUrl(imageUrl).ref, ref);
+    assert.equal(store.get(ref).storage, "external");
+    assert.equal(store.get(ref).imageUrl, imageUrl);
+    assert.throws(() => readFileSync(path.join(stateDir, `${ref}.bin`)), /ENOENT/, "no duplicate blob is written");
+    assert.doesNotMatch(readFileSync(path.join(stateDir, "index.json"), "utf8"), /data:image/, "the index stores a path, not base64");
+
+    const restored = makeStore({ stateDir, externalRoots: index.roots });
+    assert.equal(restored.get(ref).imageUrl, imageUrl, "the zero-copy ref survives a gateway restart");
+    rmSync(source, { force: true });
+    assert.equal(restored.get(ref), undefined, "a removed Codex attachment is never substituted silently");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("persists remote image URLs across a store restart", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
   try {
@@ -185,6 +217,20 @@ test("removes persisted files when entries expire", () => {
     store.cleanup(Date.now() + 101);
     assert.equal(store.get(ref), undefined);
     assert.throws(() => readFileSync(path.join(stateDir, `${ref}.bin`)), /ENOENT/);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("caps only ModelDock-owned fallback blobs, not zero-copy Codex refs", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  try {
+    const store = makeStore({ stateDir, maxBytes: 128, maxStoredBytes: 6, maxEntries: 8 });
+    const first = store.put(`data:image/png;base64,${Buffer.from("1111").toString("base64")}`);
+    const second = store.put(`data:image/png;base64,${Buffer.from("2222").toString("base64")}`);
+    assert.equal(store.get(first), undefined, "the oldest owned blob yields first when the explicit disk budget is exceeded");
+    assert.ok(store.get(second));
+    assert.equal(store.snapshot().storedBytes, 4);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

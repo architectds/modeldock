@@ -8,7 +8,7 @@ import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
-import { RouteAffinity, currentTurnHasImage, routeResponsesRequest } from "./router.mjs";
+import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
@@ -932,6 +932,7 @@ export function normalizeGatewayInput(input) {
       if (item?.type !== "compaction") return item;
       const text = compactionSummaryText(item);
       return {
+        [CURRENT_TURN_MARKER]: true,
         type: "message",
         role: "user",
         content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
@@ -1342,56 +1343,140 @@ export function adaptImageUrlShape(input, shape) {
   });
 }
 
-export function rewriteHistoricalImages(input, mediaStore, { preserveImages = false } = {}) {
-  if (!Array.isArray(input) || preserveImages) return input;
-  return input.map((item) => {
-    if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
-    let changed = false;
-    const content = item.content.map((part) => {
-      if (!part || typeof part !== "object" || part.type !== "input_image" || typeof part.image_url !== "string") return part;
-      changed = true;
-      if (!mediaStore) {
-        return { type: "input_text", text: "[An image was attached earlier in this conversation. Its visual contents were handled in a prior turn; do not re-inspect unless the user asks a new visual question.]" };
-      }
-      let ref;
-      try {
-        ref = mediaStore.put(part.image_url);
-      } catch {
-        return { type: "input_text", text: "[An image was attached earlier in this conversation. Its visual contents were handled in a prior turn; do not re-inspect unless the user asks a new visual question.]" };
-      }
-      return {
-        type: "input_text",
-        text: historicalImageSpawnHint(ref),
-      };
-    });
-    return changed ? { ...item, content } : item;
-  });
-}
+export const RECENT_IMAGE_WINDOW = 20;
 
-// A compact_v2 item can return only text, so local CPU compaction preserves an
-// attachment as the image_ref wording above. When a later route can actually
-// read images, hydrate that durable reference back into an input_image instead
-// of making the visual model ask a separate model to describe its own picture.
-// Text routes never call this helper and retain the lightweight reference.
-// A period is accepted for summaries emitted before the explicit image_ref
-// wording was introduced, so an already-compacted conversation can recover
-// after this upgrade too.
+// A compact_v2 item can return only text, so image refs are deliberately part
+// of its handoff. A visual model gets the current images plus a small recent
+// window; older pixels are loaded only through vision_inspect. This keeps a
+// screenshot -> edit -> screenshot comparison direct without replaying every
+// old attachment on every turn.
 const IMAGE_ATTACHMENT_REF_RE = /\[Image attachment (img_[A-Za-z0-9_-]+)(?::|\.)/g;
 
-export function hydrateImageRefsForVision(input, mediaStore) {
+function imageRefsInText(text) {
+  if (typeof text !== "string") return [];
+  IMAGE_ATTACHMENT_REF_RE.lastIndex = 0;
+  return [...text.matchAll(IMAGE_ATTACHMENT_REF_RE)].map((match) => match[1]);
+}
+
+function unavailableImageHint() {
+  return "[An earlier image is unavailable by reference. Ask the user to attach it again before making visual claims.]";
+}
+
+// Replace pixels in old history with durable refs. `keepRecentImages` is only
+// used by visual routes; omitting it preserves the legacy all-pixels behavior
+// for callers outside the gateway while they migrate to the bounded contract.
+export function rewriteHistoricalImages(input, mediaStore, {
+  preserveImages = false,
+  keepRecentImages,
+  keepCurrentImages = false,
+  currentStartIndex,
+  resolveExternalSource,
+  sessionId,
+  batched = false,
+} = {}) {
+  if (!Array.isArray(input)) return input;
+  if (preserveImages && keepRecentImages === undefined) return input;
+  if (!batched && typeof mediaStore?.batch === "function") {
+    return mediaStore.batch(() => rewriteHistoricalImages(input, mediaStore, {
+      preserveImages,
+      keepRecentImages,
+      keepCurrentImages,
+      currentStartIndex,
+      resolveExternalSource,
+      sessionId,
+      batched: true,
+    }));
+  }
+
+  const rawRefs = new Map();
+  const occurrences = [];
+  const referencedRefs = new Set();
+  for (let index = 0; index < input.length; index += 1) {
+    const item = input[index];
+    if (!item || typeof item !== "object" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "input_image" && typeof part.image_url === "string") {
+        let ref = "";
+        try {
+          ref = mediaStore?.put(part.image_url, { resolveExternalSource, sessionId }) || "";
+        } catch {
+          // The replacement below explains that this image cannot be reloaded.
+        }
+        if (ref) {
+          rawRefs.set(part, ref);
+          occurrences.push({ ref, index });
+        }
+      }
+      if (part?.type === "input_text") {
+        for (const ref of imageRefsInText(part.text)) {
+          referencedRefs.add(ref);
+          occurrences.push({ ref, index });
+        }
+      }
+    }
+  }
+  if (typeof mediaStore?.associateMany === "function") mediaStore.associateMany(referencedRefs, sessionId);
+  else for (const ref of referencedRefs) mediaStore?.associate?.(ref, sessionId);
+
+  const currentStart = keepCurrentImages
+    ? Number.isInteger(currentStartIndex) ? currentStartIndex : currentTurnStartIndex(input)
+    : input.length;
+  const lastOccurrence = new Map();
+  for (const occurrence of occurrences) {
+    if (occurrence.index < currentStart) lastOccurrence.set(occurrence.ref, occurrence.index);
+  }
+  const recentRefs = new Set(
+    [...lastOccurrence.entries()]
+      .sort((left, right) => left[1] - right[1])
+      .slice(-Math.max(0, Number(keepRecentImages) || 0))
+      .map(([ref]) => ref),
+  );
+  const shouldKeepPixels = (ref, index) => preserveImages && (index >= currentStart || recentRefs.has(ref));
+
+  let changed = false;
+  const rewritten = input.map((item, index) => {
+    if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
+    let itemChanged = false;
+    const content = item.content.map((part) => {
+      if (part?.type !== "input_image" || typeof part.image_url !== "string") return part;
+      const ref = rawRefs.get(part);
+      // A visual route must not lose a current image merely because the local
+      // reference cache is unavailable. Production always has MediaStore; this
+      // fallback preserves correctness for a degraded/test-only service.
+      if ((ref && shouldKeepPixels(ref, index)) || (!ref && preserveImages && index >= currentStart)) return part;
+      itemChanged = true;
+      return ref
+        ? { type: "input_text", text: historicalImageSpawnHint(ref) }
+        : { type: "input_text", text: unavailableImageHint() };
+    });
+    if (!itemChanged) return item;
+    changed = true;
+    return { ...item, content };
+  });
+
+  // Textual references that survived a prior compaction do not have raw image
+  // parts. Restore only the same bounded window, never every historical ref.
+  const hydrated = preserveImages
+    ? hydrateImageRefsForVision(rewritten, mediaStore, { refs: recentRefs })
+    : rewritten;
+  return changed || hydrated !== rewritten ? hydrated : input;
+}
+
+export function hydrateImageRefsForVision(input, mediaStore, { refs = null } = {}) {
   if (!Array.isArray(input) || !mediaStore?.get) return input;
   const hydrated = new Set();
   let changed = false;
   const output = input.map((item) => {
     if (!item || typeof item !== "object" || !Array.isArray(item.content)) return item;
-    const refs = new Set();
+    const imageRefs = new Set();
     for (const part of item.content) {
       if (part?.type !== "input_text" || typeof part.text !== "string") continue;
-      IMAGE_ATTACHMENT_REF_RE.lastIndex = 0;
-      for (const match of part.text.matchAll(IMAGE_ATTACHMENT_REF_RE)) refs.add(match[1]);
+      for (const ref of imageRefsInText(part.text)) {
+        if (!refs || refs.has(ref)) imageRefs.add(ref);
+      }
     }
     const images = [];
-    for (const ref of refs) {
+    for (const ref of imageRefs) {
       if (hydrated.has(ref)) continue;
       let media;
       try {
@@ -1408,6 +1493,34 @@ export function hydrateImageRefsForVision(input, mediaStore) {
     return { ...item, content: [...item.content, ...images] };
   });
   return changed ? output : input;
+}
+
+function imageReferenceHandoff(input, mediaStore, resolveExternalSource, sessionId) {
+  const refs = new Set();
+  if (!Array.isArray(input)) return "";
+  for (const item of input) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "input_text") {
+        for (const ref of imageRefsInText(part.text)) refs.add(ref);
+      }
+      if (part?.type === "input_image" && typeof part.image_url === "string") {
+        try {
+          const ref = mediaStore?.put(part.image_url, { resolveExternalSource, sessionId });
+          if (ref) refs.add(ref);
+        } catch {
+          // An unreferenceable image cannot be promised in a compaction handoff.
+        }
+      }
+    }
+  }
+  if (!refs.size) return "";
+  return `\n\nVISUAL ATTACHMENTS (retrieve only when needed):\n${[...refs].map(historicalImageSpawnHint).join("\n")}`;
+}
+
+function codexAttachmentResolver(attachmentIndex, sessionId, threadId) {
+  if (!attachmentIndex) return undefined;
+  return (image) => attachmentIndex.resolve(sessionId, image) || attachmentIndex.resolve(threadId, image);
 }
 
 // OpenCode Go rejects function tools whose parameters schema is missing or not
@@ -2858,8 +2971,9 @@ function writeDirectCompaction(res, payload, summary, v2) {
 // kcr1: payload. v2 returns a single compaction output item (JSON or SSE);
 // v1 returns replacement history under { output }.
 export async function relayCompaction(payload, res, services, { signal } = {}, v2 = true) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
+  mediaStore?.touchSession?.(sessionId);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
@@ -2901,20 +3015,21 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
   const localBackend = isLocalBackend(config, route.model);
   const targetSupportsVision = Boolean(modelEntryFor(config, route.model)?.supportsVision);
-  // The v2 compaction response can carry only its text summary, not an
-  // input_image item. A local CPU summary must therefore keep an image_ref for
-  // every attachment, including when the local model itself can see images;
-  // otherwise compaction silently loses the only way to revisit the image.
-  // Remote visual summaries keep bytes and let their selected model describe
-  // the image directly before that text-only handoff is written.
-  const visualInput = targetSupportsVision
-    ? hydrateImageRefsForVision(normalizedInput, mediaStore)
-    : normalizedInput;
+  // A compaction must carry image refs forward, not raw pixels. The selected
+  // visual model can still see the 20 newest attachments while it summarizes;
+  // every older image survives in the returned text handoff as an img_ref.
+  const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
   const summarizeInput = rewriteHistoricalImages(
-    visualInput,
+    normalizedInput,
     mediaStore,
-    { preserveImages: !localBackend && targetSupportsVision },
+    {
+      preserveImages: !localBackend && targetSupportsVision,
+      keepRecentImages: !localBackend && targetSupportsVision ? RECENT_IMAGE_WINDOW : 0,
+      resolveExternalSource,
+      sessionId,
+    },
   );
+  const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId);
   const summarizeBody = {
     ...(localPayload || payload),
     model: route.model,
@@ -2949,7 +3064,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     if (compressed.compressedChars < compressed.originalChars * 0.95) {
       compressionInfo = { fromChars: compressed.originalChars, toChars: compressed.compressedChars };
     }
-    directSummary = compressed.text;
+    directSummary = `${compressed.text}${imageHandoff}`;
   }
   // Small-context local backends do not need the heavy creative skills; drop
   // their entries from the instructions so the summarize call (which replays
@@ -3111,7 +3226,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       return { ok: false, httpStatus: 502, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
     usage = extractResponseUsage(parsed);
-    const summary = extractResponseText(parsed);
+    const summary = `${extractResponseText(parsed)}${imageHandoff}`;
     if (v2) {
       if (payload.stream === false) {
         res.statusCode = 200;
@@ -3164,7 +3279,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex } = services;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     const error = {
       error: {
@@ -3178,6 +3293,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     return { ok: false, httpStatus: 400, route: { model: "", reason: "bad_request" }, error };
   }
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
+  mediaStore?.touchSession?.(sessionId);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
@@ -3270,13 +3386,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let normalizedPayload = {
     ...(localPayload || payload),
     input: adaptImageUrlShape(
-      rewriteHistoricalImages(
-        modelSupportsVision(route.model)
-          ? hydrateImageRefsForVision(normalizedInput, mediaStore)
-          : normalizedInput,
-        mediaStore,
-        { preserveImages: modelSupportsVision(route.model) },
-      ),
+      rewriteHistoricalImages(normalizedInput, mediaStore, {
+        preserveImages: modelSupportsVision(route.model),
+        keepRecentImages: modelSupportsVision(route.model) ? RECENT_IMAGE_WINDOW : 0,
+        keepCurrentImages: true,
+        currentStartIndex: currentTurnStartIndex(normalizedInput),
+        resolveExternalSource: codexAttachmentResolver(attachmentIndex, sessionId, threadId),
+        sessionId,
+      }),
       modelEntryFor(config, route.model)?.imageUrlShape,
     ),
     model: route.model,

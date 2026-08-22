@@ -12,6 +12,7 @@ import { ownsEnvFile, parseEnvFile, loadConfig, publicConfig, writeEnvFile, envF
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
+import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
@@ -1077,6 +1078,9 @@ async function refreshProfileModels(profile, config) {
 }
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
+  const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
+    ? mutableConfig.codexHome
+    : path.join(os.homedir(), ".codex");
   // loadConfig always supplies `tokens`; test fixtures build config objects by
   // hand, so make the runtime copy self-consistent before routes mutate it.
   mutableConfig.tokens = mutableConfig.tokens || {};
@@ -1089,11 +1093,14 @@ export function createServices(config = loadConfig()) {
   }
   delete mutableConfig.goToken;
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
+  const attachmentIndex = new CodexAttachmentIndex({ codexHome });
   const mediaStore = new MediaStore({
     ttlMs: mutableConfig.mediaTtlMs,
     maxBytes: mutableConfig.mediaMaxBytes,
     maxEntries: mutableConfig.mediaMaxEntries,
+    maxStoredBytes: mutableConfig.mediaMaxStoredBytes,
     stateDir: mutableConfig.mediaDir,
+    externalRoots: attachmentIndex.roots,
   });
   const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
   const derivedFallback = createDerivedFallback();
@@ -1328,11 +1335,6 @@ export function createServices(config = loadConfig()) {
     ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  // Tests inject a partial config that omits codexHome; fall back to the same
-  // default loadConfig would have chosen so the session index is always rooted.
-  const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
-    ? mutableConfig.codexHome
-    : path.join(os.homedir(), ".codex");
   return Object.assign(services, {
     config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
@@ -1344,6 +1346,7 @@ export function createServices(config = loadConfig()) {
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
+    attachmentIndex,
   });
 }
 
@@ -1366,8 +1369,60 @@ function protectedRelayPath(pathname) {
     || [...NATIVE_IMAGE_PATHS].includes(pathname);
 }
 
-function zstdRequestDecoder(callerKey) {
-  const maxInput = 16 * 1024 * 1024;
+function payloadTooLargeDiagnostics({
+  encoding,
+  reason,
+  wireBytes,
+  wireLimitBytes = null,
+  decodedBytes = null,
+  decodedBytesAtLeast = null,
+  decodedLimitBytes = null,
+}) {
+  return {
+    encoding,
+    reason,
+    wireBytes,
+    wireLimitBytes,
+    decodedBytes,
+    decodedBytesAtLeast,
+    decodedLimitBytes,
+    // A 413 occurs before it is safe to parse the JSON. Never decompress or
+    // parse past the guard just to obtain these diagnostics.
+    inputItems: null,
+    inputImages: null,
+    inputImageBytes: null,
+  };
+}
+
+function recordPayloadTooLarge(metrics, diagnostics) {
+  const finish = metrics?.begin?.("responses", {
+    operation: "payload_too_large",
+    payloadDiagnostics: diagnostics,
+  });
+  finish?.({
+    ok: false,
+    httpStatus: 413,
+    error: `Request body exceeded ${diagnostics.reason} limit.`,
+  });
+}
+
+function sendPayloadTooLarge(res, metrics, diagnostics, message) {
+  recordPayloadTooLarge(metrics, diagnostics);
+  return res.status(413).json({
+    error: {
+      type: "payload_too_large",
+      message,
+      diagnostics,
+    },
+  });
+}
+
+function zstdRequestDecoder({ callerKey, metrics }) {
+  // Codex sends its own compaction request as one zstd body. A 16 MiB wire cap
+  // rejected that very request before it could replace image-heavy history with
+  // a compact handoff. Keep a bounded 32 MiB ingress allowance; decompression
+  // remains capped at 64 MiB, so this is not an unbounded memory escape hatch.
+  const maxInput = 32 * 1024 * 1024;
   const maxOutput = 64 * 1024 * 1024;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
@@ -1387,7 +1442,18 @@ function zstdRequestDecoder(callerKey) {
       received += chunk.length;
       if (received > maxInput) {
         tooLarge = true;
-        res.status(413).json({ error: { type: "payload_too_large", message: `zstd request body exceeds the ${maxInput}-byte limit` } });
+        sendPayloadTooLarge(
+          res,
+          metrics,
+          payloadTooLargeDiagnostics({
+            encoding: "zstd",
+            reason: "compressed_request",
+            wireBytes: received,
+            wireLimitBytes: maxInput,
+            decodedLimitBytes: maxOutput,
+          }),
+          `zstd request body exceeds the ${maxInput}-byte limit`,
+        );
         return;
       }
       chunks.push(chunk);
@@ -1399,7 +1465,21 @@ function zstdRequestDecoder(callerKey) {
       const onDecoded = (error, body) => {
         if (error) {
           if (error.code === "ERR_BUFFER_TOO_LARGE") {
-            return res.status(413).json({ error: { type: "payload_too_large", message: `zstd request decompresses beyond the ${maxOutput}-byte limit` } });
+            return sendPayloadTooLarge(
+              res,
+              metrics,
+              payloadTooLargeDiagnostics({
+                encoding: "zstd",
+                reason: "decompressed_request",
+                wireBytes: compressed.length,
+                decodedBytes: Number.isFinite(error.decompressedBytes) ? error.decompressedBytes : null,
+                decodedBytesAtLeast: Number.isFinite(error.decompressedBytesAtLeast)
+                  ? error.decompressedBytesAtLeast
+                  : maxOutput + 1,
+                decodedLimitBytes: maxOutput,
+              }),
+              `zstd request decompresses beyond the ${maxOutput}-byte limit`,
+            );
           }
           return res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
         }
@@ -1424,7 +1504,10 @@ export function decodeZstdBody(compressed, maxOutput = 64 * 1024 * 1024, nativeD
   if (typeof nativeDecoder === "function") {
     return new Promise((resolve, reject) => {
       nativeDecoder(compressed, { maxOutputLength: maxOutput }, (error, body) => {
-        if (error) reject(error);
+        if (error) {
+          if (error.code === "ERR_BUFFER_TOO_LARGE") error.decompressedBytesAtLeast = maxOutput + 1;
+          reject(error);
+        }
         else resolve(Buffer.from(body));
       });
     });
@@ -1437,6 +1520,8 @@ export function decodeZstdBody(compressed, maxOutput = 64 * 1024 * 1024, nativeD
       if (length > maxOutput) {
         const error = new Error("decompressed body exceeds limit");
         error.code = "ERR_BUFFER_TOO_LARGE";
+        error.decompressedBytes = length;
+        error.decompressedBytesAtLeast = length;
         throw error;
       }
       chunks.push(Buffer.from(chunk));
@@ -2747,8 +2832,30 @@ export function createApp(services = createServices()) {
   // (which is registered inside createMcpExpressApp and cannot be reordered).
   const outer = express();
   outer.disable("x-powered-by");
-  outer.use(zstdRequestDecoder(services.callerKey));
+  outer.use(zstdRequestDecoder({ callerKey: services.callerKey, metrics: services.metrics }));
   outer.use(app);
+  // createMcpExpressApp owns the JSON parser. Its 25 MB rejection is raised
+  // after the inner app runs, so record the same anonymous diagnostics here.
+  outer.use((error, req, res, next) => {
+    if (error?.status !== 413 && error?.statusCode !== 413 && error?.type !== "entity.too.large") return next(error);
+    const limit = Number.isFinite(error.limit) ? error.limit : 25 * 1024 * 1024;
+    const received = Number.isFinite(error.length) ? error.length : null;
+    const diagnostics = payloadTooLargeDiagnostics({
+      encoding: String(req.headers["content-encoding"] || "identity").toLowerCase(),
+      reason: "json_request",
+      wireBytes: received,
+      wireLimitBytes: limit,
+      decodedBytes: received,
+      decodedLimitBytes: limit,
+    });
+    if (res.headersSent) return next(error);
+    return sendPayloadTooLarge(
+      res,
+      services.metrics,
+      diagnostics,
+      `JSON request body exceeds the ${limit}-byte limit`,
+    );
+  });
   return { app: outer, close: () => mcpHandler.close?.(), services };
 }
 

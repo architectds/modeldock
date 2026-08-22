@@ -3,7 +3,9 @@ import test from "node:test";
 import { Writable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
+import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 import {
   RouteAffinity,
   adaptImageUrlShape,
@@ -34,6 +36,7 @@ import {
   LOCAL_TOOL_ALLOWLIST,
   flattenNamespaceCalls,
   pipeNormalizedStream,
+  RECENT_IMAGE_WINDOW,
   restoreNamespaceCall,
   redactBearer,
   relayCompaction,
@@ -785,13 +788,12 @@ test("rewriteHistoricalImages replaces all images with refs by default", () => {
     { type: "message", role: "user", content: [{ type: "input_text", text: "current" }, { type: "input_image", image_url: "data:image/png;base64,BBBB" }] },
   ];
   const rewritten = rewriteHistoricalImages(input, mediaStore);
-  assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+: use vision_inspect with image_ref/);
+  assert.match(rewritten[0].content[1].text, /\[Image attachment img_\d+: if visual evidence is needed, call vision_inspect\(image_ref=/);
   assert.equal(rewritten[0].content[1].type, "input_text");
   assert.equal(rewritten[2].content[1].type, "input_text", "current-turn image is also replaced by default");
   assert.equal(rewritten[1], input[1], "assistant history is untouched");
-  assert.match(rewritten[0].content[1].text, /spawn_agent's message/);
-  assert.match(rewritten[0].content[1].text, /omit fork_turns or use "all"/i);
-  assert.doesNotMatch(rewritten[0].content[1].text, /spawn_agent's prompt/);
+  assert.match(rewritten[0].content[1].text, /vision_inspect\(image_ref=/);
+  assert.match(rewritten[0].content[1].text, /specific visual question/);
 });
 
 test("rewriteHistoricalImages preserves all image bytes for a vision-capable target", () => {
@@ -844,7 +846,50 @@ test("rewriteHistoricalImages degrades to a plain placeholder without a media st
   ];
   const rewritten = rewriteHistoricalImages(input, null);
   assert.equal(rewritten[0].content[0].type, "input_text");
-  assert.match(rewritten[0].content[0].text, /handled in a prior turn/);
+  assert.match(rewritten[0].content[0].text, /unavailable by reference/);
+});
+
+test("visual routes keep the current images plus only the newest bounded history", () => {
+  const refs = new Map();
+  const mediaStore = {
+    put: (url) => {
+      if (!refs.has(url)) refs.set(url, `img_${refs.size}`);
+      return refs.get(url);
+    },
+  };
+  const image = (label) => `data:image/png;base64,${Buffer.from(label).toString("base64")}`;
+  const input = [];
+  for (let index = 0; index < RECENT_IMAGE_WINDOW + 5; index += 1) {
+    input.push({ type: "message", role: "user", content: [{ type: "input_image", image_url: image(`old-${index}`) }] });
+    input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: "handled" }] });
+  }
+  input.push({ type: "message", role: "user", content: [
+    { type: "input_image", image_url: image("current-a") },
+    { type: "input_image", image_url: image("current-b") },
+  ] });
+
+  const output = rewriteHistoricalImages(input, mediaStore, {
+    preserveImages: true,
+    keepRecentImages: RECENT_IMAGE_WINDOW,
+    keepCurrentImages: true,
+  });
+  const historical = output.slice(0, -1).flatMap((item) => item.content || []);
+  assert.equal(historical.filter((part) => part.type === "input_image").length, RECENT_IMAGE_WINDOW);
+  assert.equal(historical.filter((part) => part.type === "input_text" && /Image attachment img_/.test(part.text)).length, 5);
+  assert.equal(output.at(-1).content.filter((part) => part.type === "input_image").length, 2, "a multi-image current turn is never clipped by the history window");
+});
+
+test("visual ref hydration is limited to the requested window", () => {
+  const input = Array.from({ length: RECENT_IMAGE_WINDOW + 5 }, (_, index) => ({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: `[Image attachment img_${index}: use vision_inspect with image_ref "img_${index}" if visual evidence is needed.]` }],
+  }));
+  const allowed = new Set(Array.from({ length: RECENT_IMAGE_WINDOW }, (_, index) => `img_${index + 5}`));
+  const output = hydrateImageRefsForVision(input, {
+    get: (ref) => ({ imageUrl: `data:image/png;base64,${Buffer.from(ref).toString("base64")}` }),
+  }, { refs: allowed });
+  assert.equal(output.flatMap((item) => item.content).filter((part) => part.type === "input_image").length, RECENT_IMAGE_WINDOW);
 });
 
 test("applyToolPolicy strips hosted tool schemas", () => {
@@ -2761,6 +2806,7 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
       res,
       {
         ...compactServices(),
+        mediaStore: { put: () => "img_compact_visual" },
         mainModel: "deepseek-v4-flash@opencode-go",
         visionModel: "gpt-5.6-luna@opencode-go",
         config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go" },
@@ -2775,6 +2821,8 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
     const image = calls[0].input.flatMap((item) => item.content || []).find((part) => part.type === "input_image");
     assert.ok(image, "the compact model receives the image it must summarize");
     assert.deepEqual(image.image_url, { url: "data:image/png;base64,AAAA" }, "MiMo's image wire shape still applies on compact");
+    const compacted = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.match(decodeCompactionSummary(compacted.output[0].encrypted_content), /Image attachment img_compact_visual/, "the compaction handoff keeps a durable image ref");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2948,8 +2996,8 @@ test("local CPU compaction preserves image refs instead of silently dropping vis
     assert.equal(calls.length, 0, "the compact path remains CPU-only for a local model");
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
     const summary = decodeCompactionSummary(body.output[0].encrypted_content);
-    assert.match(summary, /Image attachment img_local_visual: use vision_inspect with image_ref/);
-    assert.match(summary, /vision_inspect with image_ref "img_local_visual"/);
+    assert.match(summary, /Image attachment img_local_visual: if visual evidence is needed, call vision_inspect\(image_ref=/);
+    assert.match(summary, /image_ref="img_local_visual"/);
     assert.doesNotMatch(summary, /data:image\/png;base64,AAAA/, "raw image bytes cannot fit in the text compaction contract");
   } finally {
     globalThis.fetch = originalFetch;
@@ -3463,6 +3511,62 @@ test("relayResponses leaves the string image_url alone for models that want it",
     assert.equal(image.image_url, dataUrl, "the string form is untouched");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("a routed vision request reuses Codex's byte-identical attachment without a second blob", async () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-codex-home-"));
+  const mediaDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-media-"));
+  const sessionId = "019fe9b0-f0b5-7e00-8703-862bf7c16a6d";
+  const attachment = path.join(codexHome, "codex-remote-attachments", sessionId, "attachment", "1-Photo-1.png");
+  const bytes = Buffer.from("the same screenshot that Codex put on the wire");
+  const dataUrl = `data:image/png;base64,${bytes.toString("base64")}`;
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("visual answer");
+  };
+  try {
+    mkdirSync(path.dirname(attachment), { recursive: true });
+    writeFileSync(attachment, bytes);
+    const attachmentIndex = new CodexAttachmentIndex({ codexHome });
+    const mediaStore = new MediaStore({
+      ttlMs: 60_000,
+      maxBytes: 10 * 1024 * 1024,
+      maxEntries: 64,
+      stateDir: mediaDir,
+      externalRoots: attachmentIndex.roots,
+    });
+    await relayResponses(
+      {
+        model: "gpt-5.6-luna@opencode-go",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: dataUrl }] }],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "gpt-5.6-luna@opencode-go",
+        visionModel: "gpt-5.6-luna@opencode-go",
+        config: { ...configStub(), mainModel: "gpt-5.6-luna@opencode-go", visionModel: "gpt-5.6-luna@opencode-go" },
+        knownModels: new Set(["gpt-5.6-luna@opencode-go"]),
+        mediaStore,
+        attachmentIndex,
+        incomingHeaders: { "x-codex-session-id": sessionId },
+        requestUrl: "/v1/responses",
+      },
+    );
+    const ref = describeImageUrl(dataUrl).ref;
+    assert.equal(mediaStore.get(ref).storage, "external");
+    assert.equal(existsSync(path.join(mediaDir, `${ref}.bin`)), false, "no fallback blob was written");
+    assert.equal(calls[0].input.flatMap((item) => item.content || []).find((part) => part.type === "input_image")?.image_url, dataUrl);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(codexHome, { recursive: true, force: true });
+    rmSync(mediaDir, { recursive: true, force: true });
   }
 });
 

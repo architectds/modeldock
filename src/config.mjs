@@ -10,7 +10,7 @@ import { applyContextOverrides, readContextOverrides } from "./context-overrides
 import { readModelToggles } from "./model-toggles.mjs";
 import { readCustomEndpoints } from "./custom-endpoints.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
-import { defaultStateDir, stateDir } from "./state-dir.mjs";
+import { defaultStateDir, stateDir, stateFile } from "./state-dir.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
@@ -491,12 +491,13 @@ export function loadConfig() {
     nativeMerge,
     mcpTransport,
     visionTimeoutMs: integer("MODELDOCK_VISION_TIMEOUT_MS", 90_000, { min: 1_000, max: 300_000 }),
-    mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 3_600_000, { min: 60_000 }),
+    mediaTtlMs: integer("MODELDOCK_MEDIA_TTL_MS", 30 * 24 * 3_600_000, { min: 60_000 }),
     mediaMaxBytes: integer("MODELDOCK_MEDIA_MAX_BYTES", 10 * 1024 * 1024, { min: 1_024 }),
-    mediaMaxEntries: integer("MODELDOCK_MEDIA_MAX_ENTRIES", 64, { min: 1, max: 1_024 }),
+    mediaMaxEntries: integer("MODELDOCK_MEDIA_MAX_ENTRIES", 4_096, { min: 1, max: 10_000 }),
+    mediaMaxStoredBytes: integer("MODELDOCK_MEDIA_MAX_STORED_BYTES", 256 * 1024 * 1024, { min: 1_024 * 1_024 }),
     mediaDir: process.env.MODELDOCK_MEDIA_DIR
       ? path.resolve(process.env.MODELDOCK_MEDIA_DIR)
-      : path.join(os.homedir(), ".modeldock", "media"),
+      : stateFile("media"),
     // Persistent memory vault (recall_memory tool). Always on; MODELDOCK_MEMORY=0
     // opts out for the rare install that wants to stay thin.
     memoryEnabled: !envOff("MODELDOCK_MEMORY"),
