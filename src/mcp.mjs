@@ -107,7 +107,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
           {
             title: "Grok Video Generation",
             description:
-              "Generate a video with the signed-in xAI Grok Imagine service. Generation is asynchronous: this tool waits briefly and returns the temporary video URL when ready, or returns request_id and pending status for a later status call. ModelDock does not copy the video locally.",
+              "Generate a video with the signed-in xAI Grok Imagine service. The normal call waits for a terminal result and returns the temporary video URL. Set wait_seconds to 0 only for an explicit detached job, then call action=status with its request_id. ModelDock does not copy the video locally.",
             inputSchema: z.object({
               action: z.enum(["generate", "status"]).optional().describe("generate starts a video; status checks a pending request"),
               prompt: z.string().min(1).optional().describe("Video prompt; required for generate"),
@@ -116,7 +116,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
               duration: z.number().int().min(1).max(15).optional().describe("Seconds; defaults to 5"),
               aspect_ratio: z.enum(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]).optional().describe("Defaults to 16:9"),
               resolution: z.enum(["480p", "720p", "1080p"]).optional().describe("Defaults to 480p"),
-              wait_seconds: z.number().int().min(0).max(300).optional().describe("How long to poll before returning pending; defaults to 60"),
+              wait_seconds: z.number().int().min(0).max(600).optional().describe("Wait up to 600 seconds by default; use 0 only for an explicit detached job"),
             }),
             annotations: { readOnlyHint: false, openWorldHint: false },
           },

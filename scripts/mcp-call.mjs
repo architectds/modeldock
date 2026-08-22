@@ -197,7 +197,7 @@ function exampleFor(toolName) {
     web_search_exa: 'search "query"',
     vision_inspect: 'vision <path> "question"',
     image_gen: 'image "prompt" [size]',
-    grok_video_gen: 'video "prompt" [duration] [aspect_ratio] [resolution] [wait_seconds]',
+    grok_video_gen: 'video "prompt" [duration] [aspect_ratio] [resolution] [wait_seconds=600]',
     speak: 'speak "text"',
     hear: "hear <file>",
     recall_memory: 'recall "query" [scope_dir]',

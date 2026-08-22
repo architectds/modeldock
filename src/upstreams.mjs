@@ -199,7 +199,11 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       if (!Number.isInteger(duration) || duration < 1 || duration > 15) {
         throw new Error("duration must be an integer from 1 to 15 seconds.");
       }
-      const waitSeconds = Math.max(0, Math.min(300, Number(args.wait_seconds ?? 60) || 0));
+      // A video result that quietly becomes pending is effectively lost to the
+      // user: Codex cannot receive a new assistant message after this tool call
+      // has returned. Keep the normal call open until xAI reaches a terminal
+      // state. Detached operation is explicit with wait_seconds: 0.
+      const waitSeconds = Math.max(0, Math.min(600, Number(args.wait_seconds ?? 600) || 0));
       const response = await fetch(`${XAI_VIDEO_BASE}/generations`, {
         method: "POST",
         headers,
@@ -227,6 +231,9 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
         body = await readStatus(id);
       }
       const result = videoResult(body, id);
+      if (result.status === "pending" && waitSeconds > 0) {
+        throw new Error(`Grok video did not finish within ${waitSeconds} seconds. It is still rendering at xAI; check it with action=status and request_id=${id}.`);
+      }
       if (result.status === "failed" || result.status === "expired") {
         throw new Error(`Grok video generation ${result.status}.`);
       }
