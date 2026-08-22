@@ -558,7 +558,7 @@ export function createUpdater({
             minBytes: target.asset === ASSET_NAME ? 100_000 : 0,
             fetchImpl,
           });
-          staged.push({ body, dest: path.join(rootDir, ...target.dest) });
+          staged.push({ body, dest: path.join(rootDir, ...target.dest), mode: target.mode });
         }
         deployFilesAtomically(staged, rootDir);
       }

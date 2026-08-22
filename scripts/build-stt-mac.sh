@@ -3,11 +3,23 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 OUT="$ROOT/dist/modeldock-stt-helper"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/modeldock-stt.XXXXXX")"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-platform-version 2>/dev/null || sw_vers -productVersion)"
+DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-$SDK_VERSION}"
+
+cleanup() {
+  rm -rf "$BUILD_DIR"
+}
+trap cleanup EXIT
 
 mkdir -p "$ROOT/dist"
-swiftc -parse-as-library -O -arch arm64 -arch x86_64 -o "$OUT" "$ROOT/scripts/stt-mac-helper.swift" \
-  -framework Speech \
-  -framework AVFoundation
+for ARCH in arm64 x86_64; do
+  swiftc -parse-as-library -O -target "$ARCH-apple-macos$DEPLOYMENT_TARGET" \
+    -o "$BUILD_DIR/modeldock-stt-helper-$ARCH" "$ROOT/scripts/stt-mac-helper.swift" \
+    -framework Speech \
+    -framework AVFoundation
+done
+lipo -create "$BUILD_DIR/modeldock-stt-helper-arm64" "$BUILD_DIR/modeldock-stt-helper-x86_64" -output "$OUT"
 
 echo "built $OUT"
 
