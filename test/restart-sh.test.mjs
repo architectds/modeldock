@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,7 @@ test("restart.sh stops the owned listener and starts a healthy POSIX gateway", a
 
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.sh"), readFileSync(path.join(repoRoot, "scripts", "restart.sh")), { mode: 0o755 });
+  writeFileSync(path.join(root, "scripts", "gateway-verifier.mjs"), readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")), "utf8");
   const bundlePath = path.join(root, "dist", "modeldock.mjs");
   writeFileSync(
     bundlePath,
@@ -81,12 +82,20 @@ http.createServer((req, res) => {
     bundlePath,
     `import http from "node:http";
 import { writeFileSync } from "node:fs";
+import path from "node:path";
 const port = Number(process.env.MODELDOCK_PORT || ${port});
+const stateDir = process.env.MODELDOCK_STATE_DIR;
+writeFileSync(path.join(stateDir, \`owner-\${port}.json\`), JSON.stringify({ pid: process.pid, root: ${JSON.stringify(root)}, port, startedAt: new Date().toISOString() }));
 writeFileSync(${JSON.stringify(path.join(root, "started.txt"))}, String(process.pid));
 http.createServer((req, res) => {
   if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, marker: "new", pid: process.pid }));
+    return;
+  }
+  if (req.url === "/api/status") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ config: {}, runtime: {} }));
     return;
   }
   res.writeHead(404); res.end();
@@ -135,6 +144,7 @@ test("restart.sh refuses a live foreign listener when the owner record is missin
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.sh"), readFileSync(path.join(repoRoot, "scripts", "restart.sh")), { mode: 0o755 });
+  writeFileSync(path.join(root, "scripts", "gateway-verifier.mjs"), readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")), "utf8");
   writeFileSync(path.join(root, "dist", "modeldock.mjs"), "process.exit(0);\n", "utf8");
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const foreign = spawn(process.execPath, ["--input-type=module", "-e", `
@@ -180,6 +190,7 @@ test("restart.sh proceeds when the owner record is stale but the listener runs t
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.sh"), readFileSync(path.join(repoRoot, "scripts", "restart.sh")), { mode: 0o755 });
+  writeFileSync(path.join(root, "scripts", "gateway-verifier.mjs"), readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")), "utf8");
   const bundlePath = path.join(root, "dist", "modeldock.mjs");
   writeFileSync(
     bundlePath,
@@ -198,6 +209,35 @@ http.createServer((req, res) => {
   });
   t.after(() => old.kill("SIGKILL"));
   assert.ok(await waitForHealth(port, "old"), "old gateway should start for the stale-owner test");
+
+  // The old listener keeps the original module in memory. Replace the on-disk
+  // bundle before restarting with a real post-handoff shape: the lifecycle
+  // verifier must see a fresh owner and the local status API, not just a port.
+  writeFileSync(
+    bundlePath,
+    `import http from "node:http";
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+const port = Number(process.env.MODELDOCK_PORT || ${port});
+const stateDir = process.env.MODELDOCK_STATE_DIR;
+writeFileSync(path.join(stateDir, \`owner-\${port}.json\`), JSON.stringify({ pid: process.pid, root: ${JSON.stringify(root)}, port, startedAt: new Date().toISOString() }));
+writeFileSync(${JSON.stringify(path.join(root, "started.txt"))}, String(process.pid));
+http.createServer((req, res) => {
+  if (req.url === "/healthz") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, marker: "new", pid: process.pid }));
+    return;
+  }
+  if (req.url === "/api/status") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ config: {}, runtime: {} }));
+    return;
+  }
+  res.writeHead(404); res.end();
+}).listen(port, "127.0.0.1");
+`,
+    "utf8",
+  );
 
   // The recorded owner is a genuinely dead pid: spawn a throwaway child, let it
   // write its pid, then kill it - the exact state found on a live install after
@@ -224,4 +264,8 @@ http.createServer((req, res) => {
   const exitCode = await new Promise((resolve) => child.on("close", resolve));
   assert.equal(exitCode, 0, `stale-owner restart should succeed\nstdout:\n${out}\nstderr:\n${err}`);
   assert.match(out + err, /restart\.sh: started gateway/);
+  const started = path.join(root, "started.txt");
+  assert.ok(existsSync(started), "the replacement gateway should record its pid");
+  const newPid = Number(readFileSync(started, "utf8"));
+  if (newPid > 0) process.kill(newPid, "SIGKILL");
 });
