@@ -491,12 +491,12 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
   -webkit-appearance: none;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
   width: 100%;
-  padding: 13px 2px;
+  padding: 15px 2px;
   color: #c3d2dc;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   line-height: 1.25;
   cursor: pointer;
@@ -509,12 +509,12 @@ dialog.settings-dialog .settings-wizard-link:hover { color: var(--text, #ecf4f8)
   content: "+";
   display: inline-grid;
   place-items: center;
-  width: 18px;
-  height: 18px;
+  width: 26px;
+  height: 26px;
   border: 1px solid rgba(137,160,175,.35);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--muted, #8b90a0);
-  font: 600 13px/1 ui-sans-serif, system-ui, sans-serif;
+  font: 600 18px/1 ui-sans-serif, system-ui, sans-serif;
   transition: color .15s, border-color .15s, background .15s;
 }
 .custom-add[open] > .custom-add-summary::before { content: "\2212"; }
