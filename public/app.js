@@ -1310,6 +1310,96 @@ const ROSTER_SORT_KEYS = {
   cache: (entry) => entry.usage?.cacheRate || 0,
 };
 
+// Provider marks stay inline so the table has no network dependency and each
+// mark remains crisp at the small size a dense roster needs. The paths are
+// brand marks, not decorative substitutes; the provider name remains visible
+// beside every mark for clarity and accessibility.
+const PROVIDER_MARKS = {
+  openai: {
+    color: "#9bb7c8",
+    viewBox: "0 0 256 260",
+    path: "M239.184 106.203a64.72 64.72 0 0 0-5.576-53.103C219.452 28.459 191 15.784 163.213 21.74A65.586 65.586 0 0 0 52.096 45.22a64.72 64.72 0 0 0-43.23 31.36c-14.31 24.602-11.061 55.634 8.033 76.74a64.67 64.67 0 0 0 5.525 53.102c14.174 24.65 42.644 37.324 70.446 31.36a64.72 64.72 0 0 0 48.754 21.744c28.481.025 53.714-18.361 62.414-45.481a64.77 64.77 0 0 0 43.229-31.36c14.137-24.558 10.875-55.423-8.083-76.483m-97.56 136.338a48.4 48.4 0 0 1-31.105-11.255l1.535-.87l51.67-29.825a8.6 8.6 0 0 0 4.247-7.367v-72.85l21.845 12.636c.218.111.37.32.409.563v60.367c-.056 26.818-21.783 48.545-48.601 48.601M37.158 197.93a48.35 48.35 0 0 1-5.781-32.589l1.534.921l51.722 29.826a8.34 8.34 0 0 0 8.441 0l63.181-36.425v25.221a.87.87 0 0 1-.358.665l-52.335 30.184c-23.257 13.398-52.97 5.431-66.404-17.803M23.549 85.38a48.5 48.5 0 0 1 25.58-21.333v61.39a8.29 8.29 0 0 0 4.195 7.316l62.874 36.272l-21.845 12.636a.82.82 0 0 1-.767 0L41.353 151.53c-23.211-13.454-31.171-43.144-17.804-66.405zm179.466 41.695l-63.08-36.63L161.73 77.86a.82.82 0 0 1 .768 0l52.233 30.184a48.6 48.6 0 0 1-7.316 87.635v-61.391a8.54 8.54 0 0 0-4.4-7.213m21.742-32.69l-1.535-.922l-51.619-30.081a8.39 8.39 0 0 0-8.492 0L99.98 99.808V74.587a.72.72 0 0 1 .307-.665l52.233-30.133a48.652 48.652 0 0 1 72.236 50.391zM88.061 139.097l-21.845-12.585a.87.87 0 0 1-.41-.614V65.685a48.652 48.652 0 0 1 79.757-37.346l-1.535.87l-51.67 29.825a8.6 8.6 0 0 0-4.246 7.367zm11.868-25.58L128.067 97.3l28.188 16.218v32.434l-28.086 16.218l-28.188-16.218z",
+  },
+  "opencode-go": {
+    color: "#9aabff",
+    viewBox: "0 0 24 24",
+    path: "M22 24H2V0h20zM17 4.8H7v14.4h10z",
+  },
+  "deepseek-official": {
+    color: "#6f91ff",
+    viewBox: "0 0 24 24",
+    path: "M23.748 4.651c-.254-.124-.364.113-.512.233c-.051.04-.094.09-.137.137c-.372.397-.806.657-1.373.626c-.829-.046-1.537.214-2.163.848c-.133-.782-.575-1.248-1.247-1.548c-.352-.155-.708-.311-.955-.65c-.172-.24-.219-.509-.305-.774c-.055-.16-.11-.323-.293-.35c-.2-.031-.278.136-.356.276c-.313.572-.434 1.202-.422 1.84c.027 1.436.633 2.58 1.838 3.393c.137.094.172.187.129.323c-.082.28-.18.553-.266.833c-.055.179-.137.218-.328.14a5.5 5.5 0 0 1-1.737-1.179c-.857-.828-1.631-1.743-2.597-2.46a12 12 0 0 0-.689-.47c-.985-.957.13-1.743.387-1.836c.27-.098.094-.433-.778-.428c-.872.003-1.67.295-2.687.685a3 3 0 0 1-.465.136a9.6 9.6 0 0 0-2.883-.101c-1.885.21-3.39 1.1-4.497 2.622C.082 8.776-.231 10.854.152 13.02c.403 2.284 1.568 4.175 3.36 5.653c1.857 1.533 3.997 2.284 6.438 2.14c1.482-.085 3.132-.284 4.994-1.86c.47.234.962.328 1.78.398c.629.058 1.235-.031 1.705-.129c.735-.155.684-.836.418-.961c-2.155-1.004-1.682-.595-2.112-.926c1.095-1.295 2.768-3.598 3.284-6.733c.05-.346.115-.834.108-1.114c-.004-.171.035-.238.23-.257a4.2 4.2 0 0 0 1.545-.475c1.397-.763 1.96-2.016 2.093-3.517c.02-.23-.004-.467-.247-.588M11.58 18.168c-2.088-1.642-3.101-2.183-3.52-2.16c-.39.024-.32.472-.234.763c.09.288.207.487.371.74c.114.167.192.416-.113.603c-.673.416-1.842-.14-1.897-.168c-1.361-.801-2.5-1.86-3.301-3.306c-.775-1.393-1.225-2.888-1.299-4.482c-.02-.385.094-.522.477-.592a4.7 4.7 0 0 1 1.53-.038c2.131.311 3.946 1.264 5.467 2.774c.868.86 1.525 1.887 2.202 2.89c.72 1.066 1.494 2.082 2.48 2.915c.348.291.626.513.892.677c-.802.09-2.14.109-3.055-.615z",
+  },
+  xai: {
+    color: "#c0a8ff",
+    viewBox: "0 0 24 24",
+    path: "M14.234 10.162L22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993l-9.168-13.838zm-2.837 3.299l-.929-1.329L3.076 1.56h3.182l5.965 8.532l.929 1.329l7.754 11.09h-3.182z",
+  },
+  llamacpp: {
+    color: "#b9c8d4",
+    viewBox: "0 0 24 24",
+    path: "M3 4h18v16H3zM7 8h2v2H7zm4 0h6v2h-6zM7 12h2v2H7zm4 0h4v2h-4zM7 16h10v2H7z",
+  },
+  custom: {
+    color: "#aab9c4",
+    viewBox: "0 0 24 24",
+    path: "M8 3v5a4 4 0 0 0 8 0V3h-2v5a2 2 0 0 1-4 0V3zM3 11h18v2H3zm5 5h8v2H8z",
+  },
+};
+
+function providerMark(provider) {
+  const key = String(provider || "").toLowerCase();
+  const mark = PROVIDER_MARKS[key] || PROVIDER_MARKS.custom;
+  const wrap = document.createElement("span");
+  wrap.className = `roster-provider-mark roster-provider-mark-${key.replace(/[^a-z0-9]+/g, "-")}`;
+  wrap.setAttribute("aria-hidden", "true");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("focusable", "false");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", mark.path);
+  svg.append(path);
+  wrap.append(svg);
+  wrap.style.setProperty("--provider-color", mark.color);
+  return wrap;
+}
+
+function providerCell(entry) {
+  const cell = document.createElement("td");
+  cell.className = "roster-provider-cell";
+  const content = document.createElement("span");
+  content.className = "roster-provider";
+  const name = document.createElement("span");
+  name.className = "roster-provider-name";
+  name.textContent = entry.providerLabel || entry.provider || "-";
+  content.append(providerMark(entry.provider), name);
+  cell.append(content);
+  return cell;
+}
+
+function rosterMetricCell(kind, value, formatted, ratio) {
+  const cell = document.createElement("td");
+  cell.className = "roster-num roster-metric-cell";
+  if (value === null) {
+    cell.textContent = "-";
+    return cell;
+  }
+  const metric = document.createElement("span");
+  metric.className = `roster-metric roster-metric-${kind}`;
+  const track = document.createElement("span");
+  track.className = "roster-metric-track";
+  track.setAttribute("aria-hidden", "true");
+  const fill = document.createElement("i");
+  fill.style.width = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
+  track.append(fill);
+  const numberNode = document.createElement("span");
+  numberNode.className = "roster-metric-value";
+  numberNode.textContent = formatted;
+  metric.append(track, numberNode);
+  cell.append(metric);
+  return cell;
+}
+
 function sortRoster(rows) {
   const key = ROSTER_SORT_KEYS[rosterSort.column] || ROSTER_SORT_KEYS.requests;
   const sign = rosterSort.direction === "asc" ? 1 : -1;
@@ -1396,7 +1486,7 @@ function rosterCell(text, className) {
   return cell;
 }
 
-function rosterRow(entry, rank, onChanged) {
+function rosterRow(entry, rank, onChanged, scales) {
   const row = document.createElement("tr");
   if (entry.published === false) row.classList.add("roster-parked");
   row.append(rosterSwitch(entry, onChanged));
@@ -1414,7 +1504,7 @@ function rosterRow(entry, rank, onChanged) {
     name.append(" ", tag);
   }
   row.append(name);
-  row.append(rosterCell(entry.providerLabel, "roster-provider"));
+  row.append(providerCell(entry));
   // A published window is the model maker's claim about the base model, not a
   // measurement of what this endpoint serves. The two can differ, and whoever
   // hits the wall knows better than the table does - so the cell says where
@@ -1497,9 +1587,12 @@ function rosterRow(entry, rank, onChanged) {
   // all, and a tier beside a request count reads as a quality score.
   row.append(rosterCell(t(entry.supportsVision ? "roster.yes" : "roster.no")));
   const usage = entry.usage;
-  row.append(rosterCell(usage ? number(usage.requests) : "-", "roster-num"));
-  row.append(rosterCell(usage && usage.tps ? usage.tps.toFixed(1) : "-", "roster-num"));
-  row.append(rosterCell(usage && usage.in ? `${Math.round(usage.cacheRate * 100)}%` : "-", "roster-num"));
+  const requests = usage ? Number(usage.requests) || 0 : null;
+  const tpsValue = usage && usage.tps ? Number(usage.tps) : null;
+  const cacheValue = usage && usage.in ? Math.max(0, Math.min(1, Number(usage.cacheRate) || 0)) : null;
+  row.append(rosterMetricCell("requests", requests, requests === null ? "-" : number(requests), requests === null ? 0 : requests / scales.requests));
+  row.append(rosterMetricCell("tps", tpsValue, tpsValue === null ? "-" : tpsValue.toFixed(1), tpsValue === null ? 0 : tpsValue / scales.tps));
+  row.append(rosterMetricCell("cache", cacheValue, cacheValue === null ? "-" : `${Math.round(cacheValue * 100)}%`, cacheValue === null ? 0 : cacheValue));
   if (!usage) row.classList.add("roster-unused");
   return row;
 }
@@ -1561,10 +1654,14 @@ async function renderModelRoster() {
     }
     const body = document.createElement("tbody");
     body.append(head);
+    const scales = {
+      requests: Math.max(1, ...rows.map((entry) => Number(entry.usage?.requests) || 0)),
+      tps: Math.max(1, ...rows.map((entry) => Number(entry.usage?.tps) || 0)),
+    };
     let used = 0;
     rows.forEach((entry, index) => {
       if (entry.usage) used += 1;
-      body.append(rosterRow(entry, String(index + 1), () => pollConfig().catch(() => {})));
+      body.append(rosterRow(entry, String(index + 1), () => pollConfig().catch(() => {}), scales));
     });
     table.append(body);
     host.append(table);

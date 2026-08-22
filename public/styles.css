@@ -727,14 +727,29 @@ body { padding-left: 88px; }
 /* Model roster: one ranked table, provider as a column. */
 .roster-panel { max-width: none; }
 .roster-window { margin: 0; color: var(--muted); font-size: 12px; }
-.roster-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
+.roster-table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 6px; }
 .roster-table th { padding: 7px 10px; color: var(--muted); font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
 .roster-table th { text-align: left; }
 .roster-table th.roster-head-num { text-align: right; }
 .roster-table td { padding: 8px 10px; border-bottom: 1px solid rgba(35,55,71,.5); }
 .roster-table tr:last-child td { border-bottom: 0; }
 .roster-rank { display: inline-block; min-width: 22px; color: var(--muted); font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.roster-provider { color: var(--muted); }
+#roster-groups { overflow-x: auto; }
+.roster-provider-cell { min-width: 158px; }
+.roster-provider { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; color: var(--muted); }
+.roster-provider-mark { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; color: var(--provider-color, var(--muted)); }
+.roster-provider-mark svg { display: block; width: 16px; height: 16px; fill: currentColor; }
+.roster-provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roster-metric-cell { width: 175px; min-width: 175px; }
+.roster-metric { display: grid; grid-template-columns: minmax(68px, 1fr) max-content; align-items: center; gap: 9px; min-width: 164px; }
+.roster-metric-track { display: block; height: 5px; overflow: hidden; border-radius: 999px; background: rgba(137,160,175,.14); }
+.roster-metric-track i { display: block; width: 0; height: 100%; border-radius: inherit; transition: width .25s ease; }
+.roster-metric-requests .roster-metric-track i { background: #4f9dff; }
+.roster-metric-tps .roster-metric-track i { background: #63d4df; }
+.roster-metric-cache .roster-metric-track i { background: #a88bff; }
+.roster-metric-value { min-width: 64px; color: var(--text); font: 600 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.roster-parked .roster-metric-value { color: var(--muted); }
+.roster-parked .roster-metric-track { opacity: .5; }
 /* Editable, and it says so before you click: a field with no border reads as
    text, and nobody clicks text. Quiet enough that a roster still reads as a
    roster. */
