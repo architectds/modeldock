@@ -1,6 +1,6 @@
 {
   "name": "modeldock-opencode-go-gate",
-  "version": "0.3.29",
+  "version": "0.3.30",
   "private": true,
   "type": "module",
   "description": "ModelDock makes the AI tools you already own work together.",
