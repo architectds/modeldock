@@ -552,7 +552,7 @@ function statusPayload(services) {
   const ROUTE_PROVIDER_LABELS = {
     "openai": "ChatGPT (native)",
     "opencode-go": "OpenCode Go",
-    "deepseek-official": "DeepSeek Official",
+    "deepseek-official": "DeepSeek",
   };
   const lastRequest = metrics.recent.find((record) => record.kind === "responses" && record.model);
   const routeModel = lastRequest?.model || selected.mainModel;

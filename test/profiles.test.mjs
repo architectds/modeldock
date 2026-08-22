@@ -46,6 +46,7 @@ test("lists all profiles as selectable options", () => {
   // validates, empty until someone signs in.
   assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "xai", "ollama", "llamacpp", "vllm"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
+  assert.equal(options.find((option) => option.id === "deepseek-official")?.label, "DeepSeek");
 });
 
 test("ollama profile is empty until connected and fills from the snapshot", () => {
@@ -191,6 +192,7 @@ test("model catalog is generated per profile with distinct comp hashes", () => {
   assert.equal(goCatalog.models[0].default_reasoning_level, "medium");
   assert.deepEqual(goCatalog.models[0].supported_reasoning_levels.map((level) => level.effort), ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.equal(officialCatalog.models[0].comp_hash, "modeldock-deepseek-official-v1");
+  assert.equal(officialCatalog.models[0].display_name, "DeepSeek - DeepSeek V4 Flash", "the picker keeps the compact Provider - Model label");
   assert.equal(officialCatalog.models[0].supports_search_tool, false);
   assert.equal(officialCatalog.models[0].default_reasoning_level, "medium", "DeepSeek official defaults to medium thinking");
   assert.deepEqual(

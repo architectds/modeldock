@@ -8,7 +8,7 @@ moving prompts, files, or results between apps.
 
 **Work in one place. Get things done everywhere.**
 
-A thin local Responses bridge for OpenCode Go, DeepSeek official, and local
+A thin local Responses bridge for OpenCode Go, DeepSeek, and local
 engines - Ollama, llama.cpp, and vLLM are detected on loopback, and any other
 OpenAI-compatible endpoint can be added by URL - with native GPT passthrough
 and live token, latency, and trace observability.
@@ -40,7 +40,7 @@ to the task. Connectors are planned; they are not part of the current release.
 
 DeepSeek V4 Flash is fast and cheap, but it cannot see, speak, or listen, and
 the OpenCode Go Responses endpoint it runs through has no hosted search (the
-DeepSeek official endpoint does). A Qwen or any other model you host yourself
+DeepSeek endpoint does). A Qwen or any other model you host yourself
 has the same gaps. Model Dock For Codex adds these as tools,
 without rewriting the conversation history:
 
@@ -89,7 +89,7 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 The installer checks Node.js >= 24, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Add at
 least one provider in Settings: [OpenCode Go](https://opencode.ai/auth),
-DeepSeek official, a custom Responses endpoint, or connect Ollama for local
+DeepSeek, a custom Responses endpoint, or connect Ollama for local
 models. The `content-to-video` skill is not downloaded by the installer; copy
 `skills/content-to-video` into Codex's skills directory manually when you want
 the video capability.

@@ -309,7 +309,7 @@ const OPENCODE_GO_PROFILE = {
 
 const DEEPSEEK_OFFICIAL_PROFILE = {
   id: "deepseek-official",
-  label: "DeepSeek Official",
+  label: "DeepSeek",
   baseUrl: "https://api.deepseek.com",
   tokenEnvName: "DEEPSEEK_API_KEY",
 
@@ -348,8 +348,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
     return modelCatalogDefaults({
       profileId: DEEPSEEK_OFFICIAL_PROFILE.id,
       mainModel,
-      displayName: "DeepSeek V4 (Official)",
-      description: "DeepSeek official Responses endpoint through ModelDock.",
+      displayName: "DeepSeek",
+      description: "DeepSeek Responses endpoint through ModelDock.",
       compHash: "modeldock-deepseek-official-v1",
       inputModalities: ["text"],
       supportsSearchTool: false,
