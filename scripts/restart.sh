@@ -110,6 +110,14 @@ if [ ! -f "$SERVER" ]; then
   status "ERROR: gateway entry not found under $ROOT/src or $ROOT/dist"
   exit 1
 fi
+VERIFIER="$ROOT/scripts/gateway-verifier.mjs"
+if [ ! -f "$VERIFIER" ]; then
+  # The old updater deploys the new bundle before these scripts but cannot
+  # download a helper asset it does not yet know. Use that bundled verifier
+  # for this one migration; fresh installs have the standalone helper.
+  status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+  VERIFIER="$SERVER"
+fi
 
 OLD_PID="$(find_listener_pid)"
 if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null \
@@ -198,19 +206,19 @@ try_launchd_restart() {
 
 # A successful process launch is not a successful restart: the child can bind
 # briefly and then die, or an old listener can survive the handoff. Invoke the
-# verifier embedded in the same bundle that was just launched so Windows,
+# verifier shipped with the lifecycle scripts so Windows,
 # POSIX, installer recovery, and release verification share one definition of
 # ready: a fresh owner from this install plus a working local status API.
 verify_gateway() {
   if [ -n "$OLD_PID" ]; then
-    if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+    if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
       --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
       --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000 \
       --previous-pid "$OLD_PID"; then
       status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
       return 1
     fi
-  elif ! "$NODE_BIN" "$SERVER" --verify-gateway \
+  elif ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
     --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
     --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
     status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."

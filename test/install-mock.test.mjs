@@ -665,6 +665,7 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   const launcher = path.join(installDir, "scripts", launcherName);
   assert.ok(existsSync(installedBundle), "dist/modeldock.mjs should be downloaded");
   assert.ok(existsSync(launcher), `${launcherName} launcher should be written`);
+  assert.ok(existsSync(path.join(installDir, "scripts", "gateway-verifier.mjs")), "scripts/gateway-verifier.mjs should be written");
   assert.ok(existsSync(path.join(installDir, "scripts", "restart.ps1")), "scripts/restart.ps1 should be written");
   if (!isWindows) {
     assert.ok(existsSync(path.join(installDir, "scripts", "restart.sh")), "scripts/restart.sh should be written");

@@ -11,8 +11,8 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 
 function Invoke-GatewayVerifier([string[]]$VerifierArgs, [switch]$Quiet) {
   try {
-    if ($Quiet) { & $nodeExe @VerifierArgs *> $null }
-    else { & $nodeExe @VerifierArgs }
+    if ($Quiet) { & $nodeExe $verifierEntry @VerifierArgs *> $null }
+    else { & $nodeExe $verifierEntry @VerifierArgs }
     return $LASTEXITCODE
   } catch {
     # PowerShell 7 can still surface a non-zero native exit as an exception in
@@ -26,6 +26,16 @@ $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+if (Test-Path -LiteralPath $verifier) {
+    $verifierEntry = $verifier
+} else {
+    # The old updater deploys the new bundle before this script but cannot
+    # download a helper it does not yet know. Use the bundled verifier for
+    # that one migration; fresh installs always have the standalone helper.
+    Write-Output "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+    $verifierEntry = $server
+}
 $envFile = Join-Path $root ".env"
 $port = 4097
 $envPort = 0
@@ -78,7 +88,7 @@ if (Test-Path -LiteralPath $bundle) { $server = $bundle }
 # /healthz, so use the shared status/owner verifier rather than treating that
 # normal setup state as down. It also prevents a second hidden launch from
 # masking a foreign listener as our gateway.
-$preflightExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
+$preflightExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
 if ($preflightExit -eq 0) { exit 0 }
 
 # Log instead of discarding: a hidden start that dies (node missing, port taken, bad
@@ -103,7 +113,7 @@ if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 
 }
 $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
-$verifyExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
 if ($verifyExit -ne 0) {
   Write-Output "ERROR: Gateway did not verify after hidden start. Check $log."
   exit 1

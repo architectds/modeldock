@@ -238,6 +238,132 @@ Write-Host "  release assets verified against SHA256SUMS"
 
 # Hidden launcher (same content as the repo's scripts/start-hidden.ps1). Written by the
 # installer so a single-file download still gets autostart + self-update restarts.
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+@'
+// Shared lifecycle verifier. It is deliberately independent of modeldock.mjs:
+// an installer or updater can verify an older released bundle before this
+// version of the bundle itself has been published.
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+function normalizedPath(value, platform = process.platform) {
+  const resolved = path.resolve(value);
+  return platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function ownerPath(port, stateDir) {
+  return path.join(stateDir || path.join(os.homedir(), ".modeldock"), `owner-${port}.json`);
+}
+
+function readOwner(port, stateDir) {
+  try {
+    const file = ownerPath(port, stateDir);
+    if (!existsSync(file)) return null;
+    const owner = JSON.parse(readFileSync(file, "utf8"));
+    return owner && typeof owner === "object" ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function inspectGateway({
+  root,
+  port,
+  stateDir,
+  startedAfterMs = 0,
+  previousPid = 0,
+  fetchImpl = fetch,
+  platform = process.platform,
+} = {}) {
+  const expectedRoot = normalizedPath(root || ".", platform);
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) return { ok: false, reason: "invalid_port" };
+  const owner = readOwner(numericPort, stateDir);
+  if (!owner) return { ok: false, reason: "owner_missing" };
+  if (normalizedPath(owner.root || ".", platform) !== expectedRoot) return { ok: false, reason: "owner_root" };
+  if (Number(owner.port) !== numericPort) return { ok: false, reason: "owner_port" };
+  if (!Number.isInteger(Number(owner.pid)) || !processAlive(Number(owner.pid))) return { ok: false, reason: "owner_dead" };
+  if (Number(previousPid) > 0 && Number(owner.pid) === Number(previousPid)) return { ok: false, reason: "old_owner" };
+  if (Number(startedAfterMs) > 0) {
+    const startedAt = Date.parse(owner.startedAt || "");
+    if (!Number.isFinite(startedAt) || startedAt < Number(startedAfterMs)) return { ok: false, reason: "owner_stale" };
+  }
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${numericPort}/api/status`, {
+      signal: AbortSignal.timeout(2_000), headers: { accept: "application/json" },
+    });
+    if (!response.ok) return { ok: false, reason: `status_${response.status}` };
+    const status = await response.json();
+    if (!status || typeof status !== "object" || !status.config || !status.runtime) return { ok: false, reason: "status_shape" };
+    return { ok: true, owner };
+  } catch {
+    return { ok: false, reason: "status_unreachable" };
+  }
+}
+
+export async function waitForGateway({ timeoutMs = 15_000, intervalMs = 250, ...options } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { ok: false, reason: "not_started" };
+  while (Date.now() <= deadline) {
+    last = await inspectGateway(options);
+    if (last.ok) return last;
+    await sleep(intervalMs);
+  }
+  return last;
+}
+
+function valueAfter(args, flag) {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] || "" : "";
+}
+
+export function verifierArgs(args = process.argv.slice(2)) {
+  return {
+    root: valueAfter(args, "--root"),
+    port: Number(valueAfter(args, "--port")),
+    stateDir: valueAfter(args, "--state-dir"),
+    timeoutMs: Number(valueAfter(args, "--timeout-ms")) || 15_000,
+    startedAfterMs: Number(valueAfter(args, "--started-after-ms")) || 0,
+    previousPid: Number(valueAfter(args, "--previous-pid")) || 0,
+  };
+}
+
+export async function runGatewayVerifierCli(args = process.argv.slice(2), output = console) {
+  const options = verifierArgs(args);
+  if (!options.root || !options.port) {
+    output.error("usage: --verify-gateway --root <install-root> --port <port> [--state-dir <dir>]");
+    return 64;
+  }
+  const result = await waitForGateway(options);
+  if (!result.ok) {
+    output.error(`Gateway did not verify: ${result.reason}`);
+    return 1;
+  }
+  output.log(`Gateway verified: PID ${result.owner.pid}, port ${options.port}`);
+  return 0;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(await runGatewayVerifierCli());
+}
+'@ | Out-File -FilePath $verifier -Encoding ascii
+
 $launcher = Join-Path $root "scripts\start-hidden.ps1"
 @'
 # Start the ModelDock gateway hidden (no console window) with the package root as the
@@ -253,8 +379,8 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 
 function Invoke-GatewayVerifier([string[]]$VerifierArgs, [switch]$Quiet) {
   try {
-    if ($Quiet) { & $nodeExe @VerifierArgs *> $null }
-    else { & $nodeExe @VerifierArgs }
+    if ($Quiet) { & $nodeExe $verifierEntry @VerifierArgs *> $null }
+    else { & $nodeExe $verifierEntry @VerifierArgs }
     return $LASTEXITCODE
   } catch {
     # PowerShell 7 can still surface a non-zero native exit as an exception in
@@ -268,6 +394,16 @@ $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $root "dist\modeldock.mjs"
 $server = Join-Path $root "src\server.mjs"
 if (Test-Path -LiteralPath $bundle) { $server = $bundle }
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+if (Test-Path -LiteralPath $verifier) {
+    $verifierEntry = $verifier
+} else {
+    # The old updater deploys the new bundle before this script but cannot
+    # download a helper it does not yet know. Use the bundled verifier for
+    # that one migration; fresh installs always have the standalone helper.
+    Write-Output "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+    $verifierEntry = $server
+}
 $envFile = Join-Path $root ".env"
 $port = 4097
 $envPort = 0
@@ -320,7 +456,7 @@ if (Test-Path -LiteralPath $bundle) { $server = $bundle }
 # /healthz, so use the shared status/owner verifier rather than treating that
 # normal setup state as down. It also prevents a second hidden launch from
 # masking a foreign listener as our gateway.
-$preflightExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
+$preflightExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--timeout-ms", "500") -Quiet
 if ($preflightExit -eq 0) { exit 0 }
 
 # Log instead of discarding: a hidden start that dies (node missing, port taken, bad
@@ -345,7 +481,7 @@ if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 
 }
 $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
-$verifyExit = Invoke-GatewayVerifier -VerifierArgs @($server, "--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
 if ($verifyExit -ne 0) {
   Write-Output "ERROR: Gateway did not verify after hidden start. Check $log."
   exit 1
@@ -394,7 +530,7 @@ function Write-Status($message) {
 
 function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
   try {
-    & $nodeExe @VerifierArgs *> $null
+    & $nodeExe $verifierEntry @VerifierArgs *> $null
     return $LASTEXITCODE
   } catch {
     # See start-hidden.ps1: an overriding PowerShell host can throw for the
@@ -617,6 +753,16 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+if (Test-Path -LiteralPath $verifier) {
+  $verifierEntry = $verifier
+} else {
+  # The 0.3.31 updater did not know this helper asset. Its first upgrade
+  # deploys the new bundle before these scripts, so use the bundled copy for
+  # this one migration only; later releases deploy the standalone helper.
+  Write-Status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+  $verifierEntry = $server
+}
 
 try {
   # Quote both paths: an installed layout under a home dir with a space
@@ -640,7 +786,6 @@ try {
 }
 Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
 $verifyArgs = @(
-  $server,
   "--verify-gateway",
   "--root", $root,
   "--port", "$port",

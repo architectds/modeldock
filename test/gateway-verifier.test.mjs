@@ -3,8 +3,12 @@ import test from "node:test";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { inspectGateway, waitForGateway } from "../src/gateway-verifier.mjs";
+import { fileURLToPath } from "node:url";
+import { inspectGateway, waitForGateway } from "../scripts/gateway-verifier.mjs";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function listen(server) {
   await new Promise((resolve, reject) => {
@@ -57,4 +61,37 @@ test("gateway verifier rejects a stale owner before trusting a listener", async 
   }));
   const result = await inspectGateway({ root, stateDir, port, startedAfterMs: Date.now(), fetchImpl: async () => assert.fail("stale owner must not fetch") });
   assert.deepEqual(result, { ok: false, reason: "owner_stale" });
+});
+
+test("the built bundle carries the migration verifier for an updater that cannot yet deploy the helper", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-verify-bundle-root-"));
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-verify-bundle-state-"));
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/api/status") return res.writeHead(404).end();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ config: {}, runtime: {} }));
+  });
+  const port = await listen(server);
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+  writeFileSync(path.join(stateDir, `owner-${port}.json`), JSON.stringify({
+    pid: process.pid,
+    root,
+    port,
+    startedAt: new Date().toISOString(),
+  }));
+
+  const child = spawn(process.execPath, [
+    path.join(repoRoot, "dist", "modeldock.mjs"), "--verify-gateway",
+    "--root", root, "--port", String(port), "--state-dir", stateDir, "--timeout-ms", "500",
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0, output);
+  assert.match(output, /Gateway verified/);
 });

@@ -298,6 +298,132 @@ echo "  release assets verified against SHA256SUMS"
 
 # Background launcher (same content as the repo's scripts/start-hidden.sh). Written by
 # the installer so a single-file download still gets autostart + self-update restarts.
+VERIFIER="$ROOT/scripts/gateway-verifier.mjs"
+cat > "$VERIFIER" <<'EOF'
+// Shared lifecycle verifier. It is deliberately independent of modeldock.mjs:
+// an installer or updater can verify an older released bundle before this
+// version of the bundle itself has been published.
+import { existsSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+function normalizedPath(value, platform = process.platform) {
+  const resolved = path.resolve(value);
+  return platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function ownerPath(port, stateDir) {
+  return path.join(stateDir || path.join(os.homedir(), ".modeldock"), `owner-${port}.json`);
+}
+
+function readOwner(port, stateDir) {
+  try {
+    const file = ownerPath(port, stateDir);
+    if (!existsSync(file)) return null;
+    const owner = JSON.parse(readFileSync(file, "utf8"));
+    return owner && typeof owner === "object" ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function inspectGateway({
+  root,
+  port,
+  stateDir,
+  startedAfterMs = 0,
+  previousPid = 0,
+  fetchImpl = fetch,
+  platform = process.platform,
+} = {}) {
+  const expectedRoot = normalizedPath(root || ".", platform);
+  const numericPort = Number(port);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) return { ok: false, reason: "invalid_port" };
+  const owner = readOwner(numericPort, stateDir);
+  if (!owner) return { ok: false, reason: "owner_missing" };
+  if (normalizedPath(owner.root || ".", platform) !== expectedRoot) return { ok: false, reason: "owner_root" };
+  if (Number(owner.port) !== numericPort) return { ok: false, reason: "owner_port" };
+  if (!Number.isInteger(Number(owner.pid)) || !processAlive(Number(owner.pid))) return { ok: false, reason: "owner_dead" };
+  if (Number(previousPid) > 0 && Number(owner.pid) === Number(previousPid)) return { ok: false, reason: "old_owner" };
+  if (Number(startedAfterMs) > 0) {
+    const startedAt = Date.parse(owner.startedAt || "");
+    if (!Number.isFinite(startedAt) || startedAt < Number(startedAfterMs)) return { ok: false, reason: "owner_stale" };
+  }
+  try {
+    const response = await fetchImpl(`http://127.0.0.1:${numericPort}/api/status`, {
+      signal: AbortSignal.timeout(2_000), headers: { accept: "application/json" },
+    });
+    if (!response.ok) return { ok: false, reason: `status_${response.status}` };
+    const status = await response.json();
+    if (!status || typeof status !== "object" || !status.config || !status.runtime) return { ok: false, reason: "status_shape" };
+    return { ok: true, owner };
+  } catch {
+    return { ok: false, reason: "status_unreachable" };
+  }
+}
+
+export async function waitForGateway({ timeoutMs = 15_000, intervalMs = 250, ...options } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = { ok: false, reason: "not_started" };
+  while (Date.now() <= deadline) {
+    last = await inspectGateway(options);
+    if (last.ok) return last;
+    await sleep(intervalMs);
+  }
+  return last;
+}
+
+function valueAfter(args, flag) {
+  const index = args.indexOf(flag);
+  return index >= 0 ? args[index + 1] || "" : "";
+}
+
+export function verifierArgs(args = process.argv.slice(2)) {
+  return {
+    root: valueAfter(args, "--root"),
+    port: Number(valueAfter(args, "--port")),
+    stateDir: valueAfter(args, "--state-dir"),
+    timeoutMs: Number(valueAfter(args, "--timeout-ms")) || 15_000,
+    startedAfterMs: Number(valueAfter(args, "--started-after-ms")) || 0,
+    previousPid: Number(valueAfter(args, "--previous-pid")) || 0,
+  };
+}
+
+export async function runGatewayVerifierCli(args = process.argv.slice(2), output = console) {
+  const options = verifierArgs(args);
+  if (!options.root || !options.port) {
+    output.error("usage: --verify-gateway --root <install-root> --port <port> [--state-dir <dir>]");
+    return 64;
+  }
+  const result = await waitForGateway(options);
+  if (!result.ok) {
+    output.error(`Gateway did not verify: ${result.reason}`);
+    return 1;
+  }
+  output.log(`Gateway verified: PID ${result.owner.pid}, port ${options.port}`);
+  return 0;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(await runGatewayVerifierCli());
+}
+EOF
+
 LAUNCHER="$ROOT/scripts/start-hidden.sh"
 cat > "$LAUNCHER" <<'EOF'
 #!/bin/sh
@@ -311,6 +437,7 @@ if [ -f "$ROOT/dist/modeldock.mjs" ]; then
 else
   SERVER="$ROOT/src/server.mjs"
 fi
+VERIFIER="$ROOT/scripts/gateway-verifier.mjs"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
   ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
@@ -358,11 +485,18 @@ fi
 if [ -f "$ROOT/dist/modeldock.mjs" ]; then
   SERVER="$ROOT/dist/modeldock.mjs"
 fi
+if [ ! -f "$VERIFIER" ]; then
+  # The old updater deploys the new bundle before this script but cannot
+  # download a helper asset it does not yet know. Use that bundled verifier
+  # for this one migration; fresh installs have the standalone helper.
+  echo "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration." >&2
+  VERIFIER="$SERVER"
+fi
 # A correctly running gateway without a provider deliberately reports 503 from
 # /healthz, so use the shared status/owner verifier rather than treating that
 # normal setup state as down. It also prevents a second hidden launch from
 # masking a foreign listener as our gateway.
-if "$NODE_BIN" "$SERVER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
+if "$NODE_BIN" "$VERIFIER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
   exit 0
 fi
 cd "$ROOT"
@@ -387,7 +521,7 @@ else
   STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
 fi
-if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
   --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
   --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
   echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2
@@ -438,7 +572,7 @@ function Write-Status($message) {
 
 function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
   try {
-    & $nodeExe @VerifierArgs *> $null
+    & $nodeExe $verifierEntry @VerifierArgs *> $null
     return $LASTEXITCODE
   } catch {
     # See start-hidden.ps1: an overriding PowerShell host can throw for the
@@ -661,6 +795,16 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+if (Test-Path -LiteralPath $verifier) {
+  $verifierEntry = $verifier
+} else {
+  # The 0.3.31 updater did not know this helper asset. Its first upgrade
+  # deploys the new bundle before these scripts, so use the bundled copy for
+  # this one migration only; later releases deploy the standalone helper.
+  Write-Status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+  $verifierEntry = $server
+}
 
 try {
   # Quote both paths: an installed layout under a home dir with a space
@@ -684,7 +828,6 @@ try {
 }
 Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
 $verifyArgs = @(
-  $server,
   "--verify-gateway",
   "--root", $root,
   "--port", "$port",
@@ -821,6 +964,14 @@ if [ ! -f "$SERVER" ]; then
   status "ERROR: gateway entry not found under $ROOT/src or $ROOT/dist"
   exit 1
 fi
+VERIFIER="$ROOT/scripts/gateway-verifier.mjs"
+if [ ! -f "$VERIFIER" ]; then
+  # The old updater deploys the new bundle before these scripts but cannot
+  # download a helper asset it does not yet know. Use that bundled verifier
+  # for this one migration; fresh installs have the standalone helper.
+  status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+  VERIFIER="$SERVER"
+fi
 
 OLD_PID="$(find_listener_pid)"
 if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/healthz" 2>/dev/null \
@@ -909,19 +1060,19 @@ try_launchd_restart() {
 
 # A successful process launch is not a successful restart: the child can bind
 # briefly and then die, or an old listener can survive the handoff. Invoke the
-# verifier embedded in the same bundle that was just launched so Windows,
+# verifier shipped with the lifecycle scripts so Windows,
 # POSIX, installer recovery, and release verification share one definition of
 # ready: a fresh owner from this install plus a working local status API.
 verify_gateway() {
   if [ -n "$OLD_PID" ]; then
-    if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+    if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
       --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
       --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000 \
       --previous-pid "$OLD_PID"; then
       status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
       return 1
     fi
-  elif ! "$NODE_BIN" "$SERVER" --verify-gateway \
+  elif ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
     --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
     --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
     status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."

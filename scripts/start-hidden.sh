@@ -9,6 +9,7 @@ if [ -f "$ROOT/dist/modeldock.mjs" ]; then
 else
   SERVER="$ROOT/src/server.mjs"
 fi
+VERIFIER="$ROOT/scripts/gateway-verifier.mjs"
 PORT="${MODELDOCK_PORT:-4097}"
 if [ -f "$ROOT/.env" ]; then
   ENV_PORT="$(sed -n 's/^MODELDOCK_PORT=//p' "$ROOT/.env" | tail -n 1 | tr -d '\r' || true)"
@@ -56,11 +57,18 @@ fi
 if [ -f "$ROOT/dist/modeldock.mjs" ]; then
   SERVER="$ROOT/dist/modeldock.mjs"
 fi
+if [ ! -f "$VERIFIER" ]; then
+  # The old updater deploys the new bundle before this script but cannot
+  # download a helper asset it does not yet know. Use that bundled verifier
+  # for this one migration; fresh installs have the standalone helper.
+  echo "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration." >&2
+  VERIFIER="$SERVER"
+fi
 # A correctly running gateway without a provider deliberately reports 503 from
 # /healthz, so use the shared status/owner verifier rather than treating that
 # normal setup state as down. It also prevents a second hidden launch from
 # masking a foreign listener as our gateway.
-if "$NODE_BIN" "$SERVER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
+if "$NODE_BIN" "$VERIFIER" --verify-gateway --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" --timeout-ms 500 >/dev/null 2>&1; then
   exit 0
 fi
 cd "$ROOT"
@@ -85,7 +93,7 @@ else
   STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
   nohup "$NODE_BIN" "$SERVER" >>"$LOG" 2>&1 &
 fi
-if ! "$NODE_BIN" "$SERVER" --verify-gateway \
+if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
   --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
   --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
   echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2

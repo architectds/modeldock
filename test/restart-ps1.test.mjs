@@ -46,6 +46,7 @@ test("restart.ps1 refuses a live foreign listener when the owner record is missi
   const port = await reservePort();
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.ps1"), readFileSync(path.join(repoRoot, "scripts", "restart.ps1")), "utf8");
+  writeFileSync(path.join(root, "scripts", "gateway-verifier.mjs"), readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")), "utf8");
   writeFileSync(path.join(root, "dist", "modeldock.mjs"), "process.exit(0);\n", "utf8");
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -111,6 +112,11 @@ test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting"
     readFileSync(path.join(repoRoot, "scripts", "restart.ps1")),
     "utf8",
   );
+  writeFileSync(
+    path.join(root, "scripts", "gateway-verifier.mjs"),
+    readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")),
+    "utf8",
+  );
   // src is the newest input, so the launcher must run build-if-stale before the
   // bundle is served. The fake helper records that it ran.
   writeFileSync(path.join(root, "src", "server.mjs"), "export const x = 1;\n", "utf8");
@@ -119,36 +125,17 @@ test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting"
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(path.join(root, "rebuilt.txt"))}, "1");\n`,
     "utf8",
   );
-  // The fake bundle models the shared verifier protocol as well as the
-  // gateway: a fresh owner plus /api/status, not merely a successful spawn.
+  // This deliberately models a prior released bundle: it has no verifier CLI
+  // at all. The current lifecycle helper must validate its fresh owner and
+  // /api/status without requiring the bundle to understand a new argument.
   writeFileSync(
     path.join(root, "dist", "modeldock.mjs"),
     `import http from "node:http";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 const port = Number(process.env.MODELDOCK_PORT);
 const stateDir = process.env.MODELDOCK_STATE_DIR;
 const ownerFile = path.join(stateDir, \`owner-\${port}.json\`);
-const args = process.argv.slice(2);
-if (args.includes("--verify-gateway")) {
-  const root = args[args.indexOf("--root") + 1];
-  const startedAfter = Number(args[args.indexOf("--started-after-ms") + 1] || 0);
-  let last = "owner_missing";
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    try {
-      const owner = JSON.parse(readFileSync(ownerFile, "utf8"));
-      const valid = owner.root === root && owner.port === port && Date.parse(owner.startedAt) >= startedAfter;
-      const status = await fetch(\`http://127.0.0.1:\${port}/api/status\`);
-      if (valid && status.ok) process.exit(0);
-      last = JSON.stringify({ owner, root, startedAfter, valid, status: status.status });
-    } catch (error) {
-      last = String(error?.stack || error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  writeFileSync(${JSON.stringify(path.join(root, "verify-error.txt"))}, last);
-  process.exit(1);
-}
 writeFileSync(${JSON.stringify(path.join(root, "started.txt"))}, String(process.pid));
 writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, root: ${JSON.stringify(root)}, port, startedAt: new Date().toISOString() }));
 http.createServer((req, res) => {
@@ -181,8 +168,7 @@ http.createServer((req, res) => {
   restart.stdout.on("data", (chunk) => (output += chunk));
   restart.stderr.on("data", (chunk) => (output += chunk));
   const exitCode = await new Promise((resolve) => restart.on("close", resolve));
-  const verifyError = path.join(root, "verify-error.txt");
-  assert.equal(exitCode, 0, `${output}\n${existsSync(verifyError) ? readFileSync(verifyError, "utf8") : ""}`);
+  assert.equal(exitCode, 0, output);
   assert.match(output, /verified gateway/);
   assert.equal(
     existsSync(path.join(root, "rebuilt.txt")),
@@ -229,6 +215,11 @@ test("restart.ps1 reports an unstoppable gateway instead of exiting silently", a
   writeFileSync(
     path.join(root, "scripts", "restart.ps1"),
     readFileSync(path.join(repoRoot, "scripts", "restart.ps1")),
+    "utf8",
+  );
+  writeFileSync(
+    path.join(root, "scripts", "gateway-verifier.mjs"),
+    readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")),
     "utf8",
   );
   writeFileSync(path.join(root, "dist", "modeldock.mjs"), "// never started\n", "utf8");

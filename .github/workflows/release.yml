@@ -62,7 +62,7 @@ jobs:
         run: |
           chmod +x dist/modeldock-stt-helper
           cd dist && sha256sum modeldock.mjs mcp-standalone.mjs modeldock-stt-helper > SHA256SUMS
-          cd ../scripts && sha256sum install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh >> ../dist/SHA256SUMS
+          cd ../scripts && sha256sum gateway-verifier.mjs install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh >> ../dist/SHA256SUMS
           cd ../dist && cat SHA256SUMS
       # Re-tagging an existing version must refresh its assets rather than fail:
       # `gh release create` errors when the release already exists, so upload with
@@ -71,7 +71,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ASSETS="dist/modeldock.mjs dist/mcp-standalone.mjs dist/modeldock-stt-helper dist/SHA256SUMS scripts/install.ps1 scripts/install.sh scripts/start-hidden.ps1 scripts/restart.ps1 scripts/recover.ps1 scripts/start-hidden.sh scripts/restart.sh scripts/recover.sh"
+          ASSETS="dist/modeldock.mjs dist/mcp-standalone.mjs dist/modeldock-stt-helper dist/SHA256SUMS scripts/gateway-verifier.mjs scripts/install.ps1 scripts/install.sh scripts/start-hidden.ps1 scripts/restart.ps1 scripts/recover.ps1 scripts/start-hidden.sh scripts/restart.sh scripts/recover.sh"
           # Delete any existing release first (the tag itself is kept). Uploading into
           # one is not safe: deleting a tag turns its release into a draft, and a draft
           # keeps accepting asset uploads while serving 404 on the public download URLs -
@@ -84,7 +84,7 @@ jobs:
             --title "ModelDock $GITHUB_REF_NAME" \
             --generate-notes
           # A green workflow is not proof the assets are reachable - verify.
-          for f in modeldock.mjs mcp-standalone.mjs modeldock-stt-helper SHA256SUMS install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh; do
+          for f in modeldock.mjs mcp-standalone.mjs modeldock-stt-helper SHA256SUMS gateway-verifier.mjs install.ps1 install.sh start-hidden.ps1 restart.ps1 recover.ps1 start-hidden.sh restart.sh recover.sh; do
             gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | grep -qx "$f" \
               || { echo "asset $f missing from the published release" >&2; exit 1; }
           done

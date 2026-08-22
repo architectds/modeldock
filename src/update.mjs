@@ -41,6 +41,7 @@ const MAX_ROLLBACK_SNAPSHOTS = 2;
 const DEPLOY_TARGETS = {
   "modeldock.mjs": { dest: ["dist", "modeldock.mjs"] },
   "mcp-standalone.mjs": { dest: ["dist", "mcp-standalone.mjs"] },
+  "gateway-verifier.mjs": { dest: ["scripts", "gateway-verifier.mjs"] },
   "modeldock-stt-helper": { dest: ["dist", "modeldock-stt-helper"], platforms: ["darwin"], mode: 0o755 },
   "start-hidden.ps1": { dest: ["scripts", "start-hidden.ps1"], platforms: ["win32"] },
   "restart.ps1": { dest: ["scripts", "restart.ps1"], platforms: ["win32"] },

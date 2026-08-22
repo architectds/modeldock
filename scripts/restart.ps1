@@ -35,7 +35,7 @@ function Write-Status($message) {
 
 function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
   try {
-    & $nodeExe @VerifierArgs *> $null
+    & $nodeExe $verifierEntry @VerifierArgs *> $null
     return $LASTEXITCODE
   } catch {
     # See start-hidden.ps1: an overriding PowerShell host can throw for the
@@ -258,6 +258,16 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+if (Test-Path -LiteralPath $verifier) {
+  $verifierEntry = $verifier
+} else {
+  # The 0.3.31 updater did not know this helper asset. Its first upgrade
+  # deploys the new bundle before these scripts, so use the bundled copy for
+  # this one migration only; later releases deploy the standalone helper.
+  Write-Status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
+  $verifierEntry = $server
+}
 
 try {
   # Quote both paths: an installed layout under a home dir with a space
@@ -281,7 +291,6 @@ try {
 }
 Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
 $verifyArgs = @(
-  $server,
   "--verify-gateway",
   "--root", $root,
   "--port", "$port",

@@ -96,14 +96,14 @@ function Gateway-LogTail {
 }
 
 function Verify-InstalledGateway($label) {
-  $bundle = Join-Path $root "dist\modeldock.mjs"
-  if (-not (Test-Path -LiteralPath $bundle)) { throw "installed bundle is missing: $bundle" }
+  $verifier = Join-Path $root "scripts\gateway-verifier.mjs"
+  if (-not (Test-Path -LiteralPath $verifier)) { throw "installed gateway verifier is missing: $verifier" }
   $nodeExe = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
   if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction Stop).Source }
   # This is the same verifier every lifecycle path uses. It validates the
   # fresh owner and /api/status; /healthz remains a separate provider-ready
   # check below because a tokenless gateway is still a valid running install.
-  & $nodeExe $bundle --verify-gateway --root $root --port "$port" --state-dir $stateDir --timeout-ms 15000
+  & $nodeExe $verifier --verify-gateway --root $root --port "$port" --state-dir $stateDir --timeout-ms 15000
   if ($LASTEXITCODE -ne 0) { throw "gateway did not pass shared verification after $label`n$(Gateway-LogTail)" }
   Write-Step "gateway verified after $label"
 }

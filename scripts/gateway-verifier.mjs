@@ -1,6 +1,10 @@
+// Shared lifecycle verifier. It is deliberately independent of modeldock.mjs:
+// an installer or updater can verify an older released bundle before this
+// version of the bundle itself has been published.
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function normalizedPath(value, platform = process.platform) {
   const resolved = path.resolve(value);
@@ -28,7 +32,6 @@ function processAlive(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    // EPERM means the process exists but belongs to another integrity level.
     return error?.code === "EPERM";
   }
 }
@@ -37,13 +40,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// A successful spawn proves nothing: a malformed bundle can start Node and
-// exit before it binds, while an unrelated listener can answer on the same
-// port. The verifier requires all three facts from the same fresh gateway:
-// its owner record names this install, that recorded PID is alive, and its
-// local status API answers with the ModelDock status shape. It deliberately
-// uses /api/status rather than readiness /healthz: a gateway with no provider
-// is running correctly and must remain recoverable/configurable.
 export async function inspectGateway({
   root,
   port,
@@ -55,9 +51,7 @@ export async function inspectGateway({
 } = {}) {
   const expectedRoot = normalizedPath(root || ".", platform);
   const numericPort = Number(port);
-  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
-    return { ok: false, reason: "invalid_port" };
-  }
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) return { ok: false, reason: "invalid_port" };
   const owner = readOwner(numericPort, stateDir);
   if (!owner) return { ok: false, reason: "owner_missing" };
   if (normalizedPath(owner.root || ".", platform) !== expectedRoot) return { ok: false, reason: "owner_root" };
@@ -70,14 +64,11 @@ export async function inspectGateway({
   }
   try {
     const response = await fetchImpl(`http://127.0.0.1:${numericPort}/api/status`, {
-      signal: AbortSignal.timeout(2_000),
-      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(2_000), headers: { accept: "application/json" },
     });
     if (!response.ok) return { ok: false, reason: `status_${response.status}` };
     const status = await response.json();
-    if (!status || typeof status !== "object" || !status.config || !status.runtime) {
-      return { ok: false, reason: "status_shape" };
-    }
+    if (!status || typeof status !== "object" || !status.config || !status.runtime) return { ok: false, reason: "status_shape" };
     return { ok: true, owner };
   } catch {
     return { ok: false, reason: "status_unreachable" };
@@ -124,4 +115,8 @@ export async function runGatewayVerifierCli(args = process.argv.slice(2), output
   }
   output.log(`Gateway verified: PID ${result.owner.pid}, port ${options.port}`);
   return 0;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(await runGatewayVerifierCli());
 }

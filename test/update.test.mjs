@@ -212,6 +212,7 @@ test("createUpdater.apply hands Node 22 directly to the verified latest installe
   const bridgeAssets = {
     "modeldock.mjs": "new",
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "install.ps1": installer,
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
@@ -261,6 +262,7 @@ test("createUpdater.apply refuses a tampered migration installer without changin
   const bridgeAssets = {
     "modeldock.mjs": "new",
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "modeldock-stt-helper": "new Mac helper",
     "install.sh": "tampered installer",
     "start-hidden.sh": "new launcher",
@@ -302,6 +304,7 @@ test("one update action migrates Node and then atomically lands on the newest re
   const assets = {
     "modeldock.mjs": newestBundle,
     "mcp-standalone.mjs": "newest bridge",
+    "gateway-verifier.mjs": "newest verifier",
     "install.ps1": "Write-Output 'runtime migration'",
     "start-hidden.ps1": "newest launcher",
     "restart.ps1": "newest restart",
@@ -309,7 +312,7 @@ test("one update action migrates Node and then atomically lands on the newest re
   };
   const sums = Object.entries(assets).map(([name, body]) => `${sha256(body)}  ${name}`).join("\n");
   writeFileSync(path.join(rootDir, "dist", "modeldock.mjs"), oldBundle);
-  for (const relative of ["dist/mcp-standalone.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"]) {
+  for (const relative of ["dist/mcp-standalone.mjs", "scripts/gateway-verifier.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"]) {
     writeFileSync(path.join(rootDir, relative), `old ${relative}`);
   }
   const fetchImpl = async (url) => {
@@ -354,6 +357,7 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   const oldFiles = {
     "dist/modeldock.mjs": "old gateway",
     "dist/mcp-standalone.mjs": "old bridge",
+    "scripts/gateway-verifier.mjs": "old verifier",
     "scripts/start-hidden.ps1": "old launcher",
     "scripts/restart.ps1": "old restart",
     "scripts/recover.ps1": "old recovery",
@@ -366,6 +370,7 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
     "recover.ps1": "new recovery",
@@ -401,6 +406,7 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   for (const [relative, body] of Object.entries({
     "dist/modeldock.mjs": assets["modeldock.mjs"],
     "dist/mcp-standalone.mjs": assets["mcp-standalone.mjs"],
+    "scripts/gateway-verifier.mjs": assets["gateway-verifier.mjs"],
     "scripts/start-hidden.ps1": assets["start-hidden.ps1"],
     "scripts/restart.ps1": assets["restart.ps1"],
     "scripts/recover.ps1": assets["recover.ps1"],
@@ -417,7 +423,7 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   const manifest = JSON.parse(readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));
   assert.deepEqual(
     manifest.files.map((file) => file.path),
-    ["dist/modeldock.mjs", "dist/mcp-standalone.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"],
+    ["dist/modeldock.mjs", "dist/mcp-standalone.mjs", "scripts/gateway-verifier.mjs", "scripts/start-hidden.ps1", "scripts/restart.ps1", "scripts/recover.ps1"],
   );
   for (const relative of manifest.files.map((file) => file.path)) {
     assert.equal(readFileSync(path.join(rollbackDir, relative), "utf8"), oldFiles[relative], `${relative} should have a rollback copy`);
@@ -434,6 +440,7 @@ test("createUpdater.apply deploys the macOS STT helper atomically and keeps it e
     "dist/modeldock.mjs": "old gateway",
     "dist/mcp-standalone.mjs": "old bridge",
     "dist/modeldock-stt-helper": "old helper",
+    "scripts/gateway-verifier.mjs": "old verifier",
     "scripts/start-hidden.sh": "old launcher",
     "scripts/restart.sh": "old restart",
     "scripts/recover.sh": "old recovery",
@@ -442,6 +449,7 @@ test("createUpdater.apply deploys the macOS STT helper atomically and keeps it e
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "modeldock-stt-helper": "new helper",
     "start-hidden.sh": "new launcher",
     "restart.sh": "new restart",
@@ -491,6 +499,7 @@ test("createUpdater.apply leaves an installed layout untouched when a helper is 
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
   };
@@ -535,6 +544,7 @@ test("createUpdater.apply rolls back the whole layout when a destination cannot 
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
     "recover.ps1": "new recovery",
@@ -637,6 +647,7 @@ test("createUpdater.apply rolls back when the complete rollback snapshot cannot 
   const original = {
     "dist/modeldock.mjs": "installed gateway",
     "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/gateway-verifier.mjs": "installed verifier",
     "scripts/start-hidden.ps1": "installed launcher",
     "scripts/restart.ps1": "installed restart",
     "scripts/recover.ps1": "installed recovery",
@@ -646,6 +657,7 @@ test("createUpdater.apply rolls back when the complete rollback snapshot cannot 
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
     "recover.ps1": "new recovery",
@@ -674,6 +686,7 @@ test("createUpdater.apply keeps only the two most recent rollback snapshots", as
   for (const [relative, body] of Object.entries({
     "dist/modeldock.mjs": "installed gateway",
     "dist/mcp-standalone.mjs": "installed bridge",
+    "scripts/gateway-verifier.mjs": "installed verifier",
     "scripts/start-hidden.ps1": "installed launcher",
     "scripts/restart.ps1": "installed restart",
     "scripts/recover.ps1": "installed recovery",
@@ -682,6 +695,7 @@ test("createUpdater.apply keeps only the two most recent rollback snapshots", as
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
     "mcp-standalone.mjs": "new bridge",
+    "gateway-verifier.mjs": "new verifier",
     "start-hidden.ps1": "new launcher",
     "restart.ps1": "new restart",
     "recover.ps1": "new recovery",

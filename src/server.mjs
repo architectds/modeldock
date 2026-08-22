@@ -23,7 +23,7 @@ import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { createDerivedFallback } from "./derived-fallback.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
-import { runGatewayVerifierCli } from "./gateway-verifier.mjs";
+import { runGatewayVerifierCli } from "../scripts/gateway-verifier.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";

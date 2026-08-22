@@ -31,7 +31,9 @@ function replacePowerShellBlock(installer, variable, helper) {
 }
 
 function replaceShellBlock(installer, variable, helper) {
-  const assignment = installer.indexOf(`${variable}=`);
+  const atLineStart = installer.indexOf(`${variable}=`);
+  const afterNewline = installer.indexOf(`\n${variable}=`);
+  const assignment = atLineStart === 0 ? 0 : (afterNewline >= 0 ? afterNewline + 1 : -1);
   if (assignment < 0) throw new Error(`install.sh is missing ${variable}`);
   const opener = installer.indexOf("<<'EOF'", assignment);
   const contentStart = lineEndAt(installer, opener);
@@ -50,7 +52,7 @@ const files = [
     name: "install.ps1",
     sync(source) {
       let result = source;
-      for (const [variable, name] of [["launcher", "start-hidden.ps1"], ["restart", "restart.ps1"], ["recover", "recover.ps1"]]) {
+      for (const [variable, name] of [["verifier", "gateway-verifier.mjs"], ["launcher", "start-hidden.ps1"], ["restart", "restart.ps1"], ["recover", "recover.ps1"]]) {
         result = replacePowerShellBlock(result, variable, helper(name));
       }
       return result;
@@ -61,6 +63,7 @@ const files = [
     sync(source) {
       let result = source;
       for (const [variable, name] of [
+        ["VERIFIER", "gateway-verifier.mjs"],
         ["LAUNCHER", "start-hidden.sh"],
         ["RESTART", "restart.ps1"],
         ["RESTART_SH", "restart.sh"],
