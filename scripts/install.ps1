@@ -989,7 +989,13 @@ function Restart-Gateway {
 
 function Restore-Native {
   $uri = "http://127.0.0.1:$port/api/config/disable"
-  $keyFile = if ($env:MODELDOCK_STATE_DIR) { Join-Path $env:MODELDOCK_STATE_DIR "caller-key" } else { Join-Path $root "caller-key" }
+  # Same resolution as restart.ps1 and caller-key.mjs: the gateway writes the
+  # key to ~/.modeldock/caller-key unless MODELDOCK_STATE_DIR redirects it.
+  # <root>\caller-key only coincided for installed layouts (root IS
+  # ~\.modeldock); on a git checkout the lookup missed, the request went out
+  # unauthenticated, and Restore-Native silently fell back to the cruder
+  # local-backup path.
+  $keyFile = if ($env:MODELDOCK_STATE_DIR) { Join-Path $env:MODELDOCK_STATE_DIR "caller-key" } else { Join-Path $env:USERPROFILE ".modeldock\caller-key" }
   $headers = @{}
   if (Test-Path -LiteralPath $keyFile) {
     $key = (Get-Content -LiteralPath $keyFile -Raw).Trim()

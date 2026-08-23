@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { modelOptions, providerOptions } from "./model-options.mjs";
@@ -36,10 +36,30 @@ export function subagentAgentFilePath(config) {
   return path.join(config.codexHome, "agents", SUBAGENT_FILE_NAME);
 }
 
+// Read on every dashboard broadcast (statusPayload -> subagentPayload), which
+// made each metrics "change" cost a file read plus a regex - three or more
+// times per relay request with a dashboard open. One stat replaces the read:
+// the in-process writer below invalidates directly (covering the same-ms
+// write an mtime check alone would miss), and the switcher's disable() only
+// deletes the file, which the stat sees as ENOENT.
+let subagentCache = { file: "", mtimeMs: -1, model: null };
+
 export function readSubagentModel(config) {
+  const file = subagentAgentFilePath(config);
+  if (!file) return null;
+  let mtimeMs;
   try {
-    const source = readFileSync(subagentAgentFilePath(config), "utf8");
-    return source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
+    mtimeMs = statSync(file).mtimeMs;
+  } catch {
+    subagentCache = { file, mtimeMs: -1, model: null };
+    return null;
+  }
+  if (subagentCache.file === file && subagentCache.mtimeMs === mtimeMs) return subagentCache.model;
+  try {
+    const source = readFileSync(file, "utf8");
+    const model = source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
+    subagentCache = { file, mtimeMs, model };
+    return model;
   } catch {
     return null;
   }
@@ -49,6 +69,7 @@ export function writeSubagentAgentFile(config, model) {
   const agentsDir = path.join(config.codexHome, "agents");
   mkdirSync(agentsDir, { recursive: true });
   const file = path.join(agentsDir, SUBAGENT_FILE_NAME);
+  subagentCache = { file: "", mtimeMs: -1, model: null };
   const content = [
     "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",
     'name = "modeldock_subagent"',

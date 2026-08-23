@@ -1,0 +1,20 @@
+# Editor-enforced spelling of the conventions AGENTS.md states in prose.
+# The repository stores LF (git warns on CRLF conversion at every add); the
+# ascii-sources test guards content, this guards whitespace and encoding.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.ps1]
+# PowerShell on Windows: keep files ASCII (AGENTS.md language rules); CRLF is
+# tolerated by the interpreter but the repo stores LF like everything else.
+end_of_line = lf

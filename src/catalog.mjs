@@ -94,6 +94,13 @@ export function catalogFor(config) {
     baseInstructions: baseInstructionsFor(config),
   });
   const enabledProviderIds = enabledProvidersFor(config);
+  // A configured vision model whose provider can no longer serve (its token was
+  // removed) is a fallback in name only: admitting attachments on its strength
+  // would walk every escalated turn into a 503. The owner must be an enabled
+  // provider; a bare native slug resolves to the active profile and passes,
+  // which is the permissive edge this check deliberately leaves open.
+  const visionRouteServiceable = Boolean(config.visionModel)
+    && enabledProviderIds.has(ownerProviderFor(config.visionModel));
   // Stamped by the server next to contextOverrides; absent in callers that only
   // want the shipped catalog, which then publishes everything as before.
   const toggles = config.modelToggles || {};
@@ -108,7 +115,7 @@ export function catalogFor(config) {
     const declared = entry.input_modalities;
     const known = Array.isArray(declared) && declared.some((modality) => modality === "text");
     const routed = modelEntryFor(config, entry.slug);
-    const mediatedImages = Boolean(config.visionModel && routed?.acceptsImagesViaGateway);
+    const mediatedImages = Boolean(visionRouteServiceable && routed?.acceptsImagesViaGateway);
     if (!known) return { ...entry, input_modalities: ["text"] };
     if (!mediatedImages || declared.includes("image")) return entry;
     return { ...entry, input_modalities: ["text", "image"] };

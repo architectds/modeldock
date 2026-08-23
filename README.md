@@ -182,6 +182,25 @@ macOS or Linux:
 sh ~/.modeldock/scripts/uninstall.sh
 ```
 
+## Development
+
+Node.js >= 24 is required (the gateway uses `node:sqlite` and native zstd).
+
+```bash
+git clone https://github.com/architectds/modeldock.git
+cd modeldock
+npm ci
+npm test        # full suite; also builds the bundle via pretest
+npm run dev     # gateway with --watch on src/
+npm start       # build if stale, then run the bundled gateway
+```
+
+The suite is self-contained: tests redirect all state writes to per-process
+temp directories and stub every upstream with local HTTP servers. A few tests
+skip themselves when their environment is missing (Chrome for the dashboard
+smoke, the `codex` binary for catalog verification, WSL for the macOS install
+simulation).
+
 ## Disclaimer
 
 Model Dock For Codex is an independent, community-maintained project. It is

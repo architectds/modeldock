@@ -40,6 +40,14 @@ architecture.md
 
 # Local scratch: sandbox scripts, icon drafts, ad-hoc probes
 tmp/
+# Session diagnostics scratch (probe scripts + dashboard screenshots)
+.diag/
+# Throwaway CODEX_HOME used when pointing a local Codex at this checkout
+.modeldock-codex-home/
+# Ad-hoc dashboard screenshot dropped at the root by `npm run shot`
+dashboard-shot.png
+# llama.cpp run output; the *.log rule only covers log-named files inside it
+llama-logs/
 # Ad-hoc debugging scripts written next to the real ones during a session
 # (scripts/tmp-grep.ps1, tmp-gpu.ps1, ...). The tmp/ rule above does not cover
 # them because they sit beside the scripts they were poking at.

@@ -62,8 +62,12 @@ export function describeOwnerConflict(port, root, { home } = {}) {
   try {
     process.kill(recorded.pid, 0);
     alive = true;
-  } catch {
+  } catch (error) {
     // ESRCH: the recorded process is gone; a stale file is not a conflict.
+    // EPERM: it exists but is not ours to signal (an elevated owner) - that
+    // is still alive, and treating it as stale reported no conflict for
+    // exactly the process most likely to really hold the port.
+    alive = error?.code === "EPERM";
   }
   if (!alive) return undefined;
   return {

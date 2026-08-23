@@ -1680,7 +1680,11 @@ export function createApp(services = createServices()) {
         binary: remembered.binary,
         args: remembered.args,
         engine,
-        logDir: services.engineLogDir || path.join(os.tmpdir(), "modeldock"),
+        // Under the state dir, not os.tmpdir(): /tmp is sticky-bit shared on
+        // POSIX, so another user can pre-own /tmp/modeldock and point
+        // engine-<name>.log at a symlink - an append-as-this-user primitive.
+        // ~/.modeldock is already ours alone.
+        logDir: services.engineLogDir || stateFile("engine-logs"),
       });
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: true });
       return res.json({ engine, started: true, binary: remembered.binary, logFile });
@@ -1769,7 +1773,11 @@ export function createApp(services = createServices()) {
         binary: running.binary,
         args,
         engine,
-        logDir: services.engineLogDir || path.join(os.tmpdir(), "modeldock"),
+        // Under the state dir, not os.tmpdir(): /tmp is sticky-bit shared on
+        // POSIX, so another user can pre-own /tmp/modeldock and point
+        // engine-<name>.log at a symlink - an append-as-this-user primitive.
+        // ~/.modeldock is already ours alone.
+        logDir: services.engineLogDir || stateFile("engine-logs"),
       });
       // The chosen spec, so a later restart replays what the user picked rather
       // than what they happened to have typed before.
@@ -2011,7 +2019,20 @@ export function createApp(services = createServices()) {
       }
     }
   };
-  metrics.on("change", broadcast);
+  // Coalesced, not per event: one relay emits "change" at least three times
+  // (begin, first response, finish), and every broadcast serializes the full
+  // status snapshot for each connected dashboard. 100ms folds a request's
+  // burst into one frame; the dashboard's own render loop already coalesces
+  // at 150ms, so nothing visible slows down.
+  let broadcastTimer = null;
+  metrics.on("change", () => {
+    if (broadcastTimer) return;
+    broadcastTimer = setTimeout(() => {
+      broadcastTimer = null;
+      broadcast();
+    }, 100);
+    broadcastTimer.unref?.();
+  });
   app.get("/api/events", (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache, no-transform");

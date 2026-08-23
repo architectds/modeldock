@@ -54,6 +54,19 @@ test("DeepSeek Flash and Pro admit images through a configured visual fallback",
     assert.equal(modelEntryFor(config, slug)?.acceptsImagesViaGateway, true, `${slug} delegates vision to ModelDock`);
     assert.ok(entry?.base_instructions.includes("TEXT-ONLY"), `${slug} retains vision_inspect guidance`);
   }
+  // A vision model whose provider cannot serve (token removed) is a fallback
+  // in name only; admitting attachments on its strength walks every escalated
+  // turn into "No API token configured". deepseek-official is not the active
+  // profile here and holds no token, so its vision model cannot carry the
+  // mediation and Flash must go back to refusing the paste up front.
+  const unserviceable = catalogFor({
+    ...config,
+    tokens: { "opencode-go": "go-token" },
+    visionModel: "deepseek-v4-flash-vision-exp@deepseek-official",
+  });
+  const flashWithoutFallback = unserviceable.models.find((model) => model.slug === "deepseek-v4-flash@opencode-go");
+  assert.deepEqual(flashWithoutFallback?.input_modalities, ["text"], "no serviceable vision route means no mediated image admission");
+
   const route = routeResponsesRequest({
     model: "deepseek-v4-flash@opencode-go",
     input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],

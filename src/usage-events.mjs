@@ -23,6 +23,10 @@ export function usageEventsPath() {
 // previous `.1`), so at most two files exist.
 const ROTATE_BYTES = 5 * 1024 * 1024;
 
+// Active file size, maintained across appends so the hot path stats once per
+// process (or per redirect) instead of once per relay request.
+let sizeCache = { path: "", bytes: 0 };
+
 function safeText(value, fallback) {
   const text = typeof value === "string" ? value.trim() : "";
   return (text || fallback).slice(0, 160);
@@ -71,12 +75,31 @@ export function recordUsageEvent({
   };
   try {
     mkdirSync(path.dirname(filePath), { recursive: true });
-    try {
-      if (statSync(filePath).size > ROTATE_BYTES) renameSync(filePath, `${filePath}.1`);
-    } catch {
-      // Missing file: nothing to rotate.
+    // The size is tracked, not stat'ed: this append runs on every relay, and
+    // the counter only has to be roughly right - rotation still triggers
+    // within one event of the cap. Re-seeded from disk on first use or when
+    // the path changes; an external truncation desyncs it by at most one
+    // rotation cycle, which telemetry can afford.
+    if (sizeCache.path !== filePath) {
+      let size = 0;
+      try {
+        size = statSync(filePath).size;
+      } catch {
+        // Missing file: starts at zero.
+      }
+      sizeCache = { path: filePath, bytes: size };
     }
-    appendFileSync(filePath, `${JSON.stringify(event)}\n`, "utf8");
+    if (sizeCache.bytes > ROTATE_BYTES) {
+      try {
+        renameSync(filePath, `${filePath}.1`);
+        sizeCache.bytes = 0;
+      } catch {
+        // Missing file: nothing to rotate.
+      }
+    }
+    const line = `${JSON.stringify(event)}\n`;
+    appendFileSync(filePath, line, "utf8");
+    sizeCache.bytes += Buffer.byteLength(line);
   } catch {
     // Metering must never take a request down.
   }

@@ -195,6 +195,26 @@ async function fetchAsset(url, maxBytes, fetchImpl = fetch) {
   if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`);
   const declared = Number(response.headers.get("content-length") || 0);
   if (declared > maxBytes) throw new Error(`Asset too large (${declared} bytes, limit ${maxBytes})`);
+  // Enforce the cap while reading, not after: a server that omits or lies
+  // about content-length could otherwise stream an arbitrarily large body
+  // into memory before the post-hoc check ever ran. Test fetch stubs return
+  // plain bodies with no stream; those keep the buffered path.
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error(`Asset too large (>${maxBytes} bytes)`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks);
+  }
   const body = Buffer.from(await response.arrayBuffer());
   if (body.length > maxBytes) throw new Error(`Asset too large (${body.length} bytes, limit ${maxBytes})`);
   return body;
