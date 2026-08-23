@@ -20,6 +20,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
+import { protectPrivateFile } from "./caller-key.mjs";
 
 export const XAI_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 export const XAI_DEVICE_URL = "https://auth.x.ai/oauth2/device/code";
@@ -29,8 +30,11 @@ export const XAI_API_BASE = "https://api.x.ai/v1";
 const DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 // Refreshed this long before it actually expires, so a tool call that starts
-// just under the wire does not have to recover from a mid-flight 401.
-export const REFRESH_SKEW_MS = 5 * 60 * 1000;
+// just under the wire does not have to recover from a mid-flight 401. The skew
+// must exceed the server's 10-minute refresh timer: at 5 minutes a token could
+// pass its effective expiry between ticks, and the relay's synchronous target()
+// would hand out an expired bearer until the next tick.
+export const REFRESH_SKEW_MS = 15 * 60 * 1000;
 
 export class XaiAuthError extends Error {
   constructor(code, message) {
@@ -102,9 +106,26 @@ export async function refreshAccessToken(refreshToken, { fetchImpl = fetch, time
     refresh_token: refreshToken,
   }, timeoutMs);
   if (!result.ok || !result.body.access_token) {
-    throw new XaiAuthError("refresh", result.body.error_description || result.body.error || `HTTP ${result.status}`);
+    const error = new XaiAuthError("refresh", result.body.error_description || result.body.error || `HTTP ${result.status}`);
+    // The caller must tell a dead session from a bad night: status and the
+    // OAuth error code are what isDefinitiveAuthRejection reads.
+    error.status = result.status;
+    error.oauthError = String(result.body.error || "");
+    throw error;
   }
   return tokenFrom(result.body, refreshToken);
+}
+
+// Whether a refresh failure means the session itself is over. Only auth.x.ai
+// saying "this grant is no good" (a 4xx) qualifies: a fetch-level throw is the
+// laptop waking up offline, and a 5xx is their outage - deleting the refresh
+// token on either signed the user out of Grok for good over a transient
+// failure, which is exactly the wrong trade for the longest-lived secret in
+// this file.
+export function isDefinitiveAuthRejection(error) {
+  if (!(error instanceof XaiAuthError)) return false;
+  const status = Number(error.status || 0);
+  return status >= 400 && status < 500;
 }
 
 function tokenFrom(body, previousRefresh = "") {
@@ -172,8 +193,22 @@ export function writeXaiAuth(file, auth) {
     connectedAt: auth.connectedAt || new Date().toISOString(),
   };
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+  // mode on the temp file, not just a chmod after: rename preserves the temp
+  // file's permissions, so the refresh token is never world-readable even for
+  // the instant between rename and hardening. DPAPI covers the content only on
+  // Windows; on macOS/Linux the file mode is the whole protection.
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
   renameSync(tmp, file);
+  // POSIX only: on Windows the tokens are DPAPI-sealed and %USERPROFILE% ACLs
+  // already exclude other users, while protectPrivateFile there costs an
+  // icacls spawn on a write that runs from the ten-minute refresh timer.
+  if (process.platform !== "win32") {
+    try {
+      protectPrivateFile(file);
+    } catch {
+      // Hardening must never take the sign-in down.
+    }
+  }
   return file;
 }
 

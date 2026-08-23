@@ -617,6 +617,14 @@ export function createUpdater({
         deployFilesAtomically(staged, rootDir);
       }
       restart();
+      // The deployment is committed and the restart is scheduled, so the
+      // flag's job is done. scheduleRestart swallows its failures by design
+      // (its comment says the Update button stays actionable) - but with
+      // `updating` still set here it was not: a restart that silently never
+      // happened left every later /api/update refusing with "already in
+      // progress" until someone killed the process by hand. Same reasoning
+      // the installer-migration path above spells out.
+      state.updating = false;
       return { ok: true, mode, latestVersion: state.latestVersion, restarting: true };
     } catch (error) {
       state.updating = false;

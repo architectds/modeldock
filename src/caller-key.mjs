@@ -38,7 +38,12 @@ function currentWindowsSid() {
   return windowsSid;
 }
 
-function protectPrivateFile(target) {
+// Exported for the other secret-bearing files (xai-auth.json, the custom
+// endpoints store, .env and its backups): DPAPI protects their *content* on
+// Windows, but on macOS/Linux those values are plaintext by design, and a
+// default-umask write leaves them world-readable while this key file was
+// already locked to the current user. One hardening routine, applied to all.
+export function protectPrivateFile(target) {
   chmodSync(target, 0o600);
   if (process.platform !== "win32") return target;
   const sid = currentWindowsSid();

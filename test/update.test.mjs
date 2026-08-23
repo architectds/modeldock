@@ -403,6 +403,11 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   assert.equal(result.latestVersion, "0.2.7");
   assert.equal(releaseChecks, 2, "apply should re-check instead of trusting stale startup state");
   assert.equal(restartCalls, 1);
+  // scheduleRestart swallows its failures by design, so a restart that silently
+  // never happens must not leave the in-progress lock held: with the deployment
+  // committed, a stuck flag turned every later /api/update into "already in
+  // progress" until the process was killed by hand.
+  assert.equal(updater.state().updating, false, "a committed deployment must release the update lock");
   for (const [relative, body] of Object.entries({
     "dist/modeldock.mjs": assets["modeldock.mjs"],
     "dist/mcp-standalone.mjs": assets["mcp-standalone.mjs"],

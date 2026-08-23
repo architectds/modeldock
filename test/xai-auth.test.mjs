@@ -8,12 +8,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import {
   XAI_CLIENT_ID,
   XAI_SCOPE,
   XaiAuthError,
   accessTokenExpired,
+  isDefinitiveAuthRejection,
   listXaiModels,
   pollDeviceToken,
   readXaiAuth,
@@ -148,6 +149,39 @@ test("both tokens are stored encrypted, and the refresh token is the one worth p
   // A file with no usable token is no session, not a half-connected one.
   writeXaiAuth(file, { accessToken: "", refreshToken: "", expiresAt: 0, models: [] });
   assert.equal(readXaiAuth(file), null);
+});
+
+test("the auth file is readable by the current user only (POSIX)", (t) => {
+  // On macOS/Linux there is no DPAPI, so the refresh token sits in this file in
+  // the clear and the file mode is its whole at-rest protection. Windows
+  // expresses the same restriction through ACLs, which stat cannot see.
+  if (process.platform === "win32") return t.skip("POSIX file modes do not apply on Windows");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-xai-mode-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "xai-auth.json");
+  writeXaiAuth(file, { accessToken: "at", refreshToken: "rt", expiresAt: Date.now() + 3600_000, models: [] });
+  assert.equal(statSync(file).mode & 0o777, 0o600, "group/other must have no access to the refresh token");
+});
+
+test("only a 4xx from the token endpoint counts as a dead session", async () => {
+  // The refresh caller deletes the refresh token on a definitive rejection and
+  // must NOT on anything transient: a laptop waking up offline at the refresh
+  // tick used to sign the user out of Grok permanently.
+  const failWith = async (status, body) => {
+    try {
+      await refreshAccessToken("rt", { fetchImpl: async () => ({ ok: false, status, text: async () => JSON.stringify(body) }) });
+      assert.fail("the refresh should have thrown");
+    } catch (error) {
+      return error;
+    }
+  };
+  const revoked = await failWith(400, { error: "invalid_grant" });
+  assert.equal(isDefinitiveAuthRejection(revoked), true, "invalid_grant is the session ending");
+  assert.equal(revoked.oauthError, "invalid_grant");
+  const outage = await failWith(503, { error: "temporarily_unavailable" });
+  assert.equal(isDefinitiveAuthRejection(outage), false, "their outage is not our sign-out");
+  const offline = new TypeError("fetch failed");
+  assert.equal(isDefinitiveAuthRejection(offline), false, "a network throw is not a rejection at all");
 });
 
 test("a token is refreshed before it expires, not after", () => {

@@ -393,6 +393,31 @@ test("api endpoints reject cross-origin browser reads", async (t) => {
   assert.match(body.error?.message, /Invalid Origin/);
 });
 
+test("api endpoints reject a spoofed Host header (DNS rebinding)", async (t) => {
+  // A DNS-rebinding page is same-origin by the browser's reckoning, so its GETs
+  // carry no Origin header and the Origin allowlist never sees them. The Host
+  // header still names the attacker's domain - a browser cannot forge it - and
+  // createMcpExpressApp's Host validation is what rejects the read. fetch()
+  // refuses to spoof Host, so the request is written over a raw socket.
+  const instance = await startApp();
+  t.after(instance.stop);
+  const port = new URL(instance.base).port;
+  const responseFor = (host) => new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), "127.0.0.1", () => {
+      socket.write(`GET /api/status HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+    });
+    let raw = "";
+    socket.on("data", (chunk) => { raw += chunk; });
+    socket.on("end", () => resolve(raw));
+    socket.on("error", reject);
+  });
+  const rebound = await responseFor(`evil.example:${port}`);
+  assert.match(rebound, /^HTTP\/1\.1 403 /, "a non-loopback Host must be refused");
+  assert.match(rebound, /Invalid Host/);
+  const loopback = await responseFor(`127.0.0.1:${port}`);
+  assert.match(loopback, /^HTTP\/1\.1 200 /, "the real loopback Host must still pass");
+});
+
 test("config API defaults off and performs reversible user-triggered switching", async (t) => {
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-switch-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));

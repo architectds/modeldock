@@ -13,6 +13,7 @@ import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { defaultStateDir, stateDir, stateFile } from "./state-dir.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
+import { protectPrivateFile } from "./caller-key.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
@@ -126,6 +127,13 @@ export function writeEnvFile(updates, file = envFileFor()) {
   if (hasSecretUpdate && existsSync(file)) {
     backup = `${file}.bak-${Date.now()}`;
     copyFileSync(file, backup);
+    // The backup is a full copy of every secret in .env; on macOS/Linux those
+    // are plaintext, and copyFileSync inherits whatever mode the source had -
+    // which for a pre-hardening install is world-readable. POSIX only: on
+    // Windows the values are DPAPI-sealed and icacls would be a spawn per save.
+    if (process.platform !== "win32") {
+      try { protectPrivateFile(backup); } catch { /* hardening is best effort */ }
+    }
   }
   try {
     const lines = raw.split(/\r?\n/);
@@ -176,12 +184,17 @@ export function writeEnvFile(updates, file = envFileFor()) {
     }
     mkdirSync(path.dirname(file), { recursive: true });
     const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
-    writeFileSync(tmp, content, "utf8");
+    // mode on the temp file (rename preserves it): on macOS/Linux the tokens in
+    // .env are plaintext by design, so the file mode is their only protection.
+    writeFileSync(tmp, content, { encoding: "utf8", mode: 0o600 });
     try {
       renameSync(tmp, file);
     } catch (error) {
       try { rmSync(tmp, { force: true }); } catch { /* keep the original error */ }
       throw error;
+    }
+    if (process.platform !== "win32") {
+      try { protectPrivateFile(file); } catch { /* hardening is best effort */ }
     }
     if (hasSecretUpdate) pruneEnvBackups(file);
     for (const [key, value] of Object.entries(updates)) {
@@ -235,6 +248,12 @@ export function migrateEnvSecrets(file = envFileFor()) {
 
   const backup = `${file}.plain.bak-${Date.now()}`;
   copyFileSync(file, backup);
+  // A cleartext dump of every secret about to be encrypted; keep it readable
+  // by the current user only for the short window it exists (and permanently,
+  // when a verify failure retains it as the rollback copy). This migration
+  // path is Windows-only (checked above), where the cleartext copy is exactly
+  // what DPAPI cannot cover yet - so here the ACL pass is worth its spawn.
+  try { protectPrivateFile(backup); } catch { /* hardening is best effort */ }
   const updates = {};
   for (const [key, value] of plainSecrets) updates[key] = value;
   writeEnvFile(updates, file);
@@ -337,10 +356,16 @@ export { hasChatGptLogin };
 
 export function loadConfig() {
   applyEnvFile(envFileFor());
-  const host = process.env.MODELDOCK_HOST || "127.0.0.1";
-  if (!isLoopbackHost(host)) {
+  const rawHost = process.env.MODELDOCK_HOST || "127.0.0.1";
+  if (!isLoopbackHost(rawHost)) {
     throw new Error("MODELDOCK_HOST must be a loopback address for this MVP");
   }
+  // Canonicalize the spelling, not just the meaning: createMcpExpressApp turns
+  // on its DNS-rebinding Host guard only when the host is exactly "127.0.0.1",
+  // "localhost", or "::1". isLoopbackHost also admits "LOCALHOST" and "[::1]",
+  // so an uncanonicalized value would pass the check above and silently start
+  // the app without Host validation.
+  const host = rawHost.trim().toLowerCase().replace(/^\[|\]$/g, "");
 
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
   const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();

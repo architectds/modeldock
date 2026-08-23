@@ -24,6 +24,25 @@ test("does not treat an unrelated provider token as OpenCode Go", () => {
   assert.equal(tokenFromCodexToml('[model_providers.openai]\nexperimental_bearer_token = "secret"\n'), "");
 });
 
+test("canonicalizes loopback host spellings the SDK's Host guard would not recognize", () => {
+  // createMcpExpressApp enables DNS-rebinding Host validation only for the
+  // exact spellings "127.0.0.1" | "localhost" | "::1". isLoopbackHost also
+  // admits "LOCALHOST" and "[::1]", so loadConfig must canonicalize or those
+  // spellings would boot the app with the guard silently off.
+  const previous = process.env.MODELDOCK_HOST;
+  try {
+    process.env.MODELDOCK_HOST = "LOCALHOST";
+    assert.equal(loadConfig().host, "localhost");
+    process.env.MODELDOCK_HOST = "[::1]";
+    assert.equal(loadConfig().host, "::1");
+    process.env.MODELDOCK_HOST = "192.168.1.10";
+    assert.throws(() => loadConfig(), /loopback/);
+  } finally {
+    if (previous === undefined) delete process.env.MODELDOCK_HOST;
+    else process.env.MODELDOCK_HOST = previous;
+  }
+});
+
 test("zenBaseUrl resolves from MODELDOCK_ZEN_BASE_URL with the trailing slash normalized", () => {
   const previous = process.env.MODELDOCK_ZEN_BASE_URL;
   process.env.MODELDOCK_ZEN_BASE_URL = "https://zen.example.test/v1/";

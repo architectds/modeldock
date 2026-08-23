@@ -14,6 +14,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
+import { protectPrivateFile } from "./caller-key.mjs";
 
 export class CustomEndpointsError extends Error {
   constructor(code, message) {
@@ -125,8 +126,21 @@ export function writeCustomEndpoints(file, endpoints) {
     addedAt: entry.addedAt || new Date().toISOString(),
   }));
   const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf8");
+  // mode on the temp file: rename preserves it, and on macOS/Linux the API
+  // keys in this file are plaintext (DPAPI is Windows-only), so the file mode
+  // is their only at-rest protection.
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
   renameSync(tmp, file);
+  // POSIX only: the keys are plaintext there and the mode is their whole
+  // protection. On Windows they are DPAPI-sealed already, and an icacls spawn
+  // per save would be cost without coverage.
+  if (process.platform !== "win32") {
+    try {
+      protectPrivateFile(file);
+    } catch {
+      // Hardening must never block saving the endpoint list.
+    }
+  }
   return file;
 }
 
