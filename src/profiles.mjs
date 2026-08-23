@@ -243,8 +243,13 @@ const OPENCODE_GO_PROFILE = {
   tokenEnvName: "OPENCODE_GO_TOKEN",
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
+  // inputNormalizer names a per-model input adaptation the gateway keeps in
+  // its INPUT_NORMALIZERS registry. The route code asks the profile instead
+  // of matching model/provider ids, so adding a provider (or moving a model)
+  // never means editing the relay paths - the same reasoning that moved tool
+  // policy onto the profile. Unmarked models take the generic path.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", inputNormalizer: "opencode-flash", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "deepseek-v4-flash-vision-exp", label: "DeepSeek V4 Flash Vision Exp", endpoint: "responses", supportsVision: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
     // Zen free tier: same OpenCode token, but the upstream is zen/v1 not zen/go/v1.
     // deepseek-v4-flash-free is available but frequently returns 503 when the free
@@ -253,7 +258,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", inputNormalizer: "opencode-pro", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
@@ -327,8 +332,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   // Hosted web_search is native too (echoed in the response tools list); tool_search is
   // silently ignored. So the same allowlist as opencode-go works, and nothing is blocked.
   availableModels: [
-    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
-    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     // DeepSeek's first vision model, announced 2026-08-21 and experimental by
     // its own name. It reads images through the same Responses endpoint the
     // other two use, so it needs no route of its own - only a published entry
@@ -490,6 +495,12 @@ const XAI_PROFILE = {
   // tool context and makes the rendering provider ambiguous to the agent.
   hostedToolTypes: new Set(["web_search", "x_search"]),
   hiddenToolNames: new Set([]),
+  // Every xAI model shares the same wire quirks, so the normalizers hang on
+  // the profile rather than per model: names resolved against the gateway's
+  // INPUT_NORMALIZERS / PAYLOAD_NORMALIZERS registries. The relay paths ask
+  // the profile - they no longer match `provider === "xai"` by hand.
+  inputNormalizer: "xai",
+  payloadNormalizer: "xai",
   availableModels: [],
   modelCatalog({ mainModel, baseInstructions }) {
     return modelCatalogDefaults({

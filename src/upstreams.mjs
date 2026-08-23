@@ -6,6 +6,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { readCodexAuth } from "./codex-auth.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
 import { readXaiAuth } from "./xai-auth.mjs";
+import { forEachSseEvent, sseDataLines } from "./sse.mjs";
 import os from "node:os";
 import path from "node:path";
 function upstreamUrl(baseUrl, path) {
@@ -26,19 +27,10 @@ function safeErrorBody(text) {
 export function streamedResponse(body) {
   let text = "";
   let completed = null;
-  for (const line of String(body || "").split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    let event;
-    try {
-      event = JSON.parse(payload);
-    } catch {
-      continue;   // a partial or non-JSON line is not an answer
-    }
+  forEachSseEvent(body, (event) => {
     if (event?.type === "response.output_text.delta" && typeof event.delta === "string") text += event.delta;
     if (event?.type === "response.completed" && event.response) completed = event.response;
-  }
+  });
   // Prefer whatever the finished object carries, for a backend that does fill
   // it in; fall back to the text we collected on the way past.
   if (completed?.output?.length) return completed;
@@ -63,9 +55,7 @@ export function parseMcpTextResult(body) {
   const payloads = [];
   const trimmed = String(body || "").trim();
   if (trimmed.startsWith("{")) payloads.push(trimmed);
-  for (const line of trimmed.split(/\r?\n/)) {
-    if (line.startsWith("data:")) payloads.push(line.slice(5).trim());
-  }
+  payloads.push(...sseDataLines(trimmed));
 
   for (const payload of payloads) {
     try {
@@ -129,18 +119,15 @@ function generatedImagePath(bytes, mime = "") {
 }
 
 function imageGenerationResult(body) {
-  for (const line of String(body || "").split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    try {
-      const event = JSON.parse(line.slice(5).trim());
-      if (event?.type === "response.output_item.done" && event.item?.type === "image_generation_call" && typeof event.item.result === "string") {
-        return event.item.result;
-      }
-    } catch {
-      // Other SSE events are progress notifications rather than the image.
+  let result = "";
+  forEachSseEvent(body, (event) => {
+    // Other SSE events are progress notifications rather than the image.
+    if (event?.type === "response.output_item.done" && event.item?.type === "image_generation_call" && typeof event.item.result === "string") {
+      result = event.item.result;
+      return false;
     }
-  }
-  return "";
+  });
+  return result;
 }
 
 function videoResult(body, requestId = "") {

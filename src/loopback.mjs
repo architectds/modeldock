@@ -11,6 +11,13 @@
 // gets changed in one.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
+// The spelling a host needs inside a URL: IPv6 literals get their brackets
+// back ("::1" -> "[::1]"). Shared by the server's guards and the services
+// wiring, which both build the gateway's own URL from config.host.
+export function urlHost(host) {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
 export function isLoopbackHost(value) {
   // Accept both spellings of an IPv6 literal: URL.hostname yields "[::1]", while a
   // host read straight from an env var or a config field has no brackets.

@@ -19,7 +19,7 @@ import {
   profileById,
   tokenFor,
 } from "../src/profiles.mjs";
-import { upstreamTargetFor, isLocalBackend } from "../src/gateway.mjs";
+import { upstreamTargetFor, isLocalBackend, INPUT_NORMALIZERS, PAYLOAD_NORMALIZERS } from "../src/gateway.mjs";
 
 function connectLocalEngines() {
   applyLocalEngineProfile("llamacpp", {
@@ -55,6 +55,37 @@ test("every profile answers the routing questions itself", () => {
       assert.ok(!profile.tokenEnvName, `${profile.id} is keyless, so it names no token variable`);
     }
   }
+});
+
+test("every declared normalizer resolves, and the quirky routes still declare theirs", () => {
+  // Input/payload adaptation used to be an if-chain on model and provider ids
+  // inside the relay paths - the same shape as the routing if-chains this file
+  // exists to prevent. Now the profile (or model entry) names a normalizer and
+  // the gateway holds the registry. Two ways that can rot: a profile naming a
+  // normalizer the registry no longer has (silent generic fallback for a route
+  // that needs adaptation), or the known-quirky routes losing their markers.
+  for (const profile of allProfiles()) {
+    if (profile.inputNormalizer) {
+      assert.ok(INPUT_NORMALIZERS[profile.inputNormalizer], `${profile.id} names input normalizer "${profile.inputNormalizer}" but the gateway registry has no such entry`);
+    }
+    if (profile.payloadNormalizer) {
+      assert.ok(PAYLOAD_NORMALIZERS[profile.payloadNormalizer], `${profile.id} names payload normalizer "${profile.payloadNormalizer}" but the gateway registry has no such entry`);
+    }
+    for (const model of profile.availableModels || []) {
+      if (model.inputNormalizer) {
+        assert.ok(INPUT_NORMALIZERS[model.inputNormalizer], `${profile.id}/${model.id} names input normalizer "${model.inputNormalizer}" but the gateway registry has no such entry`);
+      }
+    }
+  }
+  // The known-quirky routes: opencode's pro/flash history repairs and xAI's
+  // wire contract are measured behavior, not defaults. Losing a marker would
+  // quietly put those routes back on generic normalization.
+  const go = profileById("opencode-go");
+  assert.equal(go.availableModels.find((m) => m.id === "deepseek-v4-pro")?.inputNormalizer, "opencode-pro");
+  assert.equal(go.availableModels.find((m) => m.id === "deepseek-v4-flash")?.inputNormalizer, "opencode-flash");
+  const xai = profileById("xai");
+  assert.equal(xai.inputNormalizer, "xai");
+  assert.equal(xai.payloadNormalizer, "xai");
 });
 
 test("a target names its own provider and carries a usable credential rule", () => {

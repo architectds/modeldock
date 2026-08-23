@@ -1,7 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -30,6 +29,16 @@ import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { applyXaiProfile, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
+import { urlHost } from "./loopback.mjs";
+import { createServices } from "./services.mjs";
+// Re-exported: tests and embedders construct the service bag through
+// server.mjs, and that path stays stable across the services split.
+export { createServices };
+import { anyProviderRouteConfigured, codexModelCatalog, modelCatalogModels, modelOptions, modelProviderOf, providerModels, providerOptions, providerRouteConfigured, publishedModelIds, visionOptionsAcrossProviders } from "./model-options.mjs";
+import { NATIVE_PROVIDER, SUBAGENT_DEFAULT_MODEL, readSubagentModel, subagentModelOptions, subagentProviders, writeSubagentAgentFile } from "./subagent-config.mjs";
+// Re-exported: tests and the config switcher import the catalog through
+// server.mjs, and that path stays stable across the model-options split.
+export { codexModelCatalog };
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
@@ -41,9 +50,9 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { estimateVramBudget, kvBytesPerToken, maxContextFor, contextLadderFor, KV_ELEMENT_BYTES, MINIMUM_HEADROOM_BYTES, RECOMMENDED_HEADROOM_BYTES } from "./gguf.mjs";
 import { primaryGpu, probeGpus, usableBytesOf } from "./gpu.mjs";
-import { drawerLaunchArgs, launchBaseArgs, tokenizeCommandLine } from "./engine-processes.mjs";
+import { drawerLaunchArgs, launchBaseArgs, spawnEngineDetached, tokenizeCommandLine, waitForEngineStop } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
-import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
+import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
@@ -105,186 +114,6 @@ function sameLocalHost(a, b) {
   } catch {
     return false;
   }
-}
-
-function urlHost(host) {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
-
-const VISION_TIER_LABELS = { strong: "High", medium: "Mid", basic: "Low", poor: "Weak" };
-const SPEED_SCORES = { fast: 1.0, medium: 0.6, slow: 0.2 };
-const QUOTA_SCORES = [
-  { min: 10000, score: 1.0 },
-  { min: 2000, score: 0.8 },
-  { min: 500, score: 0.5 },
-  { min: 0, score: 0.15 },
-];
-
-function quotaScore(quota5h) {
-  if (typeof quota5h !== "number") return 0;
-  return QUOTA_SCORES.find((band) => quota5h >= band.min)?.score || 0.15;
-}
-
-function balanceScoreFor(model) {
-  const capability = model.visionScore != null && model.visionMaxScore ? model.visionScore / model.visionMaxScore : 0;
-  const speed = SPEED_SCORES[model.speedTier] ?? 0;
-  const cheap = quotaScore(model.quota5h);
-  const freeBoost = model.free ? 0.05 : 0;
-  return Number(((capability + speed + cheap) / 3 + freeBoost).toFixed(3));
-}
-
-function withTierLabel(model) {
-  const decorated = { ...model };
-  if (decorated.visionTier) {
-    decorated.tierLabel = VISION_TIER_LABELS[decorated.visionTier] || decorated.visionTier;
-  }
-  if (decorated.supportsVision) {
-    decorated.balanceScore = balanceScoreFor(decorated);
-  }
-  return decorated;
-}
-
-// Bare ids an older install could still reference: every model the default
-// provider (opencode-go) owns that is not a reserved native slot. gpt-5.6-luna is
-// excluded because its bare id belongs to the native GPT pipeline, not to us.
-function legacyBareIds(config) {
-  const ids = new Set();
-  const defaultProfile = profileById("opencode-go");
-  for (const model of defaultProfile?.availableModels || []) {
-    if (model?.id && !model.ownerQualified && model.status !== "unavailable") ids.add(model.id);
-  }
-  return ids;
-}
-
-// The slugs this gate can serve: every provider's published catalog plus the
-// legacy bare ids above. Used to decide whether a client-chosen model is one this
-// gate can route (anything else is native GPT traffic). The legacy bare ids keep
-// an old thread selection on the routed path (providerForModel sends it to
-// opencode-go) instead of letting isNativeModel misroute it to ChatGPT.
-function publishedModelIds(config) {
-  const ids = new Set();
-  for (const model of codexModelCatalog(config).models || []) {
-    if (model?.slug) ids.add(model.slug);
-  }
-  for (const id of legacyBareIds(config)) ids.add(id);
-  return ids;
-}
-
-function modelOptions(config, profileId) {
-  const all = [];
-  for (const entry of enabledProviders(config)) {
-    const profile = profileById(entry.id);
-    for (const model of profile?.availableModels || []) {
-      if (model.status === "unavailable" || model.endpoint === "chat") continue;
-      const id = publishedSlugFor(entry.id, model);
-      if (all.some((existing) => existing.id === id)) continue;
-      all.push({ ...withTierLabel(model), id, provider: entry.id });
-    }
-  }
-  // Config ids may be published slugs or bare legacy ids. Only add an id when
-  // its real owner is enabled and actually catalogs that model; assigning a
-  // stale OpenCode fallback to the active DeepSeek profile would manufacture a
-  // vision route that DeepSeek does not provide.
-  for (const id of [config.mainModel, config.visionModel]) {
-    if (!id) continue;
-    const owner = providerForModel(config, id);
-    if (!enabledProviders(config).some((provider) => provider.id === owner)) continue;
-    const known = profileById(owner)?.availableModels?.find((model) => model.id === bareModelId(id));
-    if (!known || known.status === "unavailable" || known.endpoint === "chat") continue;
-    const resolved = publishedSlugFor(owner, known);
-    if (all.some((existing) => existing.id === resolved)) continue;
-    all.push({ ...withTierLabel(known), id: resolved, provider: owner });
-  }
-  return appendNativeModels(all, config);
-}
-
-// One published model set, shared by every picker: the routed profiles plus
-// the native GPT catalog while signed in. Without a sign-in the native backend
-// would 401 on every call, so native models stay out (every picker fails
-// closed). input_modalities carries vision support, so the vision picker's
-// supportsVision filter picks the right native entries.
-function appendNativeModels(options, config) {
-  if (!hasChatGptLogin(config.codexHome)) return options;
-  for (const model of readNativeCatalog(config)?.models || []) {
-    if (typeof model?.slug !== "string" || !model.slug) continue;
-    // The same test the Codex catalog applies, in the same spelling: a model
-    // Codex marks "hide" is one it does not offer, and offering it here only
-    // in our own pickers puts a choice in front of people that their own App
-    // will not show them. gpt-5.4, gpt-5.4-mini and codex-auto-review are
-    // hidden today; the review model in particular is internal machinery that
-    // happens to read images, not a vision model anyone was given.
-    if (model.visibility !== "list") continue;
-    if (options.some((entry) => entry.id === model.slug)) continue;
-    options.push({
-      id: model.slug,
-      label: model.display_name || model.slug,
-      provider: "openai",
-      native: true,
-      supportsVision: Array.isArray(model.input_modalities) && model.input_modalities.includes("image"),
-      // The native catalog states its own window; dropping it here left these
-      // models inheriting our 250,000 fallback while Codex used the real one.
-      // Same override the catalog file honours, so the page and the file
-      // cannot disagree about a number the page lets you edit.
-      contextWindow: Number(config.contextOverrides?.[model.slug])
-        || Number(model.context_window) || undefined,
-      contextSource: config.contextOverrides?.[model.slug]
-        ? "user"
-        : (Number(model.context_window) > 0 ? "native" : ""),
-    });
-  }
-  return options;
-}
-
-function modelCatalogModels(config, profileId) {
-  const active = profileId || config.profileId;
-  return modelOptions(config, active).filter((entry) => entry.provider === active);
-}
-
-function providerOptions(config) {
-  return enabledProviders(config);
-}
-
-// Only providers with a configured token (or the active profile, which may resolve
-// its token from the Codex config backup) are shown in the picker and published in
-// the catalog. A provider with no key cannot serve requests, so it stays hidden.
-function enabledProviders(config) {
-  const all = profileOptions();
-  const active = config.profileId || "opencode-go";
-  return all.filter((entry) => {
-    if (entry.id === active) return true;
-    // A keyless engine has no credential to check, so "connected" is the only
-    // test that means anything: it publishes once it has models. The routing
-    // property is deliberate: xAI also has no environment variable, but its
-    // OAuth access token is still required on every request.
-    const profile = profileById(entry.id);
-    if (profile?.keyless) return Boolean(profile.availableModels?.length);
-    const token = config.tokens?.[entry.id];
-    return Boolean(token);
-  });
-}
-
-function providerModels(providerId) {
-  return (profileById(providerId)?.availableModels || [])
-    .filter((model) => model.status !== "unavailable" && model.endpoint !== "chat");
-}
-
-function providerRouteConfigured(config, providerId) {
-  const profile = profileById(providerId);
-  return Boolean(providerModels(providerId).length && (profile.keyless || config.tokens?.[providerId]));
-}
-
-function anyProviderRouteConfigured(config) {
-  return profileOptions().some((provider) => providerRouteConfigured(config, provider.id));
-}
-
-// Vision is cross-provider, but only across providers that can actually serve
-// requests once the new main provider is active. The old active profile can
-// remain enabled until the switch lands, so filter out providers that would
-// lose their "active" pass without a configured token.
-function visionOptionsAcrossProviders(config, providerId) {
-  return modelOptions(config, providerId).filter((model) =>
-    model.supportsVision && (model.provider === providerId || providerRouteConfigured(config, model.provider))
-  );
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
@@ -351,77 +180,6 @@ function modelsPayload(services) {
     visionProviders,
     selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : "",
   };
-}
-
-// The provider that owns a published model id, or "" when the catalog cannot
-// place it. Returning a placeholder here instead made every `modelProviderOf(...)
-// || config.profileId` fallback dead code, since the placeholder is truthy.
-function modelProviderOf(options, modelId) {
-  return options.find((entry) => entry.id === modelId)?.provider || "";
-}
-
-// Sub Agent selector: the dashboard writes a ModelDock-managed Codex agent file
-// (~/.codex/agents/modeldock-subagent.toml) whose `model`/`model_provider` fields
-// define the role Codex exposes for spawned subagents. The picker mirrors the
-// main provider/model pair, and every native GPT slug is selectable alongside
-// the routed catalog so subagents stop silently defaulting to native models.
-// Native roles keep the built-in "openai" provider (base_url pointed at this
-// gate in transparent mode); routed roles keep the published "@provider" slug,
-// which the gateway parses for upstream routing.
-const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
-// One spelling, shared with the disable() path that has to remove it.
-const SUBAGENT_FILE_NAME = SUBAGENT_AGENT_FILE;
-// The built-in native ChatGPT provider, shared by the subagent and vision
-// pickers: one spelling, one label, everywhere it is offered.
-const NATIVE_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
-
-function subagentModelOptions(config) {
-  // The published model set already includes native GPT slugs while signed in
-  // (modelOptions -> appendNativeModels); the subagent picker is that same set.
-  return modelOptions(config, config.profileId);
-}
-
-function subagentProviders(config) {
-  const providers = providerOptions(config).map((entry) => ({ id: entry.id, label: entry.label }));
-  if (hasChatGptLogin(config.codexHome)) providers.push(NATIVE_PROVIDER);
-  return providers;
-}
-
-function subagentAgentFilePath(config) {
-  if (!config.codexHome) return null;
-  return path.join(config.codexHome, "agents", SUBAGENT_FILE_NAME);
-}
-
-function readSubagentModel(config) {
-  try {
-    const source = readFileSync(subagentAgentFilePath(config), "utf8");
-    return source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
-  } catch {
-    return null;
-  }
-}
-
-function writeSubagentAgentFile(config, model) {
-  const agentsDir = path.join(config.codexHome, "agents");
-  mkdirSync(agentsDir, { recursive: true });
-  const file = path.join(agentsDir, SUBAGENT_FILE_NAME);
-  const content = [
-    "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",
-    'name = "modeldock_subagent"',
-    'description = "Subagent routed through the local ModelDock gate (managed by ModelDock)."',
-    'model_provider = "openai"',
-    `model = "${model}"`,
-    'model_reasoning_effort = "high"',
-    'developer_instructions = """',
-    "Complete the bounded task assigned by the parent agent.",
-    "Respect repository instructions, keep changes surgical, and run relevant verification.",
-    "Return a concise summary of work completed, checks run, and remaining risks.",
-    '"""',
-    "",
-  ].join("\n");
-  const temporary = `${file}.${process.pid}.tmp`;
-  writeFileSync(temporary, content, "utf8");
-  renameSync(temporary, file);
 }
 
 function subagentPayload(services) {
@@ -772,17 +530,11 @@ function recordConfigAction(metrics, operation, result) {
   metrics.emit("change");
 }
 
-const ZEN_FREE_BASE = "https://opencode.ai/zen/v1";
-
 // The dashboard's view of the same question the relay asks. It had its own
 // if-chain and disagreed with the relay about Ollama, so the address shown
 // was not the address used.
 function upstreamBaseForModel(config, model) {
   return profileById(providerForModel(config, model)).baseUrlFor(config, model);
-}
-
-export function codexModelCatalog(config) {
-  return catalogFor(config);
 }
 
 function serveModels(req, res, { config, modelSelection }) {
@@ -793,110 +545,6 @@ function serveModels(req, res, { config, modelSelection }) {
     mainModel: modelSelection?.mainModel || config.mainModel,
     visionModel: modelSelection?.visionModel ?? config.visionModel,
   }));
-}
-
-const VISION_MODEL_HINTS = ["luna", "omni", "vision", "vl", "mimi", "glm-5", "grok", "kimi"];
-
-function labelForModelId(id) {
-  return id
-    .split(/[-_]/)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-// Endpoint capability from live probing (2026-08-04): most models accept BOTH responses and
-// chat/completions; minimax-m2.5/m3 and qwen* only accept chat (responses returns 401);
-// grok-4.5 only accepts responses (chat returns 500). Prefer responses (native Codex dialect).
-function modelEndpoint(modelId) {
-  if (/^(minimax-m2\.5|minimax-m3|qwen)/.test(modelId)) return "chat";
-  return "responses";
-}
-
-// Image used to probe whether an upstream model can actually see images. In the release
-// bundle this is the inlined dashboard.png; in dev it falls back to a tiny 32x24 RGB-bar
-// data URL so the probe needs no on-disk asset and works from any layout.
-const inlineDashboardPng = hasInlineStatic ? staticFiles.assets?.["dashboard.png"] : null;
-const VISION_PROBE_IMAGE = inlineDashboardPng
-  ? `data:image/png;base64,${Buffer.from(inlineDashboardPng).toString("base64")}`
-  : "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAIAAAAUMWhjAAAALElEQVR4nGP47+CAHzkcSCCACv7jQQyjFoxaMGrBqAWjFoxaMGrBqAVDwwIALqWKRWv2VpsAAAAASUVORK5CYII=";
-
-function visionProbeUrlAndBody(modelId, config, imageUrl) {
-  const provider = providerForModel(config, modelId);
-  // Was deepseek-or-OpenCode only, so probing a custom or local vision model
-  // sent its image to OpenCode Go.
-  const base = profileById(provider).baseUrlFor(config, modelId);
-  const headers = { "Content-Type": "application/json", Authorization: `Bearer ${tokenFor(config, modelId)}` };
-  const upstream = bareModelId(modelId);
-  if (["gpt-5.6-luna", "grok-4.5"].includes(upstream)) {
-    return {
-      url: `${base}/responses`,
-      headers,
-      body: JSON.stringify({
-        model: upstream,
-        input: [{ role: "user", content: [{ type: "input_text", text: "What is this?" }, { type: "input_image", image_url: imageUrl }] }],
-        stream: false,
-        max_output_tokens: 64,
-      }),
-    };
-  }
-  const zenFree = upstream.endsWith("-free") || upstream === "big-pickle";
-  return {
-    url: zenFree ? "https://opencode.ai/zen/v1/chat/completions" : `${base}/chat/completions`,
-    headers,
-    body: JSON.stringify({
-      model: upstream,
-      max_tokens: 64,
-      messages: [{ role: "user", content: [{ type: "text", text: "What is this?" }, { type: "image_url", image_url: { url: imageUrl } }] }],
-    }),
-  };
-}
-
-async function callVisionModel(modelId, config, imageUrl, question, maxTokens = 64) {
-  const { url, headers, body } = visionProbeUrlAndBody(modelId, config, imageUrl);
-  const parsed = JSON.parse(body);
-  if (url.endsWith("/responses")) {
-    parsed.input[0].content[0].text = question;
-    parsed.max_output_tokens = maxTokens;
-  } else {
-    parsed.messages[0].content[0].text = question;
-    parsed.max_tokens = maxTokens;
-  }
-  const response = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(parsed),
-    signal: AbortSignal.timeout(25_000),
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 300);
-    return { error: `HTTP ${response.status} ${detail}` };
-  }
-  const data = await response.json();
-  if (url.endsWith("/responses")) {
-    const text = (data.output || [])
-      .filter((entry) => entry.type === "message" && entry.content)
-      .flatMap((entry) => entry.content)
-      .filter((part) => part.type === "output_text")
-      .map((part) => part.text)
-      .join("");
-    return { text };
-  }
-  return { text: data.choices?.[0]?.message?.content || "" };
-}
-
-async function probeImageSupport(modelId, config) {
-  try {
-    const result = await callVisionModel(modelId, config, VISION_PROBE_IMAGE, "What is this?", 64);
-    if (result.error) {
-      if (result.error.includes("Unsupported model") || result.error.includes("ModelNotFound") || result.error.includes("Router.Unavailable")) {
-        return { capability: "text", status: "unavailable" };
-      }
-      return { capability: "text", status: "available" };
-    }
-    return { capability: "vision", status: "available" };
-  } catch {
-    return { capability: "unknown", status: "unknown" };
-  }
 }
 
 // Thin-gateway path: relay through src/gateway.mjs (byte passthrough, tee usage,
@@ -935,424 +583,6 @@ async function relayGatewayRequest(req, res, services) {
     modelSelection.mainModel = result.route.model;
   }
   return result;
-}
-
-let JUDGE_MODEL = null;
-
-function judgeText(text) {
-  if (!text || !text.trim()) return 0;
-  const lower = text.toLowerCase();
-  if (/(can't|cannot|couldn't|no image|not an image|can not see|unable to see|no picture)/.test(lower)) return 0;
-  return 1;
-}
-
-async function scoreDashboardTask(modelId, config) {
-  const imageUrl = VISION_PROBE_IMAGE;
-  if (!imageUrl) return 0;
-  const question = "Describe this dashboard screenshot in detail. List the specific metrics, numbers, and charts you can see.";
-  const result = await callVisionModel(modelId, config, imageUrl, question, 256);
-  if (result.error) return 0;
-  const base = judgeText(result.text);
-  if (base === 0) return 0;
-  const hasNumbers = /\d[\d.,%]*(%|k|m|K|M)?/.test(result.text);
-  const hasMetricWords = /\b(cpu|gpu|memory|ram|requests|latency|error|tokens|usage|active|model|time|duration|rate|total|count)\b/i.test(result.text);
-  return (hasNumbers ? 1 : 0) + (hasMetricWords ? 1 : 0);
-}
-
-async function evaluateVision(modelId, config) {
-  const { TASKS, loadTaskImage, scoreTask, tierForScore } = await import("./vision-eval.mjs");
-  const results = [];
-  let deterministicScore = 0;
-  let maxDeterministic = 0;
-  for (const task of TASKS) {
-    const taskImage = loadTaskImage(task);
-    if (!taskImage) {
-      // The assets/vision set is missing in this checkout: report the task as
-      // unattempted instead of sending a broken data URL to the vision model.
-      results.push({ task: task.id, difficulty: task.difficulty, passed: false, skipped: true });
-      maxDeterministic += 1;
-      continue;
-    }
-    const imageUrl = `data:image/png;base64,${taskImage}`;
-    const answer = await callVisionModel(modelId, config, imageUrl, task.question, 48);
-    const score = answer.error ? 0 : scoreTask(task, answer.text);
-    deterministicScore += score;
-    maxDeterministic += 1;
-    results.push({ task: task.id, difficulty: task.difficulty, passed: score === 1 });
-  }
-  const dashboardScore = deterministicScore >= 3 ? await scoreDashboardTask(modelId, config) : 0;
-  const total = deterministicScore + dashboardScore;
-  const maxTotal = maxDeterministic + 2;
-  return {
-    deterministic: deterministicScore,
-    dashboard: dashboardScore,
-    score: total,
-    maxScore: maxTotal,
-    tier: tierForScore(total, maxTotal),
-    results,
-  };
-}
-
-async function probeVisionCandidates(profile, candidates, config) {
-  const results = await Promise.all(
-    candidates.map(async (model) => ({ id: model.id, ...(await probeImageSupport(model.id, config)) })),
-  );
-  profile.availableModels = profile.availableModels.map((model) => {
-    const result = results.find((entry) => entry.id === model.id);
-    if (!result) return model;
-    return {
-      ...model,
-      endpoint: modelEndpoint(model.id),
-      supportsVision: result.capability === "vision",
-      visionStatus: result.capability,
-      status: result.status,
-    };
-  });
-  const vision = results.filter((r) => r.capability === "vision").map((r) => r.id);
-  const unavailable = results.filter((r) => r.status === "unavailable").map((r) => r.id);
-  console.log(`[gate] vision probe done: vision=[${vision.join(", ") || "none"}] unavailable=[${unavailable.join(", ") || "none"}]`);
-  const VISION_SCORE_THRESHOLD = 4;
-  const visionModels = profile.availableModels.filter((model) => model.supportsVision);
-  if (visionModels.length) {
-    const evaluations = await Promise.all(
-      visionModels.map(async (model) => ({ id: model.id, evaluation: await evaluateVision(model.id, config) })),
-    );
-    profile.availableModels = profile.availableModels.map((model) => {
-      const evalEntry = evaluations.find((entry) => entry.id === model.id);
-      if (!evalEntry) return model;
-      const evaluation = evalEntry.evaluation;
-      const qualified = evaluation.score >= VISION_SCORE_THRESHOLD;
-      return {
-        ...model,
-        visionScore: evaluation.score,
-        visionMaxScore: evaluation.maxScore,
-        visionTier: evaluation.tier,
-        visionResults: evaluation.results,
-        supportsVision: qualified,
-        visionStatus: qualified ? "vision" : "no-vision",
-      };
-    });
-    const ranked = evaluations
-      .sort((a, b) => b.evaluation.score - a.evaluation.score)
-      .map((entry) => `${entry.id}=${entry.evaluation.score}/${entry.evaluation.maxScore}(${entry.evaluation.tier})${entry.evaluation.score >= VISION_SCORE_THRESHOLD ? "" : "-rejected"}`);
-    console.log(`[gate] vision evaluation done: ${ranked.join(", ")}`);
-  }
-}
-
-async function refreshProfileModels(profile, config) {
-  if (!profile || profile.id !== "opencode-go") return;
-  const opencodeToken = config.tokens?.["opencode-go"];
-  if (!opencodeToken) return;
-  if (!config.goBaseUrl.includes("opencode.ai")) return;
-  // Model catalog refresh, opt-in via MODELDOCK_MODEL_PROBE_ENABLED=1. The shipped
-  // curated catalog (profiles.mjs) is the primary model source and ships with the
-  // release; users do not need to re-probe. This only does a light GET /models merge
-  // so newly added upstream ids appear alongside the curated ones. Vision
-  // probing/evaluation (probeVisionCandidates/evaluateVision) is dev-only test
-  // tooling and is NOT wired into this path or into startup.
-  // Opt-in, as the comment above says: a config that simply omits the key (a test
-  // fixture, an embedder) must not start probing upstreams. `=== false` only
-  // behaved that way because loadConfig always fills a boolean in.
-  if (!config.modelProbeEnabled) return;
-  try {
-    const base = config.goBaseUrl.replace(/\/$/, "");
-    const headers = { Authorization: `Bearer ${opencodeToken}` };
-    const goRes = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) });
-    const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
-    const fetchedIds = [...new Set(goIds)];
-    if (!fetchedIds.length) return;
-    const existing = profile.availableModels || [];
-    const existingById = new Map(existing.map((model) => [model.id, model]));
-    const unknown = fetchedIds.filter((id) => !existingById.has(id)).sort((a, b) => a.localeCompare(b));
-    const models = [
-      ...existing,
-      ...unknown.map((id) => ({
-        id,
-        label: labelForModelId(id),
-        endpoint: modelEndpoint(id),
-        supportsVision: false,
-        visionStatus: "unknown",
-        status: "available",
-      })),
-    ];
-    profile.availableModels = models;
-    console.log(`[gate] refreshed opencode-go model catalog: ${models.length} models (${existing.length} curated, ${unknown.length} new)`);
-  } catch (error) {
-    console.log(`[gate] model catalog refresh failed: ${error.message}`);
-  }
-}
-export function createServices(config = loadConfig()) {
-  const mutableConfig = { ...config };
-  const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
-    ? mutableConfig.codexHome
-    : path.join(os.homedir(), ".codex");
-  // loadConfig always supplies `tokens`; test fixtures build config objects by
-  // hand, so make the runtime copy self-consistent before routes mutate it.
-  mutableConfig.tokens = mutableConfig.tokens || {};
-  // Provider tokens have a single source of truth: the per-provider map.
-  // The legacy boot-time goToken mirror (hand-built test configs, older
-  // persisted shapes) is folded into it here and dropped, so no reader can
-  // disagree with the just-saved token again.
-  if (mutableConfig.goToken && !mutableConfig.tokens["opencode-go"]) {
-    mutableConfig.tokens["opencode-go"] = mutableConfig.goToken;
-  }
-  delete mutableConfig.goToken;
-  const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
-  const attachmentIndex = new CodexAttachmentIndex({ codexHome });
-  const mediaStore = new MediaStore({
-    ttlMs: mutableConfig.mediaTtlMs,
-    maxBytes: mutableConfig.mediaMaxBytes,
-    maxEntries: mutableConfig.mediaMaxEntries,
-    maxStoredBytes: mutableConfig.mediaMaxStoredBytes,
-    stateDir: mutableConfig.mediaDir,
-    externalRoots: attachmentIndex.roots,
-  });
-  const modelSelection = { mainModel: mutableConfig.mainModel, visionModel: mutableConfig.visionModel };
-  const derivedFallback = createDerivedFallback();
-  const services = {};
-  const memoryStore = memoryStoreFor(mutableConfig);
-  const upstreams = createUpstreams({
-    config: mutableConfig,
-    metrics,
-    mediaStore,
-    memoryStore,
-    getVisionModel: () => modelSelection.visionModel,
-    // A getter, not the Set: nativeSlugs is built below (the native catalog is
-    // read after upstreams exists) and is cleared and refilled in place on every
-    // catalog refresh, so upstreams must read it per call, not capture it once.
-    getNativeSlugs: () => nativeSlugs,
-  });
-  let memoryTimer = null;
-  if (memoryStore) {
-    const captureMemories = () => {
-      try {
-        const result = memoryStore.captureCodexMemories(mutableConfig.codexHome);
-        if (result?.error) console.log(`[gate] memory capture: ${result.error}`);
-      } catch (error) {
-        console.log(`[gate] memory capture failed: ${error.message}`);
-      }
-    };
-    captureMemories();
-    const memoryRefreshHours = Number(mutableConfig.memoryRefreshHours || 6);
-    if (memoryRefreshHours > 0) {
-      memoryTimer = setInterval(captureMemories, memoryRefreshHours * 3_600_000);
-      memoryTimer.unref();
-    }
-  }
-  // The catalog file follows the same MODELDOCK_STATE_DIR redirect as owner
-  // records (instance-owner.mjs), so a gateway started from a throwaway install
-  // (mock-install tests) writes its own catalog instead of rewriting the real
-  // ~/.modeldock file with paths baked from the temp root.
-  const catalogFile = mutableConfig.codexCatalogFile
-    || stateFile("codex-model-catalog.json");
-  // Same redirect as the catalog: a test config that isolates one isolates both,
-  // and the writer below orders the picker from it.
-  const rollupFile = mutableConfig.usageRollupFile || usageRollupPath();
-  // Resolved once and published on services, so the boot-time tidy and the
-  // endpoint that edits the same file can never disagree about which file it is.
-  const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
-  const lifecycleFile = mutableConfig.modelLifecycleFile || modelLifecyclePath();
-  // The Ollama connection snapshot follows the same state-dir redirect. Real
-  // configs restore it during loadConfig; this re-apply covers hand-built test
-  // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
-  // profile in sync with whatever the connect/disconnect routes write.
-  const ollamaSnapshotFile = mutableConfig.ollamaSnapshotFile || ollamaSnapshotPath();
-  if (mutableConfig.ollamaSnapshotFile) {
-    const snapshot = readOllamaSnapshot(mutableConfig.ollamaSnapshotFile);
-    if (snapshot) applyOllamaProfile(mutableConfig, snapshot);
-  }
-  // The capability key rides in the base URL Codex reads from config.toml, so a
-  // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
-  const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
-  const gatewayUrl = `http://${urlHost(mutableConfig.host)}:${mutableConfig.port}`;
-  const mcpUrl = `${gatewayUrl}${callerRootPath(callerKey)}/mcp`;
-  const configSwitcher = new CodexConfigSwitcher({
-    codexHome: mutableConfig.codexHome,
-    baseUrl: `${gatewayUrl}${callerBasePath(callerKey)}`,
-    // stdio (default) spawns the standalone bridge as a Codex-owned child so gateway
-    // restarts never kill the session's MCP tools; url keeps the old HTTP wiring.
-    mcpUrl: mutableConfig.mcpTransport === "url" ? mcpUrl : "",
-    mcpCommand: mutableConfig.mcpTransport === "stdio" ? process.execPath : "",
-    mcpArgs: mutableConfig.mcpTransport === "stdio" ? [path.join(dirname, "mcp-standalone.mjs")] : [],
-    mcpEnv: mutableConfig.mcpTransport === "stdio" ? { MODELDOCK_GATEWAY_URL: mcpUrl.replace(/\/mcp$/, "") } : {},
-    // A view of the live selection, not a snapshot: Codex's own picker changes
-    // modelSelection without going through this switcher, and a stored copy then
-    // wrote the stale model into config.toml on the next enable.
-    model: () => modelSelection.mainModel,
-    // Read at enable time, not construction: sign-in state changes what the
-    // native catalog holds, and enable() uses this to pick the one model Codex
-    // can always start on. Routed slugs never go into config.toml's top-level
-    // model - they exist only in the published catalog, so writing one there
-    // makes Codex startup depend on ModelDock being healthy.
-    nativeModels: () => [...nativeModelSlugs(mutableConfig)],
-    catalogFile,
-  });
-  const autostart = createAutostart();
-  autostart.refresh().catch(() => {});
-  // Re-check periodically so the Update button stays current without a restart;
-  // the check is fire-and-forget and costs one small API call every 6h.
-  const updater = createUpdater({ autoCheckMs: 6 * 60 * 60 * 1000 });
-  updater.check().catch(() => {});
-  const routeAffinity = new RouteAffinity();
-  const runtime = { profile: mutableConfig.profile, profileId: mutableConfig.profileId };
-  // Captured native GPT slugs from the Codex desktop CLI (see native-catalog.mjs).
-  // Requests for these go to the ChatGPT backend even though they are published
-  // in our catalog for the App picker.
-  const nativeSlugs = nativeModelSlugs(mutableConfig);
-  // The Codex App never fetches a custom provider's /models: its refresh predicate is
-  // `uses_codex_backend() || has_command_auth()`, and an API-key provider satisfies
-  // neither (openai/codex#32119), so the App picker shows "Custom" for everything it
-  // cannot name locally. It does read a catalog file named by `model_catalog_json`, so
-  // publish the same catalog we serve over HTTP to disk and point the managed Codex
-  // config at it. The CLI keeps using /v1/models; both then see one list.
-  const writeCatalogFile = () => {
-    try {
-      const catalog = codexModelCatalog({
-        ...mutableConfig,
-        mainModel: modelSelection.mainModel,
-        visionModel: modelSelection.visionModel,
-        // Read fresh rather than taken from services: the agent file is edited
-        // from the dashboard, and a model the gateway is pointed at is published
-        // whatever the toggles say.
-        subagentModel: readSubagentModel(mutableConfig),
-        // Picker order. Read here rather than held on the config because the
-        // file is folded on its own schedule, and a catalog written after a
-        // fold should carry the order that fold implies.
-        usageByModel: rollupTotals(readRollup(rollupFile)),
-      });
-      mkdirSync(path.dirname(catalogFile), { recursive: true });
-      // Atomic replace: Codex reads this file on its own schedule, so a
-      // half-written JSON must never be observable. Same-directory rename is
-      // atomic on both Windows and POSIX.
-      const tmp = `${catalogFile}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify(catalog, null, 2), "utf8");
-      renameSync(tmp, catalogFile);
-      return catalog.models?.length || 0;
-    } catch (error) {
-      console.log(`[gate] model catalog file write failed: ${error.message}`);
-      return 0;
-    }
-  };
-  const refreshModelCatalog = () => Promise.all([
-    refreshProfileModels(mutableConfig.profile, mutableConfig),
-    // Opt-out keeps the desktop-app refresh out of unit tests; production turns
-    // it on by default so the picker keeps showing native GPT models.
-    mutableConfig.refreshNativeCatalog === false
-      ? null
-      : refreshNativeCatalog(mutableConfig).then((models) => {
-          if (models?.length) {
-            nativeSlugs.clear();
-            for (const model of models) {
-              if (typeof model?.slug === "string" && model.slug) nativeSlugs.add(model.slug);
-            }
-          }
-          return models;
-        }),
-  ]).then(
-    ([, nativeModels]) => {
-      const written = writeCatalogFile();
-      console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}, native=${nativeModels?.length || 0}, catalog file=${written} models`);
-    },
-    (error) => console.log(`[gate] model refresh error: ${error.message}`),
-  );
-  // The weekly tidy. At boot rather than on a timer: a gateway that runs for a
-  // month should tidy four times, not once, and one that is only started on
-  // Mondays should still tidy - which a scheduled day of the week would miss.
-  //
-  // Every model currently in the published set gets its first-seen stamp on the
-  // way past, so a model added today starts its thirty days today rather than
-  // inheriting the window's.
-  const runModelTidy = (now = Date.now()) => {
-    try {
-      const lifecycle = readLifecycle(lifecycleFile);
-      const models = modelOptions(mutableConfig, mutableConfig.profileId)
-        .filter((entry) => !entry.status || entry.status === "available");
-      const stamped = stampFirstSeen(lifecycle.firstSeen, models, now);
-      const firstSeen = { ...stamped.firstSeen };
-      const toggles = readModelToggles(togglesFile);
-      // Before the sparse false-only format, re-enabling a model wrote
-      // `{ slug: true }`. Those legacy entries cannot be distinguished from a
-      // hand edit, but keeping them forever would contradict the new rescue
-      // contract. Convert them once into a fresh first-seen timestamp: the
-      // model stays visible now, survives the next weekly tidy, and is judged
-      // normally again after a full thirty days.
-      const legacyRescued = Object.keys(toggles).filter((slug) => toggles[slug] === true);
-      if (legacyRescued.length) {
-        const refreshedAt = new Date(now).toISOString();
-        for (const slug of legacyRescued) {
-          delete toggles[slug];
-          if (firstSeen[slug]) firstSeen[slug] = refreshedAt;
-        }
-        writeModelToggles(togglesFile, toggles);
-        mutableConfig.modelToggles = toggles;
-      }
-      const rollup = readRollup(rollupFile);
-      const decision = shouldTidy({ lastTidyAt: lifecycle.lastTidyAt, rollup, now });
-      if (!decision.run) {
-        if (stamped.changed || legacyRescued.length) writeLifecycle(lifecycleFile, { ...lifecycle, firstSeen });
-        return { ...decision, parked: [] };
-      }
-      const parked = modelsToPark({
-        models,
-        rollup,
-        toggles,
-        selected: selectedModelSlugs(mutableConfig, readSubagentModel(mutableConfig)),
-        firstSeen,
-        now,
-      });
-      for (const slug of parked) toggles[slug] = false;
-      if (parked.length) {
-        writeModelToggles(togglesFile, toggles);
-        mutableConfig.modelToggles = toggles;
-        writeCatalogFile();
-      }
-      writeLifecycle(lifecycleFile, { lastTidyAt: new Date(now).toISOString(), firstSeen });
-      if (parked.length) {
-        console.log(`[gate] model tidy: ${parked.length} unused for 30 days, removed from the Codex picker (${parked.join(", ")})`);
-      }
-      return { ...decision, parked };
-    } catch (error) {
-      // Housekeeping must never stop a gateway from starting.
-      console.log(`[gate] model tidy skipped: ${error.message}`);
-      return { run: false, reason: "error", parked: [] };
-    }
-  };
-
-  // The periodic pass: refresh the model list, then tidy what it leaves. The
-  // tidy has to be on this timer and not only at boot - the gateways that most
-  // need it are the ones left running for weeks, and a boot-only tidy never
-  // fires on those at all. Running it daily costs nothing, because the weekly
-  // guard inside it decides whether this call does any work.
-  //
-  // After the refresh rather than beside it: a model that arrived in this pass
-  // should get its first-seen stamp before anything reasons about its age.
-  const runScheduledMaintenance = () => refreshModelCatalog().then(
-    () => runModelTidy(),
-    () => runModelTidy(),
-  );
-
-  // Write once at boot so the file exists even when the refresh is disabled or fails.
-  writeCatalogFile();
-  runModelTidy();
-  refreshModelCatalog();
-  const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
-  const modelRefreshTimer = refreshIntervalHours > 0
-    ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)
-    : null;
-  if (modelRefreshTimer) modelRefreshTimer.unref();
-  return Object.assign(services, {
-    config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
-    autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
-    // The configured subagent model (modeldock_subagent's `model`). It is the
-    // user's explicit choice and can be a native bare slug (model_provider
-    // "openai"), which is exactly what the collaboration relay needs.
-    subagentModel: readSubagentModel(mutableConfig),
-    memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
-    usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
-    sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
-    attachmentIndex,
-  });
 }
 
 // Codex compresses some request bodies (observed on remote compact tasks) with
@@ -2446,24 +1676,12 @@ export function createApp(services = createServices()) {
       });
     }
     try {
-      // Never discard the output of a background launch (AGENTS.md): an engine
-      // that dies on a missing model file, a held port, or a driver fault says
-      // so on stderr and nowhere else - and this button is pressed precisely
-      // when the engine has already failed once.
-      const logDir = services.engineLogDir || path.join(os.tmpdir(), "modeldock");
-      mkdirSync(logDir, { recursive: true });
-      const logFile = path.join(logDir, `engine-${engine}.log`);
-      const log = openSync(logFile, "a");
-      const child = spawn(remembered.binary, remembered.args, {
-        detached: true,
-        stdio: ["ignore", log, log],
-        windowsHide: true,
+      const { logFile } = spawnEngineDetached({
+        binary: remembered.binary,
+        args: remembered.args,
+        engine,
+        logDir: services.engineLogDir || path.join(os.tmpdir(), "modeldock"),
       });
-      // The parent's copy of the descriptor is not needed once the child owns it.
-      closeSync(log);
-      // Ours to start, not ours to hold: the engine outlives this gateway, and
-      // a restart of ModelDock must not take the user's model down with it.
-      child.unref();
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: true });
       return res.json({ engine, started: true, binary: remembered.binary, logFile });
     } catch (error) {
@@ -2530,41 +1748,12 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, `local_apply_${engine}`, { ok: false, error: error.message });
       return res.status(502).json({ error: { type: "stop_failed", message: error.message } });
     }
-    // The port does not free instantly, and starting a second copy onto a held
-    // port is the failure this waits out. Running out of patience is not the
-    // same as the port coming free: the old loop left by the same door either
-    // way and spawned regardless, so a process that refused to die produced a
-    // second one that could not bind, and the reply still said started: true.
     const stopTimeoutMs = Number(services.stopTimeoutMs) || 10_000;
-    // A real deadline rather than a count of turns: every pass through this
-    // loop is a full port scan, so "40 iterations of 250ms" is not ten seconds
-    // and the message below would be quoting a number nothing measured.
-    const deadline = Date.now() + stopTimeoutMs;
-    // Gone means gone from the process table AND gone from the scan, not either
-    // one. The scan drops a port whose probe fails, and llama-server stops
-    // answering early in its shutdown while it is still unloading the model - so
-    // the scan alone reports "stopped" while the old process is still holding
-    // twelve gigabytes of weights, and the replacement allocates on top of it.
-    // On the card this feature exists for that is 25 GiB asked of a 19 GiB card.
-    const alive = (pid) => {
-      try {
-        // Signal 0 asks the question without sending anything. EPERM means the
-        // process is there and not ours to signal, which is still there.
-        process.kill(pid, 0);
-        return true;
-      } catch (error) {
-        return error?.code === "EPERM";
-      }
-    };
-    let stopped = false;
-    while (Date.now() < deadline) {
-      const listed = (await (services.discoverEngines || discoverLocalEngines)({})).some((found) => found.pid === running.pid);
-      if (!listed && !alive(running.pid)) {
-        stopped = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
+    const stopped = await waitForEngineStop({
+      pid: running.pid,
+      discover: () => (services.discoverEngines || discoverLocalEngines)({}),
+      timeoutMs: stopTimeoutMs,
+    });
     if (!stopped) {
       recordConfigAction(metrics, `local_apply_${engine}`, { ok: false, error: "stop_timeout" });
       return res.status(502).json({
@@ -2576,13 +1765,12 @@ export function createApp(services = createServices()) {
       });
     }
     try {
-      const logDir = services.engineLogDir || path.join(os.tmpdir(), "modeldock");
-      mkdirSync(logDir, { recursive: true });
-      const logFile = path.join(logDir, `engine-${engine}.log`);
-      const log = openSync(logFile, "a");
-      const child = spawn(running.binary, args, { detached: true, stdio: ["ignore", log, log], windowsHide: true });
-      closeSync(log);
-      child.unref();
+      const { logFile } = spawnEngineDetached({
+        binary: running.binary,
+        args,
+        engine,
+        logDir: services.engineLogDir || path.join(os.tmpdir(), "modeldock"),
+      });
       // The chosen spec, so a later restart replays what the user picked rather
       // than what they happened to have typed before.
       const file = services.localEnginesFile || localEnginesSnapshotPath();
@@ -2716,8 +1904,14 @@ export function createApp(services = createServices()) {
       publishXai(next);
     } catch (error) {
       console.log(`[gate] xAI token refresh failed: ${error.message}`);
-      clearXaiAuth(file);
-      publishXai(null);
+      // Only a definitive OAuth rejection (auth.x.ai answering 4xx) ends the
+      // session. A network failure or a 5xx keeps the refresh token and the
+      // published models; the timer retries in ten minutes, and an expired
+      // bearer 401s until then - recoverable, unlike a deleted refresh token.
+      if (isDefinitiveAuthRejection(error)) {
+        clearXaiAuth(file);
+        publishXai(null);
+      }
     }
   };
 

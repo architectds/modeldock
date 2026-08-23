@@ -13,7 +13,9 @@
 // the inspector is missing, slow, or not permitted - reading another user's
 // command line needs elevation on every platform, and an engine the user did
 // not start is not our business anyway.
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync } from "node:fs";
+import path from "node:path";
 
 // Process names worth probing. Matched case-insensitively against both the
 // process name and the binary path, so `llama-server.exe` and a renamed copy
@@ -430,4 +432,64 @@ export function launchSpecFrom(listener) {
   const tokens = tokenizeCommandLine(listener.cmdline);
   if (!tokens.length) return null;
   return { binary: listener.binary, args: tokens.slice(1) };
+}
+
+// Start an engine and let go of it. This sequence used to live inline in two
+// route handlers (restart and apply), which put OS process management inside
+// Express - and two copies of the rule that a background launch must log,
+// never discard (AGENTS.md: an engine that dies on a missing model file or a
+// held port says so on stderr and nowhere else).
+export function spawnEngineDetached({ binary, args, engine, logDir }) {
+  mkdirSync(logDir, { recursive: true });
+  const logFile = path.join(logDir, `engine-${engine}.log`);
+  const log = openSync(logFile, "a");
+  const child = spawn(binary, args, {
+    detached: true,
+    stdio: ["ignore", log, log],
+    windowsHide: true,
+  });
+  // The parent's copy of the descriptor is not needed once the child owns it.
+  closeSync(log);
+  // Ours to start, not ours to hold: the engine outlives this gateway, and a
+  // restart of ModelDock must not take the user's model down with it.
+  child.unref();
+  return { logFile };
+}
+
+// Wait for a signalled engine to actually be gone, against a real deadline.
+//
+// The port does not free instantly, and starting a second copy onto a held
+// port is the failure this waits out. Running out of patience is not the same
+// as the port coming free: the old loop left by the same door either way and
+// spawned regardless, so a process that refused to die produced a second one
+// that could not bind, and the reply still said started: true.
+//
+// Gone means gone from the process table AND gone from the scan, not either
+// one. The scan drops a port whose probe fails, and llama-server stops
+// answering early in its shutdown while it is still unloading the model - so
+// the scan alone reports "stopped" while the old process is still holding
+// twelve gigabytes of weights, and the replacement allocates on top of it.
+// On the card this feature exists for that is 25 GiB asked of a 19 GiB card.
+export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
+  const alive = (candidate) => {
+    try {
+      // Signal 0 asks the question without sending anything. EPERM means the
+      // process is there and not ours to signal, which is still there.
+      process.kill(candidate, 0);
+      return true;
+    } catch (error) {
+      return error?.code === "EPERM";
+    }
+  };
+  // A real deadline rather than a count of turns: every pass through this
+  // loop is a full port scan, so "40 iterations of 250ms" is not ten seconds
+  // and a message quoting the timeout would be quoting a number nothing
+  // measured.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const listed = (await discover()).some((found) => found.pid === pid);
+    if (!listed && !alive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
 }

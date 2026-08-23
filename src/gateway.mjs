@@ -14,6 +14,11 @@ import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
+import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
+
+// Re-exported so the existing import path keeps working: the tee is SSE
+// machinery and lives with the rest of the framing rules in sse.mjs.
+export { createUsageTee };
 
 // Hosted / special tool types Codex can emit that the Go and DeepSeek upstreams
 // reject. The catalog declarations are the primary control; stripping here is the
@@ -926,19 +931,13 @@ function nativeRelayModel(services) {
 
 function parseRelayToolArguments(sseText) {
   let args = "";
-  for (const line of String(sseText || "").split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const data = line.slice(5).trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      const event = JSON.parse(data);
-      if (event.type === "response.function_call_arguments.delta" && typeof event.delta === "string") {
-        args += event.delta;
-      } else if (event.type === "response.output_item.added" && event.item?.type === "function_call" && typeof event.item.arguments === "string" && event.item.arguments) {
-        args += event.item.arguments;
-      }
-    } catch {}
-  }
+  forEachSseEvent(sseText, (event) => {
+    if (event.type === "response.function_call_arguments.delta" && typeof event.delta === "string") {
+      args += event.delta;
+    } else if (event.type === "response.output_item.added" && event.item?.type === "function_call" && typeof event.item.arguments === "string" && event.item.arguments) {
+      args += event.item.arguments;
+    }
+  });
   if (!args) return "";
   try {
     const parsed = JSON.parse(args);
@@ -1312,6 +1311,29 @@ function stripLocalInstructionText(text) {
   return out;
 }
 
+// A text-only picker entry may admit an attachment so the gateway can select a
+// vision model for a fresh user turn. That one upstream request contains real
+// pixels, so forwarding the picker's TEXT-ONLY instruction is contradictory:
+// it tells the selected vision model to ignore the very attachment it received.
+// Keep the instruction for ordinary and agentic text-model turns, where images
+// are deliberately represented by vision_inspect refs instead.
+function stripTextOnlyVisionGuidance(instructions) {
+  if (Array.isArray(instructions)) {
+    let changed = false;
+    const out = instructions.map((part) => {
+      if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
+      const text = part.text.replace(VERBOSE_VISION_GUIDANCE, "");
+      if (text === part.text) return part;
+      changed = true;
+      return { ...part, text };
+    });
+    return changed ? out : instructions;
+  }
+  return typeof instructions === "string"
+    ? instructions.replace(VERBOSE_VISION_GUIDANCE, "")
+    : instructions;
+}
+
 // Remove the dead-weight sections from the payload instructions for
 // small-context local backends. Codex sends instructions either as a plain
 // string or as an array of input_text parts; both shapes are handled and
@@ -1376,22 +1398,45 @@ export function normalizeOpenCodeProInput(input) {
   return attachProExecutionGuidance(continued);
 }
 
+// Which adaptation a route runs is the profile's to declare, not this file's
+// to infer from ids: the model entry (or the profile) names a normalizer, and
+// these registries map the name to the code. upstreamTargetFor's comment tells
+// the story of retiring the target if-chain the same way - this retires the
+// normalization one, so adding a provider no longer means editing the relay
+// paths here. The functions themselves still live in this file because they
+// share its helpers; the *dispatch* is what the profile owns.
+export const INPUT_NORMALIZERS = {
+  "opencode-pro": normalizeOpenCodeProInput,
+  "opencode-flash": normalizeOpenCodeFlashInput,
+  xai: normalizeXaiInput,
+};
+
+export const PAYLOAD_NORMALIZERS = {
+  xai: normalizeXaiPayload,
+};
+
+function inputNormalizerFor(config, model) {
+  const profile = profileById(providerForModel(config, model));
+  const entry = modelEntryFor(config, model);
+  return INPUT_NORMALIZERS[entry?.inputNormalizer || profile.inputNormalizer] || null;
+}
+
+// Applied to the outgoing payload (after the generic passes), everywhere a
+// request leaves for the upstream - ordinary relays and the compaction
+// summarize call alike. Identity when the profile declares nothing.
+function normalizePayloadForRoute(config, model, payload) {
+  const profile = profileById(providerForModel(config, model));
+  const normalize = PAYLOAD_NORMALIZERS[profile.payloadNormalizer];
+  return normalize ? normalize(payload) : payload;
+}
+
 // Keep every routed entry point on the same provider/model-specific input
 // contract. Both ordinary responses and remote compaction replay Codex history;
 // letting either path fall back to generic normalization reintroduces the same
 // strict-upstream failures only when a long task crosses that boundary.
 function normalizeInputForRoute(config, model, input, localPayload = null) {
-  const routedModel = bareModelId(model);
-  const routedProvider = providerForModel(config, model);
-  if (routedModel === "deepseek-v4-pro" && routedProvider === "opencode-go") {
-    return normalizeOpenCodeProInput(input);
-  }
-  if (routedModel === "deepseek-v4-flash" && routedProvider === "opencode-go") {
-    return normalizeOpenCodeFlashInput(input);
-  }
-  if (routedProvider === "xai") {
-    return normalizeXaiInput(input);
-  }
+  const normalize = inputNormalizerFor(config, model);
+  if (normalize) return normalize(input);
   return localPayload ? localPayload.input : normalizeGatewayInput(input);
 }
 
@@ -1877,76 +1922,6 @@ export function routeGatewayRequest(source, { mainModel, visionModel, affinity, 
 
 export { RouteAffinity };
 
-// Incremental SSE scanner used by the tee observer. It recognizes complete events
-// as they arrive across chunk boundaries, extracts usage, and never retains the
-// stream. The forwarded bytes are never parsed for this purpose beyond this
-// read-only copy.
-export function createUsageTee(onEvent) {
-  let buffer = "";
-  let discardingOversizedEvent = false;
-  const decoder = new StringDecoder("utf8");
-  const consume = (text) => {
-    if (discardingOversizedEvent) {
-      const boundary = text.match(/\r?\n\r?\n/);
-      if (!boundary) return;
-      text = text.slice(boundary.index + boundary[0].length);
-      discardingOversizedEvent = false;
-    }
-    buffer += text;
-  };
-  const process = () => {
-    while (true) {
-      const match = buffer.match(/\r?\n\r?\n/);
-      if (!match) break;
-      const block = buffer.slice(0, match.index);
-      buffer = buffer.slice(match.index + match[0].length);
-      for (const line of block.split(/\r?\n/)) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        try {
-          onEvent?.(JSON.parse(data));
-        } catch {
-          // Ignore non-JSON or partial SSE data lines.
-        }
-      }
-    }
-    // Usage observation must never hold an unbounded malformed event. This
-    // affects only telemetry: the client-facing stream is forwarded elsewhere
-    // and is never truncated by this observer.
-    if (Buffer.byteLength(buffer) > 1_000_000) {
-      buffer = "";
-      discardingOversizedEvent = true;
-    }
-  };
-  const push = (chunk) => {
-    const text = typeof chunk === "string" ? chunk : decoder.write(Buffer.from(chunk));
-    consume(text);
-    process();
-  };
-  const end = () => {
-    consume(decoder.end());
-    process();
-    // Non-streaming upstreams return a single JSON body with no SSE framing. When
-    // the buffer is a complete JSON object (a stream would leave a partial event
-    // or an empty buffer here), surface it as a completed response so usage and
-    // tool-call affinity are still captured.
-    const trimmed = buffer.trim();
-    if (trimmed) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          onEvent?.({ type: "response.completed", response: parsed });
-        }
-      } catch {
-        // Partial SSE event residue or non-JSON body: ignore.
-      }
-    }
-    buffer = "";
-  };
-  return { push, end };
-}
-
 function usageFromEvent(event) {
   return extractResponseUsage(event);
 }
@@ -2361,15 +2336,8 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   };
   const processBlock = (block, delim) => {
     for (const line of block.split(/\r?\n/)) {
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(data);
-      } catch {
-        continue;
-      }
+      let parsed = parseSseData(line);
+      if (parsed === undefined) continue;
       // Undo the tool-declaration flattening before the event reaches Codex.
       // When nothing is rewritten `raw` stays the original bytes, so a stream
       // that carries no namespaced tool call is still forwarded verbatim.
@@ -2630,15 +2598,8 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
   const processBlock = (block, delim) => {
     let completed = false;
     for (const line of block.split(/\r?\n/)) {
-      if (!line.startsWith("data:")) continue;
-      const data = line.slice(5).trim();
-      if (!data || data === "[DONE]") continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(data);
-      } catch {
-        continue;
-      }
+      const parsed = parseSseData(line);
+      if (parsed === undefined) continue;
       if (usage === undefined) usage = extractResponseUsage(parsed);
       const kind = parsed?.type;
       if (kind === "response.completed") {
@@ -2783,6 +2744,34 @@ function usageTokens(usage) {
     cachedTokens: usage.input_tokens_details?.cached_tokens,
     reasoningTokens: usage.output_tokens_details?.reasoning_tokens,
   };
+}
+
+// One JSON exit for every relay error body. The statusCode/setHeader/end
+// triple was spelled out ~15 times across the three relays - and a bookkeeping
+// pattern copied that often is where the next change lands in eight places and
+// misses the ninth (noTransform above exists for the same reason). Returns
+// false when the response already started, so streaming callers can fall back
+// to the in-band failure event.
+function sendJsonError(res, status, body) {
+  if (res.headersSent) return false;
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json");
+  res.end(typeof body === "string" ? body : JSON.stringify(body));
+  return true;
+}
+
+// The relay threw: one exit shape for the client, the telemetry finisher, and
+// the returned result. These used to disagree - the client body was redacted
+// while finish?.() and the returned result carried error.message raw, so a
+// fetch error echoing an Authorization header would land unredacted in the
+// metrics records and ~/.modeldock/usage-events.jsonl.
+function relayThrowExit(res, error, { finish, resultFields = {} } = {}) {
+  const message = redactBearer(error.message);
+  finish?.({ ok: false, error: message });
+  if (!sendJsonError(res, 502, { error: { type: "upstream_failed", message } })) {
+    endRelayStreamFailure(res, message);
+  }
+  return { ok: false, httpStatus: 502, error: message, ...resultFields };
 }
 
 // Codex re-sends the whole conversation every turn, so measuring a parsed body
@@ -2958,15 +2947,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       upstream: "openai",
     };
   } catch (error) {
-    finish?.({ ok: false, error: error.message });
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
-    } else {
-      endRelayStreamFailure(res, redactBearer(error.message));
-    }
-    return { ok: false, httpStatus: 502, route: { model: payload.model, reason: "native_passthrough" }, error: error.message };
+    return relayThrowExit(res, error, { finish, resultFields: { route: { model: payload.model, reason: "native_passthrough" } } });
   }
 }
 
@@ -3011,11 +2992,7 @@ export async function relayNativeImage(payload, res, services, { signal } = {}) 
     }
     return { ok: true, httpStatus: upstream.status };
   } catch (error) {
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
-    } else {
+    if (!sendJsonError(res, 502, { error: { type: "upstream_failed", message: redactBearer(error.message) } })) {
       endRelayFailure(res, redactBearer(error.message), forwardedBytes > 0);
     }
     return { ok: false, httpStatus: 502, error: error.message };
@@ -3279,7 +3256,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   }
   delete summarizeBody.previous_response_id;
   delete summarizeBody.client_metadata;
-  const upstreamSummarizeBody = routedProvider === "xai" ? normalizeXaiPayload(summarizeBody) : summarizeBody;
+  const upstreamSummarizeBody = normalizePayloadForRoute(config, route.model, summarizeBody);
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
 
   const target = upstreamTargetFor(config, route.model);
@@ -3344,9 +3321,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
           message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
         },
       };
-      res.statusCode = 503;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify(gone));
+      sendJsonError(res, 503, gone);
       return { ok: false, httpStatus: 503, route, error: gone };
     }
     if (!target.token && target.tokenRequired !== false) {
@@ -3356,9 +3331,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
           message: `No API token configured for provider ${target.provider}.`,
         },
       });
-      res.statusCode = 503;
-      res.setHeader("Content-Type", "application/json");
-      res.end(body);
+      sendJsonError(res, 503, body);
       finish?.({ ok: false, httpStatus: 503, error: `No API token configured for provider ${target.provider}.` });
       recordUsage({ ...compactRoute, status: 503 });
       return { ok: false, httpStatus: 503, route, error: body };
@@ -3376,11 +3349,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     const bytes = Buffer.from(await upstream.arrayBuffer());
     if (bytes.length > MAX_COMPACT_RESPONSE_BYTES) {
       const body = JSON.stringify({ error: { type: "upstream_failed", message: "Compact response is too large." } });
-      if (!res.headersSent) {
-        res.statusCode = 502;
-        res.setHeader("Content-Type", "application/json");
-        res.end(body);
-      }
+      sendJsonError(res, 502, body);
       finish?.({ ok: false, httpStatus: 502, error: "Compact response is too large." });
       recordUsage({ ...compactRoute, status: 502 });
       return { ok: false, httpStatus: 502, route, error: "Compact response is too large." };
@@ -3397,11 +3366,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         ),
       );
       const body = JSON.stringify(translated.body);
-      if (!res.headersSent) {
-        res.statusCode = upstream.status;
-        res.setHeader("Content-Type", "application/json");
-        res.end(body);
-      }
+      sendJsonError(res, upstream.status, body);
       finish?.({
         ok: false,
         httpStatus: upstream.status,
@@ -3422,11 +3387,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       // An OK response that is not JSON (a proxy's HTML, a truncated body): surface
       // a translated provider error rather than throwing to the generic 502 catch.
       const translated = translateUpstreamError({ provider: target.provider, status: 502, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
-      if (!res.headersSent) {
-        res.statusCode = 502;
-        res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify(translated.body));
-      }
+      sendJsonError(res, 502, translated.body);
       finish?.({ ok: false, httpStatus: 502, upstream: target.provider, error: translated.body.error.message.slice(0, 400) });
       recordUsage({ ...compactRoute, status: 502 });
       return { ok: false, httpStatus: 502, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
@@ -3474,15 +3435,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       upstream: target.provider,
     };
   } catch (error) {
-    finish?.({ ok: false, error: error.message });
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
-    } else {
-      endRelayStreamFailure(res, redactBearer(error.message));
-    }
-    return { ok: false, httpStatus: 502, route, error: error.message };
+    return relayThrowExit(res, error, { finish, resultFields: { route } });
   }
 }
 
@@ -3499,9 +3452,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         message: "Expected a JSON Responses request body.",
       },
     };
-    res.statusCode = 400;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(error));
+    sendJsonError(res, 400, error);
     return { ok: false, httpStatus: 400, route: { model: "", reason: "bad_request" }, error };
   }
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
@@ -3528,9 +3479,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         message: `${requestedModel} is no longer configured. Its ${ownedProvider} endpoint was removed; pick another model, or restart Codex to drop it from the picker.`,
       },
     };
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(error));
+    sendJsonError(res, 503, error);
     return { ok: false, httpStatus: 503, route: { model: requestedModel, reason: "unconfigured_provider" }, error };
   }
 
@@ -3565,9 +3514,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         message: "This is a text-only model and no vision model is configured. Select a vision-capable model in ModelDock Settings before sending an image.",
       },
     };
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(error));
+    sendJsonError(res, 503, error);
     return { ok: false, httpStatus: 503, route, error };
   }
   recordDerivedFallback(services, sessionId, route);
@@ -3626,7 +3573,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // that can still carry the orphaned tool call this gateway just cleaned, so
   // strict upstreams (Go) would reject the request again.
   delete normalizedPayload.previous_response_id;
-  if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
+  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
 
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
   const imageTransfer = {
@@ -3660,10 +3607,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (trimLocalTools) {
     normalizedPayload.instructions = stripLocalInstructions(normalizedPayload.instructions);
   }
+  if (route.reason === "current_turn_image" && route.directVision) {
+    normalizedPayload.instructions = stripTextOnlyVisionGuidance(normalizedPayload.instructions);
+  }
   // applyToolPolicy can preserve hosted tool descriptors verbatim. Normalize
   // again after that policy so Codex's web_search { external_web_access: true }
   // option never reaches xAI on the final wire.
-  if (routedProvider === "xai") normalizedPayload = normalizeXaiPayload(normalizedPayload);
+  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
   // Tool policy and namespace flattening change declarations/history, not image
   // parts. The image report above remains the exact before/after visual payload.
   const transformReport = () => noTransform({
@@ -3691,9 +3641,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
       },
     };
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(gone));
+    sendJsonError(res, 503, gone);
     return { ok: false, httpStatus: 503, route, error: gone };
   }
   if (!target.token && target.tokenRequired !== false) {
@@ -3703,9 +3651,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         message: `No API token configured for provider ${target.provider}.`,
       },
     };
-    res.statusCode = 503;
-    res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(error));
+    sendJsonError(res, 503, error);
     metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: false, routeReason: route.reason }));
     return { ok: false, httpStatus: 503, route, error };
   }
@@ -3760,11 +3706,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // mapping so a quota 429 does not read as "retry shortly".
       const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(raw), free: target.free });
       const body = JSON.stringify(translated.body);
-      if (!res.headersSent) {
-        res.statusCode = upstream.status;
-        res.setHeader("Content-Type", "application/json");
-        res.end(body);
-      }
+      sendJsonError(res, upstream.status, body);
       finish?.({
         ok: false,
         httpStatus: upstream.status,
@@ -3802,11 +3744,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           : freeEmptyError;
         const errorStatus = failure === "upstream_error" ? 502 : 429;
         const errorBody = JSON.stringify(translated.body);
-        if (!res.headersSent) {
-          res.statusCode = errorStatus;
-          res.setHeader("Content-Type", "application/json");
-          res.end(errorBody);
-        }
+        sendJsonError(res, errorStatus, errorBody);
         finish?.({
           ok: false,
           httpStatus: errorStatus,
@@ -3952,15 +3890,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstream: target.provider,
     };
   } catch (error) {
-    finish?.({ ok: false, error: error.message });
-    if (!res.headersSent) {
-      res.statusCode = 502;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: { type: "upstream_failed", message: redactBearer(error.message) } }));
-    } else {
-      endRelayStreamFailure(res, redactBearer(error.message));
-    }
-    return { ok: false, httpStatus: 502, route, error: error.message };
+    return relayThrowExit(res, error, { finish, resultFields: { route } });
   }
 }
 

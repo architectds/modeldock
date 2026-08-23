@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
+import { forEachSseEvent } from "./sse.mjs";
 
 function emptyBucket() {
   return { total: 0, ok: 0, errors: 0, active: 0, latencyMs: 0, lastLatencyMs: 0 };
@@ -148,16 +149,8 @@ export function extractResponseUsage(body) {
 
 export function extractUsageFromSse(text) {
   let usage;
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const data = line.slice(5).trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      const event = JSON.parse(data);
-      usage = extractResponseUsage(event) || usage;
-    } catch {
-      // Ignore partial/non-JSON SSE lines.
-    }
-  }
+  forEachSseEvent(text, (event) => {
+    usage = extractResponseUsage(event) || usage;
+  });
   return usage;
 }
