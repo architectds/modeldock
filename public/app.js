@@ -1395,7 +1395,7 @@ function rosterMetricCell(kind, value, formatted, ratio) {
   const numberNode = document.createElement("span");
   numberNode.className = "roster-metric-value";
   numberNode.textContent = formatted;
-  metric.append(track, numberNode);
+  metric.append(numberNode, track);
   cell.append(metric);
   return cell;
 }

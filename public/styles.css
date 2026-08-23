@@ -731,7 +731,7 @@ body { padding-left: 88px; }
 .roster-table th { padding: 7px 10px; color: var(--muted); font: 600 10px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
 .roster-table th { text-align: left; }
 .roster-table th.roster-head-num { text-align: right; }
-.roster-table th.roster-head-metric { text-align: left; }
+.roster-table th.roster-head-metric { padding-left: 83px; text-align: left; }
 .roster-table td { padding: 8px 10px; border-bottom: 1px solid rgba(35,55,71,.5); }
 .roster-table tr:last-child td { border-bottom: 0; }
 .roster-rank { display: inline-block; min-width: 22px; color: var(--muted); font: 11px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -742,7 +742,7 @@ body { padding-left: 88px; }
 .roster-provider-mark svg { display: block; width: 16px; height: 16px; fill: currentColor; }
 .roster-provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .roster-metric-cell { width: 175px; min-width: 175px; }
-.roster-metric { display: grid; grid-template-columns: minmax(68px, 1fr) max-content; align-items: center; gap: 9px; min-width: 164px; }
+.roster-metric { display: grid; grid-template-columns: max-content minmax(68px, 1fr); align-items: center; gap: 9px; min-width: 164px; }
 .roster-metric-track { display: block; height: 7px; overflow: hidden; border-radius: 999px; background: rgba(137,160,175,.14); }
 .roster-metric-track i { display: block; width: 0; height: 100%; border-radius: inherit; transition: width .25s ease; }
 .roster-metric-requests .roster-metric-track i { background: #4f9dff; }
