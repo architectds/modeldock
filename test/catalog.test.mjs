@@ -5,8 +5,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
-import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "../src/profiles.mjs";
+import { DEEPSEEK_OFFICIAL_PROFILE, modelEntryFor, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
+import { RouteAffinity, routeResponsesRequest } from "../src/router.mjs";
 import { emptyRollup, rollupTotals } from "../src/usage-rollup.mjs";
 
 function configStub() {
@@ -33,14 +34,54 @@ function staleNativeEntry() {
   return entry;
 }
 
-test("catalogFor keeps a text-only main model text-only", () => {
-  const catalog = catalogFor(configStub());
-  const main = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
-  assert.ok(main, "main model entry exists");
-  assert.deepEqual(main.input_modalities, ["text"], "a text-only model does not advertise image input");
-  assert.equal(main.supports_search_tool, false, "search is the MCP tool, not a hosted schema");
-  assert.equal(main.supports_parallel_tool_calls, false);
-  assert.equal(main.reasoning_summary_format, "experimental");
+test("DeepSeek Flash and Pro admit images through a configured visual fallback", () => {
+  const config = {
+    ...configStub(),
+    nativeMerge: false,
+    tokens: { "opencode-go": "go-token", "deepseek-official": "deepseek-token" },
+  };
+  const catalog = catalogFor(config);
+  const mediated = [
+    "deepseek-v4-flash@opencode-go",
+    "deepseek-v4-pro@opencode-go",
+    "deepseek-v4-flash@deepseek-official",
+    "deepseek-v4-pro@deepseek-official",
+  ];
+  for (const slug of mediated) {
+    const entry = catalog.models.find((model) => model.slug === slug);
+    assert.deepEqual(entry?.input_modalities, ["text", "image"], `${slug} admits an attachment through ModelDock`);
+    assert.equal(modelEntryFor(config, slug)?.supportsVision, false, `${slug} itself remains text-only`);
+    assert.equal(modelEntryFor(config, slug)?.acceptsImagesViaGateway, true, `${slug} delegates vision to ModelDock`);
+    assert.ok(entry?.base_instructions.includes("TEXT-ONLY"), `${slug} retains vision_inspect guidance`);
+  }
+  const route = routeResponsesRequest({
+    model: "deepseek-v4-flash@opencode-go",
+    input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }] }],
+  }, {
+    mainModel: config.mainModel,
+    visionModel: config.visionModel,
+    knownModels: new Set(catalog.models.map((entry) => entry.slug)),
+    affinity: new RouteAffinity(),
+    modelSupportsVision: (model) => Boolean(modelEntryFor(config, model)?.supportsVision),
+  });
+  assert.deepEqual(route, { model: config.visionModel, reason: "current_turn_image", directVision: true });
+});
+
+test("DeepSeek text routes do not admit images when Vision is None", () => {
+  const catalog = catalogFor({
+    ...configStub(),
+    visionModel: "",
+    nativeMerge: false,
+    tokens: { "opencode-go": "go-token", "deepseek-official": "deepseek-token" },
+  });
+  for (const slug of [
+    "deepseek-v4-flash@opencode-go",
+    "deepseek-v4-pro@opencode-go",
+    "deepseek-v4-flash@deepseek-official",
+    "deepseek-v4-pro@deepseek-official",
+  ]) {
+    assert.deepEqual(catalog.models.find((entry) => entry.slug === slug)?.input_modalities, ["text"], `${slug} refuses images without a fallback`);
+  }
 });
 
 test("catalogFor writes per-model base instructions for vision capability", () => {
@@ -49,6 +90,7 @@ test("catalogFor writes per-model base instructions for vision capability", () =
   const vision = catalog.models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
   const flashVision = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash-vision-exp@opencode-go");
   assert.ok(text && vision && flashVision, "both DeepSeek Flash variants and a vision-capable entry are published");
+  assert.deepEqual(text.input_modalities, ["text", "image"], "Flash accepts attachments through the visual fallback");
   assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
   assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
   assert.deepEqual(flashVision.input_modalities, ["text", "image"], "OpenCode Go Flash Vision Exp declares image input");
@@ -122,8 +164,8 @@ test("catalogFor covers every available model", () => {
   assert.ok(catalog.models.length >= available, `catalog lists at least the ${available} available models`);
   for (const entry of catalog.models) {
     const declared = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === entry.slug.replace(/@.*$/, ""));
-    const expected = declared?.supportsVision ? ["text", "image"] : ["text"];
-    assert.deepEqual(entry.input_modalities, expected, `${entry.slug} declares exactly its own capability`);
+    const expected = declared?.supportsVision || declared?.acceptsImagesViaGateway ? ["text", "image"] : ["text"];
+    assert.deepEqual(entry.input_modalities, expected, `${entry.slug} declares its direct or mediated image capability`);
   }
 });
 

@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { allProfiles, bareModelId, profileById, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, bareModelId, modelEntryFor, profileById, publishedSlugFor } from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
@@ -58,13 +58,15 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
   ].join(" ");
 }
 
-// Codex reads one catalog file per install, not per session, so the "can you
-// see images" guidance cannot depend on the derived per-session main model.
-// The decision is instead per entry: a model that declares image input gets the
-// vision-capable instructions, a text-only model gets the vision_inspect rule.
+// Codex reads one catalog file per install, not per session. An entry can accept
+// an image through the gateway while still being text-only itself, so upstream
+// vision capability - not catalog input admission - selects its instructions.
 function applyPerModelInstructions(config, models) {
   return models.map((entry) => {
-    const supportsVision = Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image");
+    const routed = modelEntryFor(config, entry.slug);
+    const supportsVision = routed
+      ? Boolean(routed.supportsVision)
+      : Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image");
     const instructions = baseInstructionsFor(config, { supportsVision });
     return {
       ...entry,
@@ -97,14 +99,19 @@ export function catalogFor(config) {
   const toggles = config.modelToggles || {};
   const selected = selectedModelSlugs(config, config.subagentModel);
   const models = (catalog.models || []).map((entry) => {
-    // A model's own capability declaration is the only source of truth. The
-    // profile-generated entries already carry per-model modalities (a text-only
-    // model never advertises image input); merged native entries keep theirs.
-    // Models with no usable definition stay text-only and the picker lists only
-    // what each provider actually declared.
+    // Codex refuses an attachment before the gateway sees it unless the picker
+    // entry admits image input. The four DeepSeek text routes deliberately admit
+    // it when a visual fallback exists; the gateway then escalates a fresh visual
+    // turn or gives an agentic Flash/Pro turn an image_ref for vision_inspect.
+    // This transport capability is distinct from supportsVision: the model still
+    // receives no image bytes and keeps the text-only instruction set.
     const declared = entry.input_modalities;
     const known = Array.isArray(declared) && declared.some((modality) => modality === "text");
-    return known ? entry : { ...entry, input_modalities: ["text"] };
+    const routed = modelEntryFor(config, entry.slug);
+    const mediatedImages = Boolean(config.visionModel && routed?.acceptsImagesViaGateway);
+    if (!known) return { ...entry, input_modalities: ["text"] };
+    if (!mediatedImages || declared.includes("image")) return entry;
+    return { ...entry, input_modalities: ["text", "image"] };
   }).filter((entry) => {
     // Only models owned by a provider with a configured token are published. The
     // active profile is always included (its token may resolve from the Codex

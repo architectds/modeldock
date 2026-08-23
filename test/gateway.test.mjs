@@ -6,6 +6,7 @@ import path from "node:path";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
 import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
+import { baseInstructionsFor } from "../src/catalog.mjs";
 import {
   RouteAffinity,
   adaptImageUrlShape,
@@ -1833,7 +1834,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    calls.push({ url, headers: options.headers });
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
     return new Response(
       new ReadableStream({
         start(controller) {
@@ -1850,6 +1851,7 @@ test("relayResponses forwards a streamed response and records usage", async () =
         model: "deepseek-v4-flash",
         input: [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "https://example.com/p.png" }] }],
         tools: [{ type: "web_search" }, { type: "function", name: "shell_command", parameters: {} }],
+        instructions: baseInstructionsFor(configStub()),
       },
       res,
       {
@@ -1866,6 +1868,9 @@ test("relayResponses forwards a streamed response and records usage", async () =
     assert.equal(result.route.model, "gpt-5.6-luna");
     assert.equal(result.usage.input_tokens, 4);
     assert.match(calls[0].url, /opencode\.ai\/zen\/go\/v1\/responses/);
+    assert.doesNotMatch(calls[0].body.instructions, /Vision guidance \(MANDATORY\)/, "a fresh visual turn must not send the Flash text-only contract to the selected vision model");
+    assert.doesNotMatch(calls[0].body.instructions, /TEXT-ONLY model/, "the vision route receives no contradictory image instruction");
+    assert.equal(calls[0].body.input[0].content[0].type, "input_image", "the selected vision model receives the actual attachment");
     const sentHeaders = Object.keys(calls[0].headers || {});
     assert.ok(!sentHeaders.some((name) => name.startsWith("x-opencode-")), "no opencode session spoofing headers are sent");
     assert.equal(affinity.snapshot().activeCallIds, 1);
@@ -3686,6 +3691,52 @@ test("a routed vision request reuses Codex's byte-identical attachment without a
     globalThis.fetch = originalFetch;
     rmSync(codexHome, { recursive: true, force: true });
     rmSync(mediaDir, { recursive: true, force: true });
+  }
+});
+
+test("relayResponses keeps text-only guidance and image refs inside an agentic Flash turn", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("continue from the visual description");
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash",
+        stream: false,
+        instructions: baseInstructionsFor(configStub()),
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Start the task." }] },
+          { type: "function_call", call_id: "call_vision_loop", name: "shell_command", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_vision_loop", output: "done" },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Now inspect this screenshot." }, { type: "input_image", image_url: "data:image/png;base64,AAAA" }] },
+        ],
+      },
+      res,
+      {
+        recordUsage: () => {},
+        config: configStub(),
+        metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+        mediaStore: { put: () => "img_agentic_turn" },
+        routeAffinity: new RouteAffinity(),
+        knownModels: new Set(["deepseek-v4-flash", "gpt-5.6-luna"]),
+        mainModel: "deepseek-v4-flash",
+        visionModel: "gpt-5.6-luna",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "deepseek-v4-flash");
+    assert.equal(result.route.directVision, false);
+    assert.match(calls[0].instructions, /TEXT-ONLY model/, "the text model keeps its vision_inspect contract inside an agentic loop");
+    const sentParts = calls[0].input.flatMap((item) => item.content || []);
+    assert.equal(sentParts.some((part) => part.type === "input_image"), false, "the text model never receives the newly pasted image bytes");
+    assert.ok(sentParts.some((part) => part.type === "input_text" && part.text.includes('vision_inspect(image_ref="img_agentic_turn"')), "the text model receives the exact vision_inspect reference instead");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
