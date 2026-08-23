@@ -101,6 +101,44 @@ test("the dashboard never asks for a key that is not translated", () => {
   assert.deepEqual(missing, [], "t() asks for keys that public/i18n.js does not define");
 });
 
+// The wizard's own inline dictionary gets the same two-way sweep as i18n.js:
+// its keys were invisible to every test above (they live in wizard.js, not
+// i18n.js), which is how seven dead wizard.* / reco.paid* keys and five
+// untranslated ones accumulated unnoticed.
+function wizardEnglishKeys() {
+  const source = read("public/wizard.js");
+  const start = source.indexOf("    en: {");
+  assert.ok(start >= 0, "the wizard English table is missing");
+  let depth = 0;
+  let end = source.indexOf("{", start);
+  for (let i = end; i < source.length; i += 1) {
+    if (source[i] === "{") depth += 1;
+    else if (source[i] === "}") {
+      depth -= 1;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  return { keys: [...source.slice(start, end).matchAll(/^ {6}"([^"]+)":/gm)].map((m) => m[1]), body: source.slice(end) };
+}
+
+test("every wizard translation key is referenced by wizard.js", () => {
+  const { keys, body } = wizardEnglishKeys();
+  const unused = keys.filter((key) => {
+    const quoted = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return !new RegExp(`["'\`]${quoted}["'\`]`).test(body);
+  });
+  assert.deepEqual(unused, [], "these wizard keys have no reference outside the dictionaries - delete them from every locale");
+});
+
+test("the wizard never asks for a key its dictionary does not define", () => {
+  const source = read("public/wizard.js");
+  const keys = new Set(wizardEnglishKeys().keys);
+  const requested = [...source.matchAll(/\bL\(\s*"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(requested.length > 40, "the L() sweep found suspiciously few calls");
+  const missing = [...new Set(requested)].filter((key) => !keys.has(key));
+  assert.deepEqual(missing, [], "L() asks for keys the wizard English table does not define");
+});
+
 test("the browser scripts are syntactically valid JavaScript", () => {
   // These tests read i18n.js as text, so a stray bracket in a translation
   // passed every one of them - a mistyped closing quote in the Japanese block
