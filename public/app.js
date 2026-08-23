@@ -1619,10 +1619,10 @@ async function renderModelRoster() {
         ? ""
         : t(column === "context" ? "roster.contextWindow" : `roster.${column}`);
       if (column === "published") cell.className = "roster-head-switch";
-      // Numeric columns are right-aligned in the body, so their headers are
-      // too. This was a nth-child rule counting the first four columns, which
-      // put the Context heading on the left of a right-aligned column.
-      if (["context", "requests", "tps", "cache"].includes(column)) cell.className = "roster-head-num";
+      // Context is a right-aligned field, while the three visual metrics need
+      // their headings above the left-hand bars rather than above the values.
+      if (column === "context") cell.className = "roster-head-num";
+      if (["requests", "tps", "cache"].includes(column)) cell.className = "roster-head-metric";
       // The switch column has no heading to click, and nothing to order by that
       // the state itself does not already say.
       if (column !== "published") {
