@@ -102,15 +102,50 @@ export function createObservedHost({ id, adapterId, endpoint, launch, capabiliti
   };
 }
 
+// This is the serialization boundary used by the durable registry. It accepts
+// no operational authority: validation only copies a stored record into the
+// canonical in-memory shape.
+export function normalizeLocalHostRecord(record) {
+  const base = createObservedHost({
+    id: record?.id,
+    adapterId: record?.adapterId,
+    endpoint: record?.endpoint,
+    launch: record?.observedSpec,
+    capabilities: record?.capabilities || {},
+    observedAt: record?.observedAt,
+  });
+  const state = assertState(record?.state || "observed");
+  const desiredSpec = record?.desiredSpec ? normalizeLaunchSpec(record.desiredSpec) : null;
+  const lastKnownGoodSpec = record?.lastKnownGoodSpec ? normalizeLaunchSpec(record.lastKnownGoodSpec) : null;
+  if (state !== "observed" && !desiredSpec) {
+    throw new TypeError("A managed local host needs a desired launch specification.");
+  }
+  if (state === "observed" && (desiredSpec || lastKnownGoodSpec)) {
+    throw new TypeError("An observed local host cannot have managed launch specifications.");
+  }
+  return {
+    ...base,
+    version: 1,
+    policy: assertPolicy(record?.policy),
+    state,
+    desiredSpec,
+    lastKnownGoodSpec,
+    managedAt: text(record?.managedAt),
+    updatedAt: text(record?.updatedAt) || base.updatedAt,
+    recoveryReason: text(record?.recoveryReason),
+    failure: text(record?.failure),
+  };
+}
+
 function managedRecord(record, patch = {}) {
+  const desiredSpec = patch.desiredSpec === undefined ? record.desiredSpec : patch.desiredSpec;
+  const lastKnownGoodSpec = patch.lastKnownGoodSpec === undefined ? record.lastKnownGoodSpec : patch.lastKnownGoodSpec;
   return {
     ...record,
     ...patch,
     observedSpec: normalizeLaunchSpec(patch.observedSpec || record.observedSpec),
-    desiredSpec: patch.desiredSpec === null ? null : normalizeLaunchSpec(patch.desiredSpec || record.desiredSpec),
-    lastKnownGoodSpec: patch.lastKnownGoodSpec === null
-      ? null
-      : normalizeLaunchSpec(patch.lastKnownGoodSpec || record.lastKnownGoodSpec),
+    desiredSpec: desiredSpec === null ? null : normalizeLaunchSpec(desiredSpec),
+    lastKnownGoodSpec: lastKnownGoodSpec === null ? null : normalizeLaunchSpec(lastKnownGoodSpec),
     capabilities: copy(patch.capabilities || record.capabilities || {}),
   };
 }
@@ -154,7 +189,9 @@ export function markHostApplying(record, { at = new Date().toISOString() } = {})
 }
 
 export function markHostVerifying(record, { at = new Date().toISOString() } = {}) {
-  if (assertState(record?.state) !== "applying") throw new TypeError("A host must apply a configuration before verification.");
+  if (!["applying", "recovering"].includes(assertState(record?.state))) {
+    throw new TypeError("A host must apply or recover a configuration before verification.");
+  }
   return managedRecord(record, { state: "verifying", updatedAt: text(at) || new Date().toISOString() });
 }
 
@@ -179,9 +216,23 @@ export function beginHostRecovery(record, { reason, at = new Date().toISOString(
   });
 }
 
+// Draining can fail before ModelDock has stopped the old process. In that case
+// the runner leaves the already-verified service alone instead of restarting
+// it merely to clean up a failed reconfiguration attempt.
+export function abortHostApply(record, { failure, at = new Date().toISOString() } = {}) {
+  if (assertState(record?.state) !== "draining") throw new TypeError("Only a draining host can abandon an unapplied configuration.");
+  if (!record.lastKnownGoodSpec) throw new TypeError("A host without a known-good specification cannot abandon an apply safely.");
+  return managedRecord(record, {
+    desiredSpec: normalizeLaunchSpec(record.lastKnownGoodSpec),
+    state: "ready",
+    updatedAt: text(at) || new Date().toISOString(),
+    failure: text(failure) || "Local host drain failed before replacement.",
+  });
+}
+
 export function markHostDegraded(record, { failure, at = new Date().toISOString() } = {}) {
   const state = assertState(record?.state);
-  if (!["applying", "verifying", "recovering"].includes(state)) throw new TypeError(`Cannot degrade a host while state is ${state}.`);
+  if (!["draining", "applying", "verifying", "recovering"].includes(state)) throw new TypeError(`Cannot degrade a host while state is ${state}.`);
   return managedRecord(record, {
     state: "degraded",
     updatedAt: text(at) || new Date().toISOString(),
