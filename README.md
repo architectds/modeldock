@@ -2,9 +2,9 @@
 
 > **ModelDock makes the AI tools you already own work together.**
 
-Keep working in Codex. Use DeepSeek, Qwen, and the models you choose alongside
-web search, image understanding, voice, memory, and video - without manually
-moving prompts, files, or results between apps.
+Keep working in Codex. Use Grok, DeepSeek, Qwen, and other models you choose
+alongside web search, image understanding, voice, memory, and video - without
+manually moving prompts, files, or results between apps.
 
 **Work in one place. Get things done everywhere.**
 

@@ -292,13 +292,13 @@ test("every profile publishes the one patch-tool shape Codex can load", () => {
   }
 });
 
-test("xAI refuses the custom tool type and runs its own search", () => {
-  // The two halves of the fix, as the profile states them. applyToolPolicy is
-  // what enforces them; gateway.test.mjs covers that side.
+test("xAI refuses the custom tool type, hosts search, and uses explicit media connectors", () => {
+  // applyToolPolicy enforces the hosted-search and blocked-custom portions;
+  // MCP tests cover the credential-gated image and video connectors.
   assert.equal(XAI_PROFILE.blockedToolTypes.has("custom"), true);
   assert.equal(XAI_PROFILE.hostedToolTypes.has("web_search"), true);
   assert.equal(XAI_PROFILE.hostedToolTypes.has("x_search"), true);
-  assert.equal(XAI_PROFILE.hostedToolTypes.has("image_generation"), true);
+  assert.equal(XAI_PROFILE.hostedToolTypes.has("image_generation"), false);
   // tool_search is answered by this gate, not by xAI, so it is not on the list.
   assert.equal(XAI_PROFILE.hostedToolTypes.has("tool_search"), false);
 });
