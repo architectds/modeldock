@@ -33,7 +33,11 @@ function listen(server) {
 
 async function waitForStatus(port) {
   let lastError = null;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  // This is a cold bundled gateway started beside the full test suite's other
+  // process-heavy integration fixtures. Six seconds is sufficient in isolation
+  // but flakes under parallel CI load before the child gets scheduled; waiting
+  // longer changes no assertion and keeps a finite diagnostic deadline.
+  for (let attempt = 0; attempt < 150; attempt += 1) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/api/status`);
       if (response.ok) return;
