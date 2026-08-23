@@ -14,6 +14,7 @@ const COMMAND_FOR_TOOL = {
   web_search_exa: "search",
   vision_inspect: "vision",
   image_gen: "image",
+  grok_image_gen: "grok-image",
   grok_video_gen: "video",
   speak: "speak",
   hear: "hear",

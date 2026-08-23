@@ -94,26 +94,6 @@ test("built bundle accepts the full original Codex xAI package after dialect nor
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream" });
-    if ((body.tools || []).some((tool) => tool?.type === "image_generation")) {
-      const item = {
-        type: "image_generation_call",
-        id: "ig_full_fixture",
-        status: "completed",
-        prompt: "sanitized full-fixture image smoke",
-        result: "ZmFrZS1pbWFnZS1ieXRlcw==",
-      };
-      res.end([
-        'data: {"type":"response.created","response":{"id":"resp_image_fixture","status":"in_progress","output":[]}}',
-        'data: {"type":"response.image_generation_call.in_progress","item_id":"ig_full_fixture"}',
-        'data: {"type":"response.image_generation_call.generating","item_id":"ig_full_fixture"}',
-        'data: {"type":"response.image_generation_call.completed","item_id":"ig_full_fixture"}',
-        `data: ${JSON.stringify({ type: "response.output_item.done", item })}`,
-        `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_image_fixture", status: "completed", output: [item] } })}`,
-        "data: [DONE]",
-        "",
-      ].join("\n"));
-      return;
-    }
     res.end([
       'data: {"type":"response.created","response":{"id":"resp_full_fixture","status":"in_progress","output":[]}}',
       'data: {"type":"response.completed","response":{"id":"resp_full_fixture","status":"completed","output":[]}}',
@@ -196,42 +176,4 @@ globalThis.fetch = (input, init) => {
     "the full Codex tool list must not be silently truncated",
   );
 
-  // This remains the full captured Codex envelope, with only a new current
-  // turn and xAI's documented server-side tool appended. The original fixture
-  // itself stays intact above, so the image path cannot silently turn into a
-  // small hand-authored request.
-  const imageRequest = structuredClone(fixture.request);
-  imageRequest.model = "grok-4.6@xai";
-  imageRequest.tools.push({ type: "image_generation", action: "generate" });
-  imageRequest.input.push({
-    type: "message",
-    role: "user",
-    content: [{ type: "input_text", text: "Generate exactly one small blue circle on white." }],
-  });
-  const imageResponse = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(imageRequest),
-  });
-  const imageText = await imageResponse.text();
-  assert.equal(imageResponse.status, 200, `the full image-tool package was rejected: ${imageText}\n${stderr}`);
-  assert.equal(seen.length, 2, "the image turn must reach xAI exactly once");
-  const imageOutbound = seen[1];
-  assert.equal(imageOutbound.model, "grok-4.6", "the image-capable Grok model reaches xAI");
-  assert.equal(imageOutbound.tools.length, fixture.request.tools.length + 1, "the original full tool array and image tool both survive");
-  assert.deepEqual(imageOutbound.tools.at(-1), { type: "image_generation", action: "generate" });
-  const imageEvents = imageText.split(/\r?\n/)
-    .filter((line) => line.startsWith("data: "))
-    .flatMap((line) => {
-      try { return [JSON.parse(line.slice(6))]; } catch { return []; }
-    });
-  assert.ok(imageEvents.some((event) => event.type === "response.image_generation_call.completed"), "Codex receives xAI image progress");
-  const done = imageEvents.find((event) => event.type === "response.output_item.done");
-  assert.deepEqual(done?.item, {
-    type: "image_generation_call",
-    id: "ig_full_fixture",
-    status: "completed",
-    prompt: "sanitized full-fixture image smoke",
-    result: "ZmFrZS1pbWFnZS1ieXRlcw==",
-  }, "Codex receives the completed xAI image item without a dialect rewrite");
 });

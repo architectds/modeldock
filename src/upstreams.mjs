@@ -91,11 +91,56 @@ export function parseMcpTextResult(body) {
 // uses for the main relay; the two must name the same host or a native model would
 // answer on the relay and 404 in the harness.
 const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+const XAI_RESPONSES_BASE = "https://api.x.ai/v1/responses";
 const XAI_VIDEO_BASE = "https://api.x.ai/v1/videos";
 const XAI_VIDEO_MODELS = new Set(["grok-imagine-video", "grok-imagine-video-1.5"]);
 
-function xaiVideoToken(config) {
+function xaiSessionToken(config) {
   return config.tokens?.xai || readXaiAuth(config.xaiAuthFile)?.accessToken || "";
+}
+
+function xaiModels(config) {
+  return readXaiAuth(config.xaiAuthFile)?.models || [];
+}
+
+function xaiHasModelList(config) {
+  return xaiModels(config).length > 0;
+}
+
+function xaiVideoModel(config, requested = "") {
+  const model = String(requested || "").trim();
+  if (model && !XAI_VIDEO_MODELS.has(model)) return "";
+  const models = xaiModels(config);
+  if (!models.length) return model || "grok-imagine-video-1.5";
+  if (model) return models.includes(model) ? model : "";
+  if (models.includes("grok-imagine-video-1.5")) return "grok-imagine-video-1.5";
+  return models.includes("grok-imagine-video") ? "grok-imagine-video" : "";
+}
+
+function generatedImagePath(bytes, mime = "") {
+  const extension = mime === "image/png" || bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    ? "png"
+    : mime === "image/webp" || bytes.subarray(0, 4).toString("ascii") === "RIFF"
+      ? "webp"
+      : "jpg";
+  const dir = path.join(os.tmpdir(), "modeldock-generated");
+  mkdirSync(dir, { recursive: true });
+  return path.join(dir, `grok-img-${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`);
+}
+
+function imageGenerationResult(body) {
+  for (const line of String(body || "").split(/\r?\n/)) {
+    if (!line.startsWith("data:")) continue;
+    try {
+      const event = JSON.parse(line.slice(5).trim());
+      if (event?.type === "response.output_item.done" && event.item?.type === "image_generation_call" && typeof event.item.result === "string") {
+        return event.item.result;
+      }
+    } catch {
+      // Other SSE events are progress notifications rather than the image.
+    }
+  }
+  return "";
 }
 
 function videoResult(body, requestId = "") {
@@ -109,6 +154,18 @@ function videoResult(body, requestId = "") {
 }
 
 export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache, getNativeSlugs = () => null }) {
+  function hasXaiSession() {
+    return Boolean(xaiSessionToken(config));
+  }
+
+  function hasXaiImageGeneration() {
+    return hasXaiSession() && (!xaiHasModelList(config) || xaiModels(config).includes("grok-4.6"));
+  }
+
+  function hasXaiVideoGeneration() {
+    return hasXaiSession() && Boolean(xaiVideoModel(config));
+  }
+
   async function generateImage(args) {
     const model = String(args.model || "gpt-image-1");
     const size = String(args.size || "1024x1024");
@@ -157,17 +214,68 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     }
   }
 
+  // Keep Grok's image capability as an explicit connector, not a hosted tool
+  // forwarded with every normal chat request. That gives Codex one clear call
+  // and lets the MCP surface omit it entirely until the user has connected
+  // their Grok subscription.
+  async function generateXaiImage(args = {}) {
+    const token = xaiSessionToken(config);
+    if (!token) {
+      throw new Error("No xAI session is connected. Sign in to Grok from the ModelDock dashboard first.");
+    }
+    if (!hasXaiImageGeneration()) {
+      throw new Error("The connected xAI subscription does not include the Grok image model required by this connector.");
+    }
+    const prompt = String(args.prompt || "").trim();
+    if (!prompt) throw new Error("prompt is required for Grok image generation.");
+    const finish = metrics.begin("vision", { operation: "grok_image_gen", model: "grok-4.6" });
+    try {
+      const response = await fetch(XAI_RESPONSES_BASE, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "grok-4.6",
+          input: [{ role: "user", content: [{ type: "input_text", text: prompt }] }],
+          tools: [{ type: "image_generation", action: "generate" }],
+          stream: true,
+        }),
+        signal: AbortSignal.timeout(300_000),
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(`Grok image generation returned ${response.status}: ${safeErrorBody(text)}`);
+      finish.markFirstResponse();
+      const result = imageGenerationResult(text);
+      if (!result) throw new Error("Grok image generation returned no completed image result.");
+      const dataUrl = result.match(/^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/);
+      const base64 = dataUrl ? dataUrl[2] : result;
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) throw new Error("Grok image generation returned an invalid image payload.");
+      const bytes = Buffer.from(base64, "base64");
+      if (!bytes.length) throw new Error("Grok image generation returned an empty image payload.");
+      const file = generatedImagePath(bytes, dataUrl?.[1] || "");
+      writeFileSync(file, bytes);
+      finish({ ok: true, httpStatus: response.status, outputBytes: bytes.length });
+      return `Generated Grok image saved to ${file}`;
+    } catch (error) {
+      finish({ ok: false, error: error.message });
+      throw error;
+    }
+  }
+
   // Grok Imagine video is deliberately a small asynchronous bridge rather than
   // a fake Responses model. The start request gives xAI time to render; status
   // can be checked later with the returned request id, and a finished job gives
   // Codex the temporary URL without copying the video into ModelDock storage.
   async function generateXaiVideo(args = {}) {
     const action = args.action === "status" ? "status" : "generate";
-    const token = xaiVideoToken(config);
+    const token = xaiSessionToken(config);
     if (!token) {
       throw new Error("No xAI session is connected. Sign in to Grok from the ModelDock dashboard first.");
     }
-    const finish = metrics.begin("vision", { operation: "grok_video_gen", action, model: String(args.model || "grok-imagine-video-1.5") });
+    const selectedVideoModel = xaiVideoModel(config, args.model);
+    if (!selectedVideoModel) {
+      throw new Error("The connected xAI subscription does not include the requested Grok video model.");
+    }
+    const finish = metrics.begin("vision", { operation: "grok_video_gen", action, model: selectedVideoModel });
     const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
     const requestId = String(args.request_id || "").trim();
     const readStatus = async (id) => {
@@ -193,8 +301,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
 
       const prompt = String(args.prompt || "").trim();
       if (!prompt) throw new Error("prompt is required when action is generate.");
-      const model = String(args.model || "grok-imagine-video-1.5");
-      if (!XAI_VIDEO_MODELS.has(model)) throw new Error(`Unsupported Grok video model: ${model}.`);
+      const model = selectedVideoModel;
       const duration = Number(args.duration ?? 5);
       if (!Number.isInteger(duration) || duration < 1 || duration > 15) {
         throw new Error("duration must be an integer from 1 to 15 seconds.");
@@ -539,5 +646,5 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     return { model, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
   }
 
-  return { searchWeb, inspectVision, generateImage, generateXaiVideo, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
+  return { searchWeb, inspectVision, generateImage, hasXaiSession, hasXaiImageGeneration, hasXaiVideoGeneration, generateXaiImage, generateXaiVideo, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
 }

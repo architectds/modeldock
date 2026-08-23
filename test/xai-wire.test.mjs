@@ -38,8 +38,8 @@ function focusedTools() {
     // The incoming client may attach this OpenAI-only hosted-web option here.
     // xAI supports the tool itself but rejects this descriptor field.
     { type: "web_search", external_web_access: true },
-    // xAI runs this server-side and returns an image_generation_call on the
-    // Responses stream. It must not be mistaken for Codex's native image route.
+    // Image generation is exposed as the explicit credential-gated
+    // grok_image_gen connector, not left in every Grok Responses request.
     { type: "image_generation", action: "generate" },
     { type: "tool_search" },
   ];
@@ -180,7 +180,7 @@ test("the xAI adapter round trip bridges namespace and freeform patch tools", as
     // Grok runs this one itself; stripping it made the gate pay Exa to redo a
     // search the subscription already covers.
     assert.ok(types.includes("web_search"), `turn ${index + 1}: hosted search is left for Grok`);
-    assert.ok(types.includes("image_generation"), `turn ${index + 1}: hosted image generation is left for Grok`);
+    assert.equal(types.includes("image_generation"), false, `turn ${index + 1}: image generation is the explicit Grok connector, not an implicit hosted tool`);
     assert.equal((body.tools || []).some((tool) => tool?.external_web_access !== undefined), false, `turn ${index + 1}: xAI receives no OpenAI-only hosted-web option`);
     // tool_search is answered by this gate, not by xAI.
     assert.equal(types.includes("tool_search"), false, `turn ${index + 1}: tool_search is ours`);

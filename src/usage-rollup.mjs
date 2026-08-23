@@ -24,6 +24,11 @@ import { stateFile } from "./state-dir.mjs";
 const MAX_PLAUSIBLE_TPS = 400;
 
 export const ROLLUP_DAYS = 30;
+// Heat for picker ordering: each day's request total is weighted
+// down by how far back it sits, so a model you start using this week rises in
+// days instead of having to out-count a month of old traffic. Days use the same
+// UTC buckets the rollup prunes, so a fresh re-decay never needs a rescan.
+export const POPULARITY_HALF_LIFE_DAYS = 7;
 // Bumped when a bucket gains a field: readRollup discards an older shape
 // rather than reporting zero for a metric the old buckets never recorded.
 // The window refills from the event log, which still holds about nine days.
@@ -130,15 +135,31 @@ export function pruneRollup(rollup, nowIso) {
   return rollup;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+// Calendar-day distance between two YYYY-MM-DD strings (first later than the
+// second). UTC day arithmetic so DST can never shift a bucketed count.
+function dayDistance(aDay, bDay) {
+  const a = Date.parse(`${aDay}T00:00:00Z`);
+  const b = Date.parse(`${bDay}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.max(0, Math.round((a - b) / DAY_MS));
+}
+
 // Read side: sum the retained days into one row per model. This is what the
 // page renders, so it stays O(days x models) with no file reading at all.
-export function rollupTotals(rollup) {
+// `popularity` is the flat thirty-day use total; `heat` is the recency-weighted
+// score that ranks models in the picker. Daily buckets retain `requests`, the
+// literal count of events recorded on that day.
+export function rollupTotals(rollup, now = new Date().toISOString()) {
   const totals = {};
-  for (const bucket of Object.values(rollup.days || {})) {
+  const today = dayOf(now);
+  for (const [day, bucket] of Object.entries(rollup.days || {})) {
+    const decay = Math.pow(0.5, dayDistance(today, day) / POPULARITY_HALF_LIFE_DAYS);
     for (const [key, entry] of Object.entries(bucket)) {
       const row = totals[key]
-        || { requests: 0, ok: 0, in: 0, out: 0, cached: 0, ms: 0, okOut: 0, okMs: 0 };
-      row.requests += entry.requests || 0;
+        || { popularity: 0, ok: 0, in: 0, out: 0, cached: 0, ms: 0, okOut: 0, okMs: 0, heat: 0 };
+      row.popularity += entry.requests || 0;
+      row.heat += (entry.requests || 0) * decay;
       row.ok += entry.ok || 0;
       row.in += entry.in || 0;
       row.out += entry.out || 0;
@@ -150,9 +171,13 @@ export function rollupTotals(rollup) {
     }
   }
   for (const row of Object.values(totals)) {
+    // The roster HTTP response used `requests` before the 30-day total gained
+    // a name. Keep this alias at the boundary for existing dashboard clients;
+    // all new internal code reads popularity so it cannot be confused with heat.
+    row.requests = row.popularity;
     row.tps = row.okMs > 0 ? row.okOut / (row.okMs / 1000) : 0;
     row.cacheRate = row.in > 0 ? row.cached / row.in : 0;
-    row.successRate = row.requests > 0 ? row.ok / row.requests : 0;
+    row.successRate = row.popularity > 0 ? row.ok / row.popularity : 0;
   }
   return totals;
 }

@@ -113,7 +113,36 @@ test("totals sum across days", () => {
     event("2026-08-17T01:00:00.000Z"),
     event("2026-08-18T01:00:00.000Z"),
   ], { now: "2026-08-18T02:00:00.000Z" });
-  assert.equal(rollupTotals(rollup)["deepseek-v4-flash@opencode-go"].requests, 2);
+  const total = rollupTotals(rollup)["deepseek-v4-flash@opencode-go"];
+  assert.equal(total.popularity, 2);
+  assert.equal(total.requests, 2, "the public legacy alias remains accurate");
+});
+
+test("heat weights recent days over equally-used older ones", () => {
+  const rollup = emptyRollup();
+  // Same request count per model, different age: today, exactly a week ago,
+  // and two weeks ago. A flat sum would rank them equal; the decayed score
+  // must order today > week-ago > two-weeks-ago.
+  rollup.days["2026-08-18"] = { "recent@opencode-go": { requests: 14 } };
+  rollup.days["2026-08-11"] = { "week@opencode-go": { requests: 14 } };
+  rollup.days["2026-08-04"] = { "old@opencode-go": { requests: 14 } };
+  const totals = rollupTotals(rollup, "2026-08-18T12:00:00.000Z");
+  assert.equal(totals["recent@opencode-go"].popularity, 14, "popularity stays a flat 30-day total");
+  assert.ok(Math.abs(totals["recent@opencode-go"].heat - 14) < 1e-9, "today is full weight");
+  assert.ok(Math.abs(totals["week@opencode-go"].heat - 7) < 1e-9, "a week back is half");
+  assert.ok(Math.abs(totals["old@opencode-go"].heat - 3.5) < 1e-9, "two weeks back is a quarter");
+  assert.ok(
+    totals["recent@opencode-go"].heat > totals["week@opencode-go"].heat
+      && totals["week@opencode-go"].heat > totals["old@opencode-go"].heat,
+    "recent traffic always outranks equally-used older traffic",
+  );
+});
+
+test("heat handles a rollup with no time context", () => {
+  const rollup = emptyRollup();
+  rollup.days["2026-08-18"] = { "m@opencode-go": { requests: 4 } };
+  const totals = rollupTotals(rollup, "not-a-date");
+  assert.equal(totals["m@opencode-go"].heat, 4, "an unparseable now falls back to full weight");
 });
 
 test("throughput ignores the requests that produced nothing", () => {

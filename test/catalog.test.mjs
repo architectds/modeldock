@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
+import { emptyRollup, rollupTotals } from "../src/usage-rollup.mjs";
 
 function configStub() {
   return {
@@ -463,6 +464,34 @@ test("catalogFor orders the picker by use, with sequential priorities", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("catalogFor ranks by rollup heat, not 30-day popularity", () => {
+  const rollup = emptyRollup();
+  rollup.days["2026-08-18"] = { "deepseek-v4-flash@opencode-go": { requests: 10 } };
+  rollup.days["2026-07-21"] = { "deepseek-v4-pro@opencode-go": { requests: 100 } };
+  const catalog = catalogFor({
+    ...configStub(),
+    usageByModel: rollupTotals(rollup, "2026-08-18T12:00:00.000Z"),
+  });
+  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => slug.includes("@"));
+  assert.equal(routed[0], "deepseek-v4-flash@opencode-go", "the recent, high-heat model opens the routed half");
+  assert.ok(
+    routed.indexOf("deepseek-v4-flash@opencode-go") < routed.indexOf("deepseek-v4-pro@opencode-go"),
+    "heat outranks a model with more 30-day popularity",
+  );
+});
+
+test("catalogFor falls back to popularity when heat is absent", () => {
+  const catalog = catalogFor({
+    ...configStub(),
+    usageByModel: {
+      "deepseek-v4-flash@opencode-go": { popularity: 10 },
+      "deepseek-v4-pro@opencode-go": { popularity: 100 },
+    },
+  });
+  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => slug.includes("@"));
+  assert.equal(routed[0], "deepseek-v4-pro@opencode-go", "without heat the 30-day popularity decides");
 });
 
 test("a published native slug routes to the native leg despite being in the catalog", () => {

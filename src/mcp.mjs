@@ -101,7 +101,33 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
         },
       );
 
-      if (typeof upstreams.generateXaiVideo === "function") {
+      // Grok media is a connected capability, not a permanently advertised
+      // placeholder. Each tool also needs its specific upstream model: a
+      // subscription that can chat with Grok but lacks Imagine must not spend
+      // Codex's tool context on a call guaranteed to fail.
+      if (upstreams.hasXaiImageGeneration?.()) {
+        server.registerTool(
+          "grok_image_gen",
+          {
+            title: "Grok Image Generation",
+            description:
+              "Generate an image with the signed-in xAI Grok service. Returns the absolute path to the saved image so it can be surfaced in the conversation.",
+            inputSchema: z.object({
+              prompt: z.string().min(1).describe("Describe the image to generate"),
+            }),
+            annotations: { readOnlyHint: false, openWorldHint: false },
+          },
+          async (args) => {
+            try {
+              return textResult(await upstreams.generateXaiImage(args));
+            } catch (error) {
+              return errorResult(error);
+            }
+          },
+        );
+      }
+
+      if (upstreams.hasXaiVideoGeneration?.()) {
         server.registerTool(
           "grok_video_gen",
           {

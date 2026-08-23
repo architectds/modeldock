@@ -485,7 +485,10 @@ const XAI_PROFILE = {
   // 200. The gate strips hosted tools by default because most upstreams have
   // none, and stripping these threw away search the subscription already pays
   // for and then paid Exa to do again.
-  hostedToolTypes: new Set(["web_search", "x_search", "image_generation"]),
+  // Images use the explicit grok_image_gen connector. Do not leave a second,
+  // implicit image-generation route in every Grok Responses request: it costs
+  // tool context and makes the rendering provider ambiguous to the agent.
+  hostedToolTypes: new Set(["web_search", "x_search"]),
   hiddenToolNames: new Set([]),
   availableModels: [],
   modelCatalog({ mainModel, baseInstructions }) {

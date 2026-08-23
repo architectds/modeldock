@@ -80,7 +80,7 @@ export function modelsToPark({
     // An unstamped model is treated as new. Stamping happens on the same pass
     // that reads this, so the only way to be unstamped is to have just arrived.
     if (!seen || now - seen < TIDY_WINDOW_DAYS * DAY_MS) continue;
-    if ((totals[slug]?.requests || 0) > 0) continue;
+    if ((totals[slug]?.popularity ?? totals[slug]?.requests ?? 0) > 0) continue;
     parked.push(slug);
   }
   return parked;

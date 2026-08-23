@@ -1506,6 +1506,7 @@ cat > "$MCP_CALL_MJS" <<'EOF'
 //   node scripts/mcp-call.mjs search <query> [numResults]
 //   node scripts/mcp-call.mjs vision <path> <question> [mode]
 //   node scripts/mcp-call.mjs image <prompt> [size] [model]
+//   node scripts/mcp-call.mjs grok-image <prompt>
 //   node scripts/mcp-call.mjs video <prompt> [duration] [aspect_ratio] [resolution] [wait_seconds]
 //   node scripts/mcp-call.mjs video --status <request_id>
 //   node scripts/mcp-call.mjs speak <text>
@@ -1668,6 +1669,8 @@ if (command === "tools") {
   if (rest[1]) args.size = rest[1];
   if (rest[2]) args.model = rest[2];
   console.log(await callMcpTool("image_gen", args));
+} else if (command === "grok-image") {
+  console.log(await callMcpTool("grok_image_gen", { prompt: rest[0] }));
 } else if (command === "video") {
   const args = rest[0] === "--status"
     ? { action: "status", request_id: rest[1] }
@@ -1684,7 +1687,7 @@ if (command === "tools") {
 } else if (command === "hear") {
   console.log(await callMcpTool("hear", { file: rest[0] }));
 } else {
-  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|video|speak|hear|recall|store|learn> ...");
+  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|grok-image|video|speak|hear|recall|store|learn> ...");
   process.exitCode = 2;
 }
 
@@ -1693,6 +1696,7 @@ function exampleFor(toolName) {
     web_search_exa: 'search "query"',
     vision_inspect: 'vision <path> "question"',
     image_gen: 'image "prompt" [size]',
+    grok_image_gen: 'grok-image "prompt"',
     grok_video_gen: 'video "prompt" [duration] [aspect_ratio] [resolution] [wait_seconds=600]',
     speak: 'speak "text"',
     hear: "hear <file>",

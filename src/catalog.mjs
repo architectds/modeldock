@@ -236,14 +236,18 @@ function orderCatalogByUse(models, usage = {}) {
   // owner - which is also how the rollup keys them, so a direct lookup matches.
   // Native slugs are bare and their traffic is filed under "<slug>@openai";
   // nothing looks it up, because their order is Codex's, not ours.
-  const requests = (entry) => {
+  // Rank the routed half by decayed heat (see usage-rollup.mjs): the
+  // score a model earned this week outranks one that amassed the same count a
+  // month ago. Older rollups and tests carry only `.requests`, so it is the
+  // fallback - the two sources never disagree about which side of a tie wins.
+  const score = (entry) => {
     const found = usage[entry?.slug];
-    return Number(found?.requests ?? found ?? 0);
+    return Number(found?.heat ?? found?.popularity ?? found?.requests ?? found ?? 0);
   };
   // A native entry is the one without an owner suffix: it comes from Codex's
   // own catalog rather than a provider of ours.
   const isNative = (entry) => !String(entry?.slug || "").includes("@");
-  const decorated = models.map((entry, index) => ({ entry, used: requests(entry), index }));
+  const decorated = models.map((entry, index) => ({ entry, used: score(entry), index }));
   const native = decorated.filter(({ entry }) => isNative(entry)).sort((a, b) => a.index - b.index);
   const routed = decorated
     .filter(({ entry }) => !isNative(entry))

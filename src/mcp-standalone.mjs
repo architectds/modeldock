@@ -13,9 +13,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "./mcp.mjs";
 import { callMcpTool, gatewayBaseUrl } from "./mcp-client.mjs";
 import { loadConfig } from "./config.mjs";
+import { readXaiAuth } from "./xai-auth.mjs";
 
 const baseUrl = gatewayBaseUrl();
 const config = loadConfig();
+const xaiAuth = readXaiAuth();
+const grokConnected = Boolean(xaiAuth?.accessToken);
+const grokImageAvailable = grokConnected && (!xaiAuth.models?.length || xaiAuth.models.includes("grok-4.6"));
+const grokVideoAvailable = grokConnected && (!xaiAuth.models?.length || xaiAuth.models.includes("grok-imagine-video") || xaiAuth.models.includes("grok-imagine-video-1.5"));
 
 // Codex spawns this bridge from the session working directory, so process.cwd()
 // is the project the user is actually in. Defaulting scope_dir to it makes
@@ -37,7 +42,18 @@ const recallScope = (args) => {
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
   inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
-  generateXaiVideo: (args) => callMcpTool("grok_video_gen", args, baseUrl),
+  ...(grokImageAvailable
+    ? {
+        hasXaiImageGeneration: () => true,
+        generateXaiImage: (args) => callMcpTool("grok_image_gen", args, baseUrl),
+      }
+    : {}),
+  ...(grokVideoAvailable
+    ? {
+        hasXaiVideoGeneration: () => true,
+        generateXaiVideo: (args) => callMcpTool("grok_video_gen", args, baseUrl),
+      }
+    : {}),
   ...(config.memoryEnabled
     ? {
         recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl),

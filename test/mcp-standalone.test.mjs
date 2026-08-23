@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const STANDALONE = fileURLToPath(new URL("../src/mcp-standalone.mjs", import.meta.url));
@@ -84,7 +87,7 @@ async function stopBridge(bridge) {
   if (bridge.child.exitCode === null) bridge.child.kill();
 }
 
-test("stdio bridge lists the media and web tools locally without a gateway round trip", async () => {
+test("stdio bridge omits Grok media tools before a Grok session is connected", async () => {
   const gateway = await startMockGateway();
   const bridge = startBridge(gateway.url);
   try {
@@ -97,7 +100,7 @@ test("stdio bridge lists the media and web tools locally without a gateway round
     notify(bridge, "notifications/initialized", {});
     const listed = await rpc(bridge, 2, "tools/list", {});
     const names = listed.result.tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["grok_video_gen", "hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
+    assert.deepEqual(names.sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
     const search = listed.result.tools.find((tool) => tool.name === "web_search_exa");
     assert.equal(
@@ -114,11 +117,48 @@ test("stdio bridge lists the media and web tools locally without a gateway round
       false,
       "hear writes an intermediate WAV, so it must not be annotated read-only",
     );
-    const video = listed.result.tools.find((tool) => tool.name === "grok_video_gen");
-    assert.equal(video.annotations?.readOnlyHint, false, "video generation has an external side effect");
+    assert.equal(names.includes("grok_image_gen"), false);
+    assert.equal(names.includes("grok_video_gen"), false);
   } finally {
     await stopBridge(bridge);
     await gateway.close();
+  }
+});
+
+test("stdio bridge exposes and forwards both Grok media tools only after login", async () => {
+  const gateway = await startMockGateway();
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-grok-"));
+  mkdirSync(stateDir, { recursive: true });
+  // Plaintext is acceptable only in this throwaway fixture. readXaiAuth accepts
+  // it for migration compatibility; the production writer encrypts the file.
+  writeFileSync(path.join(stateDir, "xai-auth.json"), JSON.stringify({
+    accessToken: "grok-subscription-token",
+    refreshToken: "",
+    expiresAt: Date.now() + 60_000,
+  }), "utf8");
+  const bridge = startBridge(gateway.url, { MODELDOCK_STATE_DIR: stateDir });
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+    const listed = await rpc(bridge, 2, "tools/list", {});
+    const names = listed.result.tools.map((tool) => tool.name);
+    assert.ok(names.includes("grok_image_gen"), `grok_image_gen missing from ${names.join(",")}`);
+    assert.ok(names.includes("grok_video_gen"), `grok_video_gen missing from ${names.join(",")}`);
+    const video = listed.result.tools.find((tool) => tool.name === "grok_video_gen");
+    assert.equal(video.annotations?.readOnlyHint, false, "video generation has an external side effect");
+    const image = await rpc(bridge, 3, "tools/call", {
+      name: "grok_image_gen",
+      arguments: { prompt: "a small blue circle" },
+    });
+    assert.equal(JSON.parse(image.result.content[0].text).forwarded, "grok_image_gen");
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 

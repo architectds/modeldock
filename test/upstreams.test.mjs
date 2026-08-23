@@ -74,6 +74,74 @@ test("generateImage fails with a readable error when there is no session token",
   }
 });
 
+test("generateXaiImage calls Grok's native image tool and saves the result", async () => {
+  const upstreams = createUpstreams({
+    config: { tokens: { xai: "grok-subscription-token" } },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    return new Response([
+      'data: {"type":"response.image_generation_call.completed","item_id":"ig_1"}',
+      `data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "image_generation_call", id: "ig_1", status: "completed", result: jpegBytes.toString("base64") } })}`,
+      'data: {"type":"response.completed","response":{"status":"completed"}}',
+      "data: [DONE]",
+      "",
+    ].join("\n"), { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  try {
+    assert.equal(upstreams.hasXaiSession(), true);
+    const output = await upstreams.generateXaiImage({ prompt: "a blue circle" });
+    assert.match(output, /^Generated Grok image saved to .+\.jpg$/);
+    const file = output.replace("Generated Grok image saved to ", "");
+    assert.deepEqual(readFileSync(file), jpegBytes);
+    rmSync(file, { force: true });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://api.x.ai/v1/responses");
+    assert.equal(calls[0].init.headers.authorization, "Bearer grok-subscription-token");
+    assert.deepEqual(JSON.parse(calls[0].init.body), {
+      model: "grok-4.6",
+      input: [{ role: "user", content: [{ type: "input_text", text: "a blue circle" }] }],
+      tools: [{ type: "image_generation", action: "generate" }],
+      stream: true,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Grok media has no credential and no callable connector before sign-in", async () => {
+  const upstreams = createUpstreams({
+    config: { tokens: {} },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  assert.equal(upstreams.hasXaiSession(), false);
+  assert.equal(upstreams.hasXaiImageGeneration(), false);
+  assert.equal(upstreams.hasXaiVideoGeneration(), false);
+  await assert.rejects(() => upstreams.generateXaiImage({ prompt: "x" }), /No xAI session is connected/);
+});
+
+test("Grok media tools are gated by the connected subscription's model list", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-xai-capability-"));
+  const authFile = path.join(dir, "xai-auth.json");
+  writeFileSync(authFile, JSON.stringify({ accessToken: "grok-subscription-token", models: ["grok-4.5"] }), "utf8");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const upstreams = createUpstreams({
+    config: { xaiAuthFile: authFile },
+    metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+    mediaStore: { get: () => undefined },
+  });
+  assert.equal(upstreams.hasXaiSession(), true);
+  assert.equal(upstreams.hasXaiImageGeneration(), false);
+  assert.equal(upstreams.hasXaiVideoGeneration(), false);
+  await assert.rejects(() => upstreams.generateXaiImage({ prompt: "x" }), /does not include the Grok image model/);
+});
+
 test("generateXaiVideo returns xAI's completed temporary URL without copying the video", async () => {
   const calls = [];
   const upstreams = createUpstreams({

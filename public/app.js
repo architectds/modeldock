@@ -1305,7 +1305,7 @@ const ROSTER_SORT_KEYS = {
   provider: (entry) => entry.providerLabel || entry.provider || "",
   context: (entry) => entry.contextWindow || 0,
   vision: (entry) => (entry.supportsVision ? 1 : 0),
-  requests: (entry) => entry.usage?.requests || 0,
+  requests: (entry) => entry.usage?.popularity ?? entry.usage?.requests ?? 0,
   tps: (entry) => entry.usage?.tps || 0,
   cache: (entry) => entry.usage?.cacheRate || 0,
 };
@@ -1587,7 +1587,7 @@ function rosterRow(entry, rank, onChanged, scales) {
   // all, and a tier beside a request count reads as a quality score.
   row.append(rosterCell(t(entry.supportsVision ? "roster.yes" : "roster.no")));
   const usage = entry.usage;
-  const requests = usage ? Number(usage.requests) || 0 : null;
+  const requests = usage ? Number(usage.popularity ?? usage.requests) || 0 : null;
   const tpsValue = usage && usage.tps ? Number(usage.tps) : null;
   const cacheValue = usage && usage.in ? Math.max(0, Math.min(1, Number(usage.cacheRate) || 0)) : null;
   row.append(rosterMetricCell("requests", requests, requests === null ? "-" : number(requests), requests === null ? 0 : requests / scales.requests));
@@ -1655,7 +1655,7 @@ async function renderModelRoster() {
     const body = document.createElement("tbody");
     body.append(head);
     const scales = {
-      requests: Math.max(1, ...rows.map((entry) => Number(entry.usage?.requests) || 0)),
+      requests: Math.max(1, ...rows.map((entry) => Number(entry.usage?.popularity ?? entry.usage?.requests) || 0)),
       tps: Math.max(1, ...rows.map((entry) => Number(entry.usage?.tps) || 0)),
     };
     let used = 0;
