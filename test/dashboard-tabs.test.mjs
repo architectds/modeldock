@@ -319,6 +319,8 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     saveMode: document.getElementById('local-config-save').dataset.mode,
     saveLabel: document.getElementById('local-config-save').textContent.trim(),
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+    modelPath: document.getElementById('local-host-model-file').value,
+    projectorHidden: document.getElementById('local-host-vision-projector-row').hidden,
   })`));
   assert.deepEqual(hostControl, {
     visible: true,
@@ -327,6 +329,8 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     saveMode: "manage",
     saveLabel: "Save and Manage",
     leaveVisible: false,
+    modelPath: "D:/models/qwen.gguf",
+    projectorHidden: true,
   }, "a connected local server stays user-owned until the user explicitly enables host control");
 
   // 5. And none of that produced an error the page swallowed.

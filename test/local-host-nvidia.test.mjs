@@ -39,6 +39,28 @@ test("the measured dual-5060-Ti ledger selects one full 262K lane", () => {
   assert.equal(profile.gpus.length, 2);
 });
 
+test("a smaller selected GGUF replaces only its weight shard in the live ledger", () => {
+  const profile = selectNvidiaManagedProfile({
+    engine: ENGINE,
+    targetModelFacts: {
+      ...ENGINE.modelFacts,
+      weightBytes: 13_575_223_296,
+      modelName: "Qwen3.8-27B",
+      modelSlug: "Qwen3.8-27B",
+    },
+    targetModelId: "D:/models/Qwen3.8-27B-Q3_K_M.gguf",
+    gpus: [
+      { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 16_110_321_664 },
+      { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 14_428_405_760 },
+    ],
+  });
+  assert.equal(profile.profileId, "static-p2-c262144");
+  assert.equal(profile.laneCount, 2);
+  assert.equal(profile.laneContextTokens, 262_144);
+  assert.equal(profile.modelId, "D:/models/Qwen3.8-27B-Q3_K_M.gguf", "the post-restart slot probe targets the selected model, not the previous server id");
+  assert.ok(profile.gpus.every((gpu) => gpu.meetsPreferredHeadroom), "the smaller GGUF does not erase observed WDDM/runtime allocation");
+});
+
 test("a single larger card can expose more equal lanes without exceeding three", () => {
   const profile = selectNvidiaManagedProfile({
     engine: { ...ENGINE, launch: { ...ENGINE.launch, splitMode: "none", mainGpu: 0 } },

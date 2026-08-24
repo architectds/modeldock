@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statfsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -58,10 +58,11 @@ import { conservativeNvidiaGpuSample, selectNvidiaManagedProfile } from "./local
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
 import { sameKvStorageDirectory } from "./local-host-kv-state.mjs";
+import { LocalHostPickerError, nativeLocalHostPickerAvailable, pickLocalHostPath } from "./local-host-picker.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
-import { kvBytesPerToken } from "./gguf.mjs";
+import { kvBytesPerToken, readModelFacts } from "./gguf.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -152,6 +153,38 @@ function isAbsoluteStorageDirectory(value) {
   return path.isAbsolute(directory) || /^[a-z]:[\\/]/i.test(directory);
 }
 
+function readManagedModelFacts(file, read = readModelFacts) {
+  const model = String(file || "").trim();
+  if (!isAbsoluteStorageDirectory(model)) {
+    throw new LocalEngineError("model_file", "Choose an absolute GGUF model file for managed local inference.");
+  }
+  try {
+    return read(model);
+  } catch (error) {
+    throw new LocalEngineError("model_file", `ModelDock could not read that GGUF model file: ${error.message}`);
+  }
+}
+
+function readManagedVisionProjector(file) {
+  const projector = String(file || "").trim();
+  if (!projector) return "";
+  if (!isAbsoluteStorageDirectory(projector)) {
+    throw new LocalEngineError("vision_projector", "Choose an absolute local vision projector file.");
+  }
+  try {
+    if (!statSync(projector).isFile()) throw new Error("not a file");
+  } catch {
+    throw new LocalEngineError("vision_projector", "The selected local vision projector file is not readable.");
+  }
+  return projector;
+}
+
+function managedLaunchHasVision(record) {
+  const args = record?.activeSpec?.args;
+  const position = Array.isArray(args) ? args.indexOf("--mmproj") : -1;
+  return position >= 0 && Boolean(String(args[position + 1] || "").trim());
+}
+
 function managedHostSummary(record, engine) {
   if (!record || record.adapterId !== "llamacpp-nvidia") return null;
   const storage = record.kvState;
@@ -163,6 +196,9 @@ function managedHostSummary(record, engine) {
   return {
     id: record.id,
     state: record.state,
+    modelPath: record.capabilities?.model || engine?.launch?.model || "",
+    modelName: record.capabilities?.modelFacts?.modelName || engine?.modelFacts?.modelName || "",
+    visionProjectorPath: record.capabilities?.visionProjectorPath || "",
     cacheDirectory: storage?.directory || "",
     cacheBudgetBytes: storage?.budgetBytes || 0,
     profile,
@@ -209,10 +245,18 @@ async function publishManagedLocalEngine(services, record, running) {
     || Number(running?.launch?.ctxSize)
     || Number(record.capabilities?.contextTokens)
     || 0;
-  const models = contextWindow
-    ? snapshot.models.map((model) => ({ ...model, contextWindow }))
-    : snapshot.models;
-  const changed = snapshot.models.some((model) => Number(model.contextWindow) !== contextWindow);
+  const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
+  const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
+  const supportsVision = managedLaunchHasVision(record);
+  const models = snapshot.models.map((model) => ({
+    ...model,
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(facts?.modelSlug ? { id: facts.modelSlug } : {}),
+    ...(facts?.modelName ? { label: facts.modelName } : {}),
+    ...(endpointModel ? { upstreamId: endpointModel } : {}),
+    supportsVision,
+  }));
+  const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
   writeLocalEngineSnapshot(file, "llamacpp", next);
   applyLocalEngineProfile("llamacpp", next);
@@ -1749,7 +1793,11 @@ export function createApp(services = createServices()) {
         ...(() => {
           const kvDirectoryDefault = services.kvDirectoryDefault || stateFile("kv");
           const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(kvDirectoryDefault);
-          return { kvDirectoryDefault, kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes) };
+          return {
+            kvDirectoryDefault,
+            kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes),
+            nativeLocalHostPicker: (services.nativeLocalHostPickerAvailable || nativeLocalHostPickerAvailable)(),
+          };
         })(),
         engines: engines.map((engine) => ({
           ...engine,
@@ -1845,6 +1893,21 @@ export function createApp(services = createServices()) {
     }
   });
 
+  // The browser cannot reveal an absolute path from an <input type=file>, but
+  // llama.cpp must receive one in argv. This endpoint exposes only fixed
+  // native-dialog kinds; it never executes a caller-provided command or path.
+  app.post("/api/local/pick", mutateConfig, async (req, res) => {
+    try {
+      const selected = await (services.pickLocalHostPath || pickLocalHostPath)(req.body?.kind);
+      return res.json({ path: selected });
+    } catch (error) {
+      const status = error instanceof LocalHostPickerError
+        ? (error.code === "picker_unsupported" ? 409 : 400)
+        : 502;
+      return res.status(status).json({ error: { type: error.code || "picker_failed", message: error.message } });
+    }
+  });
+
   // Connecting is observation and routing only. Takeover is the one automatic
   // path that chooses a per-GPU profile, drains work, restarts with fixed equal
   // slots plus SSD state, verifies the real process and rolls back to the exact
@@ -1891,12 +1954,29 @@ export function createApp(services = createServices()) {
       if (running.launch?.model && !isAbsoluteStorageDirectory(running.launch.model)) {
         throw new LocalEngineError("relative_model_path", "Host control needs an absolute model path so the exact command can be restarted and recovered safely.");
       }
+      const modelSelectedByUser = req.body?.modelPath !== undefined;
+      const modelPath = String(modelSelectedByUser ? req.body.modelPath || "" : running.launch?.model || "").trim();
+      // Existing adoption already carries facts read from the running process.
+      // Re-reading a twelve-gigabyte file just to preserve that same launch is
+      // pointless, and test/remote process attribution may expose facts while
+      // its Windows path is not readable from this Node process.
+      const targetModelFacts = !modelSelectedByUser && running.modelFacts
+        ? running.modelFacts
+        : readManagedModelFacts(modelPath, services.readModelFacts || readModelFacts);
+      const visionProjectorPath = readManagedVisionProjector(
+        req.body?.visionProjectorPath === undefined ? running.launch?.visionProjectorPath : req.body.visionProjectorPath,
+      );
       const id = managedHostId("llamacpp", snapshot.baseUrl);
       if (!id) throw new LocalEngineError("base", "The connected llama.cpp server has no usable local address.");
       let registry = await readLocalHostRegistry(services.localHostRegistryFile);
       if (registry.hosts[id]) throw new LocalEngineError("already_managed", "This llama.cpp host is already under ModelDock management. Leave management before changing its SSD budget.");
       const gpus = await probeManagedNvidiaGpus(services);
-      const selected = (services.selectNvidiaManagedProfile || selectNvidiaManagedProfile)({ engine: running, gpus });
+      const selected = (services.selectNvidiaManagedProfile || selectNvidiaManagedProfile)({
+        engine: running,
+        gpus,
+        targetModelFacts,
+        targetModelId: running.launch?.alias || modelPath,
+      });
       const { candidates: _candidates, ...profile } = selected;
       await mkdir(String(cacheDirectory).trim(), { recursive: true });
       const desiredSpec = {
@@ -1904,6 +1984,10 @@ export function createApp(services = createServices()) {
         args: managedLlamaLaunchArgs(launch.args, {
           profile,
           slotSavePath: String(cacheDirectory).trim(),
+          modelPath,
+          // Managed setup owns this switch: an empty field removes an old
+          // projector instead of silently retaining image capability.
+          visionProjectorPath: visionProjectorPath || null,
         }),
       };
       const observed = createObservedHost({
@@ -1912,7 +1996,9 @@ export function createApp(services = createServices()) {
         endpoint: snapshot.baseUrl,
         launch,
         capabilities: {
-          model: running.launch?.model || "",
+          model: modelPath,
+          modelFacts: targetModelFacts,
+          visionProjectorPath,
           contextTokens: Number(running.launch?.ctxSize) || 0,
           slots: Number(running.launch?.parallel) || 0,
           gpuCount: profile.gpus.length,

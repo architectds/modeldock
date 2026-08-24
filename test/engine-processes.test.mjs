@@ -395,6 +395,32 @@ test("managed equal lanes write total context and disable unified KV", () => {
   assert.ok(next.includes("--jinja"));
 });
 
+test("managed setup replaces the model and owns the optional vision projector", () => {
+  const running = [
+    "-m", "D:/models/text.gguf",
+    "--mmproj", "D:/models/old-projector.gguf",
+    "-c", "262144", "--parallel", "1",
+  ];
+  const next = managedLlamaLaunchArgs(running, {
+    profile: { laneCount: 1, laneContextTokens: 262_144 },
+    slotSavePath: "D:/ModelDock/KV",
+    modelPath: "D:/models/vision-base.gguf",
+    visionProjectorPath: "D:/models/vision-projector.gguf",
+  });
+  assert.deepEqual(next.filter((value) => value === "-m"), ["-m"]);
+  assert.equal(next[next.indexOf("-m") + 1], "D:/models/vision-base.gguf");
+  assert.deepEqual(next.filter((value) => value === "--mmproj"), ["--mmproj"]);
+  assert.equal(next[next.indexOf("--mmproj") + 1], "D:/models/vision-projector.gguf");
+
+  const textOnly = managedLlamaLaunchArgs(next, {
+    profile: { laneCount: 1, laneContextTokens: 262_144 },
+    slotSavePath: "D:/ModelDock/KV",
+    visionProjectorPath: null,
+  });
+  assert.ok(!textOnly.includes("--mmproj"), "clearing local vision removes the inherited projector flag");
+  assert.equal(parseLlamaArgs(`llama-server ${next.join(" ")}`).visionProjectorPath, "D:/models/vision-projector.gguf");
+});
+
 test("a port held on two addresses is filed under the one this gateway reaches", async () => {
   const rows = (order) => JSON.stringify({
     listeners: order,

@@ -279,6 +279,18 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   white-space: nowrap;
 }
 .field-head a:hover { text-decoration: underline; }
+.field-browse {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #67c0ff;
+  font: 600 12px/1.25 inherit;
+  cursor: pointer;
+}
+.field-browse:hover:not(:disabled) { text-decoration: underline; }
+.field-browse:disabled { opacity: .5; cursor: wait; }
+.field-browse:focus-visible { outline: 2px solid var(--blue, #4f8cff); outline-offset: 2px; border-radius: 2px; }
 /* Endpoint combobox: the URL field is a two-in-one control - free typing plus a
    dropdown of common endpoint presets. The toggle merges into the input's right
    edge (shared 44px height and border); the menu is an absolute listbox below. */
