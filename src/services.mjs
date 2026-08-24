@@ -32,6 +32,7 @@ import { stateFile } from "./state-dir.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelEndpoint, modelOptions } from "./model-options.mjs";
 import { readSubagentModel } from "./subagent-config.mjs";
+import { LocalHostRuntime } from "./local-host-runtime.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -148,6 +149,16 @@ export function createServices(config = loadConfig()) {
   // endpoint that edits the same file can never disagree about which file it is.
   const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
   const lifecycleFile = mutableConfig.modelLifecycleFile || modelLifecyclePath();
+  // A managed local host is a separate authority record from a connected local
+  // endpoint. Keep its small metadata alongside the other state files; its
+  // potentially large KV states live only in the directory the user selects
+  // during takeover.
+  const localHostRegistryFile = mutableConfig.localHostRegistryFile || stateFile("local-hosts.json");
+  const localHostRuntime = new LocalHostRuntime({
+    registryFile: localHostRegistryFile,
+    manifestDirectory: stateFile("local-host-kv"),
+    onDiagnostic: ({ kind, message }) => console.log(`[gate] local host ${kind}: ${message}`),
+  });
   // The Ollama connection snapshot follows the same state-dir redirect. Real
   // configs restore it during loadConfig; this re-apply covers hand-built test
   // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
@@ -345,7 +356,7 @@ export function createServices(config = loadConfig()) {
     subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
-    usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
+    usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
   });

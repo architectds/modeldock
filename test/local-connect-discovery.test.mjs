@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 import { parseLlamaArgs } from "../src/engine-processes.mjs";
-import { kvBytesPerToken, modelShape } from "../src/gguf.mjs";
+import { readLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -21,11 +20,11 @@ process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
 // A server that answers just enough of the OpenAI dialect for connect to
 // accept it: the model list, then the Responses probe.
-function fakeEngine() {
+function fakeEngine({ models = [{ id: "qwen3.8:27b" }] } = {}) {
   return createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/v1/models") {
-      res.end(JSON.stringify({ data: [{ id: "qwen3.8:27b" }] }));
+      res.end(JSON.stringify({ data: models }));
       return;
     }
     if (req.url === "/v1/responses") {
@@ -61,6 +60,8 @@ async function startApp(t, { discoverEngines }) {
     summariesFile: path.join(dir, "summaries.json"),
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
+    codexHome: path.join(dir, "codex"),
+    localHostRegistryFile: path.join(dir, "local-hosts.json"),
   };
   const services = createServices(config);
   services.discoverEngines = discoverEngines;
@@ -75,7 +76,7 @@ async function startApp(t, { discoverEngines }) {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   });
-  return { base: `http://127.0.0.1:${server.address().port}`, services };
+  return { base: `http://127.0.0.1:${server.address().port}`, services, dir };
 }
 
 test("connect attaches the port discovery found, not the profile default", async (t) => {
@@ -110,6 +111,416 @@ test("connect attaches the port discovery found, not the profile default", async
 
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.equal(snapshot.llamacpp.baseUrl, `http://127.0.0.1:${port}/v1`, "the persisted address is the discovered one");
+});
+
+test("connect publishes the GGUF name and keeps the endpoint id for the wire", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen3.8:27b"],
+    connectable: true,
+    binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
+    cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: { weightBytes: 12 * 1024 ** 3, attentionLayers: 16, headCountKv: 4, keyLength: 256, valueLength: 256, trainedContext: 262144 },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  // The launch.spec points at a real GGUF on disk; read its header for the name.
+  services.modelFactsFor = (_p) => ({ modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" });
+  const response = await fetch(`${base}/api/local/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, `connect failed: ${JSON.stringify(payload)}`);
+  const model = payload.models[0];
+  assert.equal(model.id, "Qwen3.8-27B", "the published id is the model name, not the path");
+  assert.equal(model.label, "Qwen3.8-27B", "the picker label is the model name");
+  assert.equal(model.upstreamId, "qwen3.8:27b", "the wire id is the endpoint id the server advertises");
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  assert.equal(snapshot.llamacpp.models[0].id, "Qwen3.8-27B");
+  assert.equal(snapshot.llamacpp.models[0].upstreamId, "qwen3.8:27b", "the persisted snapshot keeps the endpoint id for relaunch");
+});
+
+test("connect never assigns one GGUF name to every model from a multi-model endpoint", async (t) => {
+  const engine = fakeEngine({ models: [{ id: "first" }, { id: "second" }] });
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["first", "second"],
+    connectable: true,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+  };
+  const { base, services } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.modelFactsFor = () => ({ modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" });
+  const response = await fetch(`${base}/api/local/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, `connect failed: ${JSON.stringify(payload)}`);
+  assert.deepEqual(payload.models.map((model) => ({ id: model.id, upstreamId: model.upstreamId })), [
+    { id: "first", upstreamId: "first" },
+    { id: "second", upstreamId: "second" },
+  ]);
+});
+
+test("discovery refreshes a legacy single-model snapshot from its GGUF header", async (t) => {
+  const port = 11435;
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"],
+    connectable: true,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
+  };
+  const { base, services } = await startApp(t, { discoverEngines: async () => [discovered] });
+  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    models: [{
+      id: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      label: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      supportsVision: true,
+      contextWindow: 262144,
+    }],
+  });
+
+  const response = await fetch(`${base}/api/local/discover`);
+  assert.equal(response.status, 200);
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  assert.deepEqual(snapshot.llamacpp.models, [{
+    id: "Qwen3.8-27B",
+    label: "Qwen3.8-27B",
+    upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+    supportsVision: true,
+    contextWindow: 262144,
+  }]);
+});
+
+test("gateway connection and explicit host takeover stay separate", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen3.8:27b"],
+    connectable: true,
+    binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
+    cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: {
+      weightBytes: 12 * 1024 ** 3,
+      attentionLayers: 16,
+      headCountKv: 4,
+      keyLength: 256,
+      valueLength: 256,
+      trainedContext: 262144,
+    },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.probeGpus = async () => [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
+  ];
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() {},
+    async stop() {},
+    async start(spec) {
+      discovered.binary = spec.binary;
+      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
+      discovered.launch = parseLlamaArgs(discovered.cmdline);
+    },
+    async verify() { return true; },
+  });
+
+  const connected = await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  assert.equal(connected.status, 200);
+
+  const before = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(before.engines[0].connected, true, "the gateway route is connected");
+  assert.equal(before.engines[0].management, null, "connection did not grant process-management authority");
+
+  const managed = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 64 }),
+  });
+  const managedBody = await managed.json();
+  assert.equal(managed.status, 200, JSON.stringify(managedBody));
+  assert.equal(managedBody.management.state, "ready");
+  assert.equal(managedBody.management.ssdState, "configured", "takeover completed the verified managed restart");
+  assert.equal(managedBody.management.cacheBudgetBytes, 64 * 1024 ** 3);
+
+  const after = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(after.engines[0].connected, true, "gateway connection survives takeover");
+  assert.equal(after.engines[0].management.state, "ready");
+  assert.equal(after.engines[0].management.ssdState, "configured");
+
+  const refusedDisconnect = await fetch(`${base}/api/local/disconnect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  assert.equal(refusedDisconnect.status, 409, "managed process authority cannot be orphaned behind a disconnected route");
+
+  const released = await fetch(`${base}/api/local/unmanage`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: managedBody.management.id }),
+  });
+  assert.equal(released.status, 200);
+  const finalState = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(finalState.engines[0].connected, true, "releasing authority does not disconnect the gateway route");
+  assert.equal(finalState.engines[0].management, null);
+  assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
+});
+
+test("a failed first takeover restores observation without leaving managed authority", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const originalCmdline = `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`;
+  const discovered = {
+    engine: "llamacpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen"],
+    connectable: true,
+    binary: "D:/llama/llama-server.exe",
+    cmdline: originalCmdline,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: {
+      weightBytes: 12 * 1024 ** 3,
+      attentionLayers: 16,
+      headCountKv: 4,
+      keyLength: 256,
+      valueLength: 256,
+      trainedContext: 262144,
+    },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.probeGpus = async () => [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
+  ];
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() {},
+    async stop() {},
+    async start(spec) {
+      discovered.binary = spec.binary;
+      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
+      discovered.launch = parseLlamaArgs(discovered.cmdline);
+    },
+    async verify(_spec, record) {
+      return record.desiredProfile === null;
+    },
+  });
+
+  assert.equal((await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  })).status, 200);
+  const response = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 502, JSON.stringify(body));
+  assert.equal(body.outcome, "recovered");
+  assert.equal(body.management, null);
+  assert.equal(discovered.cmdline, originalCmdline, "recovery used the exact command seen before takeover");
+  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
+  assert.deepEqual(registry.hosts, {}, "failed activation leaves no process-management authority behind");
+  const after = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(after.engines[0].connected, true);
+  assert.equal(after.engines[0].management, null);
+});
+
+test("a double verification failure retains degraded recovery authority", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen"],
+    connectable: true,
+    binary: "D:/llama/llama-server.exe",
+    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: {
+      weightBytes: 12 * 1024 ** 3,
+      attentionLayers: 16,
+      headCountKv: 4,
+      keyLength: 256,
+      valueLength: 256,
+      trainedContext: 262144,
+    },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.probeGpus = async () => [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
+  ];
+  let verificationCount = 0;
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() {},
+    async stop() {},
+    async start() {},
+    async verify() {
+      verificationCount += 1;
+      if (verificationCount === 1) return true;
+      throw new Error("verification failed");
+    },
+  });
+  assert.equal((await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  })).status, 200);
+  const response = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 502, JSON.stringify(body));
+  assert.equal(body.outcome, "degraded");
+  assert.equal(body.management.state, "degraded");
+  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
+  assert.equal(Object.values(registry.hosts)[0].state, "degraded");
+});
+
+test("a KV budget the volume cannot hold is refused with the usable figure", async (t) => {
+  // The default directory sits under the user profile - usually the system
+  // drive - so the budget must fit inside the measured free space minus the
+  // OS reserve (20 GiB). 30 GiB free leaves 10 GiB usable: 16 is refused,
+  // and the message names the number the user should type instead.
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [] });
+  services.probeKvFreeBytes = () => 30 * 1024 ** 3;
+  const refused = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
+  });
+  const body = await refused.json();
+  assert.equal(refused.status, 400, JSON.stringify(body));
+  assert.equal(body.error?.type, "kv_budget_disk");
+  assert.match(body.error?.message, /at most 10 GiB/);
+  // And the discover payload derives its suggested default from the same
+  // measurement: min(8, usable) with the reserve already subtracted.
+  const discover = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(discover.kvBudgetDefaultGiB, 8);
+  services.probeKvFreeBytes = () => 23 * 1024 ** 3;
+  const tight = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(tight.kvBudgetDefaultGiB, 3, "a tight volume suggests only what it can spare");
+});
+
+test("unmanage releases a host whose first takeover verification failed", async (t) => {
+  // activeSpec === null means ModelDock never replaced the original process,
+  // so there is nothing to restore: unmanage must re-verify the pre-takeover
+  // command and revoke management directly. Routing this shape through
+  // applyLocalHostPlan drained a process this gateway never touched - and a
+  // failing drain then stranded the record in "draining" (reproduced live).
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen"],
+    connectable: true,
+    binary: "D:/llama/llama-server.exe",
+    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: {
+      weightBytes: 12 * 1024 ** 3,
+      attentionLayers: 16,
+      headCountKv: 4,
+      keyLength: 256,
+      valueLength: 256,
+      trainedContext: 262144,
+    },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.probeGpus = async () => [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
+  ];
+  const lifecycleCalls = [];
+  let originalServing = false;
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() { lifecycleCalls.push("drain"); throw new Error("must never drain a process ModelDock never replaced"); },
+    async stop() { lifecycleCalls.push("stop"); },
+    async start() { lifecycleCalls.push("start"); },
+    async verify() { return originalServing; },
+  });
+  assert.equal((await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  })).status, 200);
+  const managed = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
+  });
+  const managedBody = await managed.json();
+  assert.equal(managed.status, 409, JSON.stringify(managedBody));
+  assert.equal(managedBody.error?.type, "takeover_failed", "the standard envelope carries the verification failure");
+  assert.ok(managedBody.error?.message, "the dashboard reads body.error.message; without it the user saw 'Manage 409'");
+  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
+  const record = Object.values(registry.hosts)[0];
+  assert.equal(record.state, "degraded");
+  assert.equal(record.activeSpec, null, "the original process was never replaced");
+
+  originalServing = true;
+  const released = await fetch(`${base}/api/local/unmanage`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: record.id }),
+  });
+  const releasedBody = await released.json();
+  assert.equal(released.status, 200, JSON.stringify(releasedBody));
+  assert.deepEqual(lifecycleCalls, [], "release re-verifies and revokes; it never drains, stops, or starts");
+  const cleared = await readLocalHostRegistry(services.localHostRegistryFile);
+  assert.deepEqual(cleared.hosts, {}, "management authority is fully revoked");
 });
 
 test("connect says nothing is running instead of failing against a default port", async (t) => {
@@ -229,273 +640,6 @@ test("restart reports where the engine's output went", async (t) => {
   // passed on a crash traceback. The child has to have actually run.
   assert.doesNotMatch(written, /SyntaxError|Invalid or unexpected token/, "the child never ran");
   assert.match(written, /^engine boot\s*$/, "stderr reached the log instead of /dev/null");
-});
-
-test("apply starts nothing when the old engine will not let go of the port", async (t) => {
-  // The wait loop and the success path used to leave by the same door: running
-  // out of patience looked exactly like the port coming free, so a process
-  // that refused to die was followed by a second one that could only fail to
-  // bind - and the reply said started: true either way.
-  const stubborn = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-  t.after(() => { try { stubborn.kill("SIGKILL"); } catch { /* already gone */ } });
-  const cmdline = `${process.execPath} -m model.gguf -c 80000 --port 11435`;
-  // Reports the engine as present no matter how often it is asked, which is
-  // what a process that ignores the kill looks like from here.
-  const { base, services } = await startApp(t, {
-    discoverEngines: async () => [{
-      engine: "llamacpp",
-      baseUrl: "http://127.0.0.1:11435",
-      port: 11435,
-      models: ["a"],
-      connectable: true,
-      pid: stubborn.pid,
-      binary: process.execPath,
-      cmdline,
-    }],
-  });
-  services.stopTimeoutMs = 600;
-
-  const response = await fetch(`${base}/api/local/apply`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", contextTokens: 48000, sessions: 1, kvType: "f16" }),
-  });
-  const payload = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(payload));
-  assert.equal(payload.error.type, "stop_timeout");
-  assert.notEqual(payload.started, true, "nothing may be reported as started");
-});
-
-// The KV precision an engine is running has to survive the whole trip: parsed
-// off the command line, into the ledger's arithmetic, and out again as the
-// warning that says this stack cannot do it. Every one of those links was
-// broken at once, and because the last one was a dead condition rather than a
-// wrong answer, nothing failed loudly enough to notice.
-const QWEN38_META = {
-  "general.architecture": "qwen35",
-  "qwen35.block_count": 65,
-  "qwen35.nextn_predict_layers": 1,
-  "qwen35.full_attention_interval": 4,
-  "qwen35.attention.head_count": 24,
-  "qwen35.attention.head_count_kv": 4,
-  "qwen35.attention.key_length": 256,
-  "qwen35.attention.value_length": 256,
-  "qwen35.embedding_length": 5120,
-  "qwen35.context_length": 262144,
-};
-
-function quantizedEngine() {
-  const shape = modelShape({ meta: QWEN38_META });
-  const cmdline = "llama-server -m D:/models/q3.gguf -c 80000 -ctk q8_0 -ctv q8_0 -ngl 99 --port 11435";
-  return {
-    engine: "llamacpp",
-    baseUrl: "http://127.0.0.1:11435",
-    port: 11435,
-    models: ["a"],
-    connectable: true,
-    binary: "C:/llama/llama-server.exe",
-    cmdline,
-    launch: parseLlamaArgs(cmdline),
-    // The ledger is built on weightBytes - the tensors the backend loads - not
-    // on the file's size. They differ by the 221.7 MB of multi-token-prediction
-    // blocks this model ships and this backend skips, and the overhead constant
-    // carries that same amount the other way, so the reconciled total is the
-    // one that was measured on the machine either way.
-    modelFacts: {
-      ...shape,
-      fileBytes: Math.round(12.8697 * 1024 ** 3),
-      weightBytes: Math.round(12.6429 * 1024 ** 3),
-      ignoredBytes: 232470528,
-      kvBytesPerToken: kvBytesPerToken(shape, "f16"),
-    },
-  };
-}
-
-test("a quantized KV cache is budgeted as quantized, and warned about", async (t) => {
-  const { base, services } = await startApp(t, { discoverEngines: async () => [quantizedEngine()] });
-  services.probeGpus = async () => [{ name: "AMD Radeon RX 7900 XT", vendor: "amd", totalBytes: Math.round(19.98 * 1024 ** 3) }];
-
-  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
-  const engine = engines.find((found) => found.port === 11435);
-
-  // 1. The flag is read, not just written.
-  assert.equal(engine.launch.cacheTypeK, "q8_0");
-  // 2. The ledger budgets the cache that is running. At 80K this shape costs
-  //    4.88 GiB at f16 and half that at q8_0, so reporting the f16 figure
-  //    spent 2.44 GiB of headroom that was never taken - on a 19.10 GiB usable
-  //    card that is the difference between 0.52 GiB left and 2.96 GiB left,
-  //    which is the difference between a red bar and a comfortable one.
-  assert.equal(engine.vram.kvType, "q8_0");
-  const GiB = 1024 ** 3;
-  const round = (bytes) => Math.round(bytes / GiB * 100) / 100;
-  assert.equal(round(engine.vram.kv), 2.44);
-  assert.equal(round(engine.vram.headroom), 2.96);
-  // 3. The drawer is handed the engine's own argv, minus the settings it
-  //    decides, so its preview is the line Apply runs rather than one composed
-  //    from the flags the page happens to know the names of.
-  assert.deepEqual(engine.launchBase, ["-m", "D:/models/q3.gguf", "-ngl", "99", "--port", "11435"]);
-  // 4. The warning whose condition could never be true now can be.
-  assert.ok(
-    engine.warnings.some((warning) => warning.code === "kv_quant_unsupported"),
-    `no quantization warning on an AMD card: ${JSON.stringify(engine.warnings)}`,
-  );
-});
-
-test("an engine on the default cache is not warned about, and is budgeted at f16", async (t) => {
-  // The other direction, so the warning above is not simply always on.
-  const plain = quantizedEngine();
-  plain.cmdline = "llama-server -m D:/models/q3.gguf -c 80000 -ngl 99 --port 11435";
-  plain.launch = parseLlamaArgs(plain.cmdline);
-  const { base, services } = await startApp(t, { discoverEngines: async () => [plain] });
-  services.probeGpus = async () => [{ name: "AMD Radeon RX 7900 XT", vendor: "amd", totalBytes: Math.round(19.98 * 1024 ** 3) }];
-
-  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
-  const engine = engines.find((found) => found.port === 11435);
-  assert.equal(engine.vram.kvType, "f16");
-  assert.equal(Math.round(engine.vram.kv / (1024 ** 3) * 100) / 100, 4.88);
-  assert.equal(Math.round(engine.vram.headroom / (1024 ** 3) * 100) / 100, 0.52);
-  assert.ok(!engine.warnings.some((warning) => warning.code === "kv_quant_unsupported"));
-});
-
-const CARD = {
-  amd: { name: "AMD Radeon RX 7900 XT", vendor: "amd", totalBytes: Math.round(19.98 * 1024 ** 3) },
-  nvidia: { name: "NVIDIA GeForce RTX 4090", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 0 },
-};
-
-function shiftingEngine() {
-  const engine = quantizedEngine();
-  engine.cmdline = "llama-server -m D:/models/q3.gguf -c 80000 -ctk q8_0 -ctv q8_0"
-    + " -fa auto --context-shift -ngl 99 --port 11435";
-  engine.launch = parseLlamaArgs(engine.cmdline);
-  return engine;
-}
-
-test("an NVIDIA card keeps the settings the AMD one refuses", async (t) => {
-  // The refusals are the AMD stack's, not the product's opinion. Written the
-  // other way round they would have taken a working quantized cache away from
-  // every card, which is the failure mode of a rule phrased as policy instead
-  // of as a property of the hardware.
-  const { base, services } = await startApp(t, { discoverEngines: async () => [shiftingEngine()] });
-  services.probeGpus = async () => [CARD.nvidia];
-
-  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
-  const engine = engines.find((found) => found.port === 11435);
-
-  assert.equal(engine.vram.kvType, "q8_0", "the quantized cache is budgeted, not refused");
-  const codes = engine.warnings.map((warning) => warning.code);
-  assert.ok(!codes.includes("kv_quant_unsupported"), "nothing is refused on this card");
-  assert.ok(!codes.includes("context_shift_refused"));
-  // But the architecture warning is not a vendor warning and still applies:
-  // this model keeps recurrent state on three layers in four, so context
-  // shifting has nothing to slide - reproduced once with -ngl 0, where no GPU
-  // is involved at all. Guarding it as an AMD quirk would have missed it here.
-  assert.ok(codes.includes("context_shift_ineffective"), `warnings were ${JSON.stringify(codes)}`);
-  assert.ok(engine.launchBase.includes("--context-shift"), "the user's context shifting stands");
-  assert.ok(engine.launchBase.includes("-fa"));
-  // The restart honours the request rather than overriding it.
-  const preview = engine.launchBase.join(" ");
-  assert.ok(!preview.includes("--no-context-shift"));
-});
-
-test("the AMD card refuses both, in the preview as well as the restart", async (t) => {
-  const { base, services } = await startApp(t, { discoverEngines: async () => [shiftingEngine()] });
-  services.probeGpus = async () => [CARD.amd];
-
-  const { engines } = await (await fetch(`${base}/api/local/discover`)).json();
-  const engine = engines.find((found) => found.port === 11435);
-
-  // The ledger still reports what is running - refusing it is not the same as
-  // pretending it is not there.
-  assert.equal(engine.vram.kvType, "q8_0");
-  const codes = engine.warnings.map((warning) => warning.code);
-  assert.ok(codes.includes("kv_quant_unsupported"));
-  assert.ok(codes.includes("context_shift_refused"), `warnings were ${JSON.stringify(codes)}`);
-  assert.ok(!codes.includes("context_shift_ineffective"), "one reason, and it is the one acted on");
-
-  // And the line the drawer shows is the line a restart produces: neither
-  // setting is in it, and everything else is.
-  assert.ok(!engine.launchBase.includes("-ctk"));
-  assert.ok(!engine.launchBase.includes("--context-shift"));
-  assert.ok(engine.launchBase.includes("-fa") && engine.launchBase.includes("-ngl"));
-});
-
-// Stopping an engine means the process is gone, not that it stopped answering.
-//
-// discoverLocalEngines drops a port whose probe fails, and llama-server stops
-// answering early in its shutdown while it is still unloading the model. Taking
-// the scan alone as proof let the replacement start while twelve gigabytes of
-// weights were still resident - on the card this feature exists for, 25 GiB
-// asked of a 19 GiB card.
-// Windows has no window for this to happen in: process.kill terminates there,
-// so a signalled process is gone by the next line and there is nothing to
-// observe. The gap is a POSIX one - SIGTERM asks, and llama.cpp answers after
-// it has finished unloading - so this runs where the defect can exist.
-test("an engine that has stopped answering but is still running is not treated as stopped", { skip: process.platform === "win32" && "process.kill terminates on Windows, so the gap this guards cannot occur" }, async (t) => {
-  // The child says when it is ready, and this waits for that. spawn returns
-  // before node has booted, so a SIGTERM sent in that window takes the default
-  // action and kills it - the process would then be genuinely gone, the route
-  // would be right to proceed, and the test would be asserting nothing. That
-  // race is invisible on the platform where this test is skipped.
-  const live = spawn(
-    process.execPath,
-    ["-e", "process.on('SIGTERM', () => {}); console.log('ready'); setTimeout(() => {}, 60000)"],
-    { stdio: ["ignore", "pipe", "ignore"] },
-  );
-  t.after(() => { try { live.kill("SIGKILL"); } catch { /* already gone */ } });
-  await new Promise((resolve, reject) => {
-    live.stdout.once("data", resolve);
-    live.once("exit", () => reject(new Error("the stand-in engine exited before it was ready")));
-  });
-  const cmdline = `${process.execPath} -m D:/models/q3.gguf -c 80000 --port 11435`;
-  let scans = 0;
-  const { base, services } = await startApp(t, {
-    // Answers once, then goes quiet - which is what a shutting-down engine
-    // looks like to a probe, and what the old check read as "gone".
-    discoverEngines: async () => {
-      scans += 1;
-      return scans > 1 ? [] : [{
-        engine: "llamacpp", baseUrl: "http://127.0.0.1:11435", port: 11435,
-        models: ["a"], connectable: true, pid: live.pid,
-        binary: process.execPath, cmdline,
-      }];
-    },
-  });
-  services.stopTimeoutMs = 700;
-  const response = await fetch(`${base}/api/local/apply`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", contextTokens: 48000, sessions: 1, kvType: "f16" }),
-  });
-  const payload = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(payload));
-  assert.equal(payload.error.type, "stop_timeout");
-});
-
-// The argv is replayed exactly; the directory it was resolved against is not
-// ours to read. Restarting from the gateway's own directory would look like a
-// restart and be a missing model file, reported only in a log.
-test("a relative model path is refused rather than restarted from the wrong directory", async (t) => {
-  const untouched = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
-  t.after(() => { try { untouched.kill("SIGKILL"); } catch { /* already gone */ } });
-  const cmdline = `${process.execPath} -m models/q3.gguf -c 80000 --port 11435`;
-  const { base } = await startApp(t, {
-    discoverEngines: async () => [{
-      engine: "llamacpp", baseUrl: "http://127.0.0.1:11435", port: 11435,
-      models: ["a"], connectable: true, pid: untouched.pid,
-      binary: process.execPath, cmdline, launch: parseLlamaArgs(cmdline),
-    }],
-  });
-  const response = await fetch(`${base}/api/local/apply`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", contextTokens: 48000, sessions: 1, kvType: "f16" }),
-  });
-  const payload = await response.json();
-  assert.equal(response.status, 409, JSON.stringify(payload));
-  assert.equal(payload.error.type, "relative_model_path");
-  assert.match(payload.error.message, /models\/q3\.gguf/);
-  // And the engine it declined to restart is still running.
-  assert.equal(untouched.exitCode, null, "nothing was stopped on the way to refusing");
 });
 
 // What Codex is told about a local model has to follow what the engine serves.

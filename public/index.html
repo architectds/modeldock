@@ -313,7 +313,8 @@
         </div>
         <div class="engine-body" id="ollama-body">
         <div class="custom-row">
-          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="ollama-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
           <button id="ollama-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -331,7 +332,8 @@
         </div>
         <div class="engine-body" id="llamacpp-body">
         <div class="custom-row">
-          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="llamacpp-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn" data-i18n-title="local.manageTip" title="Let ModelDock manage this host">Manage</button>
           <button id="llamacpp-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -349,7 +351,8 @@
         </div>
         <div class="engine-body" id="vllm-body">
         <div class="custom-row">
-          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="vllm-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
           <button id="vllm-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -370,55 +373,32 @@
         </label>
         <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
         <ul id="local-warnings" class="engine-warnings" hidden></ul>
-        <div id="local-optimize" class="optimize" hidden>
-          <button id="tune-optimize" type="button" class="custom-action primary" data-i18n="tune.optimize">Optimize</button>
-          <span class="optimize-note" data-i18n="tune.optimizeNote">based on community recommendations</span>
-        </div>
-        <p id="tune-optimize-result" class="optimize-result" aria-live="polite" hidden></p>
-        <div id="local-tune" class="tune" hidden>
-          <p id="tune-unfit" class="tune-unfit" hidden></p>
-          <label class="tune-row">
-            <span class="tune-label" data-i18n="tune.context">Total context</span>
-            <input id="tune-context" type="range" min="0" max="4" step="1" />
-            <output id="tune-context-value" class="tune-value"></output>
-          </label>
-          <label class="tune-row">
-            <span class="tune-label" data-i18n="tune.sessions">Concurrent sessions</span>
-            <input id="tune-sessions" type="range" min="1" max="4" step="1" />
-            <output id="tune-sessions-value" class="tune-value"></output>
-          </label>
-          <div class="tune-row">
-            <span class="tune-label" data-i18n="tune.kv">KV precision</span>
-            <div id="tune-kv" class="tune-stops" role="radiogroup" aria-label="KV precision">
-              <button type="button" class="tune-stop" data-kv="q4_0">4</button>
-              <button type="button" class="tune-stop" data-kv="q8_0">8</button>
-              <button type="button" class="tune-stop" data-kv="f16">16</button>
-            </div>
-            <output id="tune-kv-note" class="tune-value"></output>
-          </div>
-        </div>
-        <div id="local-vram" class="vram" hidden>
-          <div class="vram-bar" role="img" aria-labelledby="local-vram-caption">
-            <span class="vram-seg is-weights" id="vram-weights"></span>
-            <span class="vram-seg is-kv" id="vram-kv"></span>
-            <span class="vram-seg is-overhead" id="vram-overhead"></span>
-            <span class="vram-seg is-headroom" id="vram-headroom"></span>
-          </div>
-          <p id="local-vram-caption" class="vram-caption"></p>
-          <p id="local-vram-advice" class="vram-advice" hidden></p>
-          <div id="tune-command" class="tune-command" hidden>
-            <p class="tune-command-label" data-i18n="tune.commandLabel">Start it with</p>
-            <code id="tune-command-text"></code>
-            <div class="custom-row tune-apply-row">
-              <button id="tune-apply" type="button" class="custom-action primary" data-i18n="tune.apply">Restart with these</button>
-              <p id="tune-apply-status" class="custom-status" aria-live="polite" hidden></p>
-            </div>
-          </div>
-        </div>
         <label class="chip-toggle" id="local-config-vision-row">
           <input id="local-config-vision" type="checkbox" />
           <span data-i18n="local.vision">Takes images</span>
         </label>
+        <section id="local-host-control" class="field" hidden aria-labelledby="local-host-control-title">
+          <div class="field-head"><span id="local-host-control-title" data-i18n="host.title">Host control</span></div>
+          <p id="local-host-gateway-state" class="custom-hint"></p>
+          <p id="local-host-management-state" class="custom-hint"></p>
+          <div id="local-host-management-form">
+            <label class="field">
+              <div class="field-head"><span data-i18n="host.folder">SSD KV folder</span></div>
+              <input id="local-host-kv-directory" class="lang-select" type="text" spellcheck="false" />
+            </label>
+            <label class="field">
+              <div class="field-head"><span data-i18n="host.budgetLabel">SSD KV budget (GiB)</span></div>
+              <input id="local-host-kv-budget" class="lang-select" type="number" min="1" max="1024" step="1" value="8" />
+              <p id="local-host-kv-hint" class="custom-hint" hidden></p>
+            </label>
+            <div class="custom-row">
+              <p id="local-host-manage-status" class="custom-status" aria-live="polite" hidden></p>
+            </div>
+          </div>
+          <div class="custom-row">
+            <button id="local-host-unmanage" type="button" class="custom-action" data-i18n="host.leave" hidden>Leave management</button>
+          </div>
+        </section>
         <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
         <div class="custom-row local-config-actions">
           <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>

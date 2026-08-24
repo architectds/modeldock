@@ -652,12 +652,37 @@ defineRouting(OLLAMA_PROFILE, {
   }),
 });
 
-// llama.cpp and vLLM need no override at all: their base is whatever the
-// connect snapshot wrote onto the profile, and they are keyless because the
-// address is loopback-only. That the defaults fit them exactly is the point -
-// the next OpenAI-dialect engine should also need nothing but two flags.
-defineRouting(LLAMACPP_PROFILE, { keyless: true, local: true, normalizesPayload: true, baseUrlFor: (config) => trimBase(LLAMACPP_PROFILE.baseUrl) });
-defineRouting(VLLM_PROFILE, { keyless: true, local: true, normalizesPayload: true, baseUrlFor: (config) => trimBase(VLLM_PROFILE.baseUrl) });
+// llama.cpp and vLLM are keyless and their base is whatever the connect snapshot
+// wrote onto the profile. They DO need one override the default does not give:
+// the published id is now the model's own name ("Qwen3.8 27B") read from the
+// GGUF header, not the endpoint id (which is often the model path). The server
+// only answers to the id it advertises, so the wire must carry the endpoint id.
+// Same rule Ollama uses - its slug is colon-free but the server serves the
+// original tag - and the comment there applies verbatim.
+function localWireTarget(providerId) {
+  return (config, model) => ({
+    provider: providerId,
+    model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
+    url: `${trimBase(profileById(providerId).baseUrl)}/responses`,
+    token: "",
+    tokenRequired: false,
+  });
+}
+
+defineRouting(LLAMACPP_PROFILE, {
+  keyless: true,
+  local: true,
+  normalizesPayload: true,
+  baseUrlFor: (config) => trimBase(LLAMACPP_PROFILE.baseUrl),
+  target: localWireTarget("llamacpp"),
+});
+defineRouting(VLLM_PROFILE, {
+  keyless: true,
+  local: true,
+  normalizesPayload: true,
+  baseUrlFor: (config) => trimBase(VLLM_PROFILE.baseUrl),
+  target: localWireTarget("vllm"),
+});
 
 export function profileById(id) {
   return PROFILES[id] || OPENCODE_GO_PROFILE;

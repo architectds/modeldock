@@ -217,6 +217,7 @@ const OVERRIDE_FLAGS = {
   parallel: ["-np", "--parallel"],
   cacheTypeK: ["-ctk", "--cache-type-k"],
   cacheTypeV: ["-ctv", "--cache-type-v"],
+  slotSavePath: ["--slot-save-path"],
 };
 
 // Presence-only switches: there is no value token to step over, and the two
@@ -277,9 +278,10 @@ export function applyLaunchOverrides(args, overrides = {}) {
   if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
   if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
   if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
-  // Slots that each see the whole window rather than a reserved slice. Written
-  // explicitly because llama.cpp only defaults it on when the slot count is
-  // auto, so setting --parallel silently turns it off.
+  if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
+  // Write the cache topology explicitly. Managed profiles use independent,
+  // equal lanes; inheriting a previous unified pool would invalidate both the
+  // per-lane catalog promise and the numbered SSD slot mapping.
   if (typeof overrides.kvUnified === "boolean") {
     out.push(overrides.kvUnified ? OVERRIDE_SWITCHES.kvUnified.on : OVERRIDE_SWITCHES.kvUnified.off);
   }
@@ -287,78 +289,6 @@ export function applyLaunchOverrides(args, overrides = {}) {
     out.push(overrides.contextShift ? OVERRIDE_SWITCHES.contextShift.on : OVERRIDE_SWITCHES.contextShift.off);
   }
   return out;
-}
-
-// The settings the tuning drawer owns, and the only place they are named.
-//
-// The drawer has to show the command its own Apply would run, and for a while
-// it built that line from scratch out of a short list of flags it knew about.
-// A real llama-server is started with a dozen: the alias the model is served
-// under, -fa, --jinja, -mg/-sm pinning it to a card. None of those were in the
-// list, so the line under "start it with" was missing eight flags that Apply
-// itself preserves - harmless if pressed, silently different if pasted.
-//
-// So the page no longer composes anything. The server strips exactly these
-// keys from the real argv and sends the remainder; the page appends its three
-// choices to it. Adding a knob means adding it here, and the test next to
-// `drawerLaunchTail` fails until both halves know about it.
-const DRAWER_OWNED = { ctxSize: null, parallel: null, cacheTypeK: null, cacheTypeV: null, kvUnified: null };
-
-// Two settings this stack cannot be trusted with, refused rather than offered.
-//
-// Quantized KV returns wrong answers here rather than slow ones, and context
-// shifting is turned off because it is not something we are willing to have
-// running on this vendor. Both are enforced where the argv is built, not in
-// the page: greying a control out stops the dashboard from asking for it and
-// stops nothing else, and /api/local/apply takes its settings from a request
-// body that need never have come from the page.
-export function vendorRefusals(vendor) {
-  const amd = String(vendor || "").toLowerCase() === "amd";
-  return { quantizedKv: amd, contextShift: amd };
-}
-
-// Everything the engine was started with except what the drawer decides. The
-// vendor matters because a refusal is a setting the drawer owns too - it has
-// to come off the base, or the preview would show a flag the restart removes.
-export function launchBaseArgs(args, { vendor } = {}) {
-  const refuse = vendorRefusals(vendor);
-  return applyLaunchOverrides(args, {
-    ...DRAWER_OWNED,
-    ...(refuse.contextShift ? { contextShift: null } : {}),
-  });
-}
-
-// The drawer's three choices as flags, in the order applyLaunchOverrides
-// writes them. This is the half the page duplicates, so it is kept to a shape
-// with no branching worth getting wrong, and pinned by a test.
-export function drawerLaunchTail({ contextTokens, sessions, kvType, vendor } = {}) {
-  const refuse = vendorRefusals(vendor);
-  const tail = [];
-  if (Number(contextTokens)) tail.push("-c", String(Number(contextTokens)));
-  if (Number(sessions)) tail.push("--parallel", String(Number(sessions)));
-  // f16 is llama.cpp's default, so it is expressed by writing nothing.
-  if (!refuse.quantizedKv && kvType && kvType !== "f16") tail.push("-ctk", String(kvType), "-ctv", String(kvType));
-  tail.push("--kv-unified");
-  if (refuse.contextShift) tail.push("--no-context-shift");
-  return tail;
-}
-
-// What Apply runs. The one caller that actually spawns, and the definition the
-// preview above is measured against.
-export function drawerLaunchArgs(args, choices = {}) {
-  const refuse = vendorRefusals(choices.vendor);
-  // A refused setting is not a default the caller may override: whatever the
-  // request asked for, the cache comes back to f16 and context shifting is
-  // written off, so a body that never came from the page cannot get around it.
-  const cache = !refuse.quantizedKv && choices.kvType && choices.kvType !== "f16" ? choices.kvType : null;
-  return applyLaunchOverrides(args, {
-    ctxSize: Number(choices.contextTokens) || undefined,
-    parallel: Number(choices.sessions) || undefined,
-    cacheTypeK: cache,
-    cacheTypeV: cache,
-    kvUnified: true,
-    contextShift: refuse.contextShift ? false : undefined,
-  });
 }
 
 // llama-server's command line is a complete adoption spec. Parsing it is what
@@ -375,6 +305,8 @@ const LLAMA_FLAGS = [
   ["port", ["--port"]],
   ["mainGpu", ["-mg", "--main-gpu"]],
   ["splitMode", ["-sm", "--split-mode"]],
+  ["tensorSplit", ["-ts", "--tensor-split"]],
+  ["device", ["-dev", "--device"]],
   ["slotSavePath", ["--slot-save-path"]],
   // Read, not just written: without these the KV precision an engine is
   // actually running was invisible, so the budget assumed f16 for a cache that
@@ -448,12 +380,16 @@ export function spawnEngineDetached({ binary, args, engine, logDir }) {
     stdio: ["ignore", log, log],
     windowsHide: true,
   });
+  // A missing executable reports asynchronously. The lifecycle verifier owns
+  // the user-visible failure and log path; without a listener Node treats this
+  // event as uncaught and can take the ModelDock gateway down with the engine.
+  child.on("error", () => {});
   // The parent's copy of the descriptor is not needed once the child owns it.
   closeSync(log);
   // Ours to start, not ours to hold: the engine outlives this gateway, and a
   // restart of ModelDock must not take the user's model down with it.
   child.unref();
-  return { logFile };
+  return { pid: child.pid, logFile };
 }
 
 // Wait for a signalled engine to actually be gone, against a real deadline.
@@ -492,4 +428,28 @@ export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
+}
+
+// The managed launcher owns only the capacity and residency switches. Model,
+// device topology, templates, draft settings and every other observed argument
+// remain byte-for-byte argv entries from the user's pre-takeover process.
+// llama.cpp's -c is the total KV budget: independent equal lanes therefore use
+// P * C here while Codex is told only the per-lane C.
+export function managedLlamaLaunchArgs(args, { profile, slotSavePath } = {}) {
+  const lanes = Number(profile?.laneCount);
+  const perLane = Number(profile?.laneContextTokens);
+  if (!Number.isSafeInteger(lanes) || lanes < 1 || lanes > 3) {
+    throw new TypeError("A managed llama.cpp launch needs one through three lanes.");
+  }
+  if (!Number.isSafeInteger(perLane) || perLane <= 0) {
+    throw new TypeError("A managed llama.cpp launch needs a positive per-lane context.");
+  }
+  const root = typeof slotSavePath === "string" ? slotSavePath.trim() : "";
+  if (!root) throw new TypeError("A managed llama.cpp launch needs an SSD slot-state directory.");
+  return applyLaunchOverrides(args, {
+    ctxSize: lanes * perLane,
+    parallel: lanes,
+    slotSavePath: root,
+    kvUnified: false,
+  });
 }

@@ -5,10 +5,12 @@ import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import {
   DEFAULT_OVERHEAD_BYTES,
+  deriveModelName,
   estimateVramBudget,
   kvBytesPerToken,
   maxContextFor,
   modelShape,
+  modelSlug,
   readGgufMetadata,
   tensorWeights,
 } from "../src/gguf.mjs";
@@ -325,4 +327,47 @@ test("an unreadable tensor ledger falls back to the file size rather than to zer
   // a zero weights term would report that a 12 GiB model costs nothing.
   assert.equal(tensorWeights(null, 64), null);
   assert.equal(tensorWeights([{ name: "blk.0.x", bytes: 1 }], 0), null);
+});
+
+// The model's own name comes from the header, never the path. A path is where a
+// file lives, not what the model is, and the old catalog published the whole
+// "D:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf" string as the picker name.
+//
+// general.name is the primary source and the one field every GGUF carries. The
+// raw basename is the fallback: appending a size would double-count a size an
+// export already stitched into the basename ("Qwen3.8-27B 27B"). The filename
+// stem is the last resort for a file that declares nothing.
+test("a model is named by its header, not by its path or a doubled basename", () => {
+  assert.equal(deriveModelName({ meta: { "general.name": "Qwen3.8-27B" } }), "Qwen3.8-27B");
+  // A basename that already carries the size must not be re-appended.
+  assert.equal(
+    deriveModelName({
+      meta: {
+        "general.basename": "Qwen3.8-27B",
+        "general.size_label": "27B",
+      },
+    }),
+    "Qwen3.8-27B",
+    "the fallback keeps the raw basename rather than inventing a composite name",
+  );
+  // general.name wins over basename+size so a fully-declared file is stable.
+  assert.equal(
+    deriveModelName({
+      meta: {
+        "general.name": "Qwen3.8-27B",
+        "general.basename": "Qwen3.8-27B",
+        "general.size_label": "27B",
+      },
+    }),
+    "Qwen3.8-27B",
+  );
+  // A file with neither name field falls back to its stem (no path, no .gguf).
+  assert.equal(deriveModelName({ meta: {}, file: "D:\\models\\qwen-ud-Q4_K_XL.gguf" }), "qwen-ud-Q4_K_XL");
+});
+
+test("modelSlug is identifier-safe and collapses repeated separators", () => {
+  assert.equal(modelSlug("Qwen3.8 27B 0814"), "Qwen3.8_27B_0814");
+  assert.equal(modelSlug("  Qwen3.8-27B  "), "Qwen3.8-27B");
+  assert.equal(modelSlug(""), "");
+  assert.equal(modelSlug("llama-3.1 70b  (instruct)"), "llama-3.1_70b_instruct");
 });

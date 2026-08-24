@@ -16,6 +16,7 @@
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
     "probe:live": "node scripts/live-probe.mjs",
+    "probe:local": "node scripts/local-host-live-probe.mjs",
     "build": "node scripts/build.mjs",
     "build:stt:mac": "sh scripts/build-stt-mac.sh",
     "shot": "node scripts/shot.mjs"

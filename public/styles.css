@@ -748,6 +748,9 @@ body { padding-left: 88px; }
 .roster-metric-requests .roster-metric-track i { background: #4f9dff; }
 .roster-metric-tps .roster-metric-track i { background: #63d4df; }
 .roster-metric-cache .roster-metric-track i { background: #a88bff; }
+.roster-metric-requests .roster-metric-value { color: #4f9dff; }
+.roster-metric-tps .roster-metric-value { color: #63d4df; }
+.roster-metric-cache .roster-metric-value { color: #a88bff; }
 .roster-metric-value { min-width: 64px; color: var(--text); font: 600 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .roster-parked .roster-metric-value { color: var(--muted); }
 .roster-parked .roster-metric-track { opacity: .5; }

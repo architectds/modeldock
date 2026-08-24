@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
 import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 import { baseInstructionsFor } from "../src/catalog.mjs";
+import { applyLocalEngineProfile } from "../src/profiles.mjs";
 import {
   RouteAffinity,
   adaptImageUrlShape,
@@ -1349,6 +1350,51 @@ test("relayResponses keeps speak, hear, and request_user_input for small-context
     assert.ok(!names.includes("mcp__node_repl__js"), "node_repl stays stripped");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("managed llama dispatch pins the selected hot slot on the real upstream wire", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen3.8:27b", contextWindow: 200_000 }],
+  });
+  globalThis.fetch = async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return summaryResponse("ok");
+  };
+  try {
+    const model = "qwen3.8:27b@llamacpp";
+    const dispatched = [];
+    const services = {
+      ...compactServices(),
+      mainModel: model,
+      config: { ...configStub(), mainModel: model, profileId: "llamacpp" },
+      knownModels: new Set([model]),
+      incomingHeaders: { "x-codex-session-id": "session-managed" },
+      requestUrl: "/v1/responses",
+      localHostRuntime: {
+        async run({ sessionId, run }) {
+          dispatched.push(sessionId);
+          return run({ slot: 1, cache: { tier: "ssd" } });
+        },
+      },
+    };
+    const result = await relayResponses({
+      model,
+      stream: false,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    }, res, services);
+    assert.equal(result.ok, true);
+    assert.deepEqual(dispatched, ["session-managed"]);
+    assert.equal(calls[0].id_slot, 1);
+    assert.equal(calls[0].model, "qwen3.8:27b");
+  } finally {
+    globalThis.fetch = originalFetch;
+    applyLocalEngineProfile("llamacpp", null);
   }
 });
 

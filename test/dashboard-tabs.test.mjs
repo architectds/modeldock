@@ -19,7 +19,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
+import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -85,8 +86,30 @@ async function startDashboard(t) {
     addedAt: "2026-01-01T00:00:00.000Z",
   }], null, 2));
   services.engineLogDir = path.join(dir, "engine-logs");
-  // Nothing on this machine, so the page renders the same on every runner.
-  services.discoverEngines = async () => [];
+  // A connected, observed llama.cpp host lets the browser prove that the page
+  // displays gateway routing separately from the ungranted host-control
+  // authority. The server is not real: discovery is injected, so no test ever
+  // touches a developer's engine or GPU.
+  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
+  });
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
+  });
+  t.after(() => applyLocalEngineProfile("llamacpp", null));
+  services.discoverEngines = async () => [{
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: "http://127.0.0.1:11435",
+    port: 11435,
+    models: ["qwen3.8:27b"],
+    connectable: true,
+    binary: "D:/llama-cpp/llama-server.exe",
+    cmdline: "D:/llama-cpp/llama-server.exe -m D:/models/qwen.gguf -c 262144 --parallel 1 --port 11435",
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+  }];
   services.probeGpus = async () => [];
 
   const { app } = createApp(services);
@@ -278,6 +301,33 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       .map((b) => b.id || b.className))`));
     assert.deepEqual(nameless, [], `#${tab} has controls with no accessible name`);
   }
+
+  // A connection publishes models to the gateway but must not silently grant
+  // lifecycle control. This opens the actual drawer and reads rendered text,
+  // rather than only importing the functions that calculate it.
+  await evaluate(`location.hash = '#local'`);
+  await sleep(400);
+  await evaluate(`document.getElementById('llamacpp-configure').click()`);
+  await sleep(200);
+  const hostControl = JSON.parse(await evaluate(`JSON.stringify({
+    visible: !document.getElementById('local-host-control').hidden,
+    gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
+    control: document.getElementById('local-host-management-state').textContent.trim(),
+    // The takeover action lives on the drawer's bottom primary in "manage"
+    // mode - the standalone "Manage this host" button asked the drawer's own
+    // question a second time and was removed.
+    saveMode: document.getElementById('local-config-save').dataset.mode,
+    saveLabel: document.getElementById('local-config-save').textContent.trim(),
+    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+  })`));
+  assert.deepEqual(hostControl, {
+    visible: true,
+    gateway: "Gateway connection: connected. ModelDock can route requests to this local server.",
+    control: "Host control: user-owned. ModelDock cannot restart this server or manage its SSD KV state.",
+    saveMode: "manage",
+    saveLabel: "Save and Manage",
+    leaveVisible: false,
+  }, "a connected local server stays user-owned until the user explicitly enables host control");
 
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
