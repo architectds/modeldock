@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { admissionBudgetFromCapacity, catalogContextFromCapacity, createLocalHostCapacityContract } from "../src/local-host-capacity.mjs";
+import {
+  admissionBudgetFromCapacity,
+  catalogContextFromCapacity,
+  createLocalHostCapacityContract,
+  createLocalHostCapacityFromLaneProfile,
+} from "../src/local-host-capacity.mjs";
 
 const CONTRACT = {
   adapterId: "llamacpp-nvidia",
@@ -11,7 +16,7 @@ const CONTRACT = {
   maxActiveRequests: 1,
 };
 
-test("a calibrated capacity contract publishes a single-request catalog window with output reserve", () => {
+test("a selected capacity contract publishes a single-request catalog window with output reserve", () => {
   const contract = createLocalHostCapacityContract(CONTRACT);
   const catalog = catalogContextFromCapacity(contract);
   const admission = admissionBudgetFromCapacity(contract);
@@ -36,4 +41,22 @@ test("Apple MLX can carry a measured capacity contract without inventing an MLX 
   const mlx = createLocalHostCapacityContract({ ...CONTRACT, adapterId: "mlx-apple", profileId: "validated-on-apple-host" });
   assert.equal(mlx.adapterId, "mlx-apple");
   assert.equal(mlx.profileId, "validated-on-apple-host");
+});
+
+test("a selected static lane profile is published as one honest catalog window", () => {
+  const capacity = createLocalHostCapacityFromLaneProfile({
+    adapterId: "llamacpp-nvidia",
+    modelId: "qwen3.8:27b",
+    profileId: "static-p2-c200000",
+    laneCount: 2,
+    laneContextTokens: 200_000,
+    totalContextTokens: 400_000,
+  }, { outputReserveTokens: 16_000 });
+  assert.equal(capacity.maxSingleRequestTokens, 200_000);
+  assert.equal(capacity.maxActiveRequests, 2);
+  assert.deepEqual(catalogContextFromCapacity(capacity), {
+    context_window: 200_000,
+    max_context_window: 200_000,
+    auto_compact_token_limit: 147_200,
+  });
 });

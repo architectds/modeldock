@@ -1,11 +1,17 @@
-// Single-slot session coordination for explicit SSD KV states.
+// Managed llama.cpp conversation coordination.
 //
-// It sits above llama.cpp's slot endpoint and below the Responses relay. The
-// coordinator does not alter request JSON: after an exact restore miss it lets
-// the normal, complete Codex history perform a cold prefill.
+// Codex keeps the authoritative conversation JSON. This layer owns only which
+// fixed llama slot is hot, whether an inactive slot has an SSD checkpoint, and
+// fair admission when more conversations are active than the selected profile
+// can serve. A cache fault always degrades to a complete cold prefill.
 
 import { kvSessionKey } from "./local-host-kv-state.mjs";
 import { LocalHostScheduler } from "./local-host-scheduler.mjs";
+import {
+  completeLocalHostResidency,
+  createLocalHostResidency,
+  leaseLocalHostResidency,
+} from "./local-host-residency.mjs";
 
 function text(value, label) {
   const result = typeof value === "string" ? value.trim() : "";
@@ -20,31 +26,56 @@ function diagnosticMessage(error) {
 }
 
 export class LocalHostKvCoordinator {
-  #resident = null;
-  #fingerprint = "";
+  #residency;
+  #mutation = Promise.resolve();
+  #validatedFingerprint = false;
 
-  constructor({ hostId, store, slotClient, onDiagnostic = noOp } = {}) {
-    if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function") {
+  constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp } = {}) {
+    if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function" || typeof store.has !== "function") {
       throw new TypeError("A KV coordinator needs a local KV state store.");
     }
     if (!slotClient || typeof slotClient.erase !== "function") throw new TypeError("A KV coordinator needs a llama.cpp slot client.");
     if (typeof onDiagnostic !== "function") throw new TypeError("A KV coordinator diagnostic handler must be a function.");
     this.hostId = text(hostId, "A local host id");
+    this.fingerprint = text(fingerprint, "A KV host fingerprint");
     this.store = store;
     this.slotClient = slotClient;
+    this.assignSlots = Boolean(assignSlots);
     this.onDiagnostic = onDiagnostic;
-    // SSD state is the deliberate first implementation for one large slot.
-    // Multi-slot coordination needs independently verified slot assignment and
-    // stays outside this class until the adapter exposes it.
-    this.scheduler = new LocalHostScheduler({ hostId: this.hostId, maxActiveRequests: 1 });
+    this.scheduler = new LocalHostScheduler({ hostId: this.hostId, maxActiveRequests: Number(laneCount) });
+    this.#residency = createLocalHostResidency({ laneCount: Number(laneCount) });
   }
 
   snapshot() {
     return Object.freeze({
       ...this.scheduler.snapshot(),
-      resident: Boolean(this.#resident),
-      fingerprint: this.#fingerprint,
+      fingerprint: this.fingerprint,
+      slotAffinity: this.assignSlots,
+      lanes: this.#residency.lanes.map((lane) => ({ ...lane })),
+      hotCount: this.#residency.lanes.filter((lane) => lane.state === "hot").length,
     });
+  }
+
+  async waitForIdle({ timeoutMs = 30_000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const snapshot = this.scheduler.snapshot();
+      if (!snapshot.activeCount && !snapshot.pendingCount) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return false;
+  }
+
+  async #exclusive(operation) {
+    const previous = this.#mutation;
+    let release;
+    this.#mutation = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   async #diagnose(kind, error) {
@@ -55,9 +86,9 @@ export class LocalHostKvCoordinator {
     }
   }
 
-  async #clearSlot() {
+  async #erase(slot) {
     try {
-      await this.slotClient.erase({ slot: 0 });
+      await this.slotClient.erase({ slot });
       return true;
     } catch (error) {
       await this.#diagnose("slot_erase_failed", error);
@@ -65,71 +96,108 @@ export class LocalHostKvCoordinator {
     }
   }
 
-  async #saveResident() {
-    if (!this.#resident) return { saved: false, reason: "none" };
-    const resident = this.#resident;
-    this.#resident = null;
-    try {
-      return await this.store.save({ sessionKey: resident.sessionKey, fingerprint: resident.fingerprint, slot: 0 });
-    } catch (error) {
-      await this.#diagnose("slot_save_failed", error);
-      return { saved: false, reason: "save_failed" };
-    }
-  }
-
-  async #prepare({ sessionKey, fingerprint }) {
-    if (this.#fingerprint !== fingerprint) {
-      this.#resident = null;
-      this.#fingerprint = fingerprint;
-      try {
-        await this.store.invalidateExcept({ fingerprint });
-      } catch (error) {
-        await this.#diagnose("state_invalidation_failed", error);
+  async #prepare(sessionKey, signal) {
+    return this.#exclusive(async () => {
+      if (!this.#validatedFingerprint) {
+        try {
+          if (typeof this.store.gcOrphans === "function") await this.store.gcOrphans();
+          await this.store.invalidateExcept({ fingerprint: this.fingerprint });
+        } catch (error) {
+          await this.#diagnose("state_startup_cleanup_failed", error);
+        }
+        this.#validatedFingerprint = true;
       }
-      await this.#clearSlot();
-    }
-    if (this.#resident?.sessionKey === sessionKey && this.#resident.fingerprint === fingerprint) {
-      return Object.freeze({ tier: "gpu" });
-    }
-    await this.#saveResident();
-    try {
-      const restored = await this.store.restore({ sessionKey, fingerprint, slot: 0 });
-      if (restored.restored) return Object.freeze({ tier: "ssd", restoreMs: restored.restoreMs });
-      await this.#clearSlot();
-      return Object.freeze({ tier: "cold", reason: restored.reason });
-    } catch (error) {
-      await this.#diagnose("slot_restore_failed", error);
-      await this.#clearSlot();
-      return Object.freeze({ tier: "cold", reason: "restore_failed" });
-    }
+      let hasSsdState = false;
+      try {
+        hasSsdState = await this.store.has({ sessionKey, fingerprint: this.fingerprint });
+      } catch (error) {
+        await this.#diagnose("state_lookup_failed", error);
+      }
+      const lease = leaseLocalHostResidency(this.#residency, {
+        sessionKey,
+        fingerprint: this.fingerprint,
+        hasSsdState,
+      });
+      if (lease.kind === "queue") throw new Error("No local host lane became available after admission.");
+      this.#residency = lease.residency;
+      let tier = lease.kind;
+      for (const action of lease.actions) {
+        if (action.type === "use_gpu") continue;
+        if (action.type === "invalidate_ssd") {
+          try {
+            await this.store.invalidateExcept({ fingerprint: this.fingerprint });
+          } catch (error) {
+            await this.#diagnose("state_invalidation_failed", error);
+          }
+          continue;
+        }
+        if (action.type === "erase_slot") {
+          await this.#erase(action.slot);
+          continue;
+        }
+        if (action.type === "save_lru_to_ssd") {
+          try {
+            await this.store.save({ sessionKey: action.sessionKey, fingerprint: action.fingerprint, slot: action.slot, signal });
+          } catch (error) {
+            await this.#diagnose("slot_save_failed", error);
+          }
+          continue;
+        }
+        if (action.type === "restore_ssd") {
+          try {
+            const restored = await this.store.restore({ sessionKey, fingerprint: this.fingerprint, slot: action.slot, signal });
+            if (!restored.restored) {
+              tier = "cold";
+              await this.#erase(action.slot);
+            }
+          } catch (error) {
+            tier = "cold";
+            await this.#diagnose("slot_restore_failed", error);
+            await this.#erase(action.slot);
+          }
+          continue;
+        }
+        if (action.type === "cold_prefill") await this.#erase(action.slot);
+      }
+      return { slot: lease.slot, tier };
+    });
   }
 
-  async run({ principalId = "local", conversationId, fingerprint, signal, run } = {}) {
+  async #complete({ slot, sessionKey, success }) {
+    if (!this.assignSlots) return;
+    await this.#exclusive(async () => {
+      this.#residency = completeLocalHostResidency(this.#residency, {
+        slot,
+        sessionKey,
+        fingerprint: this.fingerprint,
+        success,
+      });
+      if (!success) await this.#erase(slot);
+    });
+  }
+
+  async run({ principalId = "local", conversationId, signal, run } = {}) {
     if (typeof run !== "function") throw new TypeError("A KV coordinator request needs a run function.");
     const normalizedPrincipalId = text(principalId, "A local principal id");
     const normalizedConversationId = text(conversationId, "A local conversation id");
-    const normalizedFingerprint = text(fingerprint, "A KV host fingerprint");
     const sessionKey = kvSessionKey({ principalId: normalizedPrincipalId, conversationId: normalizedConversationId });
     return this.scheduler.enqueue({
       principalId: normalizedPrincipalId,
       conversationId: normalizedConversationId,
       signal,
       run: async () => {
-        const cache = await this.#prepare({ sessionKey, fingerprint: normalizedFingerprint });
+        // Builds without request-level slot affinity can still use llama.cpp's
+        // own P-way scheduler. SSD swapping is disabled because restoring slot
+        // N and then letting the server choose another slot would corrupt the
+        // cache mapping; fair admission and complete Codex history remain safe.
+        if (!this.assignSlots) return run({ cache: { tier: "llama_auto" }, slot: null });
+        const prepared = await this.#prepare(sessionKey, signal);
         try {
-          const result = await run({ cache });
-          // Do not preserve partial state after an upstream failure or a client
-          // close. A completed response is the only safe hot prefix to carry.
-          if (result?.ok === false) {
-            this.#resident = null;
-            await this.#clearSlot();
-          } else {
-            this.#resident = { sessionKey, fingerprint: normalizedFingerprint };
-          }
+          const result = await run({ cache: { tier: prepared.tier }, slot: prepared.slot });
+          await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false });
           return result;
         } catch (error) {
-          this.#resident = null;
-          await this.#clearSlot();
+          await this.#complete({ slot: prepared.slot, sessionKey, success: false });
           throw error;
         }
       },

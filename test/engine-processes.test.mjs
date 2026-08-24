@@ -4,23 +4,17 @@ import {
   listEngineListeners,
   looksLikeEngineProcess,
   parseLlamaArgs,
-  launchBaseArgs,
-  drawerLaunchTail,
-  drawerLaunchArgs,
   parsePosixListeners,
   parsePosixProcesses,
   parseWindowsInspection,
   tokenizeCommandLine,
   launchSpecFrom,
   applyLaunchOverrides,
-  withLlamaSlotSavePath,
+  managedLlamaLaunchArgs,
 } from "../src/engine-processes.mjs";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
 // Verbatim from this machine on 2026-08-19: a llama-server the fixed candidate
@@ -344,131 +338,20 @@ test("the unified switch can be turned off as well as on", () => {
   assert.ok(!off.includes("--kv-unified"));
 });
 
-test("managed durable KV replaces only the llama.cpp slot-state path", () => {
-  const running = [
-    "-m", "D:/models/qwen.gguf", "--slot-save-path", "C:/old-cache",
-    "-c", "262144", "--parallel", "1", "--jinja", "-ngl", "999",
-  ];
-  const next = withLlamaSlotSavePath(running, "D:/ModelDock/KV/host-qwen");
-  assert.equal(next.filter((token) => token === "--slot-save-path").length, 1);
-  assert.equal(next[next.indexOf("--slot-save-path") + 1], "D:/ModelDock/KV/host-qwen");
-  for (const kept of ["-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1", "--jinja", "-ngl", "999"]) {
-    assert.ok(next.includes(kept), `${kept} was not preserved`);
-  }
-  assert.throws(() => withLlamaSlotSavePath(running, ""), /slot-state directory/);
+test("managed equal lanes write total context and disable unified KV", () => {
+  const running = ["-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1", "--kv-unified", "--jinja"];
+  const next = managedLlamaLaunchArgs(running, {
+    profile: { laneCount: 2, laneContextTokens: 200_000 },
+    slotSavePath: "D:/ModelDock/KV",
+  });
+  assert.equal(next[next.indexOf("-c") + 1], "400000");
+  assert.equal(next[next.indexOf("--parallel") + 1], "2");
+  assert.ok(next.includes("--no-kv-unified"));
+  assert.ok(!next.includes("--kv-unified"));
+  assert.equal(next[next.indexOf("--slot-save-path") + 1], "D:/ModelDock/KV");
+  assert.ok(next.includes("--jinja"));
 });
 
-// --- the drawer's preview is the line Apply runs ---------------------------
-
-// public/app.js is a browser script, so the page cannot import the module the
-// server builds launch arguments with. It carries its own copy of the tail
-// half instead, and this reads that copy out of the file and runs it. Without
-// this the two drift silently, which is exactly how the preview came to be
-// missing eight flags in the first place: nothing compared them.
-function pageFunction(name) {
-  const source = readFileSync(path.join(root, "public/app.js"), "utf8").replace(/\r\n/g, "\n");
-  const start = source.indexOf(`function ${name}(`);
-  assert.ok(start >= 0, `${name} is gone from public/app.js`);
-  const end = source.indexOf("\n}\n", start);
-  assert.ok(end > start, `${name} in public/app.js is not a top-level function any more`);
-  return source.slice(start, end + 2);
-}
-
-const REAL_ARGV = tokenizeCommandLine(REAL_CMDLINE).slice(1);
-
-test("the page's copy of the launch tail is the server's copy", () => {
-  const { tuneTail } = new Function(`${pageFunction("tuneTail")}\nreturn { tuneTail };`)();
-  for (const contextTokens of [16000, 48000, 262144]) {
-    for (const sessions of [1, 4]) {
-      for (const kvType of ["f16", "q8_0", "q4_0"]) {
-        for (const vendor of ["amd", "nvidia", "intel", undefined]) {
-          const state = { context: contextTokens, sessions, kv: kvType, ledger: { card: { vendor } } };
-          assert.deepEqual(
-            tuneTail(state),
-            drawerLaunchTail({ contextTokens, sessions, kvType, vendor }),
-            `public/app.js tuneTail drifted at ${contextTokens}/${sessions}/${kvType}/${vendor} - `
-            + "a setting was added to one half of the drawer and not the other",
-          );
-        }
-      }
-    }
-  }
-});
-
-test("what one card cannot be trusted with, another can", () => {
-  // The refusals belong to this vendor, not to the product. Quantized KV
-  // returns wrong answers on the AMD stack here, and llama.cpp disables
-  // context shifting for this model anyway - "KV cache shifting is not
-  // supported for this context, disabling KV cache shifting" is the engine's
-  // own line in the log. Neither is true of an NVIDIA card, and a rule written
-  // as "we do not do this" rather than "this card cannot" would have taken a
-  // working feature away from everyone.
-  const running = ["-m", "m.gguf", "-fa", "auto", "--context-shift", "-c", "80000", "--parallel", "1"];
-  const wants = { contextTokens: 48000, sessions: 1, kvType: "q8_0" };
-
-  const nvidia = drawerLaunchArgs(running, { ...wants, vendor: "nvidia" });
-  assert.ok(nvidia.includes("-ctk") && nvidia.includes("q8_0"), "a quantized cache is honoured");
-  assert.ok(nvidia.includes("--context-shift"), "the user's own context shifting is left alone");
-  assert.ok(!nvidia.includes("--no-context-shift"));
-
-  const amd = drawerLaunchArgs(running, { ...wants, vendor: "amd" });
-  assert.ok(!amd.includes("-ctk") && !amd.includes("-ctv"), "refused whatever the request asked for");
-  assert.ok(!amd.includes("--context-shift"), "and written off rather than left to a default");
-  assert.ok(amd.includes("--no-context-shift"));
-
-  // Everything the drawer does not own survives on both.
-  for (const argv of [nvidia, amd]) {
-    assert.ok(argv.includes("-fa") && argv.includes("auto"));
-    assert.ok(argv.includes("48000"));
-  }
-
-  // An unknown or absent vendor is not quietly treated as the restricted one.
-  for (const vendor of ["intel", "unknown", undefined]) {
-    const other = drawerLaunchArgs(running, { ...wants, vendor });
-    assert.ok(other.includes("-ctk"), `${vendor} lost its cache setting`);
-    assert.ok(other.includes("--context-shift"), `${vendor} lost its context shifting`);
-  }
-});
-
-test("base plus tail is exactly what Apply spawns", () => {
-  // The split only holds if stripping and rewriting are the same operation
-  // seen from two sides. If they ever are not, the preview is a different
-  // command from the one the button runs - which is the whole defect.
-  for (const choices of [
-    { contextTokens: 48000, sessions: 1, kvType: "f16" },
-    { contextTokens: 16000, sessions: 4, kvType: "q8_0" },
-    { contextTokens: 262144, sessions: 2, kvType: "q4_0" },
-  ]) {
-    for (const vendor of ["amd", "nvidia", "intel", undefined]) {
-      const withVendor = { ...choices, vendor };
-      assert.deepEqual(
-        [...launchBaseArgs(REAL_ARGV, { vendor }), ...drawerLaunchTail(withVendor)],
-        drawerLaunchArgs(REAL_ARGV, withVendor),
-        `preview and spawn disagree at ${JSON.stringify(withVendor)}`,
-      );
-    }
-  }
-});
-
-test("the preview keeps every flag the restart keeps", () => {
-  // The eight this engine carries that the old composed line dropped. -a is
-  // the one that bites hardest: it is the model id the engine serves under, so
-  // pasting a line without it brings the engine back under a different name
-  // and ModelDock's own connection no longer matches.
-  const base = launchBaseArgs(REAL_ARGV, { vendor: "nvidia" });
-  for (const flag of ["-a", "-fa", "--context-shift", "--reasoning-budget", "-ngl", "--jinja", "-t", "-mg", "-sm"]) {
-    assert.ok(base.includes(flag), `${flag} is not in the line the drawer shows`);
-  }
-  // And none of the five the drawer decides, because it appends those itself.
-  for (const flag of ["-c", "--ctx-size", "-np", "--parallel", "-ctk", "-ctv", "--kv-unified", "--no-kv-unified"]) {
-    assert.ok(!base.includes(flag), `${flag} would appear twice`);
-  }
-});
-
-// Two processes can hold one port number on different local addresses, and the
-// process table does not promise an order. Keeping whichever row arrived first
-// files the port under a pid that is not answering on it - and that pid is what
-// /api/local/apply signals, so the wrong engine gets stopped.
 test("a port held on two addresses is filed under the one this gateway reaches", async () => {
   const rows = (order) => JSON.stringify({
     listeners: order,

@@ -370,51 +370,6 @@
         </label>
         <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
         <ul id="local-warnings" class="engine-warnings" hidden></ul>
-        <div id="local-optimize" class="optimize" hidden>
-          <button id="tune-optimize" type="button" class="custom-action primary" data-i18n="tune.optimize">Optimize</button>
-          <span class="optimize-note" data-i18n="tune.optimizeNote">based on community recommendations</span>
-        </div>
-        <p id="tune-optimize-result" class="optimize-result" aria-live="polite" hidden></p>
-        <div id="local-tune" class="tune" hidden>
-          <p id="tune-unfit" class="tune-unfit" hidden></p>
-          <label class="tune-row">
-            <span class="tune-label" data-i18n="tune.context">Total context</span>
-            <input id="tune-context" type="range" min="0" max="4" step="1" />
-            <output id="tune-context-value" class="tune-value"></output>
-          </label>
-          <label class="tune-row">
-            <span class="tune-label" data-i18n="tune.sessions">Concurrent sessions</span>
-            <input id="tune-sessions" type="range" min="1" max="4" step="1" />
-            <output id="tune-sessions-value" class="tune-value"></output>
-          </label>
-          <div class="tune-row">
-            <span class="tune-label" data-i18n="tune.kv">KV precision</span>
-            <div id="tune-kv" class="tune-stops" role="radiogroup" aria-label="KV precision">
-              <button type="button" class="tune-stop" data-kv="q4_0">4</button>
-              <button type="button" class="tune-stop" data-kv="q8_0">8</button>
-              <button type="button" class="tune-stop" data-kv="f16">16</button>
-            </div>
-            <output id="tune-kv-note" class="tune-value"></output>
-          </div>
-        </div>
-        <div id="local-vram" class="vram" hidden>
-          <div class="vram-bar" role="img" aria-labelledby="local-vram-caption">
-            <span class="vram-seg is-weights" id="vram-weights"></span>
-            <span class="vram-seg is-kv" id="vram-kv"></span>
-            <span class="vram-seg is-overhead" id="vram-overhead"></span>
-            <span class="vram-seg is-headroom" id="vram-headroom"></span>
-          </div>
-          <p id="local-vram-caption" class="vram-caption"></p>
-          <p id="local-vram-advice" class="vram-advice" hidden></p>
-          <div id="tune-command" class="tune-command" hidden>
-            <p class="tune-command-label" data-i18n="tune.commandLabel">Start it with</p>
-            <code id="tune-command-text"></code>
-            <div class="custom-row tune-apply-row">
-              <button id="tune-apply" type="button" class="custom-action primary" data-i18n="tune.apply">Restart with these</button>
-              <p id="tune-apply-status" class="custom-status" aria-live="polite" hidden></p>
-            </div>
-          </div>
-        </div>
         <label class="chip-toggle" id="local-config-vision-row">
           <input id="local-config-vision" type="checkbox" />
           <span data-i18n="local.vision">Takes images</span>
@@ -426,7 +381,7 @@
           <div id="local-host-management-form">
             <label class="field">
               <div class="field-head"><span data-i18n="host.folder">SSD KV folder</span></div>
-              <input id="local-host-kv-directory" class="lang-select" type="text" spellcheck="false" value="D:\ModelDock\KV" />
+              <input id="local-host-kv-directory" class="lang-select" type="text" spellcheck="false" />
             </label>
             <label class="field">
               <div class="field-head"><span data-i18n="host.budgetLabel">SSD KV budget (GiB)</span></div>

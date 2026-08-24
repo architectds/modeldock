@@ -52,17 +52,23 @@ export function parseWindowsGpus(stdout) {
     .filter((gpu) => gpu.totalBytes > 0);
 }
 
-// `nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits`
+// Current probe format is index,uuid,name,total,used. The three-column legacy
+// form remains accepted because tests and older embedders call this parser
+// directly. Driver index and UUID survive sorting, which is required when a
+// managed tensor split accounts for each physical card independently.
 export function parseNvidiaSmi(stdout) {
   const gpus = [];
   for (const line of String(stdout || "").split(/\r?\n/)) {
     const parts = line.split(",").map((part) => part.trim());
     if (parts.length < 2 || !parts[0]) continue;
-    const total = Number(parts[1]);
+    const extended = parts.length >= 5 && /^GPU-/i.test(parts[1]);
+    const name = extended ? parts[2] : parts[0];
+    const total = Number(extended ? parts[3] : parts[1]);
     if (!Number.isFinite(total) || total <= 0) continue;
-    const used = Number(parts[2]);
+    const used = Number(extended ? parts[4] : parts[2]);
     gpus.push({
-      name: parts[0],
+      ...(extended ? { index: Number(parts[0]), uuid: parts[1] } : {}),
+      name,
       vendor: "nvidia",
       // nounits reports MiB.
       totalBytes: Math.round(total * 1024 * 1024),
@@ -113,19 +119,19 @@ export async function probeGpus({
     if (platform === "win32") {
       found.push(...parseWindowsGpus(await runCommand("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_SCRIPT], timeoutMs)));
     }
-    // nvidia-smi wins where both answer: it is the vendor's own number and it
-    // carries live usage. Merged by name so a card is not counted twice.
+    // nvidia-smi wins for the entire NVIDIA set: it is the vendor's own live
+    // enumeration. Merging by name is incorrect when two identical cards are
+    // installed (the second overwrites the first) and preserves stale registry
+    // adapters. Keep only non-NVIDIA registry rows whenever smi answered.
     const smi = parseNvidiaSmi(await runCommand(
       "nvidia-smi",
-      ["--query-gpu=name,memory.total,memory.used", "--format=csv,noheader,nounits"],
+      ["--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits"],
       timeoutMs,
     ));
-    for (const gpu of smi) {
-      const existing = found.findIndex((card) => card.name === gpu.name || card.name.includes(gpu.name));
-      if (existing >= 0) found[existing] = { ...found[existing], ...gpu };
-      else found.push(gpu);
-    }
-    return found.sort((a, b) => b.totalBytes - a.totalBytes);
+    const merged = smi.length
+      ? [...found.filter((gpu) => gpu.vendor !== "nvidia"), ...smi]
+      : found;
+    return merged.sort((a, b) => b.totalBytes - a.totalBytes);
   } catch {
     return [];
   }
@@ -139,7 +145,7 @@ export async function probeGpus({
 export function primaryGpu(gpus, { mainGpu } = {}) {
   if (!Array.isArray(gpus) || !gpus.length) return null;
   const largest = gpus[0];
-  if (!Number.isInteger(mainGpu) || mainGpu < 0 || mainGpu >= gpus.length) return largest;
-  const named = gpus[mainGpu];
+  if (!Number.isInteger(mainGpu) || mainGpu < 0) return largest;
+  const named = gpus.find((gpu) => gpu.index === mainGpu) || gpus[mainGpu];
   return named && named.totalBytes >= largest.totalBytes ? named : largest;
 }

@@ -62,11 +62,25 @@ export class LlamaCppSlotStateError extends Error {
   }
 }
 
+// Multi-GB slot states make SSD save/restore legitimately slow, so the bound
+// is generous - but it must exist: every slot call runs inside the
+// coordinator's exclusive mutation lock, and one llama.cpp request that never
+// returned wedged every later conversation on the host until the gateway was
+// restarted. The caller's signal (client disconnect) composes with this
+// deadline; erase passes no signal at all and still gets the deadline.
+const DEFAULT_SLOT_TIMEOUT_MS = 120_000;
+
 export class LlamaCppSlotStateClient {
-  constructor({ baseUrl, fetchImpl = fetch } = {}) {
+  constructor({ baseUrl, fetchImpl = fetch, timeoutMs = DEFAULT_SLOT_TIMEOUT_MS } = {}) {
     if (typeof fetchImpl !== "function") throw new TypeError("A llama.cpp slot client needs fetch.");
     this.baseUrl = llamaServerRoot(baseUrl);
     this.fetch = fetchImpl;
+    this.timeoutMs = positiveNumber(timeoutMs, "A llama.cpp slot client timeout");
+  }
+
+  #boundedSignal(signal) {
+    const deadline = AbortSignal.timeout(this.timeoutMs);
+    return signal ? AbortSignal.any([signal, deadline]) : deadline;
   }
 
   async #action(action, { slot = 0, filename, signal } = {}) {
@@ -76,7 +90,7 @@ export class LlamaCppSlotStateClient {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal,
+      signal: this.#boundedSignal(signal),
     });
     return jsonResponse(response, action);
   }

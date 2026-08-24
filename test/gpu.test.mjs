@@ -40,6 +40,22 @@ test("nvidia-smi supplies live usage the registry cannot", () => {
   assert.equal(gpus[1].usedBytes, 0);
 });
 
+test("two identical NVIDIA cards retain distinct driver identities", async () => {
+  const smi = [
+    "0, GPU-a, NVIDIA RTX 5060 Ti, 16311, 15710",
+    "1, GPU-b, NVIDIA RTX 5060 Ti, 16311, 13758",
+  ].join("\n");
+  const runCommand = async (file) => file === "nvidia-smi"
+    ? smi
+    : JSON.stringify([
+        { name: "NVIDIA RTX 5060 Ti", totalBytes: 17103323136 },
+        { name: "NVIDIA RTX 5060 Ti", totalBytes: 17103323136 },
+      ]);
+  const gpus = await probeGpus({ platform: "win32", runCommand });
+  assert.deepEqual(gpus.map((gpu) => gpu.index), [0, 1]);
+  assert.deepEqual(gpus.map((gpu) => gpu.uuid), ["GPU-a", "GPU-b"]);
+});
+
 test("a probe that fails yields no cards instead of throwing", async () => {
   for (const runCommand of [async () => "", async () => "not json", async () => { throw new Error("denied"); }]) {
     assert.deepEqual(await probeGpus({ platform: "win32", runCommand }), []);

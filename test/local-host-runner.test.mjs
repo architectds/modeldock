@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createObservedHost, markHostVerified, takeOverHost } from "../src/local-hosts.mjs";
-import { applyLocalHostPlan, verifyLocalHost } from "../src/local-host-runner.mjs";
+import { beginHostApply, createObservedHost, markHostApplying, markHostVerified, markHostVerifying, takeOverHost } from "../src/local-hosts.mjs";
+import { applyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "../src/local-host-runner.mjs";
 
 const OBSERVED = {
   id: "host-qwen",
@@ -54,23 +54,43 @@ test("takeover verification never restarts an observed process", async () => {
   assert.equal(failed.record.state, "degraded");
 });
 
+test("a degraded host that never replaced its original survives a failing drain as degraded", async () => {
+  // Reproduced live: first takeover verification failed (record degraded,
+  // activeSpec still null), a retry or release then hit a failing drain, and
+  // abortHostApply - which requires an activeSpec to return to - threw an
+  // unstructured TypeError with the record already persisted as "draining".
+  // Every later apply and unmanage refused that state until a gateway restart.
+  const degraded = (await verifyLocalHost(
+    takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE }),
+    operations({ verifyResults: [false] }),
+  )).record;
+  assert.equal(degraded.activeSpec, null, "a failed first takeover has no active specification");
+  const fake = operations({ drainError: "engine is still serving" });
+  const result = await applyLocalHostPlan(degraded, { desiredSpec: REPLACEMENT }, fake);
+  assert.equal(result.outcome, "degraded");
+  assert.equal(result.record.state, "degraded");
+  assert.equal(fake.calls.at(-1), "persist:degraded", "the durable record must not rest in draining");
+});
+
 test("runner persists each lifecycle boundary and promotes a verified replacement", async () => {
   const fake = operations();
   const result = await applyLocalHostPlan(readyHost(), { desiredSpec: REPLACEMENT, policy: "workers" }, fake);
   assert.equal(result.outcome, "applied");
   assert.equal(result.record.state, "ready");
-  assert.deepEqual(result.record.lastKnownGoodSpec, REPLACEMENT);
+  assert.deepEqual(result.record.activeSpec, REPLACEMENT);
+  assert.deepEqual(result.record.preTakeoverSpec, OBSERVED.launch);
   assert.deepEqual(fake.calls, [
     "persist:draining", "drain", "persist:applying", "stop", "start:2", "persist:verifying", "verify", "persist:ready",
   ]);
 });
 
-test("runner restores the persisted known-good launch after replacement verification fails", async () => {
+test("runner restores the immutable pre-takeover launch after replacement verification fails", async () => {
   const fake = operations({ verifyResults: [false, true] });
   const result = await applyLocalHostPlan(readyHost(), { desiredSpec: REPLACEMENT }, fake);
   assert.equal(result.outcome, "recovered");
   assert.equal(result.record.state, "ready");
-  assert.deepEqual(result.record.lastKnownGoodSpec, OBSERVED.launch);
+  assert.deepEqual(result.record.activeSpec, OBSERVED.launch);
+  assert.deepEqual(result.record.preTakeoverSpec, OBSERVED.launch);
   assert.deepEqual(result.record.desiredSpec, OBSERVED.launch);
   assert.deepEqual(fake.calls, [
     "persist:draining", "drain", "persist:applying", "stop", "start:2", "persist:verifying", "verify",
@@ -115,4 +135,16 @@ test("runner requires every injected lifecycle operation", async () => {
     () => applyLocalHostPlan(readyHost(), { desiredSpec: REPLACEMENT }, { persist: async () => {} }),
     /needs a drain operation/,
   );
+});
+
+test("boot reconciliation restores pre-takeover argv after an interrupted replacement", async () => {
+  let interrupted = beginHostApply(readyHost(), { desiredSpec: REPLACEMENT });
+  interrupted = markHostApplying(interrupted);
+  interrupted = markHostVerifying(interrupted);
+  const fake = operations({ verifyResults: [false, true] });
+  const result = await reconcileInterruptedLocalHost(interrupted, fake);
+  assert.equal(result.outcome, "recovered");
+  assert.deepEqual(result.record.activeSpec, OBSERVED.launch);
+  assert.deepEqual(result.record.preTakeoverSpec, OBSERVED.launch);
+  assert.ok(fake.calls.includes("persist:recovering"));
 });

@@ -48,3 +48,32 @@ test("slot client validates malformed successful responses instead of inventing 
   await assert.rejects(() => client.save({ filename: "a.bin" }), /saved slot bytes/);
   assert.equal(llamaServerRoot("http://localhost:11435/v1/"), "http://localhost:11435");
 });
+
+test("a slot call that never returns is bounded by the client deadline", async () => {
+  // Every slot call runs inside the coordinator's exclusive mutation lock, so
+  // before this bound existed one hung llama.cpp request queued every later
+  // conversation on the host forever - reproduced live with a stalled erase.
+  // erase passes no signal of its own, making it the exact call to pin here.
+  const client = new LlamaCppSlotStateClient({
+    baseUrl: "http://127.0.0.1:11435/v1",
+    timeoutMs: 40,
+    fetchImpl: (_url, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  });
+  await assert.rejects(() => client.erase({ slot: 0 }), (error) => error?.name === "TimeoutError");
+});
+
+test("a caller abort still wins while the deadline is pending", async () => {
+  const controller = new AbortController();
+  const client = new LlamaCppSlotStateClient({
+    baseUrl: "http://127.0.0.1:11435/v1",
+    timeoutMs: 60_000,
+    fetchImpl: (_url, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }),
+  });
+  const pending = assert.rejects(() => client.save({ filename: "a.bin", signal: controller.signal }), (error) => error?.name === "AbortError");
+  controller.abort();
+  await pending;
+});

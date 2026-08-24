@@ -6,6 +6,7 @@ import test from "node:test";
 import { createObservedHost, markHostVerified, takeOverHost } from "../src/local-hosts.mjs";
 import {
   createLocalHostRegistry,
+  LOCAL_HOST_REGISTRY_VERSION,
   readLocalHostRegistry,
   removeLocalHost,
   upsertLocalHost,
@@ -53,7 +54,7 @@ test("missing registry starts empty while corrupt or mismatched records fail clo
     assert.deepEqual(await readLocalHostRegistry(file), createLocalHostRegistry());
     await writeFile(file, "not json", "utf8");
     await assert.rejects(() => readLocalHostRegistry(file), /not valid JSON/);
-    await writeFile(file, JSON.stringify({ version: 1, hosts: { wrong: readyHost() } }), "utf8");
+    await writeFile(file, JSON.stringify({ version: LOCAL_HOST_REGISTRY_VERSION, hosts: { wrong: readyHost() } }), "utf8");
     await assert.rejects(() => readLocalHostRegistry(file), /key does not match/);
   } finally {
     await rm(dir, { recursive: true, force: true });

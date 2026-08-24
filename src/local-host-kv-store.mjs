@@ -4,9 +4,9 @@
 // chooses a conversation, changes a llama-server launch command, or forwards a
 // model request. It only persists a manifest around one adapter save/restore.
 
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   createLocalHostKvStateManifest,
   createLocalHostKvStorage,
@@ -14,6 +14,7 @@ import {
   invalidateLocalHostKvStates,
   planLocalHostKvStateWrite,
   removeLocalHostKvState,
+  sameKvStorageDirectory,
   touchLocalHostKvState,
 } from "./local-host-kv-state.mjs";
 
@@ -30,12 +31,38 @@ function stateFilePath(storage, filename) {
   return target;
 }
 
-function stateFilename(id) {
-  return `slot-${String(id).replace(/[^a-z0-9]/gi, "").toLowerCase()}.bin`;
+function hostFilePrefix(hostId) {
+  return `slot-${createHash("sha256").update(hostId).digest("hex").slice(0, 12)}-`;
+}
+
+function stateFilename(prefix, id) {
+  return `${prefix}${String(id).replace(/[^a-z0-9]/gi, "").toLowerCase()}.bin`;
 }
 
 function copy(value) {
   return structuredClone(value);
+}
+
+// LRU-fit a stored state list against a (possibly new) budget: drop the least
+// recently used states until the survivors fit. Returns null when the list is
+// too malformed to reason about, which sends the caller to quarantine instead.
+function fitStatesToBudget(states, budgetBytes) {
+  if (!Array.isArray(states)) return null;
+  let total = 0;
+  for (const state of states) {
+    const bytes = Number(state?.bytes);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) return null;
+    total += bytes;
+  }
+  const kept = [...states].sort((left, right) =>
+    String(left?.lastAccessedAt || "").localeCompare(String(right?.lastAccessedAt || "")));
+  const evicted = [];
+  while (total > budgetBytes && kept.length) {
+    const oldest = kept.shift();
+    evicted.push(oldest);
+    total -= Number(oldest.bytes);
+  }
+  return { kept, evicted };
 }
 
 export class LocalHostKvStateStore {
@@ -45,10 +72,26 @@ export class LocalHostKvStateStore {
     }
     if (typeof makeId !== "function") throw new TypeError("A local KV state store needs a state filename generator.");
     this.hostId = text(hostId, "A local host id");
+    this.filePrefix = hostFilePrefix(this.hostId);
     this.storage = createLocalHostKvStorage(storage);
     this.manifestFile = text(manifestFile, "A local KV state manifest path");
     this.slotClient = slotClient;
     this.makeId = makeId;
+  }
+
+  // A manifest this store cannot use must never brick the subsystem. Before
+  // this healed, corrupt JSON, a budget changed through unmanage -> re-manage,
+  // and a Windows path-case drift all made every load() throw forever - the
+  // SSD tier went silently dead, gcOrphans died with it, and the multi-GB
+  // files the lost manifest referenced were never reclaimed (reproduced live
+  // for all three triggers). Unusable manifests are quarantined beside the
+  // original so the evidence survives; a merely re-spelled directory or a
+  // changed budget is adopted, with LRU eviction down to the new budget.
+  async #quarantine(reason) {
+    const target = `${this.manifestFile}.corrupt-${Date.now()}`;
+    await rename(this.manifestFile, target).catch(() => {});
+    console.log(`[gate] local KV manifest quarantined to ${path.basename(target)}: ${String(reason?.message || reason)}`);
+    return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage });
   }
 
   async load() {
@@ -59,25 +102,44 @@ export class LocalHostKvStateStore {
       if (error?.code === "ENOENT") return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage });
       throw error;
     }
-    let parsed;
+    let stored;
     try {
-      parsed = JSON.parse(source);
+      stored = JSON.parse(source);
     } catch {
-      throw new TypeError("Local KV state manifest is not valid JSON.");
+      return this.#quarantine(new TypeError("Local KV state manifest is not valid JSON."));
     }
-    const manifest = createLocalHostKvStateManifest(parsed);
-    if (manifest.hostId !== this.hostId) throw new TypeError("Local KV state manifest host does not match this store.");
-    if (manifest.storage.directory !== this.storage.directory || manifest.storage.budgetBytes !== this.storage.budgetBytes) {
-      throw new TypeError("Local KV state manifest storage policy does not match this managed host.");
+    if (stored?.hostId !== this.hostId) {
+      return this.#quarantine(new TypeError("Local KV state manifest host does not match this store."));
     }
-    return manifest;
+    if (!sameKvStorageDirectory(stored?.storage?.directory, this.storage.directory)) {
+      // A genuinely different directory's manifest describes files that do not
+      // live here; adopting its entries would point restores at nothing.
+      return this.#quarantine(new TypeError("Local KV state manifest names a different storage directory."));
+    }
+    // Adopt the live storage policy (the directory's current spelling and the
+    // current budget); the stored copy of the policy is a snapshot, not a veto.
+    try {
+      return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage, states: stored?.states || [] });
+    } catch (error) {
+      const fit = fitStatesToBudget(stored?.states, this.storage.budgetBytes);
+      if (!fit) return this.#quarantine(error);
+      let manifest;
+      try {
+        manifest = createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage, states: fit.kept });
+      } catch (secondError) {
+        return this.#quarantine(secondError);
+      }
+      await this.#write(manifest);
+      await this.#removeEvicted(fit.evicted.map((state) => ({ filename: String(state?.filename || "") })));
+      return manifest;
+    }
   }
 
   async #write(manifest) {
     const normalized = createLocalHostKvStateManifest(manifest);
     const directory = path.dirname(this.manifestFile);
     const temporary = path.join(directory, `.${path.basename(this.manifestFile)}.${process.pid}.${randomUUID()}.tmp`);
-    await mkdir(directory, { recursive: true });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     try {
       await writeFile(temporary, `${JSON.stringify(normalized, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
       await rename(temporary, this.manifestFile);
@@ -105,12 +167,31 @@ export class LocalHostKvStateStore {
     return failed;
   }
 
+  async gcOrphans() {
+    const manifest = await this.load();
+    const retained = new Set(manifest.states.map((state) => state.filename));
+    await mkdir(this.storage.directory, { recursive: true, mode: 0o700 });
+    const owned = new RegExp(`^${this.filePrefix}[a-f0-9]{32}\\.bin$`, "i");
+    const removed = [];
+    const failures = [];
+    for (const entry of await readdir(this.storage.directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !owned.test(entry.name) || retained.has(entry.name)) continue;
+      try {
+        await this.#removeState(entry.name);
+        removed.push(entry.name);
+      } catch (error) {
+        failures.push({ filename: entry.name, error: String(error?.message || error) });
+      }
+    }
+    return Object.freeze({ removed: Object.freeze(removed), failures: Object.freeze(failures) });
+  }
+
   async save({ sessionKey, fingerprint, slot = 0, signal, at = new Date().toISOString() } = {}) {
-    const filename = stateFilename(this.makeId());
+    const filename = stateFilename(this.filePrefix, this.makeId());
     // The managed launch receives this same directory as --slot-save-path.
     // Create it before asking the adapter to write, rather than relying on a
     // build-specific llama.cpp mkdir behavior.
-    await mkdir(this.storage.directory, { recursive: true });
+    await mkdir(this.storage.directory, { recursive: true, mode: 0o700 });
     const saved = await this.slotClient.save({ slot, filename, signal });
     const target = stateFilePath(this.storage, filename);
     let actual;
@@ -168,6 +249,11 @@ export class LocalHostKvStateStore {
     manifest = touchLocalHostKvState(manifest, { sessionKey, fingerprint, at });
     await this.#write(manifest);
     return Object.freeze({ restored: true, state: findLocalHostKvState(manifest, { sessionKey, fingerprint }), restoreMs: restored.restoreMs });
+  }
+
+  async has({ sessionKey, fingerprint } = {}) {
+    const manifest = await this.load();
+    return Boolean(findLocalHostKvState(manifest, { sessionKey, fingerprint }));
   }
 
   async invalidateExcept({ fingerprint } = {}) {

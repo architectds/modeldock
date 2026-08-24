@@ -16,6 +16,10 @@ function normalizePrincipals(value) {
   if (!Array.isArray(value)) throw new TypeError("Sharing principals must be an array.");
   const principals = value.map((principal) => ({
     id: text(principal?.id, "A sharing principal id"),
+    // Validated and stored, but NOT yet enforced: the scheduler is plain FIFO
+    // today, so weight is a declared future contract (weighted fair admission
+    // across principals), not implemented behavior. Kept in the shape so
+    // registries written now stay valid when the scheduler learns to read it.
     weight: principal?.weight === undefined ? 1 : positiveInteger(principal.weight, "A sharing principal weight"),
   }));
   if (new Set(principals.map(({ id }) => id)).size !== principals.length) throw new TypeError("Sharing principal ids must be unique.");

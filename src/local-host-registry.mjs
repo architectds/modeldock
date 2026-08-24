@@ -3,10 +3,11 @@
 // exposes a local engine.
 
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { normalizeLocalHostRecord } from "./local-hosts.mjs";
 
-export const LOCAL_HOST_REGISTRY_VERSION = 1;
+export const LOCAL_HOST_REGISTRY_VERSION = 2;
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -74,7 +75,7 @@ export async function writeLocalHostRegistry(file, registry) {
   if (!target) throw new TypeError("A local host registry path is required.");
   const normalized = createLocalHostRegistry(registry);
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.${randomUUID()}.tmp`);
   await mkdir(directory, { recursive: true });
   try {
     await writeFile(temporary, `${JSON.stringify(normalized, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });

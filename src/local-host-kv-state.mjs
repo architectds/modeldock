@@ -85,6 +85,17 @@ function normalizeStates(states) {
   return normalized;
 }
 
+// One spelling for "is this the same storage directory": Windows paths differ
+// by case and trailing separators without naming a different place. Shared by
+// the server's takeover flow and the store's manifest adoption - when the two
+// disagreed (server compared case-insensitively, the store byte-for-byte), a
+// re-spelled path permanently bricked the store.
+export function sameKvStorageDirectory(left, right) {
+  const a = String(left || "").trim().replace(/[\\/]+$/, "");
+  const b = String(right || "").trim().replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
 export function createLocalHostKvStorage({ directory, budgetBytes } = {}) {
   return Object.freeze({
     version: LOCAL_HOST_KV_STATE_VERSION,

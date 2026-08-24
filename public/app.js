@@ -1679,24 +1679,6 @@ async function renderModelRoster() {
 // Read-only: it reports what is already listening so the user does not have to
 // know a port number. Connecting still goes through the flow that owns the
 // engine, which is why nothing here writes.
-// One decimal is the resolution that matters here: the difference between 0.4
-// and 2.1 GiB of headroom is the whole story, and a second decimal is noise.
-function gib(bytes) {
-  return (Number(bytes || 0) / 1024 ** 3).toFixed(2);
-}
-
-// Headroom below this reads as "it fitted, and then something else on the
-// desktop wanted memory". Measured: the 80K configuration left 0.40 GiB and was
-// evicted; the 52K one leaves 2.15 GiB and is not.
-const VRAM_TIGHT_BYTES = 1.5 * 1024 ** 3;
-
-function vramIsTight(vram) {
-  return Boolean(vram && vram.headroom !== null && vram.headroom < VRAM_TIGHT_BYTES);
-}
-
-// The drawer's stacked bar. Segment widths are shares of the CARD, not of the
-// total, so an over-committed configuration visibly runs past the end instead
-// of quietly rescaling to fit its own frame.
 // Warnings are keyed by code so the text lives in the translation table and
 // the server sends no prose.
 function warningText(code) {
@@ -1713,57 +1695,6 @@ function renderEngineWarnings(warnings) {
     const item = document.createElement("li");
     item.textContent = warningText(warning.code);
     box.append(item);
-  }
-}
-
-function renderVramBar(vram) {
-  const box = $("local-vram");
-  if (!box) return;
-  if (!vram?.card) {
-    box.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const card = vram.card.totalBytes || 1;
-  const pct = (bytes) => `${Math.max(0, Math.min(100, (Number(bytes || 0) / card) * 100))}%`;
-  const set = (id, bytes) => { const el = $(id); if (el) el.style.width = pct(bytes); };
-  set("vram-weights", vram.weights);
-  set("vram-kv", vram.kv);
-  set("vram-overhead", vram.overhead);
-  set("vram-headroom", Math.max(0, vram.headroom || 0));
-  box.classList.toggle("is-tight", vramIsTight(vram));
-  const caption = $("local-vram-caption");
-  if (caption) {
-    caption.textContent = "";
-    const terms = [
-      ["is-weights", t("vram.weights", { gib: gib(vram.weights) })],
-      ["is-kv", t("vram.kv", { gib: gib(vram.kv) })],
-      ["is-overhead", t("vram.overhead", { gib: gib(vram.overhead) })],
-      ["is-headroom", t("vram.headroom", { gib: gib(Math.max(0, vram.headroom || 0)) })],
-    ];
-    for (const [segment, text] of terms) {
-      const term = document.createElement("span");
-      term.className = "vram-term";
-      const swatch = document.createElement("i");
-      // The same class the bar's segment carries, so the two cannot drift:
-      // recolour a band and its entry in the legend recolours with it.
-      swatch.className = `vram-swatch ${segment}`;
-      swatch.setAttribute("aria-hidden", "true");
-      term.append(swatch, document.createTextNode(text));
-      caption.append(term);
-    }
-  }
-  // A tight configuration comes with the answer, not just the complaint.
-  const advice = $("local-vram-advice");
-  if (advice) {
-    const show = vramIsTight(vram) && vram.recommendedContext > 0 && vram.recommendedContext < vram.contextTokens;
-    advice.hidden = !show;
-    if (show) {
-      advice.textContent = t("vram.advice", {
-        now: formatContextSize(vram.contextTokens),
-        suggest: formatContextSize(vram.recommendedContext),
-      });
-    }
   }
 }
 
@@ -1792,8 +1723,16 @@ function hostControlSummary(management) {
   const cache = management.ssdState === "configured"
     ? t("host.cacheConfigured")
     : t("host.restartRequired");
+  const profile = management.profile;
+  const runtime = management.runtime;
+  const automatic = profile
+    ? `P${profile.laneCount} x ${formatContextSize(profile.laneContextTokens)} per session`
+    : "automatic profile pending";
+  const activity = runtime
+    ? `; ${runtime.hotCount || 0} hot, ${runtime.activeCount || 0} active, ${runtime.pendingCount || 0} queued`
+    : "";
   return t("host.managed", {
-    cache,
+    cache: `${automatic}; ${cache}${activity}`,
     budget: budget ? t("host.budget", { budget }) : "",
   });
 }
@@ -1858,12 +1797,12 @@ async function renderLocalEngines() {
         state.textContent = t("local.useApiPage");
       } else if (engine.connected && engine.offline) {
         item.classList.add("is-connected", "is-offline");
-        state.textContent = `Gateway: ${t("local.offline", { count: engine.connectedModels })}`;
+        state.textContent = t("local.gatewayOffline", { count: engine.connectedModels });
       } else if (engine.connected) {
         item.classList.add("is-connected");
-        state.textContent = `Gateway: ${t("local.connected", { count: engine.connectedModels })}`;
+        state.textContent = t("local.gatewayConnected", { count: engine.connectedModels });
       } else {
-        state.textContent = `Gateway: ${t("local.notConnected")}`;
+        state.textContent = t("local.gatewayNotConnected");
       }
       item.append(state);
       if (engine.engine === "llamacpp") {
@@ -2467,7 +2406,13 @@ function renderLocalHostControl(engine, found) {
   if (state) {
     state.textContent = management
       ? hostControlSummary(management)
-      : t("host.userOwned");
+      : (found?.recommendedProfile
+        ? t("host.automaticTarget", {
+            state: t("host.userOwned"),
+            lanes: found.recommendedProfile.laneCount,
+            context: formatContextSize(found.recommendedProfile.laneContextTokens),
+          })
+        : t("host.userOwned"));
   }
   const form = $("local-host-management-form");
   if (form) form.hidden = Boolean(management) || !connected;
@@ -2480,342 +2425,18 @@ function renderLocalHostControl(engine, found) {
   }
   const directory = $("local-host-kv-directory");
   if (directory && management?.cacheDirectory) directory.value = management.cacheDirectory;
+  // A platform-appropriate suggestion, not a baked-in one: the old hardcoded
+  // value="D:\ModelDock\KV" shipped a drive letter that C-only machines and
+  // every non-Windows install would submit verbatim. The dashboard runs on the
+  // same machine as the gateway, so navigator.platform names the right OS; on
+  // anything but Windows the field stays empty and the user picks a real SSD
+  // path (the server refuses non-absolute paths with a readable error).
+  if (directory && !management && !directory.value && /win/i.test(navigator.platform)) {
+    directory.value = "D:\\ModelDock\\KV";
+  }
   const budget = $("local-host-kv-budget");
   if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
 }
-
-// --- Trade-off sliders ---------------------------------------------------
-//
-// Dragging recomputes the budget in the page from coefficients the scan already
-// sent, so a drag is arithmetic rather than a round trip per pixel. The formula
-// itself stays on the server; only per-token costs cross the wire.
-//
-// The three controls do not all spend the same thing. Context and KV precision
-// both buy or release VRAM, so they move the bar. Concurrency does not: the KV
-// buffer is sized by `-c` whatever the slot count, so sessions divide a window
-// rather than enlarge a bill. It is capped instead by the floor below.
-
-// A session under this has no working room left once the per-turn fixed
-// overhead is paid - measured at 9,908 tokens of system prompt and tool
-// schemas. Four sessions in a 48K window leaves each about 2K, which is why
-// the cap exists rather than letting the control read "fine" at four.
-const SESSION_FLOOR_TOKENS = 15 * 1024;
-const KV_STOPS = ["q4_0", "q8_0", "f16"];
-
-let tuneState = null;
-
-function tuneBudget(ledger, contextTokens, kvType) {
-  const perToken = ledger.perTokenByKv?.[kvType] || ledger.perToken || 0;
-  const kv = Math.round(perToken * contextTokens);
-  const total = ledger.weights + kv + ledger.overhead;
-  const card = ledger.card?.totalBytes || 0;
-  return { ...ledger, kv, total, contextTokens, headroom: card ? card - total : null, fits: card ? total <= card : null };
-}
-
-// The rungs this precision can still afford. Cheaper KV does not shrink the
-// bar, it lengthens the ladder - which is the trade the control exists to show.
-function tuneRungs(ledger, kvType) {
-  const perToken = ledger.perTokenByKv?.[kvType] || 0;
-  const card = ledger.card?.totalBytes || 0;
-  if (!perToken || !card) return [];
-  const spare = card - ledger.minimumHeadroom - ledger.weights - ledger.overhead;
-  // Empty is an answer: this card cannot hold this model at this precision.
-  // The old fallback handed back the smallest rung anyway, which put a window
-  // the card demonstrably cannot allocate under the slider - and for a model
-  // trained below the ladder the ladder itself was empty, so `.slice(0, 1)`
-  // was empty too and `rungs[index]` reached the page as `undefined`.
-  return (ledger.contextLadder || []).filter((rung) => rung * perToken <= spare);
-}
-
-// The three settings this drawer owns, as flags. The mirror of
-// drawerLaunchTail in src/engine-processes.mjs - a test runs both and fails if
-// they drift, which is the price of the page not being able to import it.
-function tuneTail(state) {
-  // Two settings this vendor is not trusted with. The stops are already
-  // disabled here, but the line has to agree with what the server will build:
-  // it refuses them whatever the page asks for.
-  const amd = state.ledger?.card?.vendor === "amd";
-  const tail = [];
-  if (Number(state.context)) tail.push("-c", String(Number(state.context)));
-  if (Number(state.sessions)) tail.push("--parallel", String(Number(state.sessions)));
-  // f16 is llama.cpp's default, so it is expressed by writing nothing.
-  if (!amd && state.kv && state.kv !== "f16") tail.push("-ctk", String(state.kv), "-ctv", String(state.kv));
-  tail.push("--kv-unified");
-  if (amd) tail.push("--no-context-shift");
-  return tail;
-}
-
-// The line Apply would run, not a line assembled from the flags this page
-// happens to know the names of.
-//
-// It used to be the latter, and a real llama-server carries a dozen flags this
-// page has never heard of: -a, which decides the model id the engine serves
-// under and therefore whether ModelDock can still find it; -fa; --jinja;
-// -mg/-sm pinning it to one of two cards. All of them survive Apply and none
-// of them appeared here, so the label "start it with" invited the user to
-// paste a line that quietly started a different engine.
-//
-// The server now sends the engine's own argv with this drawer's settings taken
-// out, and the only thing left to do is put them back.
-function tuneCommandArgs(state) {
-  const spec = state.launch || {};
-  // No argv means the process could not be attributed, so there is nothing to
-  // preserve; what little was learned about it stands in.
-  const base = state.launchBase || [
-    ...(spec.model ? ["-m", spec.model] : []),
-    ...(spec.gpuLayers ? ["-ngl", String(spec.gpuLayers)] : []),
-    ...(spec.port ? ["--host", "127.0.0.1", "--port", String(spec.port)] : []),
-  ];
-  return [...base, ...tuneTail(state)];
-}
-
-function tuneCommand(state) {
-  const quote = (token) => (/\s/.test(token) ? `"${token}"` : token);
-  return [state.binary || "llama-server", ...tuneCommandArgs(state)].map(quote).join(" ");
-}
-
-// The settings a community sweep would pick for this card, applied to the
-// controls rather than announced in a panel: the bar reflows and the command
-// changes, which is the comparison, without claiming a speed this machine has
-// not demonstrated.
-function optimizedConfig(ledger) {
-  // Cheaper KV buys window at no quality cost worth the name - except where it
-  // is broken, which is the whole reason the stop is locked on AMD.
-  const kv = ledger.card?.vendor === "amd" ? "f16" : "q8_0";
-  const perToken = ledger.perTokenByKv?.[kv] || ledger.perToken || 0;
-  const card = ledger.card?.totalBytes || 0;
-  const spare = card - ledger.recommendedHeadroom - ledger.weights - ledger.overhead;
-  const rungs = (ledger.contextLadder || []).filter((rung) => perToken && rung * perToken <= spare);
-  return {
-    kv,
-    // A cushion, not the ceiling: the recommendation is the largest rung that
-    // still survives something else on the desktop wanting memory.
-    context: rungs.length ? rungs[rungs.length - 1] : tuneRungs(ledger, kv)[0] || 0,
-    // One session gets the whole window. Concurrency is a choice the user makes
-    // against a known cost, not something an optimizer should spend for them.
-    sessions: 1,
-  };
-}
-
-// Precision stops: unavailable on this vendor, or too expensive at the current
-// context. Locked reads "not available" and nothing more.
-function renderKvStops(stops, locked) {
-  for (const stop of stops) {
-    const kv = stop.dataset.kv;
-    const unusable = locked && kv !== "f16";
-    stop.disabled = unusable;
-    stop.classList.toggle("is-active", kv === tuneState?.kv);
-    stop.title = unusable ? t("tune.kvUnavailable") : "";
-  }
-  const note = $("tune-kv-note");
-  if (note) note.textContent = locked ? t("tune.kvLocked") : "";
-}
-
-function renderTune() {
-  const box = $("local-tune");
-  if (!box) return;
-  if (!tuneState) {
-    box.hidden = true;
-    const cmd = $("tune-command");
-    if (cmd) cmd.hidden = true;
-    const optimize = $("local-optimize");
-    if (optimize) optimize.hidden = true;
-    return;
-  }
-  box.hidden = false;
-  const optimize = $("local-optimize");
-  if (optimize) optimize.hidden = false;
-  const { ledger } = tuneState;
-
-  // Context moves between fixed rungs, so the slider indexes the ladder rather
-  // than carrying token counts. Nothing has to round.
-  const rungs = tuneRungs(ledger, tuneState.kv);
-  const locked = ledger.card?.vendor === "amd";
-  const stops = [...document.querySelectorAll("#tune-kv .tune-stop")];
-  // A precision this card could still afford a rung at. When the current one
-  // affords none, that control is the only way out of the dead end, so it
-  // stays on screen after the other two have gone.
-  const escape = !rungs.length && stops.some((stop) => {
-    if (locked && stop.dataset.kv !== "f16") return false;
-    return tuneRungs(ledger, stop.dataset.kv).length > 0;
-  });
-  const unfit = $("tune-unfit");
-  if (unfit) {
-    unfit.hidden = rungs.length > 0;
-    if (!rungs.length) unfit.textContent = escape ? t("tune.unfitKv") : t("tune.unfit");
-  }
-  for (const row of box.querySelectorAll(".tune-row")) {
-    row.hidden = !rungs.length && !(escape && row.contains($("tune-kv")));
-  }
-  if (!rungs.length) {
-    // The bar still draws, at what is actually running: it is the evidence for
-    // the sentence above it, and hiding it would leave a claim with no figure.
-    if (optimize) optimize.hidden = true;
-    renderVramBar(tuneBudget(ledger, ledger.contextTokens, tuneState.kv));
-    const dead = $("tune-command");
-    if (dead) dead.hidden = true;
-    renderKvStops(stops, locked);
-    return;
-  }
-  let index = rungs.indexOf(tuneState.context);
-  if (index < 0) {
-    // The running configuration may sit off the ladder, or above what this
-    // precision affords; fall back to the nearest rung at or below it.
-    index = Math.max(0, rungs.filter((rung) => rung <= tuneState.context).length - 1);
-    tuneState.context = rungs[index];
-  }
-  const context = $("tune-context");
-  if (context) {
-    context.max = String(Math.max(0, rungs.length - 1));
-    context.value = String(index);
-    context.disabled = rungs.length <= 1;
-  }
-  const contextValue = $("tune-context-value");
-  if (contextValue) contextValue.textContent = formatContextSize(tuneState.context);
-
-  // Sessions: capped by the floor, not by memory.
-  const maxSessions = Math.max(1, Math.floor(tuneState.context / SESSION_FLOOR_TOKENS));
-  tuneState.sessions = Math.min(tuneState.sessions, maxSessions);
-  const sessions = $("tune-sessions");
-  if (sessions) {
-    sessions.max = String(maxSessions);
-    sessions.value = String(tuneState.sessions);
-    sessions.disabled = maxSessions <= 1;
-  }
-  const sessionsValue = $("tune-sessions-value");
-  if (sessionsValue) {
-    sessionsValue.textContent = maxSessions <= 1
-      ? t("tune.sessionsOne")
-      : String(tuneState.sessions);
-  }
-
-  renderKvStops(stops, locked);
-
-  renderVramBar(tuneBudget(ledger, tuneState.context, tuneState.kv));
-
-  const command = $("tune-command");
-  const text = $("tune-command-text");
-  // Not a field-by-field comparison: the drawer refuses settings on some cards
-  // regardless of what the controls say, so an engine can differ from what a
-  // restart would produce without any control having moved. Comparing the two
-  // argvs asks the only question that matters, and cannot fall behind the set
-  // of flags the drawer owns.
-  const next = tuneCommandArgs(tuneState);
-  const changed = tuneState.launchArgs
-    ? JSON.stringify(next) !== JSON.stringify(tuneState.launchArgs)
-    : tuneState.context !== ledger.contextTokens || tuneState.kv !== (ledger.kvType || "f16");
-  if (command) command.hidden = !changed;
-  if (text && changed) text.textContent = tuneCommand(tuneState);
-}
-
-// Called when the drawer opens: a discovered engine with a ledger gets sliders
-// seeded from what it is actually running, so the first thing they show is the
-// truth rather than a default.
-function startTune(found) {
-  const ledger = found?.vram;
-  if (!ledger?.card || !ledger.perTokenByKv) {
-    tuneState = null;
-    renderTune();
-    return;
-  }
-  const optimized = $("tune-optimize-result");
-  if (optimized) optimized.hidden = true;
-  tuneState = {
-    ledger,
-    launch: found.launch || {},
-    launchArgs: found.launchArgs || null,
-    launchBase: found.launchBase || null,
-    binary: found.binary || "",
-    context: ledger.contextTokens,
-    sessions: Math.max(1, Number(found.launch?.parallel) || 1),
-    // The precision the engine is actually using. Hard-coding f16 here meant
-    // opening the drawer on a q8_0 engine, nudging only the context slider and
-    // pressing Apply silently downgraded the cache the user had chosen.
-    kv: ledger.kvType || "f16",
-  };
-  renderTune();
-}
-
-$("tune-context")?.addEventListener("input", (event) => {
-  if (!tuneState) return;
-  const rungs = tuneRungs(tuneState.ledger, tuneState.kv);
-  const picked = rungs[Number(event.target.value)];
-  if (picked) tuneState.context = picked;
-  renderTune();
-});
-$("tune-sessions")?.addEventListener("input", (event) => {
-  if (!tuneState) return;
-  tuneState.sessions = Number(event.target.value) || 1;
-  renderTune();
-});
-// Applying stops the engine and starts it again, which is the only way a
-// launch flag changes. The button says restart for that reason: the cost is
-// the point, not a detail to bury.
-$("tune-apply")?.addEventListener("click", async () => {
-  if (!tuneState) return;
-  const button = $("tune-apply");
-  const status = $("tune-apply-status");
-  const show = (text, isError) => {
-    if (!status) return;
-    status.hidden = !text;
-    status.textContent = text || "";
-    status.classList.toggle("is-error", Boolean(isError));
-  };
-  button.disabled = true;
-  show(t("tune.applying"), false);
-  try {
-    const response = await fetch("/api/local/apply", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        engine: localConfigEngine,
-        contextTokens: tuneState.context,
-        sessions: tuneState.sessions,
-        kvType: tuneState.kv,
-      }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error?.message || `Apply ${response.status}`);
-    // An engine takes a while to load a model back into memory, so the scan
-    // that proves it came back is worth waiting for rather than reporting
-    // success the moment the process was spawned.
-    show(t("tune.applyWait"), false);
-    for (let i = 0; i < 40; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      const engines = await renderLocalEngines();
-      if (engines.some((found) => found.engine === localConfigEngine)) {
-        show("", false);
-        openLocalConfig(localConfigEngine);
-        return;
-      }
-    }
-    show(t("tune.applySlow"), true);
-  } catch (error) {
-    show(error.message, true);
-  } finally {
-    button.disabled = false;
-  }
-});
-
-$("tune-optimize")?.addEventListener("click", () => {
-  if (!tuneState) return;
-  Object.assign(tuneState, optimizedConfig(tuneState.ledger));
-  renderTune();
-  // Pressing it moved three controls and nothing said so - on a configuration
-  // already at the recommendation it moved none, and the button read as dead.
-  // One line, and it is the flags themselves rather than a claim about them.
-  const result = $("tune-optimize-result");
-  if (result) {
-    result.hidden = false;
-    result.textContent = tuneTail(tuneState).join(" ");
-  }
-});
-$("tune-kv")?.addEventListener("click", (event) => {
-  const stop = event.target.closest(".tune-stop");
-  if (!stop || stop.disabled || !tuneState) return;
-  tuneState.kv = stop.dataset.kv;
-  renderTune();
-});
 
 function openLocalConfig(engine) {
   localConfigEngine = engine;
@@ -2844,10 +2465,7 @@ function openLocalConfig(engine) {
     runtime.textContent = parts.join(" · ");
     runtime.hidden = parts.length === 0;
   }
-  // The row and the drawer read one ledger, so they cannot disagree.
-  renderVramBar(found?.vram);
   renderEngineWarnings(found?.warnings);
-  startTune(found);
   renderLocalHostControl(engine, found);
   showLocalHostManageStatus("");
 
@@ -2876,7 +2494,6 @@ function closeLocalConfig() {
   const drawer = $("local-drawer");
   if (drawer) drawer.hidden = true;
   localConfigEngine = "";
-  startTune(null);
   const hostControl = $("local-host-control");
   if (hostControl) hostControl.hidden = true;
   for (const engineId of localEngineIds) paintEngineButton(engineId);

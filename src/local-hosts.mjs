@@ -11,14 +11,14 @@ export const LOCAL_HOST_ADAPTERS = Object.freeze({
     label: "llama.cpp (NVIDIA)",
     hardwareFamily: "nvidia",
     engine: "llamacpp",
-    candidateProfiles: "calibration_required",
+    profileSelection: "static_per_gpu_allocation",
   }),
   "mlx-apple": Object.freeze({
     id: "mlx-apple",
     label: "MLX (Apple)",
     hardwareFamily: "apple",
     engine: "mlx",
-    candidateProfiles: "hardware_validation_required",
+    profileSelection: "static_unified_memory_allocation",
   }),
 });
 
@@ -81,18 +81,46 @@ export function normalizeLaunchSpec(value) {
   return { binary, args: [...value.args] };
 }
 
+function normalizeLaneProfile(value) {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("A managed local host lane profile must be an object.");
+  }
+  const laneCount = Number(value.laneCount);
+  const laneContextTokens = Number(value.laneContextTokens);
+  const totalContextTokens = Number(value.totalContextTokens);
+  if (!Number.isSafeInteger(laneCount) || laneCount < 1 || laneCount > 3) {
+    throw new TypeError("A managed local host lane profile needs one through three lanes.");
+  }
+  if (!Number.isSafeInteger(laneContextTokens) || laneContextTokens <= 0) {
+    throw new TypeError("A managed local host lane profile needs a positive per-lane context.");
+  }
+  if (totalContextTokens !== laneCount * laneContextTokens) {
+    throw new TypeError("A managed local host lane profile total must equal lanes times per-lane context.");
+  }
+  const adapterId = text(value.adapterId);
+  const modelId = text(value.modelId);
+  const profileId = text(value.profileId);
+  if (!adapterId || !modelId || !profileId) throw new TypeError("A managed local host lane profile needs adapter, model, and profile ids.");
+  return copy({ ...value, adapterId, modelId, profileId, laneCount, laneContextTokens, totalContextTokens });
+}
+
 // A discovery record does not grant ModelDock authority over the process. Its
 // observed launch spec remains the comparison point even after later managed
 // configuration changes.
 export function createObservedHost({ id, adapterId, endpoint, launch, capabilities = {}, observedAt = new Date().toISOString() } = {}) {
   return {
-    version: 1,
+    version: 2,
     id: assertHostId(id),
     adapterId: assertAdapterId(adapterId),
     endpoint: text(endpoint),
     observedSpec: normalizeLaunchSpec(launch),
+    preTakeoverSpec: null,
     desiredSpec: null,
-    lastKnownGoodSpec: null,
+    activeSpec: null,
+    recoverySpec: null,
+    desiredProfile: null,
+    activeProfile: null,
     kvState: null,
     capabilities: copy(capabilities),
     policy: "automatic",
@@ -118,13 +146,17 @@ export function normalizeLocalHostRecord(record) {
     observedAt: record?.observedAt,
   });
   const state = assertState(record?.state || "observed");
+  const preTakeoverSpec = record?.preTakeoverSpec ? normalizeLaunchSpec(record.preTakeoverSpec) : null;
   const desiredSpec = record?.desiredSpec ? normalizeLaunchSpec(record.desiredSpec) : null;
-  const lastKnownGoodSpec = record?.lastKnownGoodSpec ? normalizeLaunchSpec(record.lastKnownGoodSpec) : null;
+  const activeSpec = record?.activeSpec ? normalizeLaunchSpec(record.activeSpec) : null;
+  const recoverySpec = record?.recoverySpec ? normalizeLaunchSpec(record.recoverySpec) : null;
+  const desiredProfile = normalizeLaneProfile(record?.desiredProfile);
+  const activeProfile = normalizeLaneProfile(record?.activeProfile);
   const kvState = record?.kvState ? createLocalHostKvStorage(record.kvState) : null;
-  if (state !== "observed" && !desiredSpec) {
-    throw new TypeError("A managed local host needs a desired launch specification.");
+  if (state !== "observed" && (!preTakeoverSpec || !desiredSpec)) {
+    throw new TypeError("A managed local host needs its pre-takeover and desired launch specifications.");
   }
-  if (state === "observed" && (desiredSpec || lastKnownGoodSpec)) {
+  if (state === "observed" && (preTakeoverSpec || desiredSpec || activeSpec || recoverySpec || desiredProfile || activeProfile)) {
     throw new TypeError("An observed local host cannot have managed launch specifications.");
   }
   if (state === "observed" && kvState) throw new TypeError("An observed local host cannot have managed KV state storage.");
@@ -136,11 +168,15 @@ export function normalizeLocalHostRecord(record) {
   }
   return {
     ...base,
-    version: 1,
+    version: 2,
     policy: assertPolicy(record?.policy),
     state,
+    preTakeoverSpec,
     desiredSpec,
-    lastKnownGoodSpec,
+    activeSpec,
+    recoverySpec,
+    desiredProfile,
+    activeProfile,
     kvState,
     managedAt: text(record?.managedAt),
     updatedAt: text(record?.updatedAt) || base.updatedAt,
@@ -150,15 +186,23 @@ export function normalizeLocalHostRecord(record) {
 }
 
 function managedRecord(record, patch = {}) {
+  const preTakeoverSpec = patch.preTakeoverSpec === undefined ? record.preTakeoverSpec : patch.preTakeoverSpec;
   const desiredSpec = patch.desiredSpec === undefined ? record.desiredSpec : patch.desiredSpec;
-  const lastKnownGoodSpec = patch.lastKnownGoodSpec === undefined ? record.lastKnownGoodSpec : patch.lastKnownGoodSpec;
+  const activeSpec = patch.activeSpec === undefined ? record.activeSpec : patch.activeSpec;
+  const recoverySpec = patch.recoverySpec === undefined ? record.recoverySpec : patch.recoverySpec;
+  const desiredProfile = patch.desiredProfile === undefined ? record.desiredProfile : patch.desiredProfile;
+  const activeProfile = patch.activeProfile === undefined ? record.activeProfile : patch.activeProfile;
   const kvState = patch.kvState === undefined ? record.kvState : patch.kvState;
   return {
     ...record,
     ...patch,
     observedSpec: normalizeLaunchSpec(patch.observedSpec || record.observedSpec),
+    preTakeoverSpec: preTakeoverSpec === null ? null : normalizeLaunchSpec(preTakeoverSpec),
     desiredSpec: desiredSpec === null ? null : normalizeLaunchSpec(desiredSpec),
-    lastKnownGoodSpec: lastKnownGoodSpec === null ? null : normalizeLaunchSpec(lastKnownGoodSpec),
+    activeSpec: activeSpec === null ? null : normalizeLaunchSpec(activeSpec),
+    recoverySpec: recoverySpec === null ? null : normalizeLaunchSpec(recoverySpec),
+    desiredProfile: normalizeLaneProfile(desiredProfile),
+    activeProfile: normalizeLaneProfile(activeProfile),
     kvState: kvState === null ? null : createLocalHostKvStorage(kvState),
     capabilities: copy(patch.capabilities || record.capabilities || {}),
   };
@@ -166,8 +210,9 @@ function managedRecord(record, patch = {}) {
 
 // The explicit takeover transition grants automation permission. It does not
 // restart the host; the observed running specification becomes the initial
-// desired and known-good specification only after the lifecycle runner verifies
-// it on a real host.
+// desired and active specification only after the lifecycle runner verifies it
+// on a real host. preTakeoverSpec is immutable for the lifetime of this grant:
+// every failed managed replacement returns to exactly what the user last ran.
 export function takeOverHost(record, { policy = "automatic", kvState, at = new Date().toISOString() } = {}) {
   if (assertState(record?.state) !== "observed") throw new TypeError("Only an observed host can be taken over.");
   const desired = normalizeLaunchSpec(record.observedSpec);
@@ -181,8 +226,12 @@ export function takeOverHost(record, { policy = "automatic", kvState, at = new D
   return managedRecord(record, {
     policy: assertPolicy(policy),
     state: "verifying",
+    preTakeoverSpec: desired,
     desiredSpec: desired,
-    lastKnownGoodSpec: null,
+    activeSpec: null,
+    recoverySpec: null,
+    desiredProfile: null,
+    activeProfile: null,
     kvState: storage,
     managedAt: text(at) || new Date().toISOString(),
     updatedAt: text(at) || new Date().toISOString(),
@@ -192,12 +241,14 @@ export function takeOverHost(record, { policy = "automatic", kvState, at = new D
 
 // Planning a change is distinct from applying it. The server may persist this
 // record before draining the old process, so a crash leaves an unambiguous
-// desired target and an untouched last-known-good fallback.
-export function beginHostApply(record, { desiredSpec, policy, at = new Date().toISOString() } = {}) {
+// desired target and an untouched pre-takeover fallback.
+export function beginHostApply(record, { desiredSpec, desiredProfile = null, policy, at = new Date().toISOString() } = {}) {
   const state = assertState(record?.state);
   if (!["ready", "degraded"].includes(state)) throw new TypeError(`Cannot apply a host configuration while state is ${state}.`);
   return managedRecord(record, {
     desiredSpec: normalizeLaunchSpec(desiredSpec),
+    desiredProfile: normalizeLaneProfile(desiredProfile),
+    recoverySpec: null,
     policy: policy === undefined ? record.policy : assertPolicy(policy),
     state: "draining",
     updatedAt: text(at) || new Date().toISOString(),
@@ -217,11 +268,14 @@ export function markHostVerifying(record, { at = new Date().toISOString() } = {}
   return managedRecord(record, { state: "verifying", updatedAt: text(at) || new Date().toISOString() });
 }
 
-export function markHostVerified(record, { at = new Date().toISOString() } = {}) {
+export function markHostVerified(record, { capabilities, at = new Date().toISOString() } = {}) {
   if (assertState(record?.state) !== "verifying") throw new TypeError("Only a verifying host can become ready.");
   return managedRecord(record, {
     state: "ready",
-    lastKnownGoodSpec: normalizeLaunchSpec(record.desiredSpec),
+    activeSpec: normalizeLaunchSpec(record.desiredSpec),
+    activeProfile: normalizeLaneProfile(record.desiredProfile),
+    recoverySpec: null,
+    capabilities: capabilities ? copy(capabilities) : record.capabilities,
     updatedAt: text(at) || new Date().toISOString(),
     failure: "",
     recoveryReason: "",
@@ -229,9 +283,11 @@ export function markHostVerified(record, { at = new Date().toISOString() } = {})
 }
 
 export function beginHostRecovery(record, { reason, at = new Date().toISOString() } = {}) {
-  if (!record?.lastKnownGoodSpec) throw new TypeError("A host without a known-good specification cannot recover automatically.");
+  if (!record?.preTakeoverSpec) throw new TypeError("A host without a pre-takeover specification cannot recover automatically.");
   return managedRecord(record, {
-    desiredSpec: normalizeLaunchSpec(record.lastKnownGoodSpec),
+    recoverySpec: normalizeLaunchSpec(record.desiredSpec),
+    desiredSpec: normalizeLaunchSpec(record.preTakeoverSpec),
+    desiredProfile: null,
     state: "recovering",
     updatedAt: text(at) || new Date().toISOString(),
     recoveryReason: text(reason) || "verification_failed",
@@ -243,9 +299,11 @@ export function beginHostRecovery(record, { reason, at = new Date().toISOString(
 // it merely to clean up a failed reconfiguration attempt.
 export function abortHostApply(record, { failure, at = new Date().toISOString() } = {}) {
   if (assertState(record?.state) !== "draining") throw new TypeError("Only a draining host can abandon an unapplied configuration.");
-  if (!record.lastKnownGoodSpec) throw new TypeError("A host without a known-good specification cannot abandon an apply safely.");
+  if (!record.activeSpec) throw new TypeError("A host without an active specification cannot abandon an apply safely.");
   return managedRecord(record, {
-    desiredSpec: normalizeLaunchSpec(record.lastKnownGoodSpec),
+    desiredSpec: normalizeLaunchSpec(record.activeSpec),
+    desiredProfile: normalizeLaneProfile(record.activeProfile),
+    recoverySpec: null,
     state: "ready",
     updatedAt: text(at) || new Date().toISOString(),
     failure: text(failure) || "Local host drain failed before replacement.",

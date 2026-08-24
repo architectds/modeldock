@@ -41,11 +41,30 @@ export function createLocalHostCapacityContract({
     version: 1,
     adapterId: normalizedAdapterId,
     modelId: text(modelId, "A local model id"),
-    profileId: text(profileId, "A calibrated profile id"),
+    profileId: text(profileId, "A selected profile id"),
     maxSingleRequestTokens: maximum,
     outputReserveTokens: reserve,
     maxActiveRequests: positiveInteger(maxActiveRequests, "maxActiveRequests"),
     autoCompactRatio: compactRatio,
+  });
+}
+
+// The profile calculator owns the static per-GPU arithmetic. This adapter is
+// deliberately narrow: the catalog and scheduler receive only the one honest
+// per-lane window and its fixed lane count, never total context or VRAM facts.
+export function createLocalHostCapacityFromLaneProfile(profile, {
+  outputReserveTokens,
+  autoCompactRatio = 0.8,
+} = {}) {
+  if (!profile || typeof profile !== "object") throw new TypeError("A selected local host lane profile is required.");
+  return createLocalHostCapacityContract({
+    adapterId: profile.adapterId,
+    modelId: profile.modelId,
+    profileId: profile.profileId,
+    maxSingleRequestTokens: profile.laneContextTokens,
+    outputReserveTokens,
+    maxActiveRequests: profile.laneCount,
+    autoCompactRatio,
   });
 }
 

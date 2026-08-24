@@ -3686,7 +3686,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
   });
 
-  try {
+  const relayPayload = normalizedPayload;
+  const executeRelay = async ({ slot = null } = {}) => {
+    // llama.cpp accepts id_slot as an extension to its Responses request. It is
+    // added only after provider normalization and only when the managed runtime
+    // has proven request-level slot affinity; no other upstream sees it.
+    const normalizedPayload = Number.isSafeInteger(slot) && slot >= 0
+      ? { ...relayPayload, id_slot: slot }
+      : relayPayload;
+    try {
     const routed = serializedBody({ ...normalizedPayload, model: upstreamModel });
     const upstreamBytes = routed.bytes;
     const upstream = await fetch(target.url, {
@@ -3889,6 +3897,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
     };
+    } catch (error) {
+      return relayThrowExit(res, error, { finish, resultFields: { route } });
+    }
+  };
+  try {
+    if (target.provider === "llamacpp" && services.localHostRuntime) {
+      return await services.localHostRuntime.run({ sessionId, threadId, signal, run: executeRelay });
+    }
+    return await executeRelay();
   } catch (error) {
     return relayThrowExit(res, error, { finish, resultFields: { route } });
   }
