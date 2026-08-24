@@ -1777,6 +1777,27 @@ function formatContextSize(tokens) {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : String(tokens);
 }
 
+function formatGiB(bytes) {
+  const value = Number(bytes) / 1024 ** 3;
+  return Number.isFinite(value) && value > 0 ? `${Math.round(value)} GiB` : "";
+}
+
+function hostControlSummary(management) {
+  if (!management) return t("host.userOwned");
+  if (management.state !== "ready") return t("host.state", {
+    state: management.state,
+    failure: management.failure ? ` - ${management.failure}` : "",
+  });
+  const budget = formatGiB(management.cacheBudgetBytes);
+  const cache = management.ssdState === "configured"
+    ? t("host.cacheConfigured")
+    : t("host.restartRequired");
+  return t("host.managed", {
+    cache,
+    budget: budget ? t("host.budget", { budget }) : "",
+  });
+}
+
 async function renderLocalEngines() {
   const list = $("local-engine-list");
   const note = $("local-discovery-note");
@@ -1837,14 +1858,20 @@ async function renderLocalEngines() {
         state.textContent = t("local.useApiPage");
       } else if (engine.connected && engine.offline) {
         item.classList.add("is-connected", "is-offline");
-        state.textContent = t("local.offline", { count: engine.connectedModels });
+        state.textContent = `Gateway: ${t("local.offline", { count: engine.connectedModels })}`;
       } else if (engine.connected) {
         item.classList.add("is-connected");
-        state.textContent = t("local.connected", { count: engine.connectedModels });
+        state.textContent = `Gateway: ${t("local.connected", { count: engine.connectedModels })}`;
       } else {
-        state.textContent = t("local.notConnected");
+        state.textContent = `Gateway: ${t("local.notConnected")}`;
       }
       item.append(state);
+      if (engine.engine === "llamacpp") {
+        const control = document.createElement("p");
+        control.className = "local-engine-state";
+        control.textContent = hostControlSummary(engine.management);
+        item.append(control);
+      }
       list.append(item);
     }
     if (note) note.textContent = engines.length ? "" : t("local.none");
@@ -2413,6 +2440,50 @@ const renderLocalSections = {
   vllm: (state) => renderLocalEngineState("vllm", state),
 };
 
+function showLocalHostManageStatus(message, isError = false) {
+  const status = $("local-host-manage-status");
+  if (!status) return;
+  status.hidden = !message;
+  status.textContent = message || "";
+  status.classList.toggle("is-error", Boolean(isError));
+}
+
+function renderLocalHostControl(engine, found) {
+  const control = $("local-host-control");
+  if (!control) return;
+  const supported = engine === "llamacpp";
+  control.hidden = !supported;
+  if (!supported) return;
+
+  const connected = Boolean(found && !found.offline && localConnectedState.get("llamacpp"));
+  const management = found?.management || null;
+  const gateway = $("local-host-gateway-state");
+  if (gateway) {
+    gateway.textContent = connected
+      ? t("host.gatewayConnected")
+      : t("host.gatewayNotConnected");
+  }
+  const state = $("local-host-management-state");
+  if (state) {
+    state.textContent = management
+      ? hostControlSummary(management)
+      : t("host.userOwned");
+  }
+  const form = $("local-host-management-form");
+  if (form) form.hidden = Boolean(management) || !connected;
+  const manage = $("local-host-manage");
+  if (manage) manage.disabled = !connected;
+  const release = $("local-host-unmanage");
+  if (release) {
+    release.hidden = !management;
+    release.dataset.hostId = management?.id || "";
+  }
+  const directory = $("local-host-kv-directory");
+  if (directory && management?.cacheDirectory) directory.value = management.cacheDirectory;
+  const budget = $("local-host-kv-budget");
+  if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
+}
+
 // --- Trade-off sliders ---------------------------------------------------
 //
 // Dragging recomputes the budget in the page from coefficients the scan already
@@ -2777,6 +2848,8 @@ function openLocalConfig(engine) {
   renderVramBar(found?.vram);
   renderEngineWarnings(found?.warnings);
   startTune(found);
+  renderLocalHostControl(engine, found);
+  showLocalHostManageStatus("");
 
   // Ollama publishes vision from its own model metadata, so the toggle would be
   // a control that changes nothing there.
@@ -2804,6 +2877,8 @@ function closeLocalConfig() {
   if (drawer) drawer.hidden = true;
   localConfigEngine = "";
   startTune(null);
+  const hostControl = $("local-host-control");
+  if (hostControl) hostControl.hidden = true;
   for (const engineId of localEngineIds) paintEngineButton(engineId);
 }
 
@@ -2930,6 +3005,61 @@ for (const engineId of localEngineIds) {
 
 
 $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
+
+$("local-host-manage")?.addEventListener("click", async () => {
+  if (localConfigEngine !== "llamacpp") return;
+  const directory = String($("local-host-kv-directory")?.value || "").trim();
+  const budgetGiB = Number($("local-host-kv-budget")?.value || 0);
+  if (!directory) {
+    showLocalHostManageStatus(t("host.chooseFolder"), true);
+    return;
+  }
+  if (!Number.isSafeInteger(budgetGiB) || budgetGiB < 1 || budgetGiB > 1024) {
+    showLocalHostManageStatus(t("host.chooseBudget"), true);
+    return;
+  }
+  const button = $("local-host-manage");
+  if (button) button.disabled = true;
+  showLocalHostManageStatus(t("host.verifying"));
+  try {
+    const response = await fetch("/api/local/manage", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ engine: "llamacpp", cacheDirectory: directory, cacheBudgetGiB: budgetGiB }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Manage ${response.status}`);
+    await renderLocalEngines();
+    openLocalConfig("llamacpp");
+  } catch (error) {
+    showLocalHostManageStatus(error.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+$("local-host-unmanage")?.addEventListener("click", async () => {
+  const button = $("local-host-unmanage");
+  const hostId = String(button?.dataset.hostId || "").trim();
+  if (!hostId) return;
+  if (button) button.disabled = true;
+  showLocalHostManageStatus(t("host.releasing"));
+  try {
+    const response = await fetch("/api/local/unmanage", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hostId }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Unmanage ${response.status}`);
+    await renderLocalEngines();
+    openLocalConfig("llamacpp");
+  } catch (error) {
+    showLocalHostManageStatus(error.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
 
 
 // --- xAI (Grok) subscription sign-in ---

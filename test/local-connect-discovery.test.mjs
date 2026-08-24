@@ -65,6 +65,7 @@ async function startApp(t, { discoverEngines }) {
   const services = createServices(config);
   services.discoverEngines = discoverEngines;
   services.localEnginesFile = path.join(dir, "local-engines.json");
+  services.localHostRegistryFile = path.join(dir, "local-hosts.json");
   services.engineLogDir = path.join(dir, "engine-logs");
   const { app } = createApp(services);
   const server = app.listen(0, "127.0.0.1");
@@ -110,6 +111,60 @@ test("connect attaches the port discovery found, not the profile default", async
 
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.equal(snapshot.llamacpp.baseUrl, `http://127.0.0.1:${port}/v1`, "the persisted address is the discovered one");
+});
+
+test("gateway connection and explicit host takeover stay separate", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen3.8:27b"],
+    connectable: true,
+    binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
+    cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+  };
+  const { base, services } = await startApp(t, { discoverEngines: async () => [discovered] });
+
+  const connected = await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  assert.equal(connected.status, 200);
+
+  const before = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(before.engines[0].connected, true, "the gateway route is connected");
+  assert.equal(before.engines[0].management, null, "connection did not grant process-management authority");
+
+  const managed = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: "D:/ModelDock/KV", cacheBudgetGiB: 64 }),
+  });
+  const managedBody = await managed.json();
+  assert.equal(managed.status, 200, JSON.stringify(managedBody));
+  assert.equal(managedBody.management.state, "ready");
+  assert.equal(managedBody.management.ssdState, "restart_required", "takeover itself did not restart the engine");
+  assert.equal(managedBody.management.cacheBudgetBytes, 64 * 1024 ** 3);
+
+  const after = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(after.engines[0].connected, true, "gateway connection survives takeover");
+  assert.equal(after.engines[0].management.state, "ready");
+  assert.equal(after.engines[0].management.ssdState, "restart_required");
+
+  const released = await fetch(`${base}/api/local/unmanage`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: managedBody.management.id }),
+  });
+  assert.equal(released.status, 200);
+  const finalState = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(finalState.engines[0].connected, true, "releasing authority does not disconnect the gateway route");
+  assert.equal(finalState.engines[0].management, null);
+  assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
 });
 
 test("connect says nothing is running instead of failing against a default port", async (t) => {

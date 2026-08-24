@@ -50,8 +50,11 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { estimateVramBudget, kvBytesPerToken, maxContextFor, contextLadderFor, KV_ELEMENT_BYTES, MINIMUM_HEADROOM_BYTES, RECOMMENDED_HEADROOM_BYTES } from "./gguf.mjs";
 import { primaryGpu, probeGpus, usableBytesOf } from "./gpu.mjs";
-import { drawerLaunchArgs, launchBaseArgs, spawnEngineDetached, tokenizeCommandLine, waitForEngineStop } from "./engine-processes.mjs";
+import { drawerLaunchArgs, launchBaseArgs, launchSpecFrom, spawnEngineDetached, tokenizeCommandLine, waitForEngineStop } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
+import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
+import { verifyLocalHost } from "./local-host-runner.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
@@ -114,6 +117,75 @@ function sameLocalHost(a, b) {
   } catch {
     return false;
   }
+}
+
+function managedHostId(engine, baseUrl) {
+  const type = String(engine || "").trim();
+  try {
+    const parsed = new URL(baseUrl);
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    return `${type}-${port}`;
+  } catch {
+    return "";
+  }
+}
+
+function engineSummaryKey(engine) {
+  try {
+    return `${engine?.engine || ""}:${new URL(engine?.baseUrl || "").host}`;
+  } catch {
+    return "";
+  }
+}
+
+function sameStorageDirectory(left, right) {
+  const a = String(left || "").trim().replace(/[\\/]+$/, "");
+  const b = String(right || "").trim().replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function isAbsoluteStorageDirectory(value) {
+  const directory = String(value || "").trim();
+  return path.isAbsolute(directory) || /^[a-z]:[\\/]/i.test(directory);
+}
+
+function managedHostSummary(record, engine) {
+  if (!record || record.adapterId !== "llamacpp-nvidia") return null;
+  const storage = record.kvState;
+  const launchDirectory = engine?.launch?.slotSavePath || "";
+  return {
+    id: record.id,
+    state: record.state,
+    cacheDirectory: storage?.directory || "",
+    cacheBudgetBytes: storage?.budgetBytes || 0,
+    // A takeover verifies the observed engine without disturbing it. The
+    // explicit restart that adds --slot-save-path is a later, separate action,
+    // so the UI must distinguish authority from an active cache launch.
+    ssdState: storage && sameStorageDirectory(storage.directory, launchDirectory)
+      ? "configured"
+      : "restart_required",
+    failure: record.failure || "",
+  };
+}
+
+async function localHostSummaries(engines, registryFile) {
+  let registry;
+  try {
+    registry = await readLocalHostRegistry(registryFile);
+  } catch (error) {
+    console.log(`[gate] local host registry ignored: ${error.message}`);
+    return new Map();
+  }
+  const summaries = new Map();
+  for (const engine of engines) {
+    if (engine.engine !== "llamacpp" || !engine.baseUrl) continue;
+    const record = Object.values(registry.hosts).find((candidate) => (
+      candidate.adapterId === "llamacpp-nvidia" && sameLocalHost(candidate.endpoint, engine.baseUrl)
+    ));
+    const summary = managedHostSummary(record, engine);
+    if (summary) summaries.set(engineSummaryKey(engine), summary);
+  }
+  return summaries;
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
@@ -1572,7 +1644,13 @@ export function createApp(services = createServices()) {
           offline: true,
         });
       }
-      return res.json({ engines });
+      const hostSummaries = await localHostSummaries(engines, services.localHostRegistryFile);
+      return res.json({
+        engines: engines.map((engine) => ({
+          ...engine,
+          management: hostSummaries.get(engineSummaryKey(engine)) || null,
+        })),
+      });
     } catch (error) {
       return res.status(500).json({ error: { type: "discover_failed", message: error.message } });
     }
@@ -1636,6 +1714,97 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;
       return res.status(status).json({ error: { type: error.code || "local_connect_failed", message: error.message } });
+    }
+  });
+
+  // Connecting a loopback engine gives the gateway a route. Managing it is a
+  // separate, explicit authority grant: it records an SSD KV budget and proves
+  // the currently running process, but never stops, restarts or rewrites it.
+  app.post("/api/local/manage", mutateConfig, async (req, res) => {
+    const { engine, cacheDirectory, cacheBudgetGiB } = req.body || {};
+    try {
+      if (engine !== "llamacpp") throw new LocalEngineError("engine", "Managed host control currently supports NVIDIA llama.cpp only.");
+      if (!isAbsoluteStorageDirectory(cacheDirectory)) {
+        throw new LocalEngineError("kv_directory", "Choose an absolute SSD cache directory for managed KV state.");
+      }
+      const budgetGiB = Number(cacheBudgetGiB);
+      if (!Number.isSafeInteger(budgetGiB) || budgetGiB < 1 || budgetGiB > 1024) {
+        throw new LocalEngineError("kv_budget", "Choose a whole-number SSD KV budget from 1 through 1024 GiB.");
+      }
+      const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
+      if (!snapshot?.baseUrl) {
+        throw new LocalEngineError("not_connected", "Connect this llama.cpp server to the gateway before taking over host control.");
+      }
+      const live = await (services.discoverEngines || discoverLocalEngines)({});
+      const running = live.find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, snapshot.baseUrl));
+      if (!running) throw new LocalEngineError("not_found", "The connected llama.cpp server is not answering. Start it, then take over host control.");
+      const launch = launchSpecFrom(running);
+      if (!launch) {
+        throw new LocalEngineError("not_attributable", "ModelDock cannot read this llama.cpp process command. Start it from an attributable local executable, then try again.");
+      }
+      const id = managedHostId("llamacpp", snapshot.baseUrl);
+      if (!id) throw new LocalEngineError("base", "The connected llama.cpp server has no usable local address.");
+      let registry = await readLocalHostRegistry(services.localHostRegistryFile);
+      if (registry.hosts[id]) throw new LocalEngineError("already_managed", "This llama.cpp host is already under ModelDock management. Leave management before changing its SSD budget.");
+      const observed = createObservedHost({
+        id,
+        adapterId: "llamacpp-nvidia",
+        endpoint: snapshot.baseUrl,
+        launch,
+        capabilities: {
+          model: running.launch?.model || "",
+          contextTokens: Number(running.launch?.ctxSize) || 0,
+          slots: Number(running.launch?.parallel) || 0,
+        },
+      });
+      const takenOver = takeOverHost(observed, {
+        kvState: {
+          directory: String(cacheDirectory).trim(),
+          budgetBytes: budgetGiB * 1024 ** 3,
+        },
+      });
+      const result = await verifyLocalHost(takenOver, {
+        persist: async (record) => {
+          registry = upsertLocalHost(registry, record);
+          await writeLocalHostRegistry(services.localHostRegistryFile, registry);
+        },
+        verify: async (desiredSpec) => {
+          const current = (await (services.discoverEngines || discoverLocalEngines)({}))
+            .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, snapshot.baseUrl));
+          const currentLaunch = launchSpecFrom(current);
+          return Boolean(currentLaunch && JSON.stringify(currentLaunch) === JSON.stringify(desiredSpec));
+        },
+      });
+      const status = result.outcome === "verified" ? 200 : 409;
+      recordConfigAction(metrics, "local_manage_llamacpp", { ok: status === 200 });
+      return res.status(status).json({
+        outcome: result.outcome,
+        management: managedHostSummary(result.record, running),
+        message: status === 200
+          ? "Host control is authorized. A separate verified restart will be required before SSD KV state can be used."
+          : result.failure,
+      });
+    } catch (error) {
+      recordConfigAction(metrics, "local_manage_llamacpp", { ok: false, error: error.message });
+      const status = error instanceof LocalEngineError ? 400 : 502;
+      return res.status(status).json({ error: { type: error.code || "local_manage_failed", message: error.message } });
+    }
+  });
+
+  // Releasing management revokes future ModelDock automation only. It never
+  // stops a model process, changes its argv, or deletes an SSD cache directory.
+  app.post("/api/local/unmanage", mutateConfig, async (req, res) => {
+    const id = String(req.body?.hostId || "").trim();
+    if (!id) return res.status(400).json({ error: { type: "host", message: "A managed local host id is required." } });
+    try {
+      const registry = await readLocalHostRegistry(services.localHostRegistryFile);
+      if (!registry.hosts[id]) return res.status(404).json({ error: { type: "not_managed", message: "That local host is not under ModelDock management." } });
+      await writeLocalHostRegistry(services.localHostRegistryFile, removeLocalHost(registry, id));
+      recordConfigAction(metrics, "local_unmanage", { ok: true });
+      return res.json({ released: true, hostId: id });
+    } catch (error) {
+      recordConfigAction(metrics, "local_unmanage", { ok: false, error: error.message });
+      return res.status(502).json({ error: { type: "local_unmanage_failed", message: error.message } });
     }
   });
 
