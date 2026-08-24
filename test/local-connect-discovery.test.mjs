@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
-import { readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
+import { probeLocalEngine, readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 import { parseLlamaArgs } from "../src/engine-processes.mjs";
 import { readLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
@@ -38,6 +38,17 @@ function fakeEngine({ models = [{ id: "qwen3.8:27b" }] } = {}) {
     res.end("{}");
   });
 }
+
+test("llama.cpp discovery reads live vision capability from props", async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/props")) return { ok: true, json: async () => ({ modalities: { vision: false } }) };
+    if (url.endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "qwen" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const found = await probeLocalEngine(11435, { fetchImpl, timeoutMs: 50 });
+  assert.equal(found.engine, "llamacpp");
+  assert.equal(found.supportsVision, false, "a server without --mmproj cannot remain a visual Catalog model");
+});
 
 async function startApp(t, { discoverEngines }) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-connect-discovery-"));
@@ -125,6 +136,7 @@ test("connect publishes the GGUF name and keeps the endpoint id for the wire", a
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     models: ["qwen3.8:27b"],
+    supportsVision: false,
     connectable: true,
     binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
     cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
@@ -148,6 +160,8 @@ test("connect publishes the GGUF name and keeps the endpoint id for the wire", a
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.equal(snapshot.llamacpp.models[0].id, "Qwen3.8-27B");
   assert.equal(snapshot.llamacpp.models[0].upstreamId, "qwen3.8:27b", "the persisted snapshot keeps the endpoint id for relaunch");
+  assert.equal(snapshot.llamacpp.models[0].supportsVision, false, "a stale manual vision checkbox cannot override llama.cpp's live modalities");
+  assert.equal(snapshot.llamacpp.observation.modelPath, "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", "the connected launch remains available to prefill managed setup");
 });
 
 test("connect never assigns one GGUF name to every model from a multi-model endpoint", async (t) => {
@@ -188,6 +202,7 @@ test("discovery refreshes a legacy single-model snapshot from its GGUF header", 
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     models: ["D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"],
+    supportsVision: false,
     connectable: true,
     launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
     modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
@@ -211,7 +226,7 @@ test("discovery refreshes a legacy single-model snapshot from its GGUF header", 
     id: "Qwen3.8-27B",
     label: "Qwen3.8-27B",
     upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-    supportsVision: true,
+    supportsVision: false,
     contextWindow: 262144,
   }]);
 });

@@ -153,6 +153,12 @@ function isAbsoluteStorageDirectory(value) {
   return path.isAbsolute(directory) || /^[a-z]:[\\/]/i.test(directory);
 }
 
+function llamaLaunchArgument(launch, spellings) {
+  const args = Array.isArray(launch?.args) ? launch.args : [];
+  const index = args.findIndex((value) => spellings.includes(value));
+  return index >= 0 ? String(args[index + 1] || "").trim() : "";
+}
+
 function readManagedModelFacts(file, read = readModelFacts) {
   const model = String(file || "").trim();
   if (!isAbsoluteStorageDirectory(model)) {
@@ -433,12 +439,24 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
     : "";
   const name = String(engine?.modelFacts?.modelName || "").trim();
   const slug = String(engine?.modelFacts?.modelSlug || "").trim();
-  if (!Array.isArray(saved) || saved.length !== 1 || !advertised || !name || !slug) return null;
+  if (!Array.isArray(saved) || saved.length !== 1 || !advertised) return null;
   const current = saved[0];
-  if (current.id === slug && current.label === name && current.upstreamId === advertised) return null;
+  const next = {
+    ...current,
+    ...(name && slug ? { id: slug, label: name } : {}),
+    upstreamId: advertised,
+    // llama.cpp exposes this on its live /props payload, unlike vLLM and
+    // generic OpenAI-compatible servers. It must overwrite a previous Connect
+    // observation in either direction; preserving true after --mmproj is
+    // removed is worse than showing no visual option at all.
+    ...(engine?.engine === "llamacpp" && typeof engine.supportsVision === "boolean"
+      ? { supportsVision: engine.supportsVision }
+      : {}),
+  };
+  if (JSON.stringify(current) === JSON.stringify(next)) return null;
   return {
     ...snapshot,
-    models: [{ ...current, id: slug, label: name, upstreamId: advertised }],
+    models: [next],
   };
 }
 
@@ -1801,6 +1819,7 @@ export function createApp(services = createServices()) {
         })(),
         engines: engines.map((engine) => ({
           ...engine,
+          observation: attached(engine) ? saved[engine.engine]?.observation || null : null,
           management: (() => {
             const management = hostSummaries.get(engineSummaryKey(engine)) || null;
             return management && runtimeStatus?.hostId === management.id
@@ -1846,7 +1865,16 @@ export function createApp(services = createServices()) {
       // Prove the Responses dialect before persisting, so a server that only
       // speaks /v1/chat/completions fails the connect instead of every later turn.
       await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
-      const launch = await launchSpecForPort(new URL(base).port);
+      const launch = launchSpecFrom(discovered) || await launchSpecForPort(new URL(base).port);
+      const supportsVision = engine === "llamacpp"
+        ? Boolean(discovered?.supportsVision ?? asVision)
+        : Boolean(asVision);
+      const observation = {
+        modelPath: discovered?.launch?.model || llamaLaunchArgument(launch, ["-m", "--model"]),
+        visionProjectorPath: discovered?.launch?.visionProjectorPath || llamaLaunchArgument(launch, ["--mmproj"]),
+        supportsVision,
+        observedAt: new Date().toISOString(),
+      };
       const snapshot = {
         // What started this engine, read from the process behind the port we
         // just connected to. Kept so a stopped engine can be started again as
@@ -1854,6 +1882,11 @@ export function createApp(services = createServices()) {
         launch,
         baseUrl: base,
         connectedAt: new Date().toISOString(),
+        // A Connect observation is useful input when the person next opens
+        // managed setup, but is deliberately separate from the catalog's live
+        // capability declaration. A subsequent /props scan can therefore turn
+        // off image routing without erasing the last chosen model/projector.
+        observation,
         // The endpoint advertises a raw id that is often the model file path
         // (llama.cpp serves "D:\models\Qwen3.8-...gguf"). Publishing that as the
         // picker name leaks a path and makes the catalog unreadable. When a
@@ -1866,7 +1899,7 @@ export function createApp(services = createServices()) {
         // map to one unambiguous file (including vLLM) is published as-is.
         models: listed.models.map((model) => {
           const facts = listed.models.length === 1
-            ? (services.modelFactsFor || modelFactsFor)(launch?.model)
+            ? (services.modelFactsFor || modelFactsFor)(observation.modelPath)
             : null;
           const friendly = facts?.modelName || "";
           const slug = facts?.modelSlug || "";
@@ -1874,7 +1907,7 @@ export function createApp(services = createServices()) {
             id: slug || model.id,
             upstreamId: model.id,
             label: friendly || model.label || model.id,
-            supportsVision: Boolean(asVision),
+            supportsVision,
             contextWindow: model.contextWindow,
           };
         }),
@@ -1885,7 +1918,7 @@ export function createApp(services = createServices()) {
       // Same for a local engine: the models are new to Codex.
       await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
-      return res.json({ engine, baseUrl: base, models: snapshot.models, settings: settingsPayload(services) });
+      return res.json({ engine, baseUrl: base, models: snapshot.models, observation, settings: settingsPayload(services) });
     } catch (error) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;

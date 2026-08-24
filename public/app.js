@@ -2460,13 +2460,19 @@ function renderLocalHostControl(engine, found) {
   }
   const budget = $("local-host-kv-budget");
   if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
+  const observation = found?.observation || null;
   const model = $("local-host-model-file");
   if (model && management?.modelPath) model.value = management.modelPath;
-  if (model && !management && !model.value && found?.launch?.model) model.value = found.launch.model;
+  if (model && !management && !model.value) model.value = observation?.modelPath || found?.launch?.model || "";
   const visionToggle = $("local-host-vision-enabled");
   const projector = $("local-host-vision-projector");
   if (projector && management?.visionProjectorPath) projector.value = management.visionProjectorPath;
+  if (projector && !management && !projector.value) projector.value = observation?.visionProjectorPath || found?.launch?.visionProjectorPath || "";
   if (visionToggle && management) visionToggle.checked = Boolean(management.visionProjectorPath);
+  if (visionToggle && !management && !visionToggle.dataset.observationApplied) {
+    visionToggle.checked = Boolean(observation?.supportsVision || projector?.value);
+    visionToggle.dataset.observationApplied = "true";
+  }
   const projectorRow = $("local-host-vision-projector-row");
   if (projectorRow) projectorRow.hidden = !Boolean(visionToggle?.checked);
   for (const id of ["local-host-model-browse", "local-host-vision-browse", "local-host-kv-browse"]) {
@@ -2499,6 +2505,17 @@ function openLocalConfig(engine) {
   const drawer = $("local-drawer");
   if (!drawer) return;
   const found = localDiscovery.get(engine);
+  if (engine === "llamacpp") {
+    const model = $("local-host-model-file");
+    const projector = $("local-host-vision-projector");
+    const toggle = $("local-host-vision-enabled");
+    if (model) model.value = "";
+    if (projector) projector.value = "";
+    if (toggle) {
+      toggle.checked = false;
+      delete toggle.dataset.observationApplied;
+    }
+  }
   const title = $("local-config-title");
   if (title) title.textContent = localEngineLabel(engine);
 
@@ -2595,9 +2612,16 @@ async function submitLocalConfig(action) {
     // Host is fixed: assertLocalBase refuses anything but loopback anyway, so a
     // host field could only ever be a way to be told no.
     const baseUrl = `http://127.0.0.1:${port}`;
+    const observed = localDiscovery.get(engine);
+    // Reusing the discovered endpoint lets Connect carry llama.cpp's live
+    // /props modalities into the saved observation. A manually changed port
+    // remains explicit and keeps the lightweight no-scan connect behaviour.
+    const discoveredPort = Number(observed?.port) || 0;
     body = ollama
       ? { baseUrl }
-      : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) };
+      : (discoveredPort === port
+        ? { engine, asVision: Boolean($("local-config-vision")?.checked) }
+        : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) });
   }
 
   if (save) save.disabled = true;
