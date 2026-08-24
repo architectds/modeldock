@@ -76,6 +76,7 @@ test("boot recovery may stop the durably recorded failed candidate", async () =>
       stoppedPid = pid;
       running = false;
     },
+    waitForStop: async () => true,
   });
   await operations.stop({
     activeSpec: SPEC,

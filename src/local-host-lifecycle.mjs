@@ -118,6 +118,7 @@ export function createLocalHostLifecycleOperations({
   fetchImpl = fetch,
   spawn = spawnEngineDetached,
   stopProcess = (pid) => process.kill(pid, "SIGTERM"),
+  waitForStop = waitForEngineStop,
   verifyTimeoutMs = 180_000,
   stopTimeoutMs = 30_000,
 } = {}) {
@@ -156,7 +157,7 @@ export function createLocalHostLifecycleOperations({
         throw new Error("The listener changed ownership or argv during managed restart; it was not stopped.");
       }
       stopProcess(current.pid);
-      const stopped = await waitForEngineStop({ pid: current.pid, discover, timeoutMs: stopTimeoutMs });
+      const stopped = await waitForStop({ pid: current.pid, discover, timeoutMs: stopTimeoutMs });
       if (!stopped) throw new Error("The managed llama.cpp process did not stop before the restart deadline.");
       if (current.pid === startedPid) startedPid = 0;
     },

@@ -1888,7 +1888,7 @@ export function createApp(services = createServices()) {
       if (!launch) {
         throw new LocalEngineError("not_attributable", "ModelDock cannot read this llama.cpp process command. Start it from an attributable local executable, then try again.");
       }
-      if (running.launch?.model && !path.isAbsolute(String(running.launch.model))) {
+      if (running.launch?.model && !isAbsoluteStorageDirectory(running.launch.model)) {
         throw new LocalEngineError("relative_model_path", "Host control needs an absolute model path so the exact command can be restarted and recovered safely.");
       }
       const id = managedHostId("llamacpp", snapshot.baseUrl);
