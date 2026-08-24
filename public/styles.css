@@ -716,6 +716,10 @@ body { padding-left: 88px; }
 /* The primary state paints with a gradient, which background-color cannot
    transition; border and text are what actually animate. */
 .engine-button { transition: border-color 120ms ease, color 120ms ease; }
+/* Connect becomes the longer Disconnect after a successful probe. Reserve that
+   width from the beginning so a state change never shifts the adjacent Manage
+   action or the local-engine row. */
+.engine-button[id$="-connect"] { min-width: 92px; text-align: center; }
 .local-config-card { max-width: 460px; }
 .local-config-card .local-engine-runtime { margin: 8px 0 0; }
 .local-config-actions { margin-top: 14px; }
