@@ -83,9 +83,9 @@ export async function verifyLocalHost(record, suppliedOperations) {
 // starts an engine itself. If a replacement was begun but cannot verify, it
 // attempts the persisted immutable pre-takeover specification exactly once. If drain
 // failed before the old host was stopped, it leaves that host alone.
-export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile = null, policy, afterStop } = {}, suppliedOperations) {
+export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile = null, policy, capabilities, afterStop } = {}, suppliedOperations) {
   const operations = assertOperations(suppliedOperations);
-  let current = beginHostApply(record, { desiredSpec, desiredProfile, policy });
+  let current = beginHostApply(record, { desiredSpec, desiredProfile, policy, capabilities });
   await persist(operations, current);
   let replacementStarted = false;
   try {
@@ -147,15 +147,18 @@ export async function calibrateAndApplyLocalHostPlan(record, {
   measureBaseline,
   measureCalibration,
   createFinalPlan,
+  createFinalPlans,
+  targetCapabilities,
   policy,
 } = {}, suppliedOperations) {
-  if (typeof measureBaseline !== "function" || typeof measureCalibration !== "function" || typeof createFinalPlan !== "function") {
+  if (typeof measureBaseline !== "function" || typeof measureCalibration !== "function" || (typeof createFinalPlan !== "function" && typeof createFinalPlans !== "function")) {
     throw new TypeError("Target calibration needs baseline, target, and final-plan operations.");
   }
   let baseline;
   const calibration = await applyLocalHostPlan(record, {
     desiredSpec: calibrationSpec,
     desiredProfile: calibrationProfile,
+    capabilities: targetCapabilities,
     policy,
     afterStop: async (current) => {
       baseline = await measureBaseline(current);
@@ -164,9 +167,25 @@ export async function calibrateAndApplyLocalHostPlan(record, {
   if (calibration.outcome !== "applied") return calibration;
   try {
     const target = await measureCalibration(calibration.record);
-    const final = await createFinalPlan({ baseline, target, record: calibration.record });
-    if (!final?.desiredSpec || !final?.desiredProfile) throw new TypeError("Target calibration did not produce a final managed profile.");
-    return await applyLocalHostPlan(calibration.record, { ...final, policy }, suppliedOperations);
+    const planned = typeof createFinalPlans === "function"
+      ? await createFinalPlans({ baseline, target, record: calibration.record })
+      : [await createFinalPlan({ baseline, target, record: calibration.record })];
+    const finals = Array.isArray(planned) ? planned : [];
+    if (!finals.length || finals.some((final) => !final?.desiredSpec || !final?.desiredProfile)) {
+      throw new TypeError("Target calibration did not produce a final managed profile.");
+    }
+    let current = calibration.record;
+    let last = null;
+    for (const final of finals) {
+      const attempted = await applyLocalHostPlan(current, { ...final, capabilities: targetCapabilities, policy }, suppliedOperations);
+      if (attempted.outcome === "applied") return attempted;
+      if (attempted.outcome !== "recovered") return attempted;
+      // A failed final load has restored the immutable user command. That is
+      // the safe known-good starting point for a smaller target candidate.
+      current = attempted.record;
+      last = attempted;
+    }
+    return last || { outcome: "recovered", record: current, failure: "No final managed profile verified." };
   } catch (error) {
     const failure = failureText(error);
     try {

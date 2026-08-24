@@ -48,6 +48,28 @@ function copy(value) {
   return structuredClone(value);
 }
 
+function launchOption(spec, flags) {
+  const args = Array.isArray(spec?.args) ? spec.args : [];
+  for (let index = 0; index < args.length; index += 1) {
+    if (!flags.includes(args[index])) continue;
+    const value = args[index + 1];
+    return typeof value === "string" ? value : "";
+  }
+  return "";
+}
+
+function recoveredCapabilities(record) {
+  const saved = record.preTakeoverCapabilities || record.capabilities || {};
+  // Older durable records did not retain a capability snapshot. The original
+  // argv is still authoritative for the one capability that changes whether
+  // /props can verify: do not require a failed target projector of a text-only
+  // pre-takeover command.
+  return {
+    ...copy(saved),
+    visionProjectorPath: launchOption(record.preTakeoverSpec, ["--mmproj"]),
+  };
+}
+
 function assertHostId(value) {
   const id = text(value);
   if (!id) throw new TypeError("A local host id is required.");
@@ -116,6 +138,7 @@ export function createObservedHost({ id, adapterId, endpoint, launch, capabiliti
     endpoint: text(endpoint),
     observedSpec: normalizeLaunchSpec(launch),
     preTakeoverSpec: null,
+    preTakeoverCapabilities: null,
     desiredSpec: null,
     activeSpec: null,
     recoverySpec: null,
@@ -147,6 +170,7 @@ export function normalizeLocalHostRecord(record) {
   });
   const state = assertState(record?.state || "observed");
   const preTakeoverSpec = record?.preTakeoverSpec ? normalizeLaunchSpec(record.preTakeoverSpec) : null;
+  const preTakeoverCapabilities = record?.preTakeoverCapabilities ? copy(record.preTakeoverCapabilities) : null;
   const desiredSpec = record?.desiredSpec ? normalizeLaunchSpec(record.desiredSpec) : null;
   const activeSpec = record?.activeSpec ? normalizeLaunchSpec(record.activeSpec) : null;
   const recoverySpec = record?.recoverySpec ? normalizeLaunchSpec(record.recoverySpec) : null;
@@ -172,6 +196,7 @@ export function normalizeLocalHostRecord(record) {
     policy: assertPolicy(record?.policy),
     state,
     preTakeoverSpec,
+    preTakeoverCapabilities,
     desiredSpec,
     activeSpec,
     recoverySpec,
@@ -187,6 +212,7 @@ export function normalizeLocalHostRecord(record) {
 
 function managedRecord(record, patch = {}) {
   const preTakeoverSpec = patch.preTakeoverSpec === undefined ? record.preTakeoverSpec : patch.preTakeoverSpec;
+  const preTakeoverCapabilities = patch.preTakeoverCapabilities === undefined ? record.preTakeoverCapabilities : patch.preTakeoverCapabilities;
   const desiredSpec = patch.desiredSpec === undefined ? record.desiredSpec : patch.desiredSpec;
   const activeSpec = patch.activeSpec === undefined ? record.activeSpec : patch.activeSpec;
   const recoverySpec = patch.recoverySpec === undefined ? record.recoverySpec : patch.recoverySpec;
@@ -198,6 +224,7 @@ function managedRecord(record, patch = {}) {
     ...patch,
     observedSpec: normalizeLaunchSpec(patch.observedSpec || record.observedSpec),
     preTakeoverSpec: preTakeoverSpec === null ? null : normalizeLaunchSpec(preTakeoverSpec),
+    preTakeoverCapabilities: preTakeoverCapabilities === null ? null : copy(preTakeoverCapabilities),
     desiredSpec: desiredSpec === null ? null : normalizeLaunchSpec(desiredSpec),
     activeSpec: activeSpec === null ? null : normalizeLaunchSpec(activeSpec),
     recoverySpec: recoverySpec === null ? null : normalizeLaunchSpec(recoverySpec),
@@ -227,6 +254,7 @@ export function takeOverHost(record, { policy = "automatic", kvState, at = new D
     policy: assertPolicy(policy),
     state: "verifying",
     preTakeoverSpec: desired,
+    preTakeoverCapabilities: copy(record.capabilities),
     desiredSpec: desired,
     activeSpec: null,
     recoverySpec: null,
@@ -242,13 +270,14 @@ export function takeOverHost(record, { policy = "automatic", kvState, at = new D
 // Planning a change is distinct from applying it. The server may persist this
 // record before draining the old process, so a crash leaves an unambiguous
 // desired target and an untouched pre-takeover fallback.
-export function beginHostApply(record, { desiredSpec, desiredProfile = null, policy, at = new Date().toISOString() } = {}) {
+export function beginHostApply(record, { desiredSpec, desiredProfile = null, policy, capabilities, at = new Date().toISOString() } = {}) {
   const state = assertState(record?.state);
   if (!["ready", "degraded"].includes(state)) throw new TypeError(`Cannot apply a host configuration while state is ${state}.`);
   return managedRecord(record, {
     desiredSpec: normalizeLaunchSpec(desiredSpec),
     desiredProfile: normalizeLaneProfile(desiredProfile),
     recoverySpec: null,
+    capabilities: capabilities === undefined ? record.capabilities : copy(capabilities),
     policy: policy === undefined ? record.policy : assertPolicy(policy),
     state: "draining",
     updatedAt: text(at) || new Date().toISOString(),
@@ -288,6 +317,7 @@ export function beginHostRecovery(record, { reason, at = new Date().toISOString(
     recoverySpec: normalizeLaunchSpec(record.desiredSpec),
     desiredSpec: normalizeLaunchSpec(record.preTakeoverSpec),
     desiredProfile: null,
+    capabilities: recoveredCapabilities(record),
     state: "recovering",
     updatedAt: text(at) || new Date().toISOString(),
     recoveryReason: text(reason) || "verification_failed",

@@ -63,6 +63,22 @@ test("ready llama.cpp fails immediately on a slot or visual-capability mismatch"
   );
 });
 
+test("a launched llama.cpp process that exits fails verification without waiting for the full deadline", async () => {
+  const operations = createLocalHostLifecycleOperations({
+    hostId: "llamacpp-11435",
+    endpoint: "http://127.0.0.1:11435/v1",
+    registryFile: "D:/state/local-hosts.json",
+    discover: async () => [],
+    spawn: () => ({ pid: 999_999_999 }),
+    verifyTimeoutMs: 10_000,
+  });
+  await operations.start(SPEC);
+  await assert.rejects(
+    () => operations.verify(SPEC, { desiredProfile: null }),
+    /newly launched llama\.cpp process exited before it served the managed endpoint/,
+  );
+});
+
 test("slot-affinity probe is bounded and requires the requested slot id back", async () => {
   let request;
   let calls = 0;

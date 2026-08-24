@@ -58,7 +58,7 @@ import {
   createCalibratedNvidiaProfileInput,
   createNvidiaProfileInput,
   LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
-  selectNvidiaProfileFromInput,
+  selectNvidiaValidationProfilesFromInput,
 } from "./local-host-nvidia.mjs";
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
@@ -487,6 +487,35 @@ function calibrationLaneProfile(target) {
     deviceIndices: target.deviceIndices,
     tensorSplit: target.tensorSplit,
   });
+}
+
+async function requireManagedGpuHeadroom(services, profile) {
+  if (!profile || String(profile.profileId || "").startsWith("calibration-")) return;
+  // CUDA can finish graph/workspace allocation just after llama.cpp starts
+  // serving /props. Sampling on the same turn would certify a profile that
+  // becomes overcommitted before its first real prompt.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const sample = await probeManagedNvidiaGpus(services);
+  const shortages = [];
+  for (const allocation of profile.gpus || []) {
+    const gpu = sample.find((candidate, index) => {
+      const id = candidate?.uuid || `nvidia-${Number.isInteger(candidate?.index) ? candidate.index : index}`;
+      return id === allocation.id;
+    });
+    const total = Number(gpu?.totalBytes);
+    const used = Number(gpu?.usedBytes);
+    const reportedFree = Number(gpu?.freeBytes);
+    const free = Number.isSafeInteger(reportedFree) && reportedFree >= 0 ? reportedFree : total - used;
+    if (!Number.isSafeInteger(total) || !Number.isSafeInteger(used)) {
+      throw new Error(`Could not measure managed GPU ${allocation.id} after the target model started.`);
+    }
+    if (free < 1024 ** 3) {
+      shortages.push(`${allocation.id} has ${(Math.max(0, free) / 1024 ** 3).toFixed(2)} GiB free`);
+    }
+  }
+  if (shortages.length) {
+    throw new Error(`The managed profile did not retain the required 1 GiB GPU headroom: ${shortages.join(", ")}.`);
+  }
 }
 
 function statusPayload(services) {
@@ -2050,9 +2079,12 @@ export function createApp(services = createServices()) {
         endpoint: snapshot.baseUrl,
         launch,
         capabilities: {
-          model: modelPath,
-          modelFacts: targetModelFacts,
-          visionProjectorPath,
+          // Ownership is verified against the server that is actually alive.
+          // The selected model/projector becomes required only for the target
+          // calibration restart below.
+          model: running.launch?.model || modelPath,
+          modelFacts: running.modelFacts || targetModelFacts,
+          visionProjectorPath: running.launch?.visionProjectorPath || "",
           contextTokens: Number(running.launch?.ctxSize) || 0,
           slots: Number(running.launch?.parallel) || 0,
           gpuCount: target.gpus.length,
@@ -2074,6 +2106,19 @@ export function createApp(services = createServices()) {
         runtime: services.localHostRuntime,
         logDir: services.engineLogDir || stateFile("engine-logs"),
       });
+      // Slot shape alone is not enough. llama.cpp creates some CUDA graph and
+      // workspace allocations only at the final context size, so a target must
+      // also leave one real GiB free on every participating card after it is
+      // serving. This check turns a launch that merely bound its port into a
+      // capacity proof before it can reach the Codex catalog.
+      const verifyLifecycle = operations.verify.bind(operations);
+      operations.verify = async (spec, record) => {
+        const verification = await verifyLifecycle(spec, record);
+        if (verification === true || verification?.ok === true) {
+          await requireManagedGpuHeadroom(services, record.desiredProfile);
+        }
+        return verification;
+      };
       try {
         const authorized = await verifyLocalHost(takenOver, operations);
         if (authorized.outcome !== "verified") {
@@ -2093,6 +2138,12 @@ export function createApp(services = createServices()) {
         let result = await calibrateAndApplyLocalHostPlan(authorized.record, {
           calibrationSpec,
           calibrationProfile,
+          targetCapabilities: {
+            ...authorized.record.capabilities,
+            model: modelPath,
+            modelFacts: targetModelFacts,
+            visionProjectorPath,
+          },
           measureBaseline: async () => {
             // Give the driver one short scheduling turn after the verified stop
             // before recording Windows, display and other-process usage.
@@ -2103,21 +2154,19 @@ export function createApp(services = createServices()) {
             await new Promise((resolve) => setTimeout(resolve, 500));
             return probeManagedNvidiaGpus(services);
           },
-          createFinalPlan: async ({ baseline, target: calibrationSample }) => {
+          createFinalPlans: async ({ baseline, target: calibrationSample }) => {
             const calibrated = (services.createCalibratedNvidiaProfileInput || createCalibratedNvidiaProfileInput)({
               target,
               baselineSample: baseline,
               calibrationSample,
             });
-            const selected = (services.selectNvidiaProfileFromInput || selectNvidiaProfileFromInput)(calibrated);
-            const { candidates: _candidates, ...finalProfile } = selected;
-            profile = finalProfile;
-            return {
-              desiredProfile: profile,
+            const selected = (services.selectNvidiaValidationProfilesFromInput || selectNvidiaValidationProfilesFromInput)(calibrated);
+            return selected.map((finalProfile) => ({
+              desiredProfile: finalProfile,
               desiredSpec: {
                 binary: launch.binary,
                 args: managedLlamaLaunchArgs(launch.args, {
-                  profile,
+                  profile: finalProfile,
                   slotSavePath: String(cacheDirectory).trim(),
                   modelPath,
                   visionProjectorPath: visionProjectorPath || null,
@@ -2125,9 +2174,10 @@ export function createApp(services = createServices()) {
                   cacheTypeV: "q4_0",
                 }),
               },
-            };
+            }));
           },
         }, operations);
+        if (result.outcome === "applied") profile = result.record.activeProfile;
         if (result.outcome === "applied") {
           const requestSlotAffinity = profile.laneCount === 1 || await (services.probeLlamaRequestSlotAffinity || probeLlamaRequestSlotAffinity)({
             endpoint: snapshot.baseUrl,
@@ -2220,13 +2270,24 @@ export function createApp(services = createServices()) {
             ...record,
             desiredSpec: record.preTakeoverSpec,
             desiredProfile: null,
+            // This is the failed-first-takeover shape: the selected target
+            // never started, so its requested projector cannot be a condition
+            // for verifying and releasing the still-original argv.
+            capabilities: { ...record.capabilities, visionProjectorPath: "" },
           });
           if (!(verification === true || verification?.ok === true)) {
             throw new Error("The pre-takeover llama.cpp command is not serving and cannot be released safely.");
           }
           result = { outcome: "applied", record };
         } else {
-          result = await applyLocalHostPlan(record, { desiredSpec: record.preTakeoverSpec, desiredProfile: null }, operations);
+          result = await applyLocalHostPlan(record, {
+            desiredSpec: record.preTakeoverSpec,
+            desiredProfile: null,
+            // Releasing control restores the immutable user command. Its
+            // verification must not retain capability requirements that
+            // belonged only to a managed target which failed to start.
+            capabilities: { ...record.capabilities, visionProjectorPath: "" },
+          }, operations);
         }
         if (result.outcome !== "applied") {
           recordConfigAction(metrics, "local_unmanage", { ok: false, outcome: result.outcome });

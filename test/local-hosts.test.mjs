@@ -84,12 +84,14 @@ test("a failed replacement returns to the immutable pre-takeover spec before a h
   const original = record.preTakeoverSpec;
   record = beginHostApply(record, {
     desiredSpec: { ...OBSERVED.launch, args: [...OBSERVED.launch.args, "--bad-flag"] },
+    capabilities: { ...record.capabilities, visionProjectorPath: "D:/models/mmproj.gguf" },
   });
   record = markHostApplying(record);
   record = markHostVerifying(record);
   record = beginHostRecovery(record, { reason: "replacement_did_not_verify" });
   assert.equal(record.state, "recovering");
   assert.deepEqual(record.desiredSpec, original);
+  assert.equal(record.capabilities.visionProjectorPath, "", "recovery verifies the original argv, not a failed target projector");
   assert.match(record.recoverySpec.args.at(-1), /bad-flag/, "the failed candidate remains authorized across a supervisor crash");
   const degraded = markHostDegraded(record, { failure: "known-good process would not start" });
   assert.equal(degraded.state, "degraded");

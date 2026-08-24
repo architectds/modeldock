@@ -9,6 +9,7 @@ import path from "node:path";
 import { KV_ELEMENT_BYTES } from "./gguf.mjs";
 import {
   LOCAL_HOST_MIN_HEADROOM_BYTES,
+  localHostLaneValidationCandidates,
   selectLocalHostLaneProfile,
 } from "./local-host-profile.mjs";
 
@@ -187,4 +188,16 @@ export function selectNvidiaProfileFromInput(input) {
     deviceIndices: input.deviceIndices,
     tensorSplit: input.tensorSplit,
   });
+}
+
+export function selectNvidiaValidationProfilesFromInput(input) {
+  const profiles = localHostLaneValidationCandidates(input);
+  if (!profiles.length) {
+    throw new TypeError("No managed llama.cpp profile fits the selected NVIDIA cards with the required operating reserve.");
+  }
+  return Object.freeze(profiles.map((profile) => Object.freeze({
+    ...profile,
+    deviceIndices: input.deviceIndices,
+    tensorSplit: input.tensorSplit,
+  })));
 }

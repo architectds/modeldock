@@ -41,6 +41,16 @@ async function probeProps(endpoint, fetchImpl, timeoutMs = 2000) {
   return response.json();
 }
 
+function processAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function probeSlots(endpoint, fetchImpl, timeoutMs = 2000) {
   const url = new URL(endpoint);
   url.pathname = "/slots";
@@ -181,6 +191,9 @@ export function createLocalHostLifecycleOperations({
       let lastFailure = "llama.cpp did not appear on its managed endpoint.";
       while (Date.now() < deadline) {
         const current = await findCurrent();
+        if (startedPid && !processAlive(startedPid)) {
+          throw new Error("The newly launched llama.cpp process exited before it served the managed endpoint.");
+        }
         const currentSpec = launchSpecFrom(current);
         if (current && sameLaunchSpec(currentSpec, spec)) {
           const props = await probeProps(endpoint, fetchImpl);

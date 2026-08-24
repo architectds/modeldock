@@ -52,7 +52,7 @@ export function parseWindowsGpus(stdout) {
     .filter((gpu) => gpu.totalBytes > 0);
 }
 
-// Current probe format is index,uuid,name,total,used. The three-column legacy
+// Current probe format is index,uuid,name,total,used,free. The three-column legacy
 // form remains accepted because tests and older embedders call this parser
 // directly. Driver index and UUID survive sorting, which is required when a
 // managed tensor split accounts for each physical card independently.
@@ -66,6 +66,7 @@ export function parseNvidiaSmi(stdout) {
     const total = Number(extended ? parts[3] : parts[1]);
     if (!Number.isFinite(total) || total <= 0) continue;
     const used = Number(extended ? parts[4] : parts[2]);
+    const free = Number(extended && parts.length >= 6 ? parts[5] : NaN);
     gpus.push({
       ...(extended ? { index: Number(parts[0]), uuid: parts[1] } : {}),
       name,
@@ -73,6 +74,10 @@ export function parseNvidiaSmi(stdout) {
       // nounits reports MiB.
       totalBytes: Math.round(total * 1024 * 1024),
       usedBytes: Number.isFinite(used) ? Math.round(used * 1024 * 1024) : undefined,
+      // Do not reconstruct this from total - used. NVIDIA can reserve memory
+      // outside the process figure, and the driver already reports the real
+      // amount a later allocation can use.
+      freeBytes: Number.isFinite(free) ? Math.round(free * 1024 * 1024) : undefined,
     });
   }
   return gpus;
@@ -125,7 +130,7 @@ export async function probeGpus({
     // adapters. Keep only non-NVIDIA registry rows whenever smi answered.
     const smi = parseNvidiaSmi(await runCommand(
       "nvidia-smi",
-      ["--query-gpu=index,uuid,name,memory.total,memory.used", "--format=csv,noheader,nounits"],
+      ["--query-gpu=index,uuid,name,memory.total,memory.used,memory.free", "--format=csv,noheader,nounits"],
       timeoutMs,
     ));
     const merged = smi.length

@@ -102,6 +102,7 @@ test("target calibration samples baseline only after stop, then applies its deri
       return { gpu0: 123 };
     },
     measureCalibration: async () => ({ gpu0: 456 }),
+    targetCapabilities: { model: "D:/models/target.gguf", visionProjectorPath: "D:/models/mmproj.gguf" },
     createFinalPlan: async ({ baseline, target }) => {
       assert.deepEqual(baseline, { gpu0: 123 });
       assert.deepEqual(target, { gpu0: 456 });
@@ -110,7 +111,28 @@ test("target calibration samples baseline only after stop, then applies its deri
   }, fake);
   assert.equal(result.outcome, "applied");
   assert.deepEqual(result.record.activeProfile, finalProfile);
+  assert.equal(result.record.capabilities.visionProjectorPath, "D:/models/mmproj.gguf");
   assert.equal(fake.calls.filter((entry) => entry === "stop").length, 2);
+});
+
+test("a final load failure restores the user command before trying the next measured candidate", async () => {
+  const fake = operations({ verifyResults: [true, false, true, true] });
+  const calibrationSpec = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "-c", "8192"] };
+  const profiles = [
+    { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "validated-p2-c262144", laneCount: 2, laneContextTokens: 262_144, totalContextTokens: 524_288 },
+    { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "validated-p1-c215040", laneCount: 1, laneContextTokens: 215_040, totalContextTokens: 215_040 },
+  ];
+  const specs = profiles.map((profile) => ({ binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "--parallel", String(profile.laneCount), "-c", String(profile.totalContextTokens)] }));
+  const result = await calibrateAndApplyLocalHostPlan(readyHost(), {
+    calibrationSpec,
+    calibrationProfile: { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calibration-p1-c8192", laneCount: 1, laneContextTokens: 8_192, totalContextTokens: 8_192 },
+    measureBaseline: async () => ({ gpu0: 1 }),
+    measureCalibration: async () => ({ gpu0: 2 }),
+    createFinalPlans: async () => specs.map((desiredSpec, index) => ({ desiredSpec, desiredProfile: profiles[index] })),
+  }, fake);
+  assert.equal(result.outcome, "applied");
+  assert.deepEqual(result.record.activeProfile, profiles[1]);
+  assert.ok(fake.calls.filter((entry) => entry === "stop").length >= 4, "failed candidate restored before the next candidate started");
 });
 
 test("a target-calibration derivation failure restores the immutable pre-takeover argv", async () => {
