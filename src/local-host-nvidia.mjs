@@ -91,7 +91,7 @@ export function conservativeNvidiaGpuSample(samples) {
   return [...merged.values()];
 }
 
-export function createNvidiaProfileInput({ engine, gpus } = {}) {
+export function createNvidiaProfileInput({ engine, gpus, targetModelFacts, targetModelId = "" } = {}) {
   if (!engine?.launch || !engine?.modelFacts) throw new TypeError("Managed NVIDIA planning needs an attributed running llama.cpp engine.");
   const allNvidia = (Array.isArray(gpus) ? gpus : []).filter((gpu) => gpu?.vendor === "nvidia" && gpu.totalBytes && gpu.usedBytes !== undefined);
   if (!allNvidia.length) throw new TypeError("Managed NVIDIA planning needs live nvidia-smi capacity and usage for every selected card.");
@@ -100,21 +100,29 @@ export function createNvidiaProfileInput({ engine, gpus } = {}) {
   if (!participants.length) throw new TypeError("The llama.cpp launch does not name a usable NVIDIA device.");
 
   const ratios = splitRatios(engine.launch, participants);
-  const facts = engine.modelFacts;
-  const modelBytes = positiveInteger(facts.weightBytes || facts.fileBytes, "Loaded model bytes");
+  const runningFacts = engine.modelFacts;
+  const facts = targetModelFacts || runningFacts;
+  const modelBytes = positiveInteger(facts.weightBytes || facts.fileBytes, "Target model bytes");
+  const runningModelBytes = positiveInteger(runningFacts.weightBytes || runningFacts.fileBytes, "Running model bytes");
   const currentContextTokens = positiveInteger(engine.launch.ctxSize, "The running llama.cpp context");
+  const runningKvBytesPerToken = localHostKvBytesPerToken(runningFacts, engine.launch);
   const totalKvBytesPerToken = localHostKvBytesPerToken(facts, engine.launch);
   const modelMaxContextTokens = positiveInteger(facts.trainedContext || currentContextTokens, "The model context window");
   const allocations = participants.map((gpu, index) => {
     const ratio = ratios[index];
-    const currentKvBytes = Math.round(currentContextTokens * totalKvBytesPerToken * ratio);
+    const currentKvBytes = Math.round(currentContextTokens * runningKvBytesPerToken * ratio);
     const weightBytes = Math.round(modelBytes * ratio);
     // The 1.2 GiB operating reserve is already resident inside nvidia-smi's
     // used figure. Subtract it once here and let the profile calculator add it
     // back as headroom. Algebraically, the observed process remains the exact
     // baseline while extra KV can consume only genuinely free VRAM.
+    const runningWeightBytes = Math.round(runningModelBytes * ratio);
     const observedFixed = Math.max(0, Math.round(gpu.usedBytes - currentKvBytes - LOCAL_HOST_MIN_HEADROOM_BYTES));
-    const staticBytes = Math.max(weightBytes, observedFixed);
+    // Project only the model's own shard into the target launch. Everything
+    // else that nvidia-smi observed remains charged: WDDM, desktop use, draft
+    // buffers, and llama.cpp's fixed runtime allocations do not disappear just
+    // because the user selected a smaller GGUF.
+    const staticBytes = Math.max(weightBytes, observedFixed - runningWeightBytes + weightBytes);
     return {
       id: gpu.uuid || `nvidia-${Number.isInteger(gpu.index) ? gpu.index : index}`,
       totalBytes: Math.round(gpu.totalBytes),
@@ -129,7 +137,10 @@ export function createNvidiaProfileInput({ engine, gpus } = {}) {
 
   return {
     adapterId: "llamacpp-nvidia",
-    modelId: engine.models?.[0] || path.basename(String(engine.launch.model || "local-model")),
+    // The slot-affinity probe uses this exact wire id immediately after the
+    // managed restart. A selected GGUF may replace the endpoint's old id, so
+    // never retain the observed model id when the caller supplied a target.
+    modelId: String(targetModelId || "").trim() || engine.models?.[0] || path.basename(String(engine.launch.model || "local-model")),
     modelMaxContextTokens,
     gpus: allocations,
   };

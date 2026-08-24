@@ -92,6 +92,12 @@ async function startDashboard(t) {
   // touches a developer's engine or GPU.
   writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
     baseUrl: "http://127.0.0.1:11435/v1",
+    observation: {
+      modelPath: "D:/models/previous-connected-model.gguf",
+      visionProjectorPath: "D:/models/previous-connected-projector.gguf",
+      supportsVision: true,
+      observedAt: "2026-08-24T20:00:00.000Z",
+    },
     models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
   });
   applyLocalEngineProfile("llamacpp", {
@@ -319,6 +325,9 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     saveMode: document.getElementById('local-config-save').dataset.mode,
     saveLabel: document.getElementById('local-config-save').textContent.trim(),
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+    modelPath: document.getElementById('local-host-model-file').value,
+    projectorHidden: document.getElementById('local-host-vision-projector-row').hidden,
+    projectorPath: document.getElementById('local-host-vision-projector').value,
   })`));
   assert.deepEqual(hostControl, {
     visible: true,
@@ -327,6 +336,9 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     saveMode: "manage",
     saveLabel: "Save and Manage",
     leaveVisible: false,
+    modelPath: "D:/models/previous-connected-model.gguf",
+    projectorHidden: false,
+    projectorPath: "D:/models/previous-connected-projector.gguf",
   }, "a connected local server stays user-owned until the user explicitly enables host control");
 
   // 5. And none of that produced an error the page swallowed.

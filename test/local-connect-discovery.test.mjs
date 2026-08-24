@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
-import { readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
+import { probeLocalEngine, readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 import { parseLlamaArgs } from "../src/engine-processes.mjs";
 import { readLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
@@ -38,6 +38,17 @@ function fakeEngine({ models = [{ id: "qwen3.8:27b" }] } = {}) {
     res.end("{}");
   });
 }
+
+test("llama.cpp discovery reads live vision capability from props", async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/props")) return { ok: true, json: async () => ({ modalities: { vision: false } }) };
+    if (url.endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "qwen" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const found = await probeLocalEngine(11435, { fetchImpl, timeoutMs: 50 });
+  assert.equal(found.engine, "llamacpp");
+  assert.equal(found.supportsVision, false, "a server without --mmproj cannot remain a visual Catalog model");
+});
 
 async function startApp(t, { discoverEngines }) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-connect-discovery-"));
@@ -125,6 +136,7 @@ test("connect publishes the GGUF name and keeps the endpoint id for the wire", a
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     models: ["qwen3.8:27b"],
+    supportsVision: false,
     connectable: true,
     binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
     cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
@@ -148,6 +160,8 @@ test("connect publishes the GGUF name and keeps the endpoint id for the wire", a
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.equal(snapshot.llamacpp.models[0].id, "Qwen3.8-27B");
   assert.equal(snapshot.llamacpp.models[0].upstreamId, "qwen3.8:27b", "the persisted snapshot keeps the endpoint id for relaunch");
+  assert.equal(snapshot.llamacpp.models[0].supportsVision, false, "a stale manual vision checkbox cannot override llama.cpp's live modalities");
+  assert.equal(snapshot.llamacpp.observation.modelPath, "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", "the connected launch remains available to prefill managed setup");
 });
 
 test("connect never assigns one GGUF name to every model from a multi-model endpoint", async (t) => {
@@ -188,6 +202,7 @@ test("discovery refreshes a legacy single-model snapshot from its GGUF header", 
     baseUrl: `http://127.0.0.1:${port}`,
     port,
     models: ["D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"],
+    supportsVision: false,
     connectable: true,
     launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
     modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
@@ -211,7 +226,7 @@ test("discovery refreshes a legacy single-model snapshot from its GGUF header", 
     id: "Qwen3.8-27B",
     label: "Qwen3.8-27B",
     upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
-    supportsVision: true,
+    supportsVision: false,
     contextWindow: 262144,
   }]);
 });
@@ -298,6 +313,112 @@ test("gateway connection and explicit host takeover stay separate", async (t) =>
   assert.equal(finalState.engines[0].connected, true, "releasing authority does not disconnect the gateway route");
   assert.equal(finalState.engines[0].management, null);
   assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
+});
+
+test("managed setup applies selected model, projector, and SSD paths as one verified launch", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const originalFacts = {
+    weightBytes: 17_559_178_144,
+    attentionLayers: 16,
+    headCountKv: 4,
+    keyLength: 256,
+    valueLength: 256,
+    trainedContext: 262144,
+    modelName: "Qwen3.8-27B",
+    modelSlug: "Qwen3.8-27B",
+  };
+  const selectedFacts = {
+    ...originalFacts,
+    weightBytes: 13_575_223_296,
+    modelName: "Qwen3-VL-27B",
+    modelSlug: "Qwen3-VL-27B",
+  };
+  const discovered = {
+    engine: "llamacpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["D:/models/Qwen3.8-27B-Q4.gguf"],
+    connectable: true,
+    binary: "D:/llama/llama-server.exe",
+    cmdline: `"D:/llama/llama-server.exe" -m D:/models/Qwen3.8-27B-Q4.gguf -c 262144 --parallel 1 --port ${port}`,
+    launch: { model: "D:/models/Qwen3.8-27B-Q4.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: originalFacts,
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  const projector = path.join(dir, "mmproj-Qwen3-VL.gguf");
+  await writeFile(projector, "projector", "utf8");
+  const selectedModel = path.join(dir, "Qwen3-VL-27B.gguf");
+  services.readModelFacts = (file) => {
+    assert.equal(file, selectedModel);
+    return selectedFacts;
+  };
+  services.probeGpus = async () => [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
+  ];
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() {},
+    async stop() {},
+    async start(spec) {
+      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
+      discovered.launch = parseLlamaArgs(discovered.cmdline);
+      discovered.models = ["D:/models/Qwen3-VL-27B.gguf"];
+      discovered.modelFacts = selectedFacts;
+    },
+    async verify() { return true; },
+  });
+
+  assert.equal((await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  })).status, 200);
+  const managed = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      engine: "llamacpp",
+      modelPath: selectedModel,
+      visionProjectorPath: projector,
+      cacheDirectory: path.join(dir, "kv"),
+      cacheBudgetGiB: 8,
+    }),
+  });
+  const body = await managed.json();
+  assert.equal(managed.status, 200, JSON.stringify(body));
+  assert.equal(body.management.modelPath, selectedModel);
+  assert.equal(body.management.visionProjectorPath, projector);
+  assert.equal(discovered.launch.model, selectedModel);
+  assert.equal(discovered.launch.visionProjectorPath, projector);
+
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  assert.deepEqual(snapshot.llamacpp.models, [{
+    id: "Qwen3-VL-27B",
+    upstreamId: "D:/models/Qwen3-VL-27B.gguf",
+    label: "Qwen3-VL-27B",
+    supportsVision: true,
+    contextWindow: body.management.capacity.maxSingleRequestTokens,
+  }], "only the verified managed visual model reaches the Codex catalog");
+});
+
+test("the local picker API permits only the fixed native dialog kinds", async (t) => {
+  const { base, services } = await startApp(t, { discoverEngines: async () => [] });
+  let received = "";
+  services.pickLocalHostPath = async (kind) => {
+    received = kind;
+    return "D:/models/Qwen3-VL.gguf";
+  };
+  const response = await fetch(`${base}/api/local/pick`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "model" }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).path, "D:/models/Qwen3-VL.gguf");
+  assert.equal(received, "model");
 });
 
 test("a failed first takeover restores observation without leaving managed authority", async (t) => {

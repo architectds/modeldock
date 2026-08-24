@@ -1750,6 +1750,7 @@ async function renderLocalEngines() {
     const engines = data.engines || [];
     localKvDirectoryDefault = String(data.kvDirectoryDefault || "");
     localKvBudgetDefaultGiB = Number(data.kvBudgetDefaultGiB) || 0;
+    localNativeHostPicker = Boolean(data.nativeLocalHostPicker);
     // Feed the dialog: a discovered engine opens pre-filled and its button goes
     // blue. An engine that has stopped answering is dropped from the map so the
     // colour follows reality rather than the last good scan.
@@ -2335,6 +2336,9 @@ let localKvDirectoryDefault = "";
 // default directory, minus a system reserve - never a constant that assumes
 // the disk has room.
 let localKvBudgetDefaultGiB = 0;
+// The browser still permits typing an absolute path anywhere. Browse appears
+// only when this local gateway can open a Windows-native dialog for it.
+let localNativeHostPicker = false;
 
 function localEngineLabel(engine) {
   return { ollama: "Ollama", llamacpp: "llama.cpp", vllm: "vLLM" }[engine] || engine;
@@ -2456,6 +2460,25 @@ function renderLocalHostControl(engine, found) {
   }
   const budget = $("local-host-kv-budget");
   if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
+  const observation = found?.observation || null;
+  const model = $("local-host-model-file");
+  if (model && management?.modelPath) model.value = management.modelPath;
+  if (model && !management && !model.value) model.value = observation?.modelPath || found?.launch?.model || "";
+  const visionToggle = $("local-host-vision-enabled");
+  const projector = $("local-host-vision-projector");
+  if (projector && management?.visionProjectorPath) projector.value = management.visionProjectorPath;
+  if (projector && !management && !projector.value) projector.value = observation?.visionProjectorPath || found?.launch?.visionProjectorPath || "";
+  if (visionToggle && management) visionToggle.checked = Boolean(management.visionProjectorPath);
+  if (visionToggle && !management && !visionToggle.dataset.observationApplied) {
+    visionToggle.checked = Boolean(observation?.supportsVision || projector?.value);
+    visionToggle.dataset.observationApplied = "true";
+  }
+  const projectorRow = $("local-host-vision-projector-row");
+  if (projectorRow) projectorRow.hidden = !Boolean(visionToggle?.checked);
+  for (const id of ["local-host-model-browse", "local-host-vision-browse", "local-host-kv-browse"]) {
+    const browse = $(id);
+    if (browse) browse.hidden = !localNativeHostPicker;
+  }
   // Translate GiB into sessions: the default budget is deliberately small, and
   // whether it is enough depends entirely on this model's full-context state
   // size - a number the server already computed from the GGUF shape.
@@ -2482,6 +2505,17 @@ function openLocalConfig(engine) {
   const drawer = $("local-drawer");
   if (!drawer) return;
   const found = localDiscovery.get(engine);
+  if (engine === "llamacpp") {
+    const model = $("local-host-model-file");
+    const projector = $("local-host-vision-projector");
+    const toggle = $("local-host-vision-enabled");
+    if (model) model.value = "";
+    if (projector) projector.value = "";
+    if (toggle) {
+      toggle.checked = false;
+      delete toggle.dataset.observationApplied;
+    }
+  }
   const title = $("local-config-title");
   if (title) title.textContent = localEngineLabel(engine);
 
@@ -2514,10 +2548,12 @@ function openLocalConfig(engine) {
   }
   showLocalHostManageStatus("");
 
-  // Ollama publishes vision from its own model metadata, so the toggle would be
-  // a control that changes nothing there.
+  // Ollama publishes vision from its own model metadata. Once a llama.cpp host
+  // is connected, its managed-model section owns vision as a compatible base
+  // GGUF plus projector; showing both toggles would imply they do the same
+  // thing when only the managed one changes the launched process.
   const visionRow = $("local-config-vision-row");
-  if (visionRow) visionRow.hidden = engine === "ollama";
+  if (visionRow) visionRow.hidden = engine === "ollama" || (engine === "llamacpp" && localConnectedState.get("llamacpp"));
   const vision = $("local-config-vision");
   if (vision) vision.checked = false;
 
@@ -2576,9 +2612,16 @@ async function submitLocalConfig(action) {
     // Host is fixed: assertLocalBase refuses anything but loopback anyway, so a
     // host field could only ever be a way to be told no.
     const baseUrl = `http://127.0.0.1:${port}`;
+    const observed = localDiscovery.get(engine);
+    // Reusing the discovered endpoint lets Connect carry llama.cpp's live
+    // /props modalities into the saved observation. A manually changed port
+    // remains explicit and keeps the lightweight no-scan connect behaviour.
+    const discoveredPort = Number(observed?.port) || 0;
     body = ollama
       ? { baseUrl }
-      : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) };
+      : (discoveredPort === port
+        ? { engine, asVision: Boolean($("local-config-vision")?.checked) }
+        : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) });
   }
 
   if (save) save.disabled = true;
@@ -2720,14 +2763,57 @@ $("local-host-kv-budget")?.addEventListener("input", () => {
   renderLocalHostControl("llamacpp", localDiscovery.get("llamacpp"));
 });
 
+function showLocalHostVisionProjector() {
+  const enabled = Boolean($("local-host-vision-enabled")?.checked);
+  const row = $("local-host-vision-projector-row");
+  if (row) row.hidden = !enabled;
+}
+
+async function browseLocalHostPath(kind, inputId) {
+  const button = $(kind === "model" ? "local-host-model-browse" : kind === "vision_projector" ? "local-host-vision-browse" : "local-host-kv-browse");
+  if (button) button.disabled = true;
+  showLocalHostManageStatus("");
+  try {
+    const response = await fetch("/api/local/pick", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind }),
+    });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Pick ${response.status}`);
+    const field = $(inputId);
+    if (field && body.path) field.value = body.path;
+  } catch (error) {
+    showLocalHostManageStatus(error.message, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+$("local-host-vision-enabled")?.addEventListener("change", showLocalHostVisionProjector);
+$("local-host-model-browse")?.addEventListener("click", () => { browseLocalHostPath("model", "local-host-model-file").catch(() => {}); });
+$("local-host-vision-browse")?.addEventListener("click", () => { browseLocalHostPath("vision_projector", "local-host-vision-projector").catch(() => {}); });
+$("local-host-kv-browse")?.addEventListener("click", () => { browseLocalHostPath("kv_directory", "local-host-kv-directory").catch(() => {}); });
+
 // The takeover action lives on the drawer's bottom primary button ("Save and
 // Manage") once the host is connected - the first-level Manage button already
 // said what the drawer is for, so a second "Manage this host" inside it was
 // the same decision asked twice.
 async function submitLocalManage() {
   if (localConfigEngine !== "llamacpp") return;
+  const modelPath = String($("local-host-model-file")?.value || "").trim();
+  const visionEnabled = Boolean($("local-host-vision-enabled")?.checked);
+  const visionProjectorPath = String($("local-host-vision-projector")?.value || "").trim();
   const directory = String($("local-host-kv-directory")?.value || "").trim();
   const budgetGiB = Number($("local-host-kv-budget")?.value || 0);
+  if (!modelPath) {
+    showLocalHostManageStatus(t("host.chooseModel"), true);
+    return;
+  }
+  if (visionEnabled && !visionProjectorPath) {
+    showLocalHostManageStatus(t("host.chooseVisionProjector"), true);
+    return;
+  }
   if (!directory) {
     showLocalHostManageStatus(t("host.chooseFolder"), true);
     return;
@@ -2743,7 +2829,13 @@ async function submitLocalManage() {
     const response = await fetch("/api/local/manage", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ engine: "llamacpp", cacheDirectory: directory, cacheBudgetGiB: budgetGiB }),
+      body: JSON.stringify({
+        engine: "llamacpp",
+        modelPath,
+        visionProjectorPath: visionEnabled ? visionProjectorPath : "",
+        cacheDirectory: directory,
+        cacheBudgetGiB: budgetGiB,
+      }),
     });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error?.message || `Manage ${response.status}`);

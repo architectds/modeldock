@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statfsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -58,10 +58,11 @@ import { conservativeNvidiaGpuSample, selectNvidiaManagedProfile } from "./local
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
 import { sameKvStorageDirectory } from "./local-host-kv-state.mjs";
+import { LocalHostPickerError, nativeLocalHostPickerAvailable, pickLocalHostPath } from "./local-host-picker.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
-import { kvBytesPerToken } from "./gguf.mjs";
+import { kvBytesPerToken, readModelFacts } from "./gguf.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -152,6 +153,44 @@ function isAbsoluteStorageDirectory(value) {
   return path.isAbsolute(directory) || /^[a-z]:[\\/]/i.test(directory);
 }
 
+function llamaLaunchArgument(launch, spellings) {
+  const args = Array.isArray(launch?.args) ? launch.args : [];
+  const index = args.findIndex((value) => spellings.includes(value));
+  return index >= 0 ? String(args[index + 1] || "").trim() : "";
+}
+
+function readManagedModelFacts(file, read = readModelFacts) {
+  const model = String(file || "").trim();
+  if (!isAbsoluteStorageDirectory(model)) {
+    throw new LocalEngineError("model_file", "Choose an absolute GGUF model file for managed local inference.");
+  }
+  try {
+    return read(model);
+  } catch (error) {
+    throw new LocalEngineError("model_file", `ModelDock could not read that GGUF model file: ${error.message}`);
+  }
+}
+
+function readManagedVisionProjector(file) {
+  const projector = String(file || "").trim();
+  if (!projector) return "";
+  if (!isAbsoluteStorageDirectory(projector)) {
+    throw new LocalEngineError("vision_projector", "Choose an absolute local vision projector file.");
+  }
+  try {
+    if (!statSync(projector).isFile()) throw new Error("not a file");
+  } catch {
+    throw new LocalEngineError("vision_projector", "The selected local vision projector file is not readable.");
+  }
+  return projector;
+}
+
+function managedLaunchHasVision(record) {
+  const args = record?.activeSpec?.args;
+  const position = Array.isArray(args) ? args.indexOf("--mmproj") : -1;
+  return position >= 0 && Boolean(String(args[position + 1] || "").trim());
+}
+
 function managedHostSummary(record, engine) {
   if (!record || record.adapterId !== "llamacpp-nvidia") return null;
   const storage = record.kvState;
@@ -163,6 +202,9 @@ function managedHostSummary(record, engine) {
   return {
     id: record.id,
     state: record.state,
+    modelPath: record.capabilities?.model || engine?.launch?.model || "",
+    modelName: record.capabilities?.modelFacts?.modelName || engine?.modelFacts?.modelName || "",
+    visionProjectorPath: record.capabilities?.visionProjectorPath || "",
     cacheDirectory: storage?.directory || "",
     cacheBudgetBytes: storage?.budgetBytes || 0,
     profile,
@@ -209,10 +251,23 @@ async function publishManagedLocalEngine(services, record, running) {
     || Number(running?.launch?.ctxSize)
     || Number(record.capabilities?.contextTokens)
     || 0;
-  const models = contextWindow
-    ? snapshot.models.map((model) => ({ ...model, contextWindow }))
-    : snapshot.models;
-  const changed = snapshot.models.some((model) => Number(model.contextWindow) !== contextWindow);
+  const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
+  const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
+  // A managed argv is useful fallback during recovery, but a running
+  // llama.cpp /props response is the authoritative answer. This matters when
+  // the process was manually changed between gateway starts.
+  const supportsVision = typeof running?.supportsVision === "boolean"
+    ? running.supportsVision
+    : managedLaunchHasVision(record);
+  const models = snapshot.models.map((model) => ({
+    ...model,
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(facts?.modelSlug ? { id: facts.modelSlug } : {}),
+    ...(facts?.modelName ? { label: facts.modelName } : {}),
+    ...(endpointModel ? { upstreamId: endpointModel } : {}),
+    supportsVision,
+  }));
+  const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
   writeLocalEngineSnapshot(file, "llamacpp", next);
   applyLocalEngineProfile("llamacpp", next);
@@ -389,12 +444,24 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
     : "";
   const name = String(engine?.modelFacts?.modelName || "").trim();
   const slug = String(engine?.modelFacts?.modelSlug || "").trim();
-  if (!Array.isArray(saved) || saved.length !== 1 || !advertised || !name || !slug) return null;
+  if (!Array.isArray(saved) || saved.length !== 1 || !advertised) return null;
   const current = saved[0];
-  if (current.id === slug && current.label === name && current.upstreamId === advertised) return null;
+  const next = {
+    ...current,
+    ...(name && slug ? { id: slug, label: name } : {}),
+    upstreamId: advertised,
+    // llama.cpp exposes this on its live /props payload, unlike vLLM and
+    // generic OpenAI-compatible servers. It must overwrite a previous Connect
+    // observation in either direction; preserving true after --mmproj is
+    // removed is worse than showing no visual option at all.
+    ...(engine?.engine === "llamacpp" && typeof engine.supportsVision === "boolean"
+      ? { supportsVision: engine.supportsVision }
+      : {}),
+  };
+  if (JSON.stringify(current) === JSON.stringify(next)) return null;
   return {
     ...snapshot,
-    models: [{ ...current, id: slug, label: name, upstreamId: advertised }],
+    models: [next],
   };
 }
 
@@ -1749,10 +1816,15 @@ export function createApp(services = createServices()) {
         ...(() => {
           const kvDirectoryDefault = services.kvDirectoryDefault || stateFile("kv");
           const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(kvDirectoryDefault);
-          return { kvDirectoryDefault, kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes) };
+          return {
+            kvDirectoryDefault,
+            kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes),
+            nativeLocalHostPicker: (services.nativeLocalHostPickerAvailable || nativeLocalHostPickerAvailable)(),
+          };
         })(),
         engines: engines.map((engine) => ({
           ...engine,
+          observation: attached(engine) ? saved[engine.engine]?.observation || null : null,
           management: (() => {
             const management = hostSummaries.get(engineSummaryKey(engine)) || null;
             return management && runtimeStatus?.hostId === management.id
@@ -1798,7 +1870,16 @@ export function createApp(services = createServices()) {
       // Prove the Responses dialect before persisting, so a server that only
       // speaks /v1/chat/completions fails the connect instead of every later turn.
       await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
-      const launch = await launchSpecForPort(new URL(base).port);
+      const launch = launchSpecFrom(discovered) || await launchSpecForPort(new URL(base).port);
+      const supportsVision = engine === "llamacpp"
+        ? Boolean(discovered?.supportsVision ?? asVision)
+        : Boolean(asVision);
+      const observation = {
+        modelPath: discovered?.launch?.model || llamaLaunchArgument(launch, ["-m", "--model"]),
+        visionProjectorPath: discovered?.launch?.visionProjectorPath || llamaLaunchArgument(launch, ["--mmproj"]),
+        supportsVision,
+        observedAt: new Date().toISOString(),
+      };
       const snapshot = {
         // What started this engine, read from the process behind the port we
         // just connected to. Kept so a stopped engine can be started again as
@@ -1806,6 +1887,11 @@ export function createApp(services = createServices()) {
         launch,
         baseUrl: base,
         connectedAt: new Date().toISOString(),
+        // A Connect observation is useful input when the person next opens
+        // managed setup, but is deliberately separate from the catalog's live
+        // capability declaration. A subsequent /props scan can therefore turn
+        // off image routing without erasing the last chosen model/projector.
+        observation,
         // The endpoint advertises a raw id that is often the model file path
         // (llama.cpp serves "D:\models\Qwen3.8-...gguf"). Publishing that as the
         // picker name leaks a path and makes the catalog unreadable. When a
@@ -1818,7 +1904,7 @@ export function createApp(services = createServices()) {
         // map to one unambiguous file (including vLLM) is published as-is.
         models: listed.models.map((model) => {
           const facts = listed.models.length === 1
-            ? (services.modelFactsFor || modelFactsFor)(launch?.model)
+            ? (services.modelFactsFor || modelFactsFor)(observation.modelPath)
             : null;
           const friendly = facts?.modelName || "";
           const slug = facts?.modelSlug || "";
@@ -1826,7 +1912,7 @@ export function createApp(services = createServices()) {
             id: slug || model.id,
             upstreamId: model.id,
             label: friendly || model.label || model.id,
-            supportsVision: Boolean(asVision),
+            supportsVision,
             contextWindow: model.contextWindow,
           };
         }),
@@ -1837,11 +1923,26 @@ export function createApp(services = createServices()) {
       // Same for a local engine: the models are new to Codex.
       await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
-      return res.json({ engine, baseUrl: base, models: snapshot.models, settings: settingsPayload(services) });
+      return res.json({ engine, baseUrl: base, models: snapshot.models, observation, settings: settingsPayload(services) });
     } catch (error) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;
       return res.status(status).json({ error: { type: error.code || "local_connect_failed", message: error.message } });
+    }
+  });
+
+  // The browser cannot reveal an absolute path from an <input type=file>, but
+  // llama.cpp must receive one in argv. This endpoint exposes only fixed
+  // native-dialog kinds; it never executes a caller-provided command or path.
+  app.post("/api/local/pick", mutateConfig, async (req, res) => {
+    try {
+      const selected = await (services.pickLocalHostPath || pickLocalHostPath)(req.body?.kind);
+      return res.json({ path: selected });
+    } catch (error) {
+      const status = error instanceof LocalHostPickerError
+        ? (error.code === "picker_unsupported" ? 409 : 400)
+        : 502;
+      return res.status(status).json({ error: { type: error.code || "picker_failed", message: error.message } });
     }
   });
 
@@ -1891,12 +1992,29 @@ export function createApp(services = createServices()) {
       if (running.launch?.model && !isAbsoluteStorageDirectory(running.launch.model)) {
         throw new LocalEngineError("relative_model_path", "Host control needs an absolute model path so the exact command can be restarted and recovered safely.");
       }
+      const modelSelectedByUser = req.body?.modelPath !== undefined;
+      const modelPath = String(modelSelectedByUser ? req.body.modelPath || "" : running.launch?.model || "").trim();
+      // Existing adoption already carries facts read from the running process.
+      // Re-reading a twelve-gigabyte file just to preserve that same launch is
+      // pointless, and test/remote process attribution may expose facts while
+      // its Windows path is not readable from this Node process.
+      const targetModelFacts = !modelSelectedByUser && running.modelFacts
+        ? running.modelFacts
+        : readManagedModelFacts(modelPath, services.readModelFacts || readModelFacts);
+      const visionProjectorPath = readManagedVisionProjector(
+        req.body?.visionProjectorPath === undefined ? running.launch?.visionProjectorPath : req.body.visionProjectorPath,
+      );
       const id = managedHostId("llamacpp", snapshot.baseUrl);
       if (!id) throw new LocalEngineError("base", "The connected llama.cpp server has no usable local address.");
       let registry = await readLocalHostRegistry(services.localHostRegistryFile);
       if (registry.hosts[id]) throw new LocalEngineError("already_managed", "This llama.cpp host is already under ModelDock management. Leave management before changing its SSD budget.");
       const gpus = await probeManagedNvidiaGpus(services);
-      const selected = (services.selectNvidiaManagedProfile || selectNvidiaManagedProfile)({ engine: running, gpus });
+      const selected = (services.selectNvidiaManagedProfile || selectNvidiaManagedProfile)({
+        engine: running,
+        gpus,
+        targetModelFacts,
+        targetModelId: running.launch?.alias || modelPath,
+      });
       const { candidates: _candidates, ...profile } = selected;
       await mkdir(String(cacheDirectory).trim(), { recursive: true });
       const desiredSpec = {
@@ -1904,6 +2022,10 @@ export function createApp(services = createServices()) {
         args: managedLlamaLaunchArgs(launch.args, {
           profile,
           slotSavePath: String(cacheDirectory).trim(),
+          modelPath,
+          // Managed setup owns this switch: an empty field removes an old
+          // projector instead of silently retaining image capability.
+          visionProjectorPath: visionProjectorPath || null,
         }),
       };
       const observed = createObservedHost({
@@ -1912,7 +2034,9 @@ export function createApp(services = createServices()) {
         endpoint: snapshot.baseUrl,
         launch,
         capabilities: {
-          model: running.launch?.model || "",
+          model: modelPath,
+          modelFacts: targetModelFacts,
+          visionProjectorPath,
           contextTokens: Number(running.launch?.ctxSize) || 0,
           slots: Number(running.launch?.parallel) || 0,
           gpuCount: profile.gpus.length,
@@ -2540,7 +2664,7 @@ function foldUsageOnce(services) {
 
 const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
 
-async function reconcileLocalHostsOnBoot(services) {
+export async function reconcileLocalHostsOnBoot(services) {
   let registry;
   try {
     registry = await readLocalHostRegistry(services.localHostRegistryFile);
@@ -2549,6 +2673,19 @@ async function reconcileLocalHostsOnBoot(services) {
     return;
   }
   for (const record of Object.values(registry.hosts)) {
+    if (record.state === "ready") {
+      try {
+        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
+          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
+        if (!current) continue;
+        const changed = await publishManagedLocalEngine(services, record, current);
+        await services.localHostRuntime?.refresh?.(record);
+        if (changed) console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
+      } catch (error) {
+        console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
+      }
+      continue;
+    }
     if (!["draining", "applying", "verifying", "recovering"].includes(record.state)) continue;
     let releaseTransition;
     try {

@@ -213,11 +213,13 @@ export async function listEngineListeners({
 // think of - a chat template, a device selection, an alias, a LoRA. The parts
 // being tuned are replaced by name; everything else survives untouched.
 const OVERRIDE_FLAGS = {
+  modelPath: ["-m", "--model"],
   ctxSize: ["-c", "--ctx-size"],
   parallel: ["-np", "--parallel"],
   cacheTypeK: ["-ctk", "--cache-type-k"],
   cacheTypeV: ["-ctv", "--cache-type-v"],
   slotSavePath: ["--slot-save-path"],
+  visionProjectorPath: ["--mmproj"],
 };
 
 // Presence-only switches: there is no value token to step over, and the two
@@ -274,11 +276,13 @@ export function applyLaunchOverrides(args, overrides = {}) {
     }
     out.push(token);
   }
+  if (overrides.modelPath) out.push("-m", String(overrides.modelPath));
   if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
   if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
   if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
   if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
   if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
+  if (overrides.visionProjectorPath) out.push("--mmproj", String(overrides.visionProjectorPath));
   // Write the cache topology explicitly. Managed profiles use independent,
   // equal lanes; inheriting a previous unified pool would invalidate both the
   // per-lane catalog promise and the numbered SSD slot mapping.
@@ -296,6 +300,7 @@ export function applyLaunchOverrides(args, overrides = {}) {
 // one slot, vulkan build" without asking the user to retype any of it.
 const LLAMA_FLAGS = [
   ["model", ["-m", "--model"]],
+  ["visionProjectorPath", ["--mmproj"]],
   ["alias", ["-a", "--alias"]],
   ["ctxSize", ["-c", "--ctx-size"]],
   ["gpuLayers", ["-ngl", "--n-gpu-layers", "--gpu-layers"]],
@@ -435,7 +440,7 @@ export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
 // remain byte-for-byte argv entries from the user's pre-takeover process.
 // llama.cpp's -c is the total KV budget: independent equal lanes therefore use
 // P * C here while Codex is told only the per-lane C.
-export function managedLlamaLaunchArgs(args, { profile, slotSavePath } = {}) {
+export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath, visionProjectorPath } = {}) {
   const lanes = Number(profile?.laneCount);
   const perLane = Number(profile?.laneContextTokens);
   if (!Number.isSafeInteger(lanes) || lanes < 1 || lanes > 3) {
@@ -447,9 +452,11 @@ export function managedLlamaLaunchArgs(args, { profile, slotSavePath } = {}) {
   const root = typeof slotSavePath === "string" ? slotSavePath.trim() : "";
   if (!root) throw new TypeError("A managed llama.cpp launch needs an SSD slot-state directory.");
   return applyLaunchOverrides(args, {
+    modelPath,
     ctxSize: lanes * perLane,
     parallel: lanes,
     slotSavePath: root,
+    visionProjectorPath,
     kvUnified: false,
   });
 }

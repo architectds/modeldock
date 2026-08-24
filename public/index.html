@@ -383,7 +383,30 @@
           <p id="local-host-management-state" class="custom-hint"></p>
           <div id="local-host-management-form">
             <label class="field">
-              <div class="field-head"><span data-i18n="host.folder">SSD KV folder</span></div>
+              <div class="field-head">
+                <span data-i18n="host.model">Model file</span>
+                <button id="local-host-model-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
+              </div>
+              <input id="local-host-model-file" class="lang-select" type="text" spellcheck="false" />
+              <p class="custom-hint" data-i18n="host.modelHint">Choose the GGUF ModelDock will launch and manage.</p>
+            </label>
+            <label class="chip-toggle" id="local-host-vision-row">
+              <input id="local-host-vision-enabled" type="checkbox" />
+              <span data-i18n="host.vision">Enable local vision</span>
+            </label>
+            <label id="local-host-vision-projector-row" class="field" hidden>
+              <div class="field-head">
+                <span data-i18n="host.visionProjector">Vision projector</span>
+                <button id="local-host-vision-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
+              </div>
+              <input id="local-host-vision-projector" class="lang-select" type="text" spellcheck="false" />
+              <p class="custom-hint" data-i18n="host.visionHint">Requires a compatible vision GGUF base model and llama.cpp projector.</p>
+            </label>
+            <label class="field">
+              <div class="field-head">
+                <span data-i18n="host.folder">SSD KV folder</span>
+                <button id="local-host-kv-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
+              </div>
               <input id="local-host-kv-directory" class="lang-select" type="text" spellcheck="false" />
             </label>
             <label class="field">

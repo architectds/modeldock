@@ -121,6 +121,10 @@ export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 80
     baseUrl: base,
     port,
     models: modelIds,
+    // llama.cpp publishes modalities on /props. This is a live capability
+    // fact, not a remembered dashboard preference: an engine restarted without
+    // --mmproj must immediately stop being offered to Codex as an image model.
+    ...(engine === "llamacpp" ? { supportsVision: Boolean(props?.modalities?.vision) } : {}),
     // A bare OpenAI-compatible server is discovered but not connectable here:
     // it has no profile to attach to, and the API page already takes an
     // arbitrary endpoint with a key.
