@@ -41,6 +41,16 @@ async function probeProps(endpoint, fetchImpl, timeoutMs = 2000) {
   return response.json();
 }
 
+async function probeSlots(endpoint, fetchImpl, timeoutMs = 2000) {
+  const url = new URL(endpoint);
+  url.pathname = "/slots";
+  url.search = "";
+  const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) return null;
+  const slots = await response.json();
+  return Array.isArray(slots) ? slots : null;
+}
+
 async function verifiedFileIdentity(file) {
   try {
     const value = await stat(file);
@@ -173,18 +183,29 @@ export function createLocalHostLifecycleOperations({
         const current = await findCurrent();
         const currentSpec = launchSpecFrom(current);
         if (current && sameLaunchSpec(currentSpec, spec)) {
+          const props = await probeProps(endpoint, fetchImpl);
+          if (!props) {
+            lastFailure = "The managed llama.cpp status endpoint is still loading the model.";
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
           try {
-            const props = await probeProps(endpoint, fetchImpl);
             const profile = record.desiredProfile;
-            if (!props) throw new Error("The managed llama.cpp status endpoint did not answer.");
             if (profile) {
               if (Number(props.total_slots) !== Number(profile.laneCount)) {
                 throw new Error(`llama.cpp reported ${props.total_slots} slots instead of ${profile.laneCount}.`);
               }
-              const perLane = Number(props?.default_generation_settings?.n_ctx) || 0;
-              if (perLane !== Number(profile.laneContextTokens)) {
-                throw new Error(`llama.cpp reported ${perLane} tokens per slot instead of ${profile.laneContextTokens}.`);
+              const slots = await probeSlots(endpoint, fetchImpl);
+              if (!slots || slots.length !== Number(profile.laneCount)) {
+                throw new Error("llama.cpp did not expose the expected managed slot list.");
               }
+              const unexpected = slots.find((slot) => Number(slot?.n_ctx) !== Number(profile.laneContextTokens));
+              if (unexpected) {
+                throw new Error(`llama.cpp slot ${Number(unexpected.id)} reported ${Number(unexpected.n_ctx)} tokens instead of ${profile.laneContextTokens}.`);
+              }
+            }
+            if (record.capabilities?.visionProjectorPath && !props?.modalities?.vision) {
+              throw new Error("llama.cpp loaded without the requested local vision projector.");
             }
             const binary = await verifiedFileIdentity(current.binary);
             return {
@@ -200,7 +221,9 @@ export function createLocalHostLifecycleOperations({
               },
             };
           } catch (error) {
-            lastFailure = error.message;
+            // Once /props is ready, an argv/slot/capability mismatch cannot
+            // become correct by polling. Fail now so the runner can recover.
+            throw error;
           }
         }
         await new Promise((resolve) => setTimeout(resolve, 500));

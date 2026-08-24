@@ -23,16 +23,44 @@ test("verified lifecycle requires the exact argv and the selected equal-slot sha
       binary: SPEC.binary,
       cmdline: `"${SPEC.binary}" ${SPEC.args.join(" ")}`,
     }],
-    fetchImpl: async () => new Response(JSON.stringify({
-      total_slots: 2,
-      default_generation_settings: { n_ctx: 200_000 },
-    }), { status: 200 }),
+    fetchImpl: async (url) => new Response(JSON.stringify(
+      String(url).endsWith("/slots")
+        ? [{ id: 0, n_ctx: 200_000 }, { id: 1, n_ctx: 200_000 }]
+        : { total_slots: 2, modalities: { vision: false } },
+    ), { status: 200 }),
   });
   const result = await operations.verify(SPEC, {
     desiredProfile: { laneCount: 2, laneContextTokens: 200_000 },
   });
   assert.equal(result.ok, true);
   assert.equal(sameLaunchSpec(SPEC, { ...SPEC, binary: "d:/LLAMA/llama-server.exe" }), process.platform === "win32");
+});
+
+test("ready llama.cpp fails immediately on a slot or visual-capability mismatch", async () => {
+  const operations = createLocalHostLifecycleOperations({
+    hostId: "llamacpp-11435",
+    endpoint: "http://127.0.0.1:11435/v1",
+    registryFile: "D:/state/local-hosts.json",
+    discover: async () => [{
+      engine: "llamacpp",
+      baseUrl: "http://127.0.0.1:11435",
+      pid: 42,
+      binary: SPEC.binary,
+      cmdline: `"${SPEC.binary}" ${SPEC.args.join(" ")}`,
+    }],
+    fetchImpl: async (url) => new Response(JSON.stringify(
+      String(url).endsWith("/slots")
+        ? [{ id: 0, n_ctx: 200_256 }, { id: 1, n_ctx: 200_256 }]
+        : { total_slots: 2, modalities: { vision: false } },
+    ), { status: 200 }),
+  });
+  await assert.rejects(
+    () => operations.verify(SPEC, {
+      desiredProfile: { laneCount: 2, laneContextTokens: 200_000 },
+      capabilities: { visionProjectorPath: "D:/models/mmproj.gguf" },
+    }),
+    /slot 0 reported 200256 tokens instead of 200000/,
+  );
 });
 
 test("slot-affinity probe is bounded and requires the requested slot id back", async () => {

@@ -53,8 +53,13 @@ import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./e
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
 import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
 import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
-import { applyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
-import { conservativeNvidiaGpuSample, selectNvidiaManagedProfile } from "./local-host-nvidia.mjs";
+import { applyLocalHostPlan, calibrateAndApplyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
+import {
+  createCalibratedNvidiaProfileInput,
+  createNvidiaProfileInput,
+  LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
+  selectNvidiaProfileFromInput,
+} from "./local-host-nvidia.mjs";
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
 import { sameKvStorageDirectory } from "./local-host-kv-state.mjs";
@@ -465,24 +470,23 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
   };
 }
 
-function recommendedManagedProfile(engine, gpus) {
-  if (engine?.engine !== "llamacpp") return null;
-  try {
-    const { candidates: _candidates, ...profile } = selectNvidiaManagedProfile({ engine, gpus });
-    return profile;
-  } catch {
-    return null;
-  }
+async function probeManagedNvidiaGpus(services) {
+  const probe = services.probeGpus || probeGpus;
+  return probe({});
 }
 
-async function probeManagedNvidiaGpus(services, { sampleCount = 3, sampleDelayMs = 150 } = {}) {
-  const probe = services.probeGpus || probeGpus;
-  const samples = [];
-  for (let index = 0; index < sampleCount; index += 1) {
-    samples.push(await probe({}));
-    if (index + 1 < sampleCount) await new Promise((resolve) => setTimeout(resolve, sampleDelayMs));
-  }
-  return conservativeNvidiaGpuSample(samples);
+function calibrationLaneProfile(target) {
+  const context = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS;
+  return Object.freeze({
+    adapterId: target.adapterId,
+    modelId: target.modelId,
+    profileId: `calibration-p1-c${context}`,
+    laneCount: 1,
+    laneContextTokens: context,
+    totalContextTokens: context,
+    deviceIndices: target.deviceIndices,
+    tensorSplit: target.tensorSplit,
+  });
 }
 
 function statusPayload(services) {
@@ -1734,7 +1738,10 @@ export function createApp(services = createServices()) {
         ...engine,
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
-        recommendedProfile: recommendedManagedProfile(engine, gpus),
+        // A final managed profile requires a target-process calibration after
+        // the previous server is stopped. Do not display an unverified static
+        // estimate as an "automatic target" before that transaction occurs.
+        recommendedProfile: null,
         // What one full-context session state costs on disk, so the SSD budget
         // field can say "this holds about N sessions" instead of asking the
         // user to intuit GiB. f16 is the state llama.cpp writes by default;
@@ -2009,23 +2016,32 @@ export function createApp(services = createServices()) {
       let registry = await readLocalHostRegistry(services.localHostRegistryFile);
       if (registry.hosts[id]) throw new LocalEngineError("already_managed", "This llama.cpp host is already under ModelDock management. Leave management before changing its SSD budget.");
       const gpus = await probeManagedNvidiaGpus(services);
-      const selected = (services.selectNvidiaManagedProfile || selectNvidiaManagedProfile)({
-        engine: running,
+      const visionProjectorBytes = visionProjectorPath ? statSync(visionProjectorPath).size : 0;
+      // This is a target-only preflight ledger. It selects CUDA devices and a
+      // tensor split for the fixed 8K calibration launch; it does not publish
+      // P or context. The final profile comes only after the old server is
+      // stopped and the target process has been measured on every card.
+      const target = (services.createNvidiaProfileInput || createNvidiaProfileInput)({
         gpus,
         targetModelFacts,
-        targetModelId: running.launch?.alias || modelPath,
+        targetModelId: modelPath,
+        cacheTypeK: "q4_0",
+        cacheTypeV: "q4_0",
+        visionProjectorBytes,
       });
-      const { candidates: _candidates, ...profile } = selected;
+      const calibrationProfile = calibrationLaneProfile(target);
       await mkdir(String(cacheDirectory).trim(), { recursive: true });
-      const desiredSpec = {
+      const calibrationSpec = {
         binary: launch.binary,
         args: managedLlamaLaunchArgs(launch.args, {
-          profile,
+          profile: calibrationProfile,
           slotSavePath: String(cacheDirectory).trim(),
           modelPath,
           // Managed setup owns this switch: an empty field removes an old
           // projector instead of silently retaining image capability.
           visionProjectorPath: visionProjectorPath || null,
+          cacheTypeK: "q4_0",
+          cacheTypeV: "q4_0",
         }),
       };
       const observed = createObservedHost({
@@ -2039,7 +2055,7 @@ export function createApp(services = createServices()) {
           visionProjectorPath,
           contextTokens: Number(running.launch?.ctxSize) || 0,
           slots: Number(running.launch?.parallel) || 0,
-          gpuCount: profile.gpus.length,
+          gpuCount: target.gpus.length,
           requestSlotAffinity: false,
         },
       });
@@ -2073,7 +2089,45 @@ export function createApp(services = createServices()) {
             message: authorized.failure,
           });
         }
-        let result = await applyLocalHostPlan(authorized.record, { desiredSpec, desiredProfile: profile }, operations);
+        let profile = null;
+        let result = await calibrateAndApplyLocalHostPlan(authorized.record, {
+          calibrationSpec,
+          calibrationProfile,
+          measureBaseline: async () => {
+            // Give the driver one short scheduling turn after the verified stop
+            // before recording Windows, display and other-process usage.
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            return probeManagedNvidiaGpus(services);
+          },
+          measureCalibration: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            return probeManagedNvidiaGpus(services);
+          },
+          createFinalPlan: async ({ baseline, target: calibrationSample }) => {
+            const calibrated = (services.createCalibratedNvidiaProfileInput || createCalibratedNvidiaProfileInput)({
+              target,
+              baselineSample: baseline,
+              calibrationSample,
+            });
+            const selected = (services.selectNvidiaProfileFromInput || selectNvidiaProfileFromInput)(calibrated);
+            const { candidates: _candidates, ...finalProfile } = selected;
+            profile = finalProfile;
+            return {
+              desiredProfile: profile,
+              desiredSpec: {
+                binary: launch.binary,
+                args: managedLlamaLaunchArgs(launch.args, {
+                  profile,
+                  slotSavePath: String(cacheDirectory).trim(),
+                  modelPath,
+                  visionProjectorPath: visionProjectorPath || null,
+                  cacheTypeK: "q4_0",
+                  cacheTypeV: "q4_0",
+                }),
+              },
+            };
+          },
+        }, operations);
         if (result.outcome === "applied") {
           const requestSlotAffinity = profile.laneCount === 1 || await (services.probeLlamaRequestSlotAffinity || probeLlamaRequestSlotAffinity)({
             endpoint: snapshot.baseUrl,

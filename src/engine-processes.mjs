@@ -216,8 +216,13 @@ const OVERRIDE_FLAGS = {
   modelPath: ["-m", "--model"],
   ctxSize: ["-c", "--ctx-size"],
   parallel: ["-np", "--parallel"],
+  gpuLayers: ["-ngl", "--n-gpu-layers", "--gpu-layers"],
   cacheTypeK: ["-ctk", "--cache-type-k"],
   cacheTypeV: ["-ctv", "--cache-type-v"],
+  mainGpu: ["-mg", "--main-gpu"],
+  splitMode: ["-sm", "--split-mode"],
+  tensorSplit: ["-ts", "--tensor-split"],
+  device: ["-dev", "--device"],
   slotSavePath: ["--slot-save-path"],
   visionProjectorPath: ["--mmproj"],
 };
@@ -279,8 +284,13 @@ export function applyLaunchOverrides(args, overrides = {}) {
   if (overrides.modelPath) out.push("-m", String(overrides.modelPath));
   if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
   if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
+  if (overrides.gpuLayers) out.push("-ngl", String(overrides.gpuLayers));
   if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
   if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
+  if (overrides.mainGpu !== null && overrides.mainGpu !== undefined) out.push("-mg", String(overrides.mainGpu));
+  if (overrides.splitMode) out.push("-sm", String(overrides.splitMode));
+  if (overrides.tensorSplit) out.push("-ts", String(overrides.tensorSplit));
+  if (overrides.device) out.push("-dev", String(overrides.device));
   if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
   if (overrides.visionProjectorPath) out.push("--mmproj", String(overrides.visionProjectorPath));
   // Write the cache topology explicitly. Managed profiles use independent,
@@ -440,7 +450,7 @@ export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
 // remain byte-for-byte argv entries from the user's pre-takeover process.
 // llama.cpp's -c is the total KV budget: independent equal lanes therefore use
 // P * C here while Codex is told only the per-lane C.
-export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath, visionProjectorPath } = {}) {
+export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath, visionProjectorPath, cacheTypeK = "q4_0", cacheTypeV = "q4_0" } = {}) {
   const lanes = Number(profile?.laneCount);
   const perLane = Number(profile?.laneContextTokens);
   if (!Number.isSafeInteger(lanes) || lanes < 1 || lanes > 3) {
@@ -451,10 +461,28 @@ export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath,
   }
   const root = typeof slotSavePath === "string" ? slotSavePath.trim() : "";
   if (!root) throw new TypeError("A managed llama.cpp launch needs an SSD slot-state directory.");
+  const devices = Array.isArray(profile?.deviceIndices) ? profile.deviceIndices : [];
+  if (!devices.length || devices.some((index) => !Number.isSafeInteger(index) || index < 0)) {
+    throw new TypeError("A managed llama.cpp launch needs physical NVIDIA device indices.");
+  }
+  const tensorSplit = Array.isArray(profile?.tensorSplit) ? profile.tensorSplit : [];
+  if (devices.length > 1 && (tensorSplit.length !== devices.length || tensorSplit.some((ratio) => typeof ratio !== "number" || !Number.isFinite(ratio) || ratio <= 0))) {
+    throw new TypeError("A multi-GPU managed llama.cpp launch needs a positive tensor split for every device.");
+  }
   return applyLaunchOverrides(args, {
     modelPath,
     ctxSize: lanes * perLane,
     parallel: lanes,
+    gpuLayers: 999,
+    cacheTypeK,
+    cacheTypeV,
+    mainGpu: devices.length === 1 ? devices[0] : null,
+    splitMode: devices.length === 1 ? "none" : "tensor",
+    tensorSplit: devices.length === 1 ? null : tensorSplit.map((ratio) => ratio.toFixed(8)).join(","),
+    // A prior user-owned --device can pin a newly managed CUDA launch to a
+    // single or unrelated backend. Let the managed CUDA topology choose its
+    // selected devices rather than inherit that stale restriction.
+    device: null,
     slotSavePath: root,
     visionProjectorPath,
     kvUnified: false,

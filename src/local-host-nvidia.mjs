@@ -1,11 +1,9 @@
-// NVIDIA llama.cpp adapter for the static managed-host policy.
+// NVIDIA llama.cpp adapter for the managed-host capacity policy.
 //
-// The running engine is the measurement boundary. nvidia-smi reports each
-// physical card's current allocation; the adapter subtracts only the KV bytes
-// attributable to the observed -c and retains every other byte as fixed load.
-// This automatically includes model shards, recurrent state, draft buffers,
-// desktop use and other GPU consumers without pretending they can be separated
-// reliably under Windows WDDM.
+// Capacity is calculated forward from the target GGUF and physical cards. The
+// pre-takeover process may be wrong, so its context, slots, cache contents,
+// model footprint and nvidia-smi usage are not capacity inputs. Its argv is
+// retained elsewhere only as the immutable rollback specification.
 
 import path from "node:path";
 import { KV_ELEMENT_BYTES } from "./gguf.mjs";
@@ -13,6 +11,16 @@ import {
   LOCAL_HOST_MIN_HEADROOM_BYTES,
   selectLocalHostLaneProfile,
 } from "./local-host-profile.mjs";
+
+const GiB = 1024 ** 3;
+
+// Windows WDDM, the compositor and fixed CUDA runtime allocations do not live
+// in a GGUF. Reserve them before the generic profile selector applies its
+// separate 1 GiB operating headroom. A later target bootstrap can replace this
+// conservative policy with a measured target-specific baseline.
+export const LOCAL_HOST_NVIDIA_SYSTEM_RESERVE_BYTES = GiB;
+export const LOCAL_HOST_NVIDIA_RUNTIME_RESERVE_BYTES = Math.round(0.5 * GiB);
+export const LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS = 8_192;
 
 function positiveInteger(value, label) {
   const number = Number(value);
@@ -33,122 +41,150 @@ export function localHostKvBytesPerToken(facts, { cacheTypeK = "f16", cacheTypeV
   );
 }
 
-function selectedDeviceIndices(launch, gpus) {
-  if (String(launch?.splitMode || "").toLowerCase() === "none") {
-    const main = Number.isInteger(Number(launch?.mainGpu)) ? Number(launch.mainGpu) : 0;
-    return new Set([main]);
-  }
-  const device = String(launch?.device || "").trim();
-  if (!device) return new Set(gpus.map((gpu, index) => Number.isInteger(gpu.index) ? gpu.index : index));
-  const parsed = device.split(",").map((entry) => {
-    const match = /(?:CUDA)?(\d+)$/i.exec(entry.trim());
-    return match ? Number(match[1]) : -1;
-  }).filter((index) => index >= 0);
-  return parsed.length ? new Set(parsed) : new Set(gpus.map((gpu, index) => Number.isInteger(gpu.index) ? gpu.index : index));
-}
-
-function splitRatios(launch, gpus) {
-  const explicit = String(launch?.tensorSplit || "").split(/[,/;]/)
-    .map(Number)
-    .filter((value) => Number.isFinite(value) && value > 0);
-  const weights = explicit.length === gpus.length
-    ? explicit
-    : gpus.map((gpu) => positiveInteger(gpu.totalBytes, "A physical GPU byte count"));
+function targetSplitRatios(gpus, {
+  systemReserveBytes,
+  runtimeReserveBytes,
+  projectorBytes,
+} = {}) {
+  // Managed mode owns tensor placement. Its ratios are based on target-device
+  // capacity after fixed reservations, not on an old --tensor-split.
+  const weights = gpus.map((gpu, index) => Math.max(1,
+    positiveInteger(gpu.totalBytes, "A physical GPU byte count")
+      - systemReserveBytes
+      - runtimeReserveBytes
+      - (index === 0 ? projectorBytes : 0)
+      - LOCAL_HOST_MIN_HEADROOM_BYTES,
+  ));
   const total = weights.reduce((sum, value) => sum + value, 0);
   return weights.map((value) => value / total);
 }
 
-function gpuIdentity(gpu, index) {
-  if (gpu?.uuid) return `uuid:${gpu.uuid}`;
-  if (Number.isInteger(gpu?.index)) return `index:${gpu.index}`;
-  return `position:${index}`;
-}
-
-// WDDM can evict and re-reside hundreds of MiB while the dashboard is open.
-// A takeover is a durable choice, so it uses the highest observed allocation
-// per physical card across a short sample window instead of treating one idle
-// instant as permanent capacity.
-export function conservativeNvidiaGpuSample(samples) {
-  if (!Array.isArray(samples) || !samples.length) throw new TypeError("Managed NVIDIA planning needs at least one GPU sample.");
-  const merged = new Map();
-  for (const sample of samples) {
-    if (!Array.isArray(sample)) throw new TypeError("Every managed NVIDIA GPU sample must be an array.");
-    sample.forEach((gpu, index) => {
-      const key = gpuIdentity(gpu, index);
-      const current = merged.get(key);
-      if (!current) {
-        merged.set(key, { ...gpu });
-        return;
-      }
-      merged.set(key, {
-        ...current,
-        ...gpu,
-        usedBytes: Math.max(Number(current.usedBytes) || 0, Number(gpu.usedBytes) || 0),
-        totalBytes: Math.min(Number(current.totalBytes) || Number.MAX_SAFE_INTEGER, Number(gpu.totalBytes) || Number.MAX_SAFE_INTEGER),
-      });
-    });
-  }
-  return [...merged.values()];
-}
-
-export function createNvidiaProfileInput({ engine, gpus, targetModelFacts, targetModelId = "" } = {}) {
-  if (!engine?.launch || !engine?.modelFacts) throw new TypeError("Managed NVIDIA planning needs an attributed running llama.cpp engine.");
-  const allNvidia = (Array.isArray(gpus) ? gpus : []).filter((gpu) => gpu?.vendor === "nvidia" && gpu.totalBytes && gpu.usedBytes !== undefined);
-  if (!allNvidia.length) throw new TypeError("Managed NVIDIA planning needs live nvidia-smi capacity and usage for every selected card.");
-  const selected = selectedDeviceIndices(engine.launch, allNvidia);
-  const participants = allNvidia.filter((gpu, index) => selected.has(Number.isInteger(gpu.index) ? gpu.index : index));
-  if (!participants.length) throw new TypeError("The llama.cpp launch does not name a usable NVIDIA device.");
-
-  const ratios = splitRatios(engine.launch, participants);
-  const runningFacts = engine.modelFacts;
-  const facts = targetModelFacts || runningFacts;
-  const modelBytes = positiveInteger(facts.weightBytes || facts.fileBytes, "Target model bytes");
-  const runningModelBytes = positiveInteger(runningFacts.weightBytes || runningFacts.fileBytes, "Running model bytes");
-  const currentContextTokens = positiveInteger(engine.launch.ctxSize, "The running llama.cpp context");
-  const runningKvBytesPerToken = localHostKvBytesPerToken(runningFacts, engine.launch);
-  const totalKvBytesPerToken = localHostKvBytesPerToken(facts, engine.launch);
-  const modelMaxContextTokens = positiveInteger(facts.trainedContext || currentContextTokens, "The model context window");
-  const allocations = participants.map((gpu, index) => {
+export function createNvidiaProfileInput({
+  gpus,
+  targetModelFacts,
+  targetModelId = "",
+  cacheTypeK = "q4_0",
+  cacheTypeV = "q4_0",
+  visionProjectorBytes = 0,
+  systemReserveBytes = LOCAL_HOST_NVIDIA_SYSTEM_RESERVE_BYTES,
+  runtimeReserveBytes = LOCAL_HOST_NVIDIA_RUNTIME_RESERVE_BYTES,
+} = {}) {
+  const allNvidia = (Array.isArray(gpus) ? gpus : []).filter((gpu) => gpu?.vendor === "nvidia" && gpu.totalBytes);
+  if (!allNvidia.length) throw new TypeError("Managed NVIDIA planning needs physical capacity for at least one NVIDIA card.");
+  if (!targetModelFacts) throw new TypeError("Managed NVIDIA planning needs target GGUF facts.");
+  const modelBytes = positiveInteger(targetModelFacts.weightBytes || targetModelFacts.fileBytes, "Target model bytes");
+  const modelMaxContextTokens = positiveInteger(targetModelFacts.trainedContext, "The target model context window");
+  const projector = Number(visionProjectorBytes);
+  if (!Number.isSafeInteger(projector) || projector < 0) throw new TypeError("Vision projector bytes must be a non-negative integer.");
+  const system = positiveInteger(systemReserveBytes, "The Windows GPU reserve");
+  const runtime = positiveInteger(runtimeReserveBytes, "The llama.cpp GPU runtime reserve");
+  const ratios = targetSplitRatios(allNvidia, {
+    systemReserveBytes: system,
+    runtimeReserveBytes: runtime,
+    projectorBytes: projector,
+  });
+  const totalKvBytesPerToken = localHostKvBytesPerToken(targetModelFacts, { cacheTypeK, cacheTypeV });
+  const allocations = allNvidia.map((gpu, index) => {
     const ratio = ratios[index];
-    const currentKvBytes = Math.round(currentContextTokens * runningKvBytesPerToken * ratio);
     const weightBytes = Math.round(modelBytes * ratio);
-    // nvidia-smi's used figure is the physical baseline. Remove only the
-    // current KV allocation: all other observed bytes, including Windows,
-    // CUDA workspaces and llama.cpp's runtime, remain charged to the target
-    // launch. The profile calculator applies its 1 GiB headroom once.
-    const runningWeightBytes = Math.round(runningModelBytes * ratio);
-    const observedFixed = Math.max(0, Math.round(gpu.usedBytes - currentKvBytes));
-    // Project only the model's own shard into the target launch. Everything
-    // else that nvidia-smi observed remains charged: WDDM, desktop use, draft
-    // buffers, and llama.cpp's fixed runtime allocations do not disappear just
-    // because the user selected a smaller GGUF.
-    const staticBytes = Math.max(weightBytes, observedFixed - runningWeightBytes + weightBytes);
+    const projectorAllocationBytes = index === 0 ? projector : 0;
     return {
       id: gpu.uuid || `nvidia-${Number.isInteger(gpu.index) ? gpu.index : index}`,
       totalBytes: Math.round(gpu.totalBytes),
-      staticBytes,
+      staticBytes: weightBytes + projectorAllocationBytes + system + runtime,
       kvBytesPerToken: Math.max(1, Math.round(totalKvBytesPerToken * ratio)),
-      usedBytes: Math.round(gpu.usedBytes),
-      currentKvBytes,
       weightBytes,
-      runtimeReserveBytes: LOCAL_HOST_MIN_HEADROOM_BYTES,
+      projectorBytes: projectorAllocationBytes,
+      systemReserveBytes: system,
+      runtimeReserveBytes: runtime,
     };
   });
 
   return {
     adapterId: "llamacpp-nvidia",
-    // The slot-affinity probe uses this exact wire id immediately after the
-    // managed restart. A selected GGUF may replace the endpoint's old id, so
-    // never retain the observed model id when the caller supplied a target.
-    modelId: String(targetModelId || "").trim() || engine.models?.[0] || path.basename(String(engine.launch.model || "local-model")),
+    modelId: String(targetModelId || "").trim() || path.basename(String(targetModelFacts.path || "local-model")),
     modelMaxContextTokens,
+    // llama.cpp rounds a slot window to a 256-token boundary. Emit that
+    // boundary directly so lifecycle verification can require exact reality.
+    contextQuantumTokens: 256,
     gpus: allocations,
+    deviceIndices: Object.freeze(allNvidia.map((gpu, index) => Number.isInteger(gpu.index) ? gpu.index : index)),
+    tensorSplit: Object.freeze(ratios),
   };
+}
+
+function sampleGpuById(sample, allocation) {
+  const id = String(allocation?.id || "");
+  const found = (Array.isArray(sample) ? sample : []).find((gpu, index) => {
+    const candidate = gpu?.uuid || `nvidia-${Number.isInteger(gpu?.index) ? gpu.index : index}`;
+    return candidate === id;
+  });
+  const used = Number(found?.usedBytes);
+  if (!Number.isSafeInteger(used) || used < 0) {
+    throw new TypeError(`Target calibration is missing a physical usage sample for ${id}.`);
+  }
+  return used;
+}
+
+// Stop the previous server, measure each card's real Windows/desktop baseline,
+// then load the target at a fixed small context. That gives the target model,
+// projector and llama.cpp runtime footprint without accepting any old launch
+// parameter as evidence. KV bytes come from the selected cache format and are
+// only about 128 MiB at this fixed 8K calibration window.
+export function createCalibratedNvidiaProfileInput({
+  target,
+  baselineSample,
+  calibrationContextTokens = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
+  calibrationSample,
+} = {}) {
+  if (!target || typeof target !== "object" || !Array.isArray(target.gpus) || !target.gpus.length) {
+    throw new TypeError("Target calibration needs a target NVIDIA capacity ledger.");
+  }
+  const contextTokens = positiveInteger(calibrationContextTokens, "The calibration context");
+  const gpus = target.gpus.map((allocation) => {
+    const baselineUsedBytes = sampleGpuById(baselineSample, allocation);
+    const calibrationUsedBytes = sampleGpuById(calibrationSample, allocation);
+    const kvBytesPerToken = allocation.kvBytesPerToken;
+    const expectedWithoutRuntime = baselineUsedBytes
+      + allocation.weightBytes
+      + allocation.projectorBytes
+      + (contextTokens * kvBytesPerToken);
+    const runtimeReserveBytes = calibrationUsedBytes - expectedWithoutRuntime;
+    const staticBytes = baselineUsedBytes
+      + allocation.weightBytes
+      + allocation.projectorBytes
+      + runtimeReserveBytes;
+    if (!Number.isSafeInteger(staticBytes) || staticBytes <= 0 || staticBytes >= allocation.totalBytes) {
+      throw new TypeError(`Target calibration produced an invalid fixed footprint for ${allocation.id}.`);
+    }
+    if (!Number.isSafeInteger(runtimeReserveBytes) || runtimeReserveBytes < 0) {
+      throw new TypeError(`Target calibration undercounted the expected target footprint for ${allocation.id}.`);
+    }
+    return {
+      ...allocation,
+      staticBytes,
+      systemReserveBytes: baselineUsedBytes,
+      runtimeReserveBytes,
+      calibration: Object.freeze({ baselineUsedBytes, calibrationUsedBytes, calibrationContextTokens: contextTokens }),
+    };
+  });
+  return Object.freeze({
+    ...target,
+    gpus: Object.freeze(gpus),
+  });
 }
 
 export function selectNvidiaManagedProfile(options = {}) {
   const input = createNvidiaProfileInput(options);
+  return selectNvidiaProfileFromInput(input);
+}
+
+export function selectNvidiaProfileFromInput(input) {
   const profile = selectLocalHostLaneProfile(input);
   if (!profile.laneCount) throw new TypeError("No managed llama.cpp profile fits the selected NVIDIA cards with the required operating reserve.");
-  return profile;
+  return Object.freeze({
+    ...profile,
+    deviceIndices: input.deviceIndices,
+    tensorSplit: input.tensorSplit,
+  });
 }

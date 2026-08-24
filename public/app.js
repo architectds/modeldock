@@ -2548,15 +2548,6 @@ function openLocalConfig(engine) {
   }
   showLocalHostManageStatus("");
 
-  // Ollama publishes vision from its own model metadata. Once a llama.cpp host
-  // is connected, its managed-model section owns vision as a compatible base
-  // GGUF plus projector; showing both toggles would imply they do the same
-  // thing when only the managed one changes the launched process.
-  const visionRow = $("local-config-vision-row");
-  if (visionRow) visionRow.hidden = engine === "ollama" || (engine === "llamacpp" && localConnectedState.get("llamacpp"));
-  const vision = $("local-config-vision");
-  if (vision) vision.checked = false;
-
   const disconnect = $("local-config-disconnect");
   if (disconnect) disconnect.hidden = !localConnectedState.get(engine);
   const errorLine = $("local-config-error");
@@ -2619,9 +2610,7 @@ async function submitLocalConfig(action) {
     const discoveredPort = Number(observed?.port) || 0;
     body = ollama
       ? { baseUrl }
-      : (discoveredPort === port
-        ? { engine, asVision: Boolean($("local-config-vision")?.checked) }
-        : { engine, baseUrl, asVision: Boolean($("local-config-vision")?.checked) });
+      : (discoveredPort === port ? { engine } : { engine, baseUrl });
   }
 
   if (save) save.disabled = true;

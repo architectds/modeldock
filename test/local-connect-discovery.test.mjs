@@ -257,9 +257,12 @@ test("gateway connection and explicit host takeover stay separate", async (t) =>
     },
   };
   const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [
-    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
-  ];
+  services.probeGpus = async () => {
+    const usedBytes = discovered.launch.ctxSize === 8_192
+      ? Math.round(15.125 * 1024 ** 3)
+      : 1 * 1024 ** 3;
+    return [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes }];
+  };
   services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
     async persist(record) {
       const registry = await readLocalHostRegistry(registryFile);
@@ -356,9 +359,12 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     assert.equal(file, selectedModel);
     return selectedFacts;
   };
-  services.probeGpus = async () => [
-    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
-  ];
+  services.probeGpus = async () => {
+    const usedBytes = discovered.launch.ctxSize === 8_192
+      ? Math.round(16.8 * 1024 ** 3)
+      : 1 * 1024 ** 3;
+    return [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes }];
+  };
   services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
     async persist(record) {
       const registry = await readLocalHostRegistry(registryFile);

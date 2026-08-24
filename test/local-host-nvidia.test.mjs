@@ -1,89 +1,146 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conservativeNvidiaGpuSample, selectNvidiaManagedProfile } from "../src/local-host-nvidia.mjs";
+import {
+  createCalibratedNvidiaProfileInput,
+  createNvidiaProfileInput,
+  LOCAL_HOST_NVIDIA_RUNTIME_RESERVE_BYTES,
+  LOCAL_HOST_NVIDIA_SYSTEM_RESERVE_BYTES,
+  selectNvidiaProfileFromInput,
+  selectNvidiaManagedProfile,
+} from "../src/local-host-nvidia.mjs";
 
 const GiB = 1024 ** 3;
 
-const ENGINE = {
-  engine: "llamacpp",
-  models: ["qwen3.8:27b"],
-  launch: {
-    model: "D:/models/qwen.gguf",
-    ctxSize: 262_144,
-    parallel: 1,
-    splitMode: "tensor",
-    cacheTypeK: "q4_0",
-    cacheTypeV: "q4_0",
-  },
-  modelFacts: {
-    weightBytes: 17_559_178_144,
-    attentionLayers: 16,
-    headCountKv: 4,
-    keyLength: 256,
-    valueLength: 256,
-    trainedContext: 262_144,
-  },
+const TARGET = {
+  weightBytes: 4 * GiB,
+  attentionLayers: 16,
+  headCountKv: 4,
+  keyLength: 256,
+  valueLength: 256,
+  trainedContext: 262_144,
 };
 
-test("the measured dual-5060-Ti ledger leaves a one GiB physical reserve", () => {
-  const profile = selectNvidiaManagedProfile({
-    engine: ENGINE,
+function singleGpuWithKvBudget(kvBudgetGiB) {
+  return [{
+    index: 0,
+    uuid: "gpu-0",
+    vendor: "nvidia",
+    totalBytes: TARGET.weightBytes
+      + LOCAL_HOST_NVIDIA_SYSTEM_RESERVE_BYTES
+      + LOCAL_HOST_NVIDIA_RUNTIME_RESERVE_BYTES
+      + GiB
+      + kvBudgetGiB * GiB,
+  }];
+}
+
+test("target-first capacity turns available KV bytes into P and context", () => {
+  const twoGiB = selectNvidiaManagedProfile({ gpus: singleGpuWithKvBudget(2), targetModelFacts: TARGET });
+  assert.equal(twoGiB.profileId, "static-p1-c131072", "2 GiB at 16 KiB/token is 131K for one session");
+
+  const fiveGiB = selectNvidiaManagedProfile({ gpus: singleGpuWithKvBudget(5), targetModelFacts: TARGET });
+  assert.equal(fiveGiB.profileId, "static-p1-c262144", "5 GiB reaches the model's full P1 window");
+
+  const sevenGiB = selectNvidiaManagedProfile({ gpus: singleGpuWithKvBudget(7), targetModelFacts: TARGET });
+  assert.equal(sevenGiB.profileId, "static-p2-c229376", "7 GiB is two long equal sessions, not an unsafe P3");
+
+  const tenGiB = selectNvidiaManagedProfile({ gpus: singleGpuWithKvBudget(10), targetModelFacts: TARGET });
+  assert.equal(tenGiB.profileId, "static-p2-c262144", "two full windows beat three reduced windows");
+});
+
+test("target ledger ignores all old-process context and observed usage", () => {
+  const gpus = [
+    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 16 * GiB, usedBytes: 15.9 * GiB },
+    { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 16 * GiB, usedBytes: 2 * GiB },
+  ];
+  const first = createNvidiaProfileInput({
+    gpus,
+    targetModelFacts: TARGET,
+    targetModelId: "D:/models/target.gguf",
+    // These are deliberately irrelevant stale process fields. Passing them
+    // cannot affect the pure target calculator.
+    engine: { launch: { ctxSize: 262_144, parallel: 1 }, modelFacts: { weightBytes: 99 * GiB } },
+  });
+  const second = createNvidiaProfileInput({
+    gpus: gpus.map((gpu) => ({ ...gpu, usedBytes: 0 })),
+    targetModelFacts: TARGET,
+    targetModelId: "D:/models/target.gguf",
+    engine: { launch: { ctxSize: 4_096, parallel: 3 }, modelFacts: { weightBytes: GiB } },
+  });
+  assert.deepEqual(first, second);
+  assert.ok(first.gpus.every((gpu) => gpu.staticBytes === gpu.weightBytes + gpu.systemReserveBytes + gpu.runtimeReserveBytes));
+});
+
+test("target calibration measures the real Windows baseline and llama footprint", () => {
+  const target = createNvidiaProfileInput({
+    gpus: [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 16 * GiB }],
+    targetModelFacts: TARGET,
+    visionProjectorBytes: GiB,
+  });
+  const allocation = target.gpus[0];
+  const baselineUsedBytes = Math.round(1.25 * GiB);
+  const measuredRuntimeBytes = Math.round(2.5 * GiB);
+  const calibrationContextTokens = 8_192;
+  const calibrationUsedBytes = baselineUsedBytes
+    + allocation.weightBytes
+    + allocation.projectorBytes
+    + measuredRuntimeBytes
+    + (calibrationContextTokens * allocation.kvBytesPerToken);
+  const calibrated = createCalibratedNvidiaProfileInput({
+    target,
+    baselineSample: [{ index: 0, uuid: "gpu-0", usedBytes: baselineUsedBytes }],
+    calibrationContextTokens,
+    calibrationSample: [{ index: 0, uuid: "gpu-0", usedBytes: calibrationUsedBytes }],
+  });
+  assert.equal(calibrated.gpus[0].systemReserveBytes, baselineUsedBytes);
+  assert.equal(calibrated.gpus[0].runtimeReserveBytes, measuredRuntimeBytes);
+  assert.equal(
+    calibrated.gpus[0].staticBytes,
+    baselineUsedBytes + allocation.weightBytes + allocation.projectorBytes + measuredRuntimeBytes,
+  );
+  const profile = selectNvidiaProfileFromInput(calibrated);
+  assert.ok(profile.gpus[0].remainingBytes >= GiB, "final selection keeps the separate one GiB headroom after measured fixed costs");
+});
+
+test("a zero-use secondary GPU is a valid calibration baseline", () => {
+  const target = createNvidiaProfileInput({
+    gpus: [{ index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 16 * GiB }],
+    targetModelFacts: TARGET,
+  });
+  const allocation = target.gpus[0];
+  const calibrationContextTokens = 8_192;
+  const runtimeReserveBytes = 2 * GiB;
+  const calibrated = createCalibratedNvidiaProfileInput({
+    target,
+    baselineSample: [{ index: 1, uuid: "gpu-1", usedBytes: 0 }],
+    calibrationContextTokens,
+    calibrationSample: [{
+      index: 1,
+      uuid: "gpu-1",
+      usedBytes: allocation.weightBytes + runtimeReserveBytes + (calibrationContextTokens * allocation.kvBytesPerToken),
+    }],
+  });
+  assert.equal(calibrated.gpus[0].systemReserveBytes, 0);
+  assert.equal(calibrated.gpus[0].runtimeReserveBytes, runtimeReserveBytes);
+});
+
+test("projector is charged to its primary card and constrains an asymmetric pair", () => {
+  const withoutVision = selectNvidiaManagedProfile({
     gpus: [
-      { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 16_408_117_248 },
-      { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 14_426_308_608 },
+      { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 12 * GiB },
+      { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 16 * GiB },
     ],
+    targetModelFacts: TARGET,
   });
-  assert.equal(profile.profileId, "static-p1-c215000");
-  assert.equal(profile.laneCount, 1);
-  assert.equal(profile.laneContextTokens, 215_000);
-  assert.equal(profile.headroomLevel, "minimum");
-  assert.equal(profile.gpus.length, 2);
-});
-
-test("a smaller selected GGUF replaces only its weight shard and retains a real reserve", () => {
-  const profile = selectNvidiaManagedProfile({
-    engine: ENGINE,
-    targetModelFacts: {
-      ...ENGINE.modelFacts,
-      weightBytes: 13_575_223_296,
-      modelName: "Qwen3.8-27B",
-      modelSlug: "Qwen3.8-27B",
-    },
-    targetModelId: "D:/models/Qwen3.8-27B-Q3_K_M.gguf",
+  const withVision = selectNvidiaManagedProfile({
     gpus: [
-      { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 16_110_321_664 },
-      { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 14_428_405_760 },
+      { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 12 * GiB },
+      { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 16 * GiB },
     ],
+    targetModelFacts: TARGET,
+    visionProjectorBytes: GiB,
   });
-  assert.equal(profile.profileId, "static-p2-c214000");
-  assert.equal(profile.laneCount, 2);
-  assert.equal(profile.laneContextTokens, 214_000);
-  assert.equal(profile.modelId, "D:/models/Qwen3.8-27B-Q3_K_M.gguf", "the post-restart slot probe targets the selected model, not the previous server id");
-  assert.ok(profile.gpus.every((gpu) => gpu.meetsPreferredHeadroom), "the selected P2 profile keeps its physical preferred reserve");
-  assert.ok(profile.laneContextTokens < 262_144, "P2 at 262K consumes the measured physical reserve");
-});
-
-test("a single larger card can expose more equal lanes without exceeding three", () => {
-  const profile = selectNvidiaManagedProfile({
-    engine: { ...ENGINE, launch: { ...ENGINE.launch, splitMode: "none", mainGpu: 0 } },
-    gpus: [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 32 * GiB, usedBytes: 24 * GiB }],
-  });
-  assert.ok(profile.laneCount >= 2);
-  assert.ok(profile.laneCount <= 3);
-  assert.ok(profile.laneContextTokens >= Math.ceil(262_144 * 0.75));
-});
-
-test("managed selection keeps each card's highest observed WDDM allocation", () => {
-  const selected = conservativeNvidiaGpuSample([
-    [
-      { index: 0, uuid: "gpu-0", totalBytes: 16 * GiB, usedBytes: 13 * GiB },
-      { index: 1, uuid: "gpu-1", totalBytes: 16 * GiB, usedBytes: 14 * GiB },
-    ],
-    [
-      { index: 0, uuid: "gpu-0", totalBytes: 16 * GiB, usedBytes: 15 * GiB },
-      { index: 1, uuid: "gpu-1", totalBytes: 16 * GiB, usedBytes: 12 * GiB },
-    ],
-  ]);
-  assert.equal(selected[0].usedBytes, 15 * GiB);
-  assert.equal(selected[1].usedBytes, 14 * GiB);
+  assert.equal(withVision.gpus[0].projectorBytes, GiB);
+  assert.equal(withVision.gpus[1].projectorBytes, 0);
+  assert.ok(withVision.gpus[0].remainingBytes < withVision.gpus[1].remainingBytes, "the more constrained primary card remains the binding ledger entry");
+  assert.ok(withoutVision.gpus.every((gpu) => gpu.remainingBytes >= GiB));
 });

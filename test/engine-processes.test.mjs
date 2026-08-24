@@ -382,13 +382,22 @@ test("the unified switch can be turned off as well as on", () => {
 });
 
 test("managed equal lanes write total context and disable unified KV", () => {
-  const running = ["-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1", "--kv-unified", "--jinja"];
+  const running = [
+    "-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1",
+    "-ngl", "0", "-sm", "none", "-mg", "1", "-dev", "Vulkan1",
+    "--kv-unified", "--jinja",
+  ];
   const next = managedLlamaLaunchArgs(running, {
-    profile: { laneCount: 2, laneContextTokens: 200_000 },
+    profile: { laneCount: 2, laneContextTokens: 200_000, deviceIndices: [0, 1], tensorSplit: [0.5, 0.5] },
     slotSavePath: "D:/ModelDock/KV",
   });
   assert.equal(next[next.indexOf("-c") + 1], "400000");
   assert.equal(next[next.indexOf("--parallel") + 1], "2");
+  assert.equal(next[next.indexOf("-ngl") + 1], "999");
+  assert.equal(next[next.indexOf("-sm") + 1], "tensor");
+  assert.equal(next[next.indexOf("-ts") + 1], "0.50000000,0.50000000");
+  assert.ok(!next.includes("Vulkan1"), "a stale user-owned device restriction cannot survive managed CUDA placement");
+  assert.equal(next.filter((value) => value === "-sm").length, 1);
   assert.ok(next.includes("--no-kv-unified"));
   assert.ok(!next.includes("--kv-unified"));
   assert.equal(next[next.indexOf("--slot-save-path") + 1], "D:/ModelDock/KV");
@@ -402,7 +411,7 @@ test("managed setup replaces the model and owns the optional vision projector", 
     "-c", "262144", "--parallel", "1",
   ];
   const next = managedLlamaLaunchArgs(running, {
-    profile: { laneCount: 1, laneContextTokens: 262_144 },
+    profile: { laneCount: 1, laneContextTokens: 262_144, deviceIndices: [1], tensorSplit: [1] },
     slotSavePath: "D:/ModelDock/KV",
     modelPath: "D:/models/vision-base.gguf",
     visionProjectorPath: "D:/models/vision-projector.gguf",
@@ -413,7 +422,7 @@ test("managed setup replaces the model and owns the optional vision projector", 
   assert.equal(next[next.indexOf("--mmproj") + 1], "D:/models/vision-projector.gguf");
 
   const textOnly = managedLlamaLaunchArgs(next, {
-    profile: { laneCount: 1, laneContextTokens: 262_144 },
+    profile: { laneCount: 1, laneContextTokens: 262_144, deviceIndices: [1], tensorSplit: [1] },
     slotSavePath: "D:/ModelDock/KV",
     visionProjectorPath: null,
   });

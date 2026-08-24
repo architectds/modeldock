@@ -83,7 +83,7 @@ export async function verifyLocalHost(record, suppliedOperations) {
 // starts an engine itself. If a replacement was begun but cannot verify, it
 // attempts the persisted immutable pre-takeover specification exactly once. If drain
 // failed before the old host was stopped, it leaves that host alone.
-export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile = null, policy } = {}, suppliedOperations) {
+export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile = null, policy, afterStop } = {}, suppliedOperations) {
   const operations = assertOperations(suppliedOperations);
   let current = beginHostApply(record, { desiredSpec, desiredProfile, policy });
   await persist(operations, current);
@@ -94,6 +94,7 @@ export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile =
     await persist(operations, current);
     replacementStarted = true;
     await operations.stop(current);
+    if (typeof afterStop === "function") await afterStop(current);
     current = await startAndVerify(current, operations);
     return { outcome: "applied", record: current };
   } catch (error) {
@@ -131,6 +132,53 @@ export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile =
       current = markHostDegraded(current, { failure: recoveryFailure });
       await persist(operations, current);
       return { outcome: "degraded", record: current, failure, recoveryFailure };
+    }
+  }
+}
+
+// A target-first calibration is one transaction: capture the physical baseline
+// only after the old server is stopped, run the target at a fixed small window,
+// derive its final profile, and then apply it. Any failure after the calibration
+// launch returns to the immutable pre-takeover argv rather than leaving a small
+// temporary server behind.
+export async function calibrateAndApplyLocalHostPlan(record, {
+  calibrationSpec,
+  calibrationProfile,
+  measureBaseline,
+  measureCalibration,
+  createFinalPlan,
+  policy,
+} = {}, suppliedOperations) {
+  if (typeof measureBaseline !== "function" || typeof measureCalibration !== "function" || typeof createFinalPlan !== "function") {
+    throw new TypeError("Target calibration needs baseline, target, and final-plan operations.");
+  }
+  let baseline;
+  const calibration = await applyLocalHostPlan(record, {
+    desiredSpec: calibrationSpec,
+    desiredProfile: calibrationProfile,
+    policy,
+    afterStop: async (current) => {
+      baseline = await measureBaseline(current);
+    },
+  }, suppliedOperations);
+  if (calibration.outcome !== "applied") return calibration;
+  try {
+    const target = await measureCalibration(calibration.record);
+    const final = await createFinalPlan({ baseline, target, record: calibration.record });
+    if (!final?.desiredSpec || !final?.desiredProfile) throw new TypeError("Target calibration did not produce a final managed profile.");
+    return await applyLocalHostPlan(calibration.record, { ...final, policy }, suppliedOperations);
+  } catch (error) {
+    const failure = failureText(error);
+    try {
+      const restored = await applyLocalHostPlan(calibration.record, {
+        desiredSpec: calibration.record.preTakeoverSpec,
+        desiredProfile: null,
+        policy,
+      }, suppliedOperations);
+      if (restored.outcome === "applied") return { outcome: "recovered", record: restored.record, failure };
+      return { ...restored, failure };
+    } catch (restoreError) {
+      return { outcome: "degraded", record: calibration.record, failure, recoveryFailure: failureText(restoreError) };
     }
   }
 }

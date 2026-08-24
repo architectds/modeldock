@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { beginHostApply, createObservedHost, markHostApplying, markHostVerified, markHostVerifying, takeOverHost } from "../src/local-hosts.mjs";
-import { applyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "../src/local-host-runner.mjs";
+import { applyLocalHostPlan, calibrateAndApplyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "../src/local-host-runner.mjs";
 
 const OBSERVED = {
   id: "host-qwen",
@@ -82,6 +82,53 @@ test("runner persists each lifecycle boundary and promotes a verified replacemen
   assert.deepEqual(fake.calls, [
     "persist:draining", "drain", "persist:applying", "stop", "start:2", "persist:verifying", "verify", "persist:ready",
   ]);
+});
+
+test("target calibration samples baseline only after stop, then applies its derived final profile", async () => {
+  const fake = operations({ verifyResults: [true, true] });
+  const calibrationSpec = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "-c", "8192"] };
+  const finalProfile = {
+    adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "static-p2-c200000",
+    laneCount: 2, laneContextTokens: 200_000, totalContextTokens: 400_000,
+  };
+  const result = await calibrateAndApplyLocalHostPlan(readyHost(), {
+    calibrationSpec,
+    calibrationProfile: {
+      adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calibration-p1-c8192",
+      laneCount: 1, laneContextTokens: 8_192, totalContextTokens: 8_192,
+    },
+    measureBaseline: async () => {
+      assert.ok(fake.calls.includes("stop"), "baseline cannot be sampled while the old llama process remains resident");
+      return { gpu0: 123 };
+    },
+    measureCalibration: async () => ({ gpu0: 456 }),
+    createFinalPlan: async ({ baseline, target }) => {
+      assert.deepEqual(baseline, { gpu0: 123 });
+      assert.deepEqual(target, { gpu0: 456 });
+      return { desiredSpec: REPLACEMENT, desiredProfile: finalProfile };
+    },
+  }, fake);
+  assert.equal(result.outcome, "applied");
+  assert.deepEqual(result.record.activeProfile, finalProfile);
+  assert.equal(fake.calls.filter((entry) => entry === "stop").length, 2);
+});
+
+test("a target-calibration derivation failure restores the immutable pre-takeover argv", async () => {
+  const fake = operations({ verifyResults: [true, true] });
+  const calibrationSpec = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "-c", "8192"] };
+  const result = await calibrateAndApplyLocalHostPlan(readyHost(), {
+    calibrationSpec,
+    calibrationProfile: {
+      adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calibration-p1-c8192",
+      laneCount: 1, laneContextTokens: 8_192, totalContextTokens: 8_192,
+    },
+    measureBaseline: async () => ({ gpu0: 1 }),
+    measureCalibration: async () => ({ gpu0: 2 }),
+    createFinalPlan: async () => { throw new Error("calibration slope invalid"); },
+  }, fake);
+  assert.equal(result.outcome, "recovered");
+  assert.deepEqual(result.record.activeSpec, OBSERVED.launch);
+  assert.match(result.failure, /calibration slope invalid/);
 });
 
 test("runner restores the immutable pre-takeover launch after replacement verification fails", async () => {

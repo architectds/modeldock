@@ -10,7 +10,11 @@ import { LOCAL_HOST_ADAPTERS } from "./local-hosts.mjs";
 export const LOCAL_HOST_MAX_LANES = 3;
 export const LOCAL_HOST_MIN_LANE_CONTEXT_RATIO = 0.75;
 export const LOCAL_HOST_MIN_HEADROOM_BYTES = 1 * 1024 ** 3;
-export const LOCAL_HOST_PREFERRED_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
+// Managed mode has one physical operating-reserve contract: 1 GiB per card.
+// A second hidden "preferred" threshold quietly reduced promised context and
+// contradicted the user-visible policy, so retain the export only as its exact
+// alias for existing readers.
+export const LOCAL_HOST_PREFERRED_HEADROOM_BYTES = LOCAL_HOST_MIN_HEADROOM_BYTES;
 
 function text(value, label) {
   const result = typeof value === "string" ? value.trim() : "";
@@ -54,6 +58,8 @@ export function createLocalHostGpuAllocation({
   usedBytes = 0,
   currentKvBytes = 0,
   weightBytes = 0,
+  projectorBytes = 0,
+  systemReserveBytes = 0,
   runtimeReserveBytes = 0,
 } = {}) {
   const total = positiveInteger(totalBytes, "A GPU total byte count");
@@ -67,6 +73,8 @@ export function createLocalHostGpuAllocation({
     usedBytes: nonNegativeInteger(usedBytes, "A GPU observed used byte count"),
     currentKvBytes: nonNegativeInteger(currentKvBytes, "A GPU current KV byte count"),
     weightBytes: nonNegativeInteger(weightBytes, "A GPU weight byte count"),
+    projectorBytes: nonNegativeInteger(projectorBytes, "A GPU projector byte count"),
+    systemReserveBytes: nonNegativeInteger(systemReserveBytes, "A GPU system reserve byte count"),
     runtimeReserveBytes: nonNegativeInteger(runtimeReserveBytes, "A GPU runtime reserve byte count"),
   });
 }
@@ -132,6 +140,8 @@ function gpuCandidate(input, gpu, laneCount, laneContextTokens) {
     usedBytes: gpu.usedBytes,
     currentKvBytes: gpu.currentKvBytes,
     weightBytes: gpu.weightBytes,
+    projectorBytes: gpu.projectorBytes,
+    systemReserveBytes: gpu.systemReserveBytes,
     runtimeReserveBytes: gpu.runtimeReserveBytes,
     kvBytesPerToken: gpu.kvBytesPerToken,
     kvBytes,
@@ -180,11 +190,23 @@ export function selectLocalHostLaneProfile(input) {
   for (let lanes = LOCAL_HOST_MAX_LANES; lanes >= 1; lanes -= 1) {
     const candidate = evaluateLocalHostLaneProfile(normalized, lanes);
     candidates.push(candidate);
-    if (!candidate.allocationFits) continue;
-    if (lanes > 1 && !candidate.meetsLongContextFloor) continue;
+  }
+  // Never trade two full-size conversations for three smaller ones merely
+  // because P3 clears the 75% floor. First keep the model's complete window
+  // on the greatest lane count that can actually retain it; only then use a
+  // reduced two-lane plan when it still gives each session a long window.
+  const fullWindow = candidates.find((candidate) => candidate.laneCount > 1
+    && candidate.allocationFits
+    && candidate.laneContextTokens === normalized.modelMaxContextTokens);
+  const longTwoLane = candidates.find((candidate) => candidate.laneCount === 2
+    && candidate.allocationFits
+    && candidate.meetsLongContextFloor);
+  const oneLane = candidates.find((candidate) => candidate.laneCount === 1 && candidate.allocationFits);
+  const selected = fullWindow || longTwoLane || oneLane;
+  if (selected) {
     return Object.freeze({
-      ...candidate,
-      profileId: `static-p${lanes}-c${candidate.laneContextTokens}`,
+      ...selected,
+      profileId: `static-p${selected.laneCount}-c${selected.laneContextTokens}`,
       candidates: Object.freeze(candidates),
     });
   }
