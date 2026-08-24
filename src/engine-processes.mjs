@@ -217,6 +217,7 @@ const OVERRIDE_FLAGS = {
   parallel: ["-np", "--parallel"],
   cacheTypeK: ["-ctk", "--cache-type-k"],
   cacheTypeV: ["-ctv", "--cache-type-v"],
+  slotSavePath: ["--slot-save-path"],
 };
 
 // Presence-only switches: there is no value token to step over, and the two
@@ -277,6 +278,7 @@ export function applyLaunchOverrides(args, overrides = {}) {
   if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
   if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
   if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
+  if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
   // Slots that each see the whole window rather than a reserved slice. Written
   // explicitly because llama.cpp only defaults it on when the slot count is
   // auto, so setting --parallel silently turns it off.
@@ -492,4 +494,13 @@ export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
+}
+
+// Used only by an explicitly managed llama.cpp host. It preserves every
+// observed launch argument except the slot-state root, so enabling durable KV
+// storage cannot silently drop the user's model, template or GPU topology.
+export function withLlamaSlotSavePath(args, directory) {
+  const root = typeof directory === "string" ? directory.trim() : "";
+  if (!root) throw new TypeError("A managed llama.cpp slot-state directory is required.");
+  return applyLaunchOverrides(args, { slotSavePath: root });
 }

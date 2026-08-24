@@ -3,6 +3,8 @@
 // runner will use these records later, but importing it cannot inspect, stop,
 // start, or reconfigure an engine.
 
+import { createLocalHostKvStorage } from "./local-host-kv-state.mjs";
+
 export const LOCAL_HOST_ADAPTERS = Object.freeze({
   "llamacpp-nvidia": Object.freeze({
     id: "llamacpp-nvidia",
@@ -91,6 +93,7 @@ export function createObservedHost({ id, adapterId, endpoint, launch, capabiliti
     observedSpec: normalizeLaunchSpec(launch),
     desiredSpec: null,
     lastKnownGoodSpec: null,
+    kvState: null,
     capabilities: copy(capabilities),
     policy: "automatic",
     state: "observed",
@@ -117,11 +120,19 @@ export function normalizeLocalHostRecord(record) {
   const state = assertState(record?.state || "observed");
   const desiredSpec = record?.desiredSpec ? normalizeLaunchSpec(record.desiredSpec) : null;
   const lastKnownGoodSpec = record?.lastKnownGoodSpec ? normalizeLaunchSpec(record.lastKnownGoodSpec) : null;
+  const kvState = record?.kvState ? createLocalHostKvStorage(record.kvState) : null;
   if (state !== "observed" && !desiredSpec) {
     throw new TypeError("A managed local host needs a desired launch specification.");
   }
   if (state === "observed" && (desiredSpec || lastKnownGoodSpec)) {
     throw new TypeError("An observed local host cannot have managed launch specifications.");
+  }
+  if (state === "observed" && kvState) throw new TypeError("An observed local host cannot have managed KV state storage.");
+  if (state !== "observed" && base.adapterId === "llamacpp-nvidia" && !kvState) {
+    throw new TypeError("A managed NVIDIA llama.cpp host requires an explicit KV state disk budget.");
+  }
+  if (kvState && base.adapterId !== "llamacpp-nvidia") {
+    throw new TypeError("SSD KV state storage is currently supported only for managed NVIDIA llama.cpp hosts.");
   }
   return {
     ...base,
@@ -130,6 +141,7 @@ export function normalizeLocalHostRecord(record) {
     state,
     desiredSpec,
     lastKnownGoodSpec,
+    kvState,
     managedAt: text(record?.managedAt),
     updatedAt: text(record?.updatedAt) || base.updatedAt,
     recoveryReason: text(record?.recoveryReason),
@@ -140,12 +152,14 @@ export function normalizeLocalHostRecord(record) {
 function managedRecord(record, patch = {}) {
   const desiredSpec = patch.desiredSpec === undefined ? record.desiredSpec : patch.desiredSpec;
   const lastKnownGoodSpec = patch.lastKnownGoodSpec === undefined ? record.lastKnownGoodSpec : patch.lastKnownGoodSpec;
+  const kvState = patch.kvState === undefined ? record.kvState : patch.kvState;
   return {
     ...record,
     ...patch,
     observedSpec: normalizeLaunchSpec(patch.observedSpec || record.observedSpec),
     desiredSpec: desiredSpec === null ? null : normalizeLaunchSpec(desiredSpec),
     lastKnownGoodSpec: lastKnownGoodSpec === null ? null : normalizeLaunchSpec(lastKnownGoodSpec),
+    kvState: kvState === null ? null : createLocalHostKvStorage(kvState),
     capabilities: copy(patch.capabilities || record.capabilities || {}),
   };
 }
@@ -154,14 +168,22 @@ function managedRecord(record, patch = {}) {
 // restart the host; the observed running specification becomes the initial
 // desired and known-good specification only after the lifecycle runner verifies
 // it on a real host.
-export function takeOverHost(record, { policy = "automatic", at = new Date().toISOString() } = {}) {
+export function takeOverHost(record, { policy = "automatic", kvState, at = new Date().toISOString() } = {}) {
   if (assertState(record?.state) !== "observed") throw new TypeError("Only an observed host can be taken over.");
   const desired = normalizeLaunchSpec(record.observedSpec);
+  if (record.adapterId === "llamacpp-nvidia" && !kvState) {
+    throw new TypeError("A managed NVIDIA llama.cpp host requires an explicit KV state disk budget.");
+  }
+  const storage = record.adapterId === "llamacpp-nvidia" ? createLocalHostKvStorage(kvState) : null;
+  if (kvState && record.adapterId !== "llamacpp-nvidia") {
+    throw new TypeError("SSD KV state storage is currently supported only for managed NVIDIA llama.cpp hosts.");
+  }
   return managedRecord(record, {
     policy: assertPolicy(policy),
     state: "verifying",
     desiredSpec: desired,
     lastKnownGoodSpec: null,
+    kvState: storage,
     managedAt: text(at) || new Date().toISOString(),
     updatedAt: text(at) || new Date().toISOString(),
     failure: "",

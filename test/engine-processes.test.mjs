@@ -13,6 +13,7 @@ import {
   tokenizeCommandLine,
   launchSpecFrom,
   applyLaunchOverrides,
+  withLlamaSlotSavePath,
 } from "../src/engine-processes.mjs";
 import os from "node:os";
 import path from "node:path";
@@ -341,6 +342,20 @@ test("the unified switch can be turned off as well as on", () => {
   const off = applyLaunchOverrides(["--kv-unified", "-ngl", "99"], { kvUnified: false });
   assert.ok(off.includes("--no-kv-unified"));
   assert.ok(!off.includes("--kv-unified"));
+});
+
+test("managed durable KV replaces only the llama.cpp slot-state path", () => {
+  const running = [
+    "-m", "D:/models/qwen.gguf", "--slot-save-path", "C:/old-cache",
+    "-c", "262144", "--parallel", "1", "--jinja", "-ngl", "999",
+  ];
+  const next = withLlamaSlotSavePath(running, "D:/ModelDock/KV/host-qwen");
+  assert.equal(next.filter((token) => token === "--slot-save-path").length, 1);
+  assert.equal(next[next.indexOf("--slot-save-path") + 1], "D:/ModelDock/KV/host-qwen");
+  for (const kept of ["-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1", "--jinja", "-ngl", "999"]) {
+    assert.ok(next.includes(kept), `${kept} was not preserved`);
+  }
+  assert.throws(() => withLlamaSlotSavePath(running, ""), /slot-state directory/);
 });
 
 // --- the drawer's preview is the line Apply runs ---------------------------

@@ -20,8 +20,10 @@ const OBSERVED = {
   observedAt: "2026-08-23T00:00:00.000Z",
 };
 
+const KV_STATE = { directory: "D:/ModelDock/KV", budgetBytes: 64 * 1024 ** 3 };
+
 function readyHost() {
-  return markHostVerified(takeOverHost(createObservedHost(OBSERVED), { at: "2026-08-23T00:01:00.000Z" }), {
+  return markHostVerified(takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE, at: "2026-08-23T00:01:00.000Z" }), {
     at: "2026-08-23T00:02:00.000Z",
   });
 }

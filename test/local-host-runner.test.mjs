@@ -11,8 +11,10 @@ const OBSERVED = {
   observedAt: "2026-08-23T00:00:00.000Z",
 };
 
+const KV_STATE = { directory: "D:/ModelDock/KV", budgetBytes: 64 * 1024 ** 3 };
+
 function readyHost() {
-  return markHostVerified(takeOverHost(createObservedHost(OBSERVED)));
+  return markHostVerified(takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE }));
 }
 
 function operations({ drainError, stopError, verifyResults = [true] } = {}) {
@@ -40,14 +42,14 @@ function operations({ drainError, stopError, verifyResults = [true] } = {}) {
 const REPLACEMENT = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "--parallel", "2"] };
 
 test("takeover verification never restarts an observed process", async () => {
-  const takenOver = takeOverHost(createObservedHost(OBSERVED));
+  const takenOver = takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE });
   const fake = operations({ verifyResults: [true] });
   const result = await verifyLocalHost(takenOver, fake);
   assert.equal(result.outcome, "verified");
   assert.equal(result.record.state, "ready");
   assert.deepEqual(fake.calls, ["verify", "persist:ready"]);
 
-  const failed = await verifyLocalHost(takeOverHost(createObservedHost(OBSERVED)), operations({ verifyResults: [false] }));
+  const failed = await verifyLocalHost(takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE }), operations({ verifyResults: [false] }));
   assert.equal(failed.outcome, "degraded");
   assert.equal(failed.record.state, "degraded");
 });

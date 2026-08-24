@@ -26,6 +26,8 @@ const OBSERVED = {
   observedAt: "2026-08-23T00:00:00.000Z",
 };
 
+const KV_STATE = { directory: "D:/ModelDock/KV", budgetBytes: 64 * 1024 ** 3 };
+
 test("the initial managed-host scope is NVIDIA llama.cpp and Apple MLX only", () => {
   assert.deepEqual(Object.keys(LOCAL_HOST_ADAPTERS).sort(), ["llamacpp-nvidia", "mlx-apple"]);
   assert.equal(LOCAL_HOST_ADAPTERS["llamacpp-nvidia"].candidateProfiles, "calibration_required");
@@ -44,17 +46,18 @@ test("an observed host carries facts but grants no lifecycle authority", () => {
 
 test("takeover records a desired spec but requires verification before it is known good", () => {
   const observed = createObservedHost(OBSERVED);
-  const taken = takeOverHost(observed, { policy: "elastic", at: "2026-08-23T00:01:00.000Z" });
+  const taken = takeOverHost(observed, { policy: "elastic", kvState: KV_STATE, at: "2026-08-23T00:01:00.000Z" });
   assert.equal(taken.state, "verifying");
   assert.equal(taken.policy, "elastic");
   assert.deepEqual(taken.desiredSpec, OBSERVED.launch);
+  assert.deepEqual(taken.kvState, { version: 1, ...KV_STATE });
   assert.equal(taken.lastKnownGoodSpec, null);
   assert.equal(observed.state, "observed", "takeover is immutable");
   assert.throws(() => takeOverHost(taken), /Only an observed host/);
 });
 
 test("a verified apply promotes only the verified desired spec to last known good", () => {
-  let record = takeOverHost(createObservedHost(OBSERVED));
+  let record = takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE });
   record = markHostVerified(record, { at: "2026-08-23T00:02:00.000Z" });
   const original = record.lastKnownGoodSpec;
   record = beginHostApply(record, {
@@ -73,7 +76,7 @@ test("a verified apply promotes only the verified desired spec to last known goo
 });
 
 test("a failed replacement returns to the last known good spec before a host can degrade", () => {
-  let record = takeOverHost(createObservedHost(OBSERVED));
+  let record = takeOverHost(createObservedHost(OBSERVED), { kvState: KV_STATE });
   record = markHostVerified(record);
   const original = record.lastKnownGoodSpec;
   record = beginHostApply(record, {
@@ -91,6 +94,7 @@ test("a failed replacement returns to the last known good spec before a host can
 
 test("host records reject guessed adapters, malformed argv, and invalid transitions", () => {
   assert.throws(() => createObservedHost({ ...OBSERVED, adapterId: "ollama" }), /Unsupported local host adapter/);
+  assert.throws(() => takeOverHost(createObservedHost(OBSERVED)), /explicit KV state disk budget/);
   assert.throws(() => normalizeLaunchSpec({ binary: "x", args: "--bad" }), /string array/);
   assert.throws(() => beginHostApply(createObservedHost(OBSERVED), { desiredSpec: OBSERVED.launch }), /state is observed/);
 });
