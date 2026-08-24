@@ -313,14 +313,19 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     visible: !document.getElementById('local-host-control').hidden,
     gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
     control: document.getElementById('local-host-management-state').textContent.trim(),
-    manageVisible: document.getElementById('local-host-manage').offsetParent !== null,
+    // The takeover action lives on the drawer's bottom primary in "manage"
+    // mode - the standalone "Manage this host" button asked the drawer's own
+    // question a second time and was removed.
+    saveMode: document.getElementById('local-config-save').dataset.mode,
+    saveLabel: document.getElementById('local-config-save').textContent.trim(),
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
   })`));
   assert.deepEqual(hostControl, {
     visible: true,
     gateway: "Gateway connection: connected. ModelDock can route requests to this local server.",
     control: "Host control: user-owned. ModelDock cannot restart this server or manage its SSD KV state.",
-    manageVisible: true,
+    saveMode: "manage",
+    saveLabel: "Save and Manage",
     leaveVisible: false,
   }, "a connected local server stays user-owned until the user explicitly enables host control");
 

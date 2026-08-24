@@ -313,7 +313,8 @@
         </div>
         <div class="engine-body" id="ollama-body">
         <div class="custom-row">
-          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="ollama-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
           <button id="ollama-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -331,7 +332,8 @@
         </div>
         <div class="engine-body" id="llamacpp-body">
         <div class="custom-row">
-          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="llamacpp-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn" data-i18n-title="local.manageTip" title="Let ModelDock manage this host">Manage</button>
           <button id="llamacpp-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -349,7 +351,8 @@
         </div>
         <div class="engine-body" id="vllm-body">
         <div class="custom-row">
-          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.configure">Configurations</button>
+          <button id="vllm-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
+          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
           <button id="vllm-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
@@ -385,10 +388,10 @@
             </label>
             <label class="field">
               <div class="field-head"><span data-i18n="host.budgetLabel">SSD KV budget (GiB)</span></div>
-              <input id="local-host-kv-budget" class="lang-select" type="number" min="1" max="1024" step="1" value="64" />
+              <input id="local-host-kv-budget" class="lang-select" type="number" min="1" max="1024" step="1" value="8" />
+              <p id="local-host-kv-hint" class="custom-hint" hidden></p>
             </label>
             <div class="custom-row">
-              <button id="local-host-manage" type="button" class="custom-action" data-i18n="host.manage">Manage this host</button>
               <p id="local-host-manage-status" class="custom-status" aria-live="polite" hidden></p>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import path from "node:path";
 import os from "node:os";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statfsSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -50,7 +50,7 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
 import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./engine-processes.mjs";
-import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot } from "./local-engines.mjs";
+import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
 import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
 import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
 import { applyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
@@ -61,6 +61,7 @@ import { sameKvStorageDirectory } from "./local-host-kv-state.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
+import { kvBytesPerToken } from "./gguf.mjs";
 import staticFiles from "./static-inline.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -335,6 +336,66 @@ function engineWarnings(engine, gpus = []) {
     warnings.push({ code: "mtp_ignored" });
   }
   return warnings;
+}
+
+// KV slot states are the biggest thing this gateway ever writes, and the
+// default directory sits under the user profile - usually the system drive.
+// So the budget default is derived from what that volume can actually spare,
+// and a manage request is refused when its budget could not fit: the reserve
+// stays untouched for the OS (updates, pagefile, hibernation), never handed
+// to cache.
+const KV_DISK_RESERVE_BYTES = 20 * 1024 ** 3;
+const KV_BUDGET_DEFAULT_MAX_GIB = 8;
+
+// Free bytes on the volume that holds (or will hold) the directory. The
+// directory itself may not exist yet, so the nearest existing ancestor
+// answers for its volume. -1 means "could not measure" - callers must treat
+// that as unknown, not as empty.
+function kvVolumeFreeBytes(directory) {
+  let probe = path.resolve(String(directory || ""));
+  for (let depth = 0; depth < 100; depth += 1) {
+    if (existsSync(probe)) {
+      try {
+        const stats = statfsSync(probe);
+        return Number(stats.bavail) * Number(stats.bsize);
+      } catch {
+        return -1;
+      }
+    }
+    const parent = path.dirname(probe);
+    if (parent === probe) return -1;
+    probe = parent;
+  }
+  return -1;
+}
+
+function kvBudgetDefaultFor(freeBytes) {
+  if (!(freeBytes > 0)) return 1;
+  const usable = Math.floor((freeBytes - KV_DISK_RESERVE_BYTES) / 1024 ** 3);
+  return Math.max(1, Math.min(KV_BUDGET_DEFAULT_MAX_GIB, usable));
+}
+
+// Connection snapshots predate GGUF header names, so a previously connected
+// llama.cpp server still publishes its disk path after an upgrade until the
+// user presses Connect again. Discovery already observes both sides without
+// touching the engine: its one advertised endpoint id and the launch GGUF's
+// cached header facts. Refresh that one unambiguous case automatically. A
+// multi-model endpoint remains untouched because one GGUF cannot name all of
+// its models safely.
+function refreshedSingleModelSnapshot(snapshot, engine) {
+  const saved = snapshot?.models;
+  const advertised = Array.isArray(engine?.models) && engine.models.length === 1
+    ? String(engine.models[0] || "")
+    : "";
+  const name = String(engine?.modelFacts?.modelName || "").trim();
+  const slug = String(engine?.modelFacts?.modelSlug || "").trim();
+  if (!Array.isArray(saved) || saved.length !== 1 || !advertised || !name || !slug) return null;
+  const current = saved[0];
+  if (current.id === slug && current.label === name && current.upstreamId === advertised) return null;
+  return {
+    ...snapshot,
+    models: [{ ...current, id: slug, label: name, upstreamId: advertised }],
+  };
 }
 
 function recommendedManagedProfile(engine, gpus) {
@@ -1607,6 +1668,15 @@ export function createApp(services = createServices()) {
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
         recommendedProfile: recommendedManagedProfile(engine, gpus),
+        // What one full-context session state costs on disk, so the SSD budget
+        // field can say "this holds about N sessions" instead of asking the
+        // user to intuit GiB. f16 is the state llama.cpp writes by default;
+        // a quantized cache only makes the estimate conservative.
+        kvFullStateBytes: (() => {
+          const perToken = kvBytesPerToken(engine.modelFacts);
+          const context = Number(engine.launch?.ctxSize) || Number(engine.modelFacts?.trainedContext) || 0;
+          return perToken && context ? perToken * context : 0;
+        })(),
       })).map((engine) => ({ ...engine, warnings: engineWarnings(engine, gpus) }));
       const hostSummaries = await localHostSummaries(engines, services.localHostRegistryFile);
       // The window Codex is told about has to follow the per-lane window the
@@ -1636,6 +1706,22 @@ export function createApp(services = createServices()) {
         await services.configSwitcher.markRestartRequired();
         recordConfigAction(metrics, `local_context_republished_${engine.engine}`, { ok: true, contextWindow: declared });
       }
+      // Refresh legacy local snapshots from the GGUF header without restarting
+      // or modifying the engine. This makes a naming-only ModelDock update
+      // visible the next time the dashboard scans, rather than requiring a
+      // person to reconnect an already working local server by hand.
+      for (const engine of engines) {
+        if (!engine.connected) continue;
+        const file = services.localEnginesFile || localEnginesSnapshotPath();
+        const snapshot = readLocalEnginesSnapshot(file)?.[engine.engine];
+        const refreshed = refreshedSingleModelSnapshot(snapshot, engine);
+        if (!refreshed) continue;
+        writeLocalEngineSnapshot(file, engine.engine, refreshed);
+        applyLocalEngineProfile(engine.engine, refreshed);
+        services.writeCatalogFile?.();
+        await services.configSwitcher.markRestartRequired();
+        recordConfigAction(metrics, `local_model_name_refreshed_${engine.engine}`, { ok: true });
+      }
       // An engine that was connected and has since been stopped still belongs on
       // the page. Dropping it would leave a profile published against a server
       // that is gone, with no control anywhere to take it back down.
@@ -1654,6 +1740,17 @@ export function createApp(services = createServices()) {
       }
       const runtimeStatus = await services.localHostRuntime?.status?.() || services.localHostRuntime?.snapshot?.() || null;
       return res.json({
+        // The manage form's suggested SSD KV directory and budget.
+        // Server-computed so the default directory is one this install already
+        // owns (state dir, correct permissions, removed with the install) on
+        // every platform, and the default budget follows the volume's real
+        // free space minus the system reserve instead of assuming the disk
+        // has room.
+        ...(() => {
+          const kvDirectoryDefault = services.kvDirectoryDefault || stateFile("kv");
+          const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(kvDirectoryDefault);
+          return { kvDirectoryDefault, kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes) };
+        })(),
         engines: engines.map((engine) => ({
           ...engine,
           management: (() => {
@@ -1701,20 +1798,38 @@ export function createApp(services = createServices()) {
       // Prove the Responses dialect before persisting, so a server that only
       // speaks /v1/chat/completions fails the connect instead of every later turn.
       await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
+      const launch = await launchSpecForPort(new URL(base).port);
       const snapshot = {
         // What started this engine, read from the process behind the port we
         // just connected to. Kept so a stopped engine can be started again as
         // it was, rather than from a command line we would have to invent.
-        launch: await launchSpecForPort(new URL(base).port),
+        launch,
         baseUrl: base,
         connectedAt: new Date().toISOString(),
-        models: listed.models.map((model) => ({
-          id: model.id,
-          upstreamId: model.id,
-          label: model.id,
-          supportsVision: Boolean(asVision),
-          contextWindow: model.contextWindow,
-        })),
+        // The endpoint advertises a raw id that is often the model file path
+        // (llama.cpp serves "D:\models\Qwen3.8-...gguf"). Publishing that as the
+        // picker name leaks a path and makes the catalog unreadable. When a
+        // single-model llama.cpp process names a GGUF we read its header and
+        // publish the model's own name instead; the endpoint id stays in
+        // upstreamId so the wire never sees a name the server does not serve.
+        // A multi-model endpoint is deliberately left alone: one launch GGUF
+        // cannot name every advertised endpoint model, and assigning it to all
+        // of them would manufacture duplicate picker entries. An id we cannot
+        // map to one unambiguous file (including vLLM) is published as-is.
+        models: listed.models.map((model) => {
+          const facts = listed.models.length === 1
+            ? (services.modelFactsFor || modelFactsFor)(launch?.model)
+            : null;
+          const friendly = facts?.modelName || "";
+          const slug = facts?.modelSlug || "";
+          return {
+            id: slug || model.id,
+            upstreamId: model.id,
+            label: friendly || model.label || model.id,
+            supportsVision: Boolean(asVision),
+            contextWindow: model.contextWindow,
+          };
+        }),
       };
       writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
       applyLocalEngineProfile(engine, snapshot);
@@ -1748,6 +1863,19 @@ export function createApp(services = createServices()) {
       const budgetGiB = Number(cacheBudgetGiB);
       if (!Number.isSafeInteger(budgetGiB) || budgetGiB < 1 || budgetGiB > 1024) {
         throw new LocalEngineError("kv_budget", "Choose a whole-number SSD KV budget from 1 through 1024 GiB.");
+      }
+      // The chosen volume must actually hold the budget, with the system
+      // reserve untouched. Measured on the nearest existing ancestor, so a
+      // not-yet-created folder still answers; files already inside the KV
+      // directory count against "free", which makes a re-manage at the same
+      // budget slightly conservative - the safe direction.
+      const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(cacheDirectory);
+      if (freeBytes >= 0 && budgetGiB * 1024 ** 3 > freeBytes - KV_DISK_RESERVE_BYTES) {
+        const usable = Math.max(0, Math.floor((freeBytes - KV_DISK_RESERVE_BYTES) / 1024 ** 3));
+        throw new LocalEngineError(
+          "kv_budget_disk",
+          `That volume has ${(freeBytes / 1024 ** 3).toFixed(1)} GiB free; keeping ${Math.round(KV_DISK_RESERVE_BYTES / 1024 ** 3)} GiB for the system leaves at most ${usable} GiB for the KV budget.`,
+        );
       }
       const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
       if (!snapshot?.baseUrl) {

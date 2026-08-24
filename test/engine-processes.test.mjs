@@ -14,7 +14,7 @@ import {
 } from "../src/engine-processes.mjs";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { discoverLocalEngines } from "../src/local-engines.mjs";
 
 // Verbatim from this machine on 2026-08-19: a llama-server the fixed candidate
@@ -203,7 +203,7 @@ test("the scan is where the model file gets read, and it is read once", async ()
     // on every scan and this test would be measuring nothing.
     return {
       path: file, fileBytes: stat.size, weightBytes: stat.size, ignoredBytes: 0,
-      mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64,
+      mtimeMs: Math.round(stat.mtimeMs), modelName: "m", modelSlug: "m", arch: "qwen35", layers: 64,
       attentionLayers: 16, kvBytesPerToken: 65536,
     };
   };
@@ -232,6 +232,49 @@ test("the scan is where the model file gets read, and it is read once", async ()
   writeFileSync(model, "a different model entirely, of another size");
   await discoverLocalEngines(options);
   assert.equal(reads, 2, "a changed file is read again");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a cached record without a model name is re-read rather than trusted", async () => {
+  // Records written before the model-name pass carry weightBytes but no
+  // modelName. The file is unchanged, but what we know how to read out of it has
+  // grown, so the name must be recovered on the next scan - otherwise an
+  // already-cached file keeps publishing its raw path forever.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-facts-name-"));
+  const cache = path.join(dir, "model-facts.json");
+  const model = path.join(dir, "model.gguf");
+  writeFileSync(model, "not really a model");
+  const stat = statSync(model);
+  const read = (file) => ({
+    path: file, fileBytes: stat.size, weightBytes: stat.size, ignoredBytes: 0,
+    mtimeMs: Math.round(stat.mtimeMs), modelName: "m", modelSlug: "m", arch: "qwen35",
+    layers: 64, attentionLayers: 16, kvBytesPerToken: 65536,
+  });
+  // Seed the cache with the pre-name shape (no modelName).
+  writeFileSync(cache, JSON.stringify({
+    [model]: {
+      path: model, fileBytes: stat.size, weightBytes: stat.size, ignoredBytes: 0,
+      mtimeMs: Math.round(stat.mtimeMs), arch: "qwen35", layers: 64,
+      attentionLayers: 16, kvBytesPerToken: 65536,
+    },
+  }));
+  const fetchImpl = async (url) => {
+    if (url === "http://127.0.0.1:11435/props") return { ok: true, json: async () => ({ slots_idle: 1 }) };
+    if (url === "http://127.0.0.1:11435/v1/models") return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+    return { ok: false, json: async () => ({}) };
+  };
+  const cmdline = `"C:\llama\llama-server.exe" -m ${model} -c 81920 --port 11435`;
+  const options = {
+    fetchImpl,
+    timeoutMs: 50,
+    listeners: [{ port: 11435, pid: 1, name: "llama-server", binary: "C:\llama\llama-server.exe", cmdline }],
+    factsOptions: { file: cache, read },
+  };
+
+  const [found] = await discoverLocalEngines(options);
+  assert.equal(found.modelFacts.modelName, "m", "the stale record is refreshed with the name");
+  const persisted = JSON.parse(readFileSync(cache, "utf8"));
+  assert.equal(persisted[model].modelName, "m", "the refreshed cache carries the name");
   rmSync(dir, { recursive: true, force: true });
 });
 

@@ -359,6 +359,7 @@ export function readModelFacts(file) {
   const shape = modelShape({ meta });
   if (!shape) throw new GgufError("GGUF header carries no usable architecture");
   const weights = tensorWeights(tensors, shape.layers);
+  const modelName = deriveModelName({ meta, file });
   return {
     path: file,
     fileBytes: stat.size,
@@ -370,6 +371,12 @@ export function readModelFacts(file) {
     weightBytes: weights ? weights.loaded : stat.size,
     ignoredBytes: weights ? weights.ignored : 0,
     mtimeMs: Math.round(stat.mtimeMs),
+    // The model's own name and a slug-safe id, read from the header. Carried so
+    // the catalog can publish a friendly id without re-reading a 12 GiB file on
+    // every connect, and so two engines serving the same file agree on the name.
+    modelName,
+    modelSlug: modelSlug(modelName),
+    ggufName: String(meta["general.name"] || "").trim(),
     ...shape,
     kvBytesPerToken: kvBytesPerToken(shape, "f16"),
   };
@@ -382,6 +389,10 @@ export function modelFactsAreStale(facts, file) {
   // would silently keep charging the card for blocks the backend skips. The
   // file has not changed, but what we know how to read out of it has.
   if (!facts.weightBytes) return true;
+  // A record written before the model-name pass is the same situation: the file
+  // is unchanged, but what we know how to read out of it has grown. Without this
+  // the name would stay absent forever on an already-cached model file.
+  if (!facts.modelName) return true;
   try {
     const stat = statSync(file);
     return facts.fileBytes !== stat.size || facts.mtimeMs !== Math.round(stat.mtimeMs);
@@ -389,4 +400,42 @@ export function modelFactsAreStale(facts, file) {
     // Unreadable now: keep what we remembered rather than dropping the ledger.
     return false;
   }
+}
+
+// The name a model answers to, read from the file's own header rather than from
+// its path. A path is a storage location, not an identity: the same model under
+// a different quant label or directory would otherwise publish as a different
+// model (and the old catalog did exactly that, showing the whole
+// "D:\models\Qwen3.8-27B-UD-Q4_K_XL.gguf" string as the picker name).
+//
+// general.name is the model's own declared name and the one field every GGUF
+// carries, so it is the primary source - which is what the user asked for when
+// they said to use the raw meta name and not be misled by the current naming
+// convention. When it is absent, preserve the next raw metadata field rather
+// than composing guesses: some exports embed the size in general.basename
+// already (basename="Qwen3.8-27B", size_label="27B"), so appending size
+// invents the false name "Qwen3.8-27B 27B". The filename stem is last because
+// it is a storage name, not a model identity.
+export function deriveModelName({ meta, file = "" } = {}) {
+  if (!meta || typeof meta !== "object") return "";
+  const name = String(meta["general.name"] || "").trim();
+  if (name) return name;
+  const basename = String(meta["general.basename"] || "").trim();
+  if (basename) return basename;
+  const arch = String(meta["general.architecture"] || "").trim();
+  if (arch) return arch;
+  const stem = String(file || "").replace(/\\/g, "/").split("/").pop()?.replace(/\.gguf$/i, "") || "";
+  return stem;
+}
+
+// A stable identifier-safe form of a model name, for the published slug and the
+// picker id. A name may contain spaces and punctuation ("Qwen3.8 27B 0814");
+// the slug keeps only word characters and the few separators URLs and config
+// keys tolerate, so it can be written into a catalog file and referenced later.
+export function modelSlug(name) {
+  return String(name || "")
+    .trim()
+    .replace(/[^\w.+-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
 }

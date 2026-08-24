@@ -20,11 +20,11 @@ process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
 // A server that answers just enough of the OpenAI dialect for connect to
 // accept it: the model list, then the Responses probe.
-function fakeEngine() {
+function fakeEngine({ models = [{ id: "qwen3.8:27b" }] } = {}) {
   return createServer((req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/v1/models") {
-      res.end(JSON.stringify({ data: [{ id: "qwen3.8:27b" }] }));
+      res.end(JSON.stringify({ data: models }));
       return;
     }
     if (req.url === "/v1/responses") {
@@ -111,6 +111,109 @@ test("connect attaches the port discovery found, not the profile default", async
 
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.equal(snapshot.llamacpp.baseUrl, `http://127.0.0.1:${port}/v1`, "the persisted address is the discovered one");
+});
+
+test("connect publishes the GGUF name and keeps the endpoint id for the wire", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen3.8:27b"],
+    connectable: true,
+    binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
+    cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: { weightBytes: 12 * 1024 ** 3, attentionLayers: 16, headCountKv: 4, keyLength: 256, valueLength: 256, trainedContext: 262144 },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  // The launch.spec points at a real GGUF on disk; read its header for the name.
+  services.modelFactsFor = (_p) => ({ modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" });
+  const response = await fetch(`${base}/api/local/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, `connect failed: ${JSON.stringify(payload)}`);
+  const model = payload.models[0];
+  assert.equal(model.id, "Qwen3.8-27B", "the published id is the model name, not the path");
+  assert.equal(model.label, "Qwen3.8-27B", "the picker label is the model name");
+  assert.equal(model.upstreamId, "qwen3.8:27b", "the wire id is the endpoint id the server advertises");
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  assert.equal(snapshot.llamacpp.models[0].id, "Qwen3.8-27B");
+  assert.equal(snapshot.llamacpp.models[0].upstreamId, "qwen3.8:27b", "the persisted snapshot keeps the endpoint id for relaunch");
+});
+
+test("connect never assigns one GGUF name to every model from a multi-model endpoint", async (t) => {
+  const engine = fakeEngine({ models: [{ id: "first" }, { id: "second" }] });
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["first", "second"],
+    connectable: true,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+  };
+  const { base, services } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.modelFactsFor = () => ({ modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" });
+  const response = await fetch(`${base}/api/local/connect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, `connect failed: ${JSON.stringify(payload)}`);
+  assert.deepEqual(payload.models.map((model) => ({ id: model.id, upstreamId: model.upstreamId })), [
+    { id: "first", upstreamId: "first" },
+    { id: "second", upstreamId: "second" },
+  ]);
+});
+
+test("discovery refreshes a legacy single-model snapshot from its GGUF header", async (t) => {
+  const port = 11435;
+  const discovered = {
+    engine: "llamacpp",
+    label: "llama.cpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf"],
+    connectable: true,
+    launch: { model: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
+  };
+  const { base, services } = await startApp(t, { discoverEngines: async () => [discovered] });
+  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    models: [{
+      id: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      label: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      supportsVision: true,
+      contextWindow: 262144,
+    }],
+  });
+
+  const response = await fetch(`${base}/api/local/discover`);
+  assert.equal(response.status, 200);
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  assert.deepEqual(snapshot.llamacpp.models, [{
+    id: "Qwen3.8-27B",
+    label: "Qwen3.8-27B",
+    upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+    supportsVision: true,
+    contextWindow: 262144,
+  }]);
 });
 
 test("gateway connection and explicit host takeover stay separate", async (t) => {
@@ -320,6 +423,31 @@ test("a double verification failure retains degraded recovery authority", async 
   assert.equal(body.management.state, "degraded");
   const registry = await readLocalHostRegistry(services.localHostRegistryFile);
   assert.equal(Object.values(registry.hosts)[0].state, "degraded");
+});
+
+test("a KV budget the volume cannot hold is refused with the usable figure", async (t) => {
+  // The default directory sits under the user profile - usually the system
+  // drive - so the budget must fit inside the measured free space minus the
+  // OS reserve (20 GiB). 30 GiB free leaves 10 GiB usable: 16 is refused,
+  // and the message names the number the user should type instead.
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [] });
+  services.probeKvFreeBytes = () => 30 * 1024 ** 3;
+  const refused = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
+  });
+  const body = await refused.json();
+  assert.equal(refused.status, 400, JSON.stringify(body));
+  assert.equal(body.error?.type, "kv_budget_disk");
+  assert.match(body.error?.message, /at most 10 GiB/);
+  // And the discover payload derives its suggested default from the same
+  // measurement: min(8, usable) with the reserve already subtracted.
+  const discover = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(discover.kvBudgetDefaultGiB, 8);
+  services.probeKvFreeBytes = () => 23 * 1024 ** 3;
+  const tight = await (await fetch(`${base}/api/local/discover`)).json();
+  assert.equal(tight.kvBudgetDefaultGiB, 3, "a tight volume suggests only what it can spare");
 });
 
 test("unmanage releases a host whose first takeover verification failed", async (t) => {

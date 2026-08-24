@@ -1748,6 +1748,8 @@ async function renderLocalEngines() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Discover ${response.status}`);
     const engines = data.engines || [];
+    localKvDirectoryDefault = String(data.kvDirectoryDefault || "");
+    localKvBudgetDefaultGiB = Number(data.kvBudgetDefaultGiB) || 0;
     // Feed the dialog: a discovered engine opens pre-filled and its button goes
     // blue. An engine that has stopped answering is dropped from the map so the
     // colour follows reality rather than the last good scan.
@@ -2325,26 +2327,41 @@ function preferEngine(next, current) {
 const localConnectedState = new Map();
 const localDefaultPorts = { ollama: 11434, llamacpp: 8080, vllm: 8000 };
 let localConfigEngine = "";
+// Server-computed manage-form default (the install's own state dir): the
+// server knows the platform and the directory it owns; the frontend does not
+// guess at drive letters.
+let localKvDirectoryDefault = "";
+// Also server-computed: derived from the free space of the volume holding the
+// default directory, minus a system reserve - never a constant that assumes
+// the disk has room.
+let localKvBudgetDefaultGiB = 0;
 
 function localEngineLabel(engine) {
   return { ollama: "Ollama", llamacpp: "llama.cpp", vllm: "vLLM" }[engine] || engine;
 }
 
 function paintEngineButton(engine) {
-  const button = $(`${engine}-configure`);
-  if (!button) return;
+  // Two controls that mirror the two authorities: Connect is the light,
+  // reversible decision (route requests through the gateway), Manage opens the
+  // drawer where the heavy boundaries live (host takeover, SSD KV). One
+  // "Configurations" button used to carry both, and users could not tell the
+  // weight of what they were about to click.
+  const connected = Boolean(localConnectedState.get(engine));
   // Reachable means a probe answered - discovery answers /props and /v1/models
   // before reporting an engine, and a hand-typed port only counts once connect
   // accepted it. The colour therefore always means "this really responds".
-  //
-  // Carried on the button rather than on its row. The row briefly wore both
-  // states while the drawer work was in flight, which left the control itself
-  // unstyled: a filled button says "this one is live" at rest, where tinting
-  // the text of a borderless one said nothing until you looked for it.
-  const reachable = Boolean(localDiscovery.has(engine) || localConnectedState.get(engine));
-  button.classList.toggle("primary", reachable);
-  button.classList.toggle("is-open", localConfigEngine === engine);
-  button.textContent = t(localConnectedState.get(engine) ? "local.configured" : "local.configure");
+  const reachable = Boolean(localDiscovery.has(engine) || connected);
+  const connect = $(`${engine}-connect`);
+  if (connect) {
+    connect.classList.toggle("primary", reachable && !connected);
+    connect.textContent = t(connected ? "local.disconnect" : "local.connectBtn");
+  }
+  const manage = $(`${engine}-configure`);
+  if (manage) {
+    manage.classList.toggle("primary", connected);
+    manage.classList.toggle("is-open", localConfigEngine === engine);
+    manage.textContent = t("local.manageBtn");
+  }
 }
 
 function localShow(engine, text, isError) {
@@ -2416,8 +2433,17 @@ function renderLocalHostControl(engine, found) {
   }
   const form = $("local-host-management-form");
   if (form) form.hidden = Boolean(management) || !connected;
-  const manage = $("local-host-manage");
-  if (manage) manage.disabled = !connected;
+  // The drawer's bottom primary is contextual: before the gateway route exists
+  // it connects ("Connect and Save" - the manual-port path); once connected
+  // and unmanaged it performs the takeover ("Save and Manage"); once managed
+  // there is nothing left for it to save - Leave management is the action.
+  const save = $("local-config-save");
+  if (save && localConfigEngine === engine) {
+    const manageMode = connected && !management;
+    save.dataset.mode = manageMode ? "manage" : "connect";
+    save.textContent = t(manageMode ? "local.saveManage" : "local.connect");
+    save.hidden = Boolean(management);
+  }
   const release = $("local-host-unmanage");
   if (release) {
     release.hidden = !management;
@@ -2425,17 +2451,30 @@ function renderLocalHostControl(engine, found) {
   }
   const directory = $("local-host-kv-directory");
   if (directory && management?.cacheDirectory) directory.value = management.cacheDirectory;
-  // A platform-appropriate suggestion, not a baked-in one: the old hardcoded
-  // value="D:\ModelDock\KV" shipped a drive letter that C-only machines and
-  // every non-Windows install would submit verbatim. The dashboard runs on the
-  // same machine as the gateway, so navigator.platform names the right OS; on
-  // anything but Windows the field stays empty and the user picks a real SSD
-  // path (the server refuses non-absolute paths with a readable error).
-  if (directory && !management && !directory.value && /win/i.test(navigator.platform)) {
-    directory.value = "D:\\ModelDock\\KV";
+  if (directory && !management && !directory.value && localKvDirectoryDefault) {
+    directory.value = localKvDirectoryDefault;
   }
   const budget = $("local-host-kv-budget");
   if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
+  // Translate GiB into sessions: the default budget is deliberately small, and
+  // whether it is enough depends entirely on this model's full-context state
+  // size - a number the server already computed from the GGUF shape.
+  const hint = $("local-host-kv-hint");
+  if (hint) {
+    const stateBytes = Number(found?.kvFullStateBytes) || 0;
+    const budgetGiB = Number(budget?.value) || 0;
+    if (stateBytes > 0 && budgetGiB > 0) {
+      const stateGiB = stateBytes / 1024 ** 3;
+      hint.hidden = false;
+      hint.textContent = t("host.budgetHint", {
+        state: `${stateGiB >= 10 ? Math.round(stateGiB) : stateGiB.toFixed(1)} GiB`,
+        count: String(Math.max(0, Math.floor((budgetGiB * 1024 ** 3) / stateBytes))),
+      });
+    } else {
+      hint.hidden = true;
+      hint.textContent = "";
+    }
+  }
 }
 
 function openLocalConfig(engine) {
@@ -2466,7 +2505,13 @@ function openLocalConfig(engine) {
     runtime.hidden = parts.length === 0;
   }
   renderEngineWarnings(found?.warnings);
-  renderLocalHostControl(engine, found);
+  // Fresh suggestions on every open: the server's default directory and a
+  // budget derived from what the volume can actually spare. A managed host
+  // shows its stored values instead (renderLocalHostControl overwrites).
+  const budgetField = $("local-host-kv-budget");
+  if (budgetField && !found?.management && localKvBudgetDefaultGiB > 0) {
+    budgetField.value = String(localKvBudgetDefaultGiB);
+  }
   showLocalHostManageStatus("");
 
   // Ollama publishes vision from its own model metadata, so the toggle would be
@@ -2481,7 +2526,14 @@ function openLocalConfig(engine) {
   const errorLine = $("local-config-error");
   if (errorLine) errorLine.hidden = true;
   const save = $("local-config-save");
-  if (save) save.textContent = t("local.connect");
+  if (save) {
+    save.dataset.mode = "connect";
+    save.hidden = false;
+    save.textContent = t("local.connect");
+  }
+  // After the defaults above: for a connected, unmanaged llama.cpp this
+  // switches the bottom primary into its "Save and Manage" mode.
+  renderLocalHostControl(engine, found);
 
   // Not modal: the row this drawer describes stays readable beside it, which
   // is the whole reason it is not the dialog it replaced.
@@ -2565,6 +2617,41 @@ for (const engineId of localEngineIds) {
   // so the keyboard and assistive tech get one named, focusable target instead
   // of a div pretending to be a button around another button.
   $(`${engineId}-configure`)?.addEventListener("click", () => openLocalConfig(engineId));
+  // One-click routing toggle. Connect posts with no baseUrl so the server
+  // discovers the address the same way the drawer prefill does; when nothing
+  // was discovered the drawer opens instead, which already carries the manual
+  // port hint. Disconnect of a managed llama.cpp host is refused by the server
+  // (409) and the message lands on the engine's error line.
+  $(`${engineId}-connect`)?.addEventListener("click", async () => {
+    const button = $(`${engineId}-connect`);
+    const ollama = engineId === "ollama";
+    const connected = Boolean(localConnectedState.get(engineId));
+    if (!connected && !ollama && !localDiscovery.get(engineId)) {
+      openLocalConfig(engineId);
+      return;
+    }
+    if (button) button.disabled = true;
+    if (!connected) localShow(engineId, t("local.connecting"), false);
+    try {
+      const action = connected ? "disconnect" : "connect";
+      const response = await fetch(ollama ? `/api/ollama/${action}` : `/api/local/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(ollama ? {} : { engine: engineId }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || `${action} ${response.status}`);
+      if (ollama) renderOllamaSection(payload.settings?.ollama);
+      else renderLocalEngineState(engineId, payload.settings?.local?.[engineId]);
+      localShow(engineId, "", false);
+      await renderLocalEngines();
+    } catch (error) {
+      localShow(engineId, error.message, true);
+    } finally {
+      if (button) button.disabled = false;
+      paintEngineButton(engineId);
+    }
+  });
   $(`${engineId}-row`)?.addEventListener("click", (event) => {
     if (event.target.closest("button")) return;
     openLocalConfig(engineId);
@@ -2604,7 +2691,10 @@ for (const engineId of localEngineIds) {
   paintEngineButton(engineId);
 }
 $("local-config-close")?.addEventListener("click", closeLocalConfig);
-$("local-config-save")?.addEventListener("click", () => { submitLocalConfig("connect").catch(() => {}); });
+$("local-config-save")?.addEventListener("click", () => {
+  if ($("local-config-save")?.dataset.mode === "manage") submitLocalManage().catch(() => {});
+  else submitLocalConfig("connect").catch(() => {});
+});
 // Folding a section away. The button carries the state on aria-expanded, so
 // the stylesheet turns the glyph and assistive technology reads the same fact
 // from the same place rather than from a class that has to be kept in step.
@@ -2623,7 +2713,18 @@ for (const engineId of localEngineIds) {
 
 $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
 
-$("local-host-manage")?.addEventListener("click", async () => {
+// The sessions estimate must follow the number being typed, not the number
+// that was there when the drawer opened.
+$("local-host-kv-budget")?.addEventListener("input", () => {
+  if (localConfigEngine !== "llamacpp") return;
+  renderLocalHostControl("llamacpp", localDiscovery.get("llamacpp"));
+});
+
+// The takeover action lives on the drawer's bottom primary button ("Save and
+// Manage") once the host is connected - the first-level Manage button already
+// said what the drawer is for, so a second "Manage this host" inside it was
+// the same decision asked twice.
+async function submitLocalManage() {
   if (localConfigEngine !== "llamacpp") return;
   const directory = String($("local-host-kv-directory")?.value || "").trim();
   const budgetGiB = Number($("local-host-kv-budget")?.value || 0);
@@ -2635,7 +2736,7 @@ $("local-host-manage")?.addEventListener("click", async () => {
     showLocalHostManageStatus(t("host.chooseBudget"), true);
     return;
   }
-  const button = $("local-host-manage");
+  const button = $("local-config-save");
   if (button) button.disabled = true;
   showLocalHostManageStatus(t("host.verifying"));
   try {
@@ -2653,7 +2754,7 @@ $("local-host-manage")?.addEventListener("click", async () => {
   } finally {
     if (button) button.disabled = false;
   }
-});
+}
 
 $("local-host-unmanage")?.addEventListener("click", async () => {
   const button = $("local-host-unmanage");
