@@ -25,7 +25,7 @@ const ENGINE = {
   },
 };
 
-test("the measured dual-5060-Ti ledger selects one full 262K lane", () => {
+test("the measured dual-5060-Ti ledger leaves a one GiB physical reserve", () => {
   const profile = selectNvidiaManagedProfile({
     engine: ENGINE,
     gpus: [
@@ -33,13 +33,14 @@ test("the measured dual-5060-Ti ledger selects one full 262K lane", () => {
       { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 14_426_308_608 },
     ],
   });
-  assert.equal(profile.profileId, "static-p1-c262144");
+  assert.equal(profile.profileId, "static-p1-c215000");
   assert.equal(profile.laneCount, 1);
-  assert.equal(profile.laneContextTokens, 262_144);
+  assert.equal(profile.laneContextTokens, 215_000);
+  assert.equal(profile.headroomLevel, "minimum");
   assert.equal(profile.gpus.length, 2);
 });
 
-test("a smaller selected GGUF replaces only its weight shard in the live ledger", () => {
+test("a smaller selected GGUF replaces only its weight shard and retains a real reserve", () => {
   const profile = selectNvidiaManagedProfile({
     engine: ENGINE,
     targetModelFacts: {
@@ -54,11 +55,12 @@ test("a smaller selected GGUF replaces only its weight shard in the live ledger"
       { index: 1, uuid: "gpu-1", vendor: "nvidia", totalBytes: 17_103_323_136, usedBytes: 14_428_405_760 },
     ],
   });
-  assert.equal(profile.profileId, "static-p2-c262144");
+  assert.equal(profile.profileId, "static-p2-c214000");
   assert.equal(profile.laneCount, 2);
-  assert.equal(profile.laneContextTokens, 262_144);
+  assert.equal(profile.laneContextTokens, 214_000);
   assert.equal(profile.modelId, "D:/models/Qwen3.8-27B-Q3_K_M.gguf", "the post-restart slot probe targets the selected model, not the previous server id");
-  assert.ok(profile.gpus.every((gpu) => gpu.meetsPreferredHeadroom), "the smaller GGUF does not erase observed WDDM/runtime allocation");
+  assert.ok(profile.gpus.every((gpu) => gpu.meetsPreferredHeadroom), "the selected P2 profile keeps its physical preferred reserve");
+  assert.ok(profile.laneContextTokens < 262_144, "P2 at 262K consumes the measured physical reserve");
 });
 
 test("a single larger card can expose more equal lanes without exceeding three", () => {

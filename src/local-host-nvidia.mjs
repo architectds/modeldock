@@ -112,12 +112,12 @@ export function createNvidiaProfileInput({ engine, gpus, targetModelFacts, targe
     const ratio = ratios[index];
     const currentKvBytes = Math.round(currentContextTokens * runningKvBytesPerToken * ratio);
     const weightBytes = Math.round(modelBytes * ratio);
-    // The 1.2 GiB operating reserve is already resident inside nvidia-smi's
-    // used figure. Subtract it once here and let the profile calculator add it
-    // back as headroom. Algebraically, the observed process remains the exact
-    // baseline while extra KV can consume only genuinely free VRAM.
+    // nvidia-smi's used figure is the physical baseline. Remove only the
+    // current KV allocation: all other observed bytes, including Windows,
+    // CUDA workspaces and llama.cpp's runtime, remain charged to the target
+    // launch. The profile calculator applies its 1 GiB headroom once.
     const runningWeightBytes = Math.round(runningModelBytes * ratio);
-    const observedFixed = Math.max(0, Math.round(gpu.usedBytes - currentKvBytes - LOCAL_HOST_MIN_HEADROOM_BYTES));
+    const observedFixed = Math.max(0, Math.round(gpu.usedBytes - currentKvBytes));
     // Project only the model's own shard into the target launch. Everything
     // else that nvidia-smi observed remains charged: WDDM, desktop use, draft
     // buffers, and llama.cpp's fixed runtime allocations do not disappear just

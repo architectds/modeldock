@@ -67,7 +67,7 @@ test("preferred headroom is selected when it preserves the long-context floor", 
   assert.ok(profile.gpus.every((gpu) => gpu.remainingBytes >= LOCAL_HOST_PREFERRED_HEADROOM_BYTES));
 });
 
-test("parallel lanes require preferred headroom instead of riding the WDDM edge", () => {
+test("parallel lanes may use the one GiB hard reserve when preferred headroom would reject them", () => {
   const selected = selectLocalHostLaneProfile({
     ...BASE,
     gpus: BASE.gpus.map((gpu) => ({
@@ -77,10 +77,11 @@ test("parallel lanes require preferred headroom instead of riding the WDDM edge"
     })),
   });
   const two = selected.candidates.find((candidate) => candidate.laneCount === 2);
-  assert.ok(two.minimumLaneContextTokens >= two.minimumLongContextTokens, "minimum reserve alone could expose P2");
-  assert.ok(two.preferredLaneContextTokens < two.minimumLongContextTokens, "preferred reserve rejects the edge profile");
-  assert.equal(selected.laneCount, 1);
-  assert.equal(selected.laneContextTokens, 262_144);
+  assert.ok(two.minimumLaneContextTokens >= two.minimumLongContextTokens, "the one GiB reserve can expose P2");
+  assert.ok(two.preferredLaneContextTokens < two.minimumLongContextTokens, "the preferred reserve would reduce this P2 below the long-context floor");
+  assert.equal(selected.laneCount, 2);
+  assert.equal(selected.laneContextTokens, two.minimumLaneContextTokens);
+  assert.equal(selected.headroomLevel, "minimum");
 });
 
 test("profile inputs reject summed VRAM and malformed allocation facts", () => {

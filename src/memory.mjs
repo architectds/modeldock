@@ -860,13 +860,14 @@ export class MemoryStore {
     // fail nor delay a completed store/link operation. A PRAGMA on the main
     // connection was not enough under contention: Node's DatabaseSync retains
     // its constructor timeout while a statement is acquiring the lock. An
-    // independent zero-timeout connection makes the soft-write boundary real.
+    // independent one-millisecond connection makes the soft-write boundary
+    // real. Node's SQLite binding treats zero as its default busy timeout.
     let eventDb;
     let transactionOpen = false;
     try {
       const file = this.dbFiles.get(GLOBAL_NODE) || path.join(this.memoryDir, "global.db");
-      eventDb = new DatabaseSync(file, { timeout: 0 });
-      eventDb.exec("PRAGMA busy_timeout = 0");
+      eventDb = new DatabaseSync(file, { timeout: 1 });
+      eventDb.exec("PRAGMA busy_timeout = 1");
       // Acquire the one write lock explicitly before running maintenance. This
       // is the nonblocking gate: if another process owns it, the write is
       // deferred before an INSERT/DELETE can enter a slower lock path.

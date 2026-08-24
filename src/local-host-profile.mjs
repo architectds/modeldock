@@ -9,7 +9,7 @@ import { LOCAL_HOST_ADAPTERS } from "./local-hosts.mjs";
 
 export const LOCAL_HOST_MAX_LANES = 3;
 export const LOCAL_HOST_MIN_LANE_CONTEXT_RATIO = 0.75;
-export const LOCAL_HOST_MIN_HEADROOM_BYTES = Math.round(1.2 * 1024 ** 3);
+export const LOCAL_HOST_MIN_HEADROOM_BYTES = 1 * 1024 ** 3;
 export const LOCAL_HOST_PREFERRED_HEADROOM_BYTES = Math.round(1.5 * 1024 ** 3);
 
 function text(value, label) {
@@ -182,10 +182,6 @@ export function selectLocalHostLaneProfile(input) {
     candidates.push(candidate);
     if (!candidate.allocationFits) continue;
     if (lanes > 1 && !candidate.meetsLongContextFloor) continue;
-    // Parallelism is an upgrade, not a recovery mode. Require the preferred
-    // reserve so a few hundred MiB of normal WDDM residency movement cannot
-    // turn a durable P2/P3 choice into an edge allocation after takeover.
-    if (lanes > 1 && candidate.preferredLaneContextTokens < candidate.minimumLongContextTokens) continue;
     return Object.freeze({
       ...candidate,
       profileId: `static-p${lanes}-c${candidate.laneContextTokens}`,
