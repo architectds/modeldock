@@ -253,7 +253,12 @@ async function publishManagedLocalEngine(services, record, running) {
     || 0;
   const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
   const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
-  const supportsVision = managedLaunchHasVision(record);
+  // A managed argv is useful fallback during recovery, but a running
+  // llama.cpp /props response is the authoritative answer. This matters when
+  // the process was manually changed between gateway starts.
+  const supportsVision = typeof running?.supportsVision === "boolean"
+    ? running.supportsVision
+    : managedLaunchHasVision(record);
   const models = snapshot.models.map((model) => ({
     ...model,
     ...(contextWindow ? { contextWindow } : {}),
@@ -2659,7 +2664,7 @@ function foldUsageOnce(services) {
 
 const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
 
-async function reconcileLocalHostsOnBoot(services) {
+export async function reconcileLocalHostsOnBoot(services) {
   let registry;
   try {
     registry = await readLocalHostRegistry(services.localHostRegistryFile);
@@ -2668,6 +2673,19 @@ async function reconcileLocalHostsOnBoot(services) {
     return;
   }
   for (const record of Object.values(registry.hosts)) {
+    if (record.state === "ready") {
+      try {
+        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
+          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
+        if (!current) continue;
+        const changed = await publishManagedLocalEngine(services, record, current);
+        await services.localHostRuntime?.refresh?.(record);
+        if (changed) console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
+      } catch (error) {
+        console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
+      }
+      continue;
+    }
     if (!["draining", "applying", "verifying", "recovering"].includes(record.state)) continue;
     let releaseTransition;
     try {
