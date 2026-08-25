@@ -35,7 +35,7 @@ test("scheduler admits no more than the calibrated host capacity", async () => {
   assert.equal(await two, "second");
 });
 
-test("waiting conversations keep FIFO fairness and a conversation cannot reenter", async () => {
+test("waiting conversations keep FIFO fairness and a conversation cannot reenter concurrently", async () => {
   const scheduler = new LocalHostScheduler({ hostId: "host-qwen", maxActiveRequests: 1 });
   const first = deferred();
   const second = deferred();
@@ -44,10 +44,12 @@ test("waiting conversations keep FIFO fairness and a conversation cannot reenter
   const one = scheduler.enqueue({ principalId: "local", conversationId: "one", run: () => { started.push("one"); return first.promise; } });
   const two = scheduler.enqueue({ principalId: "local", conversationId: "two", run: () => { started.push("two"); return second.promise; } });
   const three = scheduler.enqueue({ principalId: "remote-a", conversationId: "three", run: () => { started.push("three"); return third.promise; } });
-  await assert.rejects(
-    () => scheduler.enqueue({ principalId: "local", conversationId: "one", run: () => Promise.resolve() }),
-    /already has an active or waiting/,
-  );
+  let retried = false;
+  const retry = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "one",
+    run: () => { retried = true; return "retry"; },
+  });
   first.resolve();
   await one;
   await waitForTurn();
@@ -56,6 +58,8 @@ test("waiting conversations keep FIFO fairness and a conversation cannot reenter
   await waitForTurn();
   third.resolve();
   await three;
+  assert.equal(await retry, "retry");
+  assert.equal(retried, true);
   assert.deepEqual(started, ["one", "two", "three"]);
 });
 
@@ -98,6 +102,29 @@ test("a retry waits for an aborted active conversation to release", async () => 
   assert.equal(await first, "stale");
   assert.equal(await retry, "retry");
   assert.equal(scheduler.snapshot().activeCount, 0);
+});
+
+test("a same-conversation retry waits even before the old response reports its disconnect", async () => {
+  const scheduler = new LocalHostScheduler({ hostId: "host-a", maxActiveRequests: 1 });
+  let releaseFirst;
+  const first = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "same-session",
+    run: async () => new Promise((resolve) => { releaseFirst = () => resolve("first"); }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  let retryStarted = false;
+  const retry = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "same-session",
+    run: async () => { retryStarted = true; return "retry"; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(retryStarted, false, "the retry waits rather than failing during the response-close race");
+  releaseFirst();
+  assert.equal(await first, "first");
+  assert.equal(await retry, "retry");
+  assert.equal(retryStarted, true);
 });
 
 test("a failed operation releases its lease for the next conversation", async () => {

@@ -68,11 +68,14 @@ export class LocalHostScheduler {
     if (signal?.aborted) return Promise.reject(abortError());
     const key = conversationKey(normalizedPrincipalId, normalizedConversationId);
     const existing = this.#byConversation.get(key);
-    if (existing?.signal?.aborted) {
-      // Codex retries immediately after it abandons a long local stream. The
-      // old fetch is already being aborted, but its finally path has not yet
-      // released the lane. Wait for that release and admit this retry normally
-      // rather than returning a transient 502 for the same conversation.
+    if (existing) {
+      // A client disconnect and Codex's retry can cross in either order. In
+      // particular, an HTTP client may receive SSE headers, abandon the body,
+      // and retry before Node emits the old response's close event. Waiting
+      // for every same-conversation job is therefore the only race-free
+      // policy: if the old client was abandoned, its abort soon releases the
+      // lane; if it was genuine concurrent work, serializing one conversation
+      // is still safer than handing the same llama slot two histories.
       return waitForRelease(existing, signal).then(() => this.enqueue({
         principalId: normalizedPrincipalId,
         conversationId: normalizedConversationId,
