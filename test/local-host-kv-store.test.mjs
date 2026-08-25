@@ -216,3 +216,43 @@ test("a re-spelled storage directory is the same directory on Windows", async ()
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("states untouched for a week expire at the boot hygiene pass", async () => {
+  // Space is budget-capped; the TTL bounds time. A conversation that never
+  // returns must not squat in the budget for months, and the price of an
+  // expired state that does return is one cold prefill.
+  const fixture = await setup();
+  try {
+    const a = kvSessionKey({ conversationId: "a" });
+    const b = kvSessionKey({ conversationId: "b" });
+    const old = await fixture.store.save({ sessionKey: a, fingerprint: FINGERPRINT, at: "2026-08-10T01:00:00.000Z" });
+    const fresh = await fixture.store.save({ sessionKey: b, fingerprint: FINGERPRINT, at: "2026-08-22T01:00:00.000Z" });
+    const result = await fixture.store.expireStale({ now: Date.parse("2026-08-23T01:00:00.000Z") });
+    assert.deepEqual(result.expired.map((state) => state.filename), [old.state.filename], "13 days idle is past the 7-day TTL");
+    await assert.rejects(() => stat(path.join(fixture.storage.directory, old.state.filename)), /ENOENT/, "the expired file is reclaimed");
+    const manifest = await fixture.store.load();
+    assert.deepEqual(manifest.states.map((state) => state.filename), [fresh.state.filename], "the day-old state survives");
+    const again = await fixture.store.expireStale({ now: Date.parse("2026-08-23T01:00:00.000Z") });
+    assert.equal(again.expired.length, 0, "a quiet pass writes nothing");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("clearAll reclaims every checkpoint and reports synchronous totals", async () => {
+  const fixture = await setup();
+  try {
+    const a = kvSessionKey({ conversationId: "a" });
+    const b = kvSessionKey({ conversationId: "b" });
+    await fixture.store.save({ sessionKey: a, fingerprint: FINGERPRINT, at: "2026-08-23T01:00:00.000Z" });
+    await fixture.store.save({ sessionKey: b, fingerprint: FINGERPRINT, at: "2026-08-23T01:01:00.000Z" });
+    assert.deepEqual(fixture.store.totals(), { totalBytes: 800, budgetBytes: 1000, states: 2 }, "totals answer without touching the disk");
+    const result = await fixture.store.clearAll();
+    assert.equal(result.cleared.length, 2);
+    assert.deepEqual(fixture.store.totals(), { totalBytes: 0, budgetBytes: 1000, states: 0 }, "totals follow the clear");
+    const leftover = (await readdir(fixture.storage.directory)).filter((name) => name.endsWith(".bin"));
+    assert.deepEqual(leftover, [], "every checkpoint file is reclaimed");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

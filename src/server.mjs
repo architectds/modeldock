@@ -2375,6 +2375,24 @@ export function createApp(services = createServices()) {
     }
   }));
 
+  // Explicit destructive reclaim of the SSD KV checkpoints. unmanage retains
+  // them on purpose (deleting a user-chosen directory is its own decision);
+  // this is that decision, made from the dashboard with its own confirm. GPU
+  // lanes keep their warm state - only the on-disk checkpoints go.
+  app.post("/api/local/kv/clear", mutateConfig, async (req, res) => {
+    try {
+      const result = await services.localHostRuntime?.clearKvStates?.();
+      if (!result) {
+        return res.status(409).json({ error: { type: "not_managed", message: "No managed local host holds SSD KV state to clear." } });
+      }
+      recordConfigAction(metrics, "local_kv_clear", { ok: true });
+      return res.json({ cleared: result.cleared || 0 });
+    } catch (error) {
+      recordConfigAction(metrics, "local_kv_clear", { ok: false, error: error.message });
+      return res.status(502).json({ error: { type: "local_kv_clear_failed", message: error.message } });
+    }
+  });
+
   // Start an engine again exactly as it was running when it was connected.
   //
   // The request names an engine and nothing more. The binary and its arguments

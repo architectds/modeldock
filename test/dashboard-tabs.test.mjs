@@ -24,7 +24,7 @@ import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
-const TABS = ["dashboard", "subscriptions", "api", "local", "models"];
+const TABS = ["dashboard", "subscriptions", "api", "local", "models", "hostmonitor"];
 
 const CHROME_CANDIDATES = {
   win32: [
@@ -315,6 +315,17 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   await sleep(400);
   await evaluate(`document.getElementById('llamacpp-configure').click()`);
   await sleep(200);
+  // The managed-host monitor is the hidden local numbers tab: its rail entry
+  // and its content must both stay invisible until a host is under takeover,
+  // and a stale #hostmonitor URL explains itself instead of rendering blank.
+  const monitor = JSON.parse(await evaluate(`JSON.stringify({
+    railHidden: document.getElementById('rail-hostmonitor').hidden,
+    sectionHidden: document.getElementById('local-host-dashboard').hidden,
+    emptyShown: !document.getElementById('hostdash-empty').hidden,
+  })`));
+  assert.deepEqual(monitor, { railHidden: true, sectionHidden: true, emptyShown: true },
+    "the host monitor tab stays hidden while nothing is managed");
+
   const hostControl = JSON.parse(await evaluate(`JSON.stringify({
     visible: !document.getElementById('local-host-control').hidden,
     gateway: document.getElementById('local-host-gateway-state').textContent.trim(),

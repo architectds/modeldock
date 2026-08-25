@@ -577,6 +577,16 @@ test("a KV budget the volume cannot hold is refused with the usable figure", asy
   assert.equal(tight.kvBudgetDefaultGiB, 3, "a tight volume suggests only what it can spare");
 });
 
+test("clearing SSD KV state without a managed host is a readable refusal", async (t) => {
+  const { base } = await startApp(t, { discoverEngines: async () => [] });
+  const refused = await fetch(`${base}/api/local/kv/clear`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  const body = await refused.json();
+  assert.equal(refused.status, 409, JSON.stringify(body));
+  assert.equal(body.error?.type, "not_managed");
+});
+
 test("unmanage releases a host whose first takeover verification failed", async (t) => {
   // activeSpec === null means ModelDock never replaced the original process,
   // so there is nothing to restore: unmanage must re-verify the pre-takeover

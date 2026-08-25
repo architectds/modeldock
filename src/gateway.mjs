@@ -3687,7 +3687,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   });
 
   const relayPayload = normalizedPayload;
-  const executeRelay = async ({ slot = null } = {}) => {
+  const executeRelay = async ({ slot = null, cache = null } = {}) => {
+    // The KV tier this request rides on (gpu_hot / ssd_restore / cold_prefill
+    // / llama_auto) is the one fact that lets the dashboard show what the SSD
+    // cache is buying. Annotated onto the live metrics record rather than
+    // threaded through every finish exit.
+    if (cache?.tier) finish?.annotate?.({ localCache: cache });
     // llama.cpp accepts id_slot as an extension to its Responses request. It is
     // added only after provider normalization and only when the managed runtime
     // has proven request-level slot affinity; no other upstream sees it.

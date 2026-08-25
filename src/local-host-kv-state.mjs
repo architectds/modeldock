@@ -212,6 +212,28 @@ export function invalidateLocalHostKvStates(manifest, { fingerprint } = {}) {
   });
 }
 
+// Space is already hard-capped by the budget; this bounds TIME. A conversation
+// that never returns would otherwise squat in the budget until LRU pressure
+// happened to reach it - on a roomy disk, for months. The cost of expiring a
+// state that does come back is one cold prefill, so the window can stay
+// generous.
+export function expireLocalHostKvStates(manifest, { maxAgeMs, now = Date.now() } = {}) {
+  const normalized = createLocalHostKvStateManifest(manifest);
+  const age = positiveInteger(maxAgeMs, "A KV state maximum age");
+  const isStale = (state) => {
+    const accessed = Date.parse(state.lastAccessedAt);
+    return !Number.isFinite(accessed) || now - accessed > age;
+  };
+  const evicted = normalized.states.filter(isStale);
+  return Object.freeze({
+    manifest: createLocalHostKvStateManifest({
+      ...normalized,
+      states: normalized.states.filter((state) => !isStale(state)),
+    }),
+    evicted: Object.freeze(evicted.map(copy)),
+  });
+}
+
 export function removeLocalHostKvState(manifest, { filename } = {}) {
   const normalized = createLocalHostKvStateManifest(manifest);
   const wantedFilename = safeFilename(filename);

@@ -661,6 +661,147 @@ function renderSessions(recent, names = {}) {
   select.value = sessionFilter;
 }
 
+// The managed local-host monitor. Hidden unless a host is under takeover:
+// this whole section is the "hidden local numbers page" that only management
+// mode opens. It reuses the dashboard's wave machinery; the tier view is a
+// dot strip of discrete requests (never a line that changes color), and the
+// SSD budget - a bounded quantity - is a fill bar, not a wave that would
+// climb to the cap and flatline.
+const hostDash = {
+  prefill: [],
+  decode: [],
+  tiers: [],
+  seen: new Set(),
+  prefillPeak: { peak: 0 },
+  decodePeak: { peak: 0 },
+  prefillPoints: [],
+  decodePoints: [],
+};
+const HOSTDASH_TIER_CLASS = { gpu: "tier-gpu", ssd: "tier-ssd", cold: "tier-cold", llama_auto: "tier-auto" };
+const HOSTDASH_MAX_DOTS = 60;
+
+function hostDashPush(history, point) {
+  history.push(point);
+  history.sort((a, b) => a.t - b.t);
+  if (history.length > WAVE_MAX_POINTS) history.splice(0, history.length - WAVE_MAX_POINTS);
+}
+
+function hostDashAvg(history) {
+  if (!history.length) return 0;
+  return history.reduce((sum, point) => sum + point.v, 0) / history.length;
+}
+
+function renderLocalHostDashboard(data) {
+  const section = $("local-host-dashboard");
+  if (!section) return;
+  const localHost = data.localHost;
+  const managed = Boolean(localHost?.managed);
+  // The monitor lives on its own rail tab so it can never collide with the
+  // manage drawer; the tab itself is the gate - present only while a host is
+  // under management. A stale #hostmonitor URL without a managed host shows
+  // the explanation instead of a blank page.
+  const rail = $("rail-hostmonitor");
+  if (rail) rail.hidden = !managed;
+  const empty = $("hostdash-empty");
+  if (empty) empty.hidden = managed;
+  section.hidden = !managed;
+  if (!managed) return;
+
+  let lastRestoreMs = 0;
+  for (const item of data.recent || []) {
+    if (item.kind !== "responses" || item.status !== "ok" || !item.localCache?.tier || hostDash.seen.has(item.id)) continue;
+    hostDash.seen.add(item.id);
+    const tier = String(item.localCache.tier);
+    hostDash.tiers.push({ tier, t: item.startedAt || 0 });
+    const restoreMs = Number(item.localCache.restoreMs) || 0;
+    if (restoreMs) lastRestoreMs = restoreMs;
+    // Prefill speed is charged net of the SSD restore: the restore bought the
+    // speed, so it must not be billed against it.
+    const firstMs = Number(item.firstResponseLatencyMs) || 0;
+    const prefillMs = Math.max(0, firstMs - restoreMs);
+    const inTokens = Number(item.inputTokens) || 0;
+    if (inTokens > 0 && prefillMs > 0) {
+      hostDashPush(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: inTokens / (prefillMs / 1000) });
+    }
+    const outTokens = Number(item.outputTokens) || 0;
+    const decodeMs = Math.max(0, (Number(item.latencyMs) || 0) - firstMs);
+    if (outTokens > 0 && decodeMs > 0) {
+      hostDashPush(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: outTokens / (decodeMs / 1000) });
+    }
+  }
+  hostDash.tiers.sort((a, b) => a.t - b.t);
+  if (hostDash.tiers.length > HOSTDASH_MAX_DOTS) hostDash.tiers.splice(0, hostDash.tiers.length - HOSTDASH_MAX_DOTS);
+
+  const prefillVisible = visiblePoints(hostDash.prefill);
+  hostDash.prefillPeak.peak = prefillVisible.reduce((max, point) => Math.max(max, point.v), 0);
+  const prefillCanvas = $("hostdash-prefill-wave");
+  if (prefillCanvas) drawWave(prefillCanvas, prefillVisible, hostDash.prefillPeak.peak, -1, WAVE_BLUE, hostDash.prefillPoints);
+  set("hostdash-prefill-last", prefillVisible.length ? number(Math.round(prefillVisible[prefillVisible.length - 1].v)) : "—");
+  set("hostdash-prefill-avg", prefillVisible.length ? number(Math.round(hostDashAvg(prefillVisible))) : "—");
+  set("hostdash-prefill-count", number(prefillVisible.length));
+  set("hostdash-restore-last", lastRestoreMs ? duration(lastRestoreMs) : "—");
+
+  const decodeVisible = visiblePoints(hostDash.decode);
+  hostDash.decodePeak.peak = decodeVisible.reduce((max, point) => Math.max(max, point.v), 0);
+  const decodeCanvas = $("hostdash-decode-wave");
+  if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, -1, WAVE_VIOLET, hostDash.decodePoints);
+  set("hostdash-decode-last", decodeVisible.length ? number(Math.round(decodeVisible[decodeVisible.length - 1].v)) : "—");
+  set("hostdash-decode-avg", decodeVisible.length ? number(Math.round(hostDashAvg(decodeVisible))) : "—");
+  set("hostdash-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
+
+  const strip = $("hostdash-tier-strip");
+  if (strip) {
+    strip.replaceChildren(...hostDash.tiers.map((entry) => {
+      const dot = document.createElement("span");
+      dot.className = `tier-dot ${HOSTDASH_TIER_CLASS[entry.tier] || "tier-auto"}`;
+      dot.title = `${entry.tier} · ${entry.t ? new Date(entry.t).toLocaleTimeString() : ""}`;
+      return dot;
+    }));
+  }
+  const tally = { gpu: 0, ssd: 0, cold: 0, llama_auto: 0 };
+  for (const entry of hostDash.tiers) tally[entry.tier] = (tally[entry.tier] || 0) + 1;
+  set("hostdash-tier-counts", `${tally.gpu} · ${tally.ssd} · ${tally.cold} · ${tally.llama_auto}`);
+
+  const ssd = localHost.ssd;
+  const counters = localHost.counters || {};
+  const fill = $("hostdash-ssd-fill");
+  if (ssd && ssd.budgetBytes > 0) {
+    const ratio = Math.min(1, (Number(ssd.totalBytes) || 0) / Number(ssd.budgetBytes));
+    if (fill) {
+      fill.style.width = `${Math.round(ratio * 100)}%`;
+      fill.classList.toggle("is-tight", ratio > 0.85);
+    }
+    set("hostdash-ssd-used", `${gib(ssd.totalBytes)} / ${gib(ssd.budgetBytes)}`);
+  } else {
+    if (fill) fill.style.width = "0";
+    set("hostdash-ssd-used", "—");
+  }
+  set("hostdash-ssd-states", number(ssd?.states || 0));
+  set("hostdash-ssd-evictions", number(counters.evictions || 0));
+  set("hostdash-ssd-expired", number(counters.expired || 0));
+}
+
+function gib(bytes) {
+  const value = Number(bytes) / 1024 ** 3;
+  if (!Number.isFinite(value) || value <= 0) return "0 GiB";
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} GiB`;
+}
+
+$("hostdash-ssd-clear")?.addEventListener("click", async () => {
+  if (!window.confirm(t("hostdash.clearConfirm"))) return;
+  const button = $("hostdash-ssd-clear");
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch("/api/local/kv/clear", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error?.message || `Clear ${response.status}`);
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
 function render(data) {
   lastData = data;
   const ready = data.ready;
@@ -688,6 +829,7 @@ function render(data) {
 
   renderContextWave(data.recent || []);
   renderCacheWave(data.recent || []);
+  renderLocalHostDashboard(data);
   renderDataWave(data.recent || []);
   renderTpsWave(data.recent || []);
   renderSessions(data.recent || [], data.sessionNames || {});
@@ -3077,7 +3219,7 @@ function redrawWaves() {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "subscriptions", "api", "local", "models"];
+const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "hostmonitor"];
 
 function routeToView(name) {
   const view = VIEWS.includes(name) ? name : VIEWS[0];
@@ -3098,6 +3240,7 @@ function currentView() {
   // The canvases could not draw while this view was hidden, so returning to
   // it has to repaint rather than wait for the next datum to arrive.
   if (view === "dashboard") redrawWaves();
+  if (view === "hostmonitor" && lastData) renderLocalHostDashboard(lastData);
   return view;
 }
 

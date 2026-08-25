@@ -85,6 +85,15 @@ export class Metrics extends EventEmitter {
       this.emit("change");
     };
     finish.markFirstResponse = markFirstResponse;
+    // Mid-flight facts that are known before the outcome is - the local KV
+    // cache tier, a restore duration. Merging them here instead of at every
+    // finish call site keeps the relay's many exit paths out of the business
+    // of threading one more field (the noTransform lesson), and the fact
+    // survives even when the request later errors.
+    finish.annotate = (fields = {}) => {
+      Object.assign(record, fields);
+      this.emit("change");
+    };
     return finish;
   }
 

@@ -29,6 +29,9 @@ export class LocalHostKvCoordinator {
   #residency;
   #mutation = Promise.resolve();
   #validatedFingerprint = false;
+  // Lifetime tallies for the local dashboard: what the SSD cache is actually
+  // doing, counted where the actions happen instead of re-derived from logs.
+  #counters = { saves: 0, restores: 0, evictions: 0, expired: 0, cleared: 0 };
 
   constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp } = {}) {
     if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function" || typeof store.has !== "function") {
@@ -53,6 +56,10 @@ export class LocalHostKvCoordinator {
       slotAffinity: this.assignSlots,
       lanes: this.#residency.lanes.map((lane) => ({ ...lane })),
       hotCount: this.#residency.lanes.filter((lane) => lane.state === "hot").length,
+      // Synchronous by design: this rides the status SSE broadcast, so it must
+      // never touch the disk. The store keeps its last-known manifest totals.
+      ssd: typeof this.store.totals === "function" ? this.store.totals() : null,
+      counters: { ...this.#counters },
     });
   }
 
@@ -101,6 +108,13 @@ export class LocalHostKvCoordinator {
       if (!this.#validatedFingerprint) {
         try {
           if (typeof this.store.gcOrphans === "function") await this.store.gcOrphans();
+          // Time-bounding runs at the same once-per-boot moment as the other
+          // hygiene: space is already hard-capped by the budget, so the TTL's
+          // only job is to stop dead conversations squatting in it for months.
+          if (typeof this.store.expireStale === "function") {
+            const expired = await this.store.expireStale();
+            this.#counters.expired += expired?.expired?.length || 0;
+          }
           await this.store.invalidateExcept({ fingerprint: this.fingerprint });
         } catch (error) {
           await this.#diagnose("state_startup_cleanup_failed", error);
@@ -121,6 +135,7 @@ export class LocalHostKvCoordinator {
       if (lease.kind === "queue") throw new Error("No local host lane became available after admission.");
       this.#residency = lease.residency;
       let tier = lease.kind;
+      let restoreMs = 0;
       for (const action of lease.actions) {
         if (action.type === "use_gpu") continue;
         if (action.type === "invalidate_ssd") {
@@ -137,7 +152,9 @@ export class LocalHostKvCoordinator {
         }
         if (action.type === "save_lru_to_ssd") {
           try {
-            await this.store.save({ sessionKey: action.sessionKey, fingerprint: action.fingerprint, slot: action.slot, signal });
+            const saved = await this.store.save({ sessionKey: action.sessionKey, fingerprint: action.fingerprint, slot: action.slot, signal });
+            if (saved?.saved) this.#counters.saves += 1;
+            this.#counters.evictions += saved?.evicted?.length || 0;
           } catch (error) {
             await this.#diagnose("slot_save_failed", error);
           }
@@ -149,6 +166,9 @@ export class LocalHostKvCoordinator {
             if (!restored.restored) {
               tier = "cold";
               await this.#erase(action.slot);
+            } else {
+              this.#counters.restores += 1;
+              restoreMs = Number(restored.restoreMs) || 0;
             }
           } catch (error) {
             tier = "cold";
@@ -159,7 +179,7 @@ export class LocalHostKvCoordinator {
         }
         if (action.type === "cold_prefill") await this.#erase(action.slot);
       }
-      return { slot: lease.slot, tier };
+      return { slot: lease.slot, tier, restoreMs };
     });
   }
 
@@ -173,6 +193,20 @@ export class LocalHostKvCoordinator {
         success,
       });
       if (!success) await this.#erase(slot);
+    });
+  }
+
+  // The explicit "give me my disk back" action. Runs under the same exclusive
+  // lock as every store mutation so it cannot race an in-flight save; GPU
+  // lanes stay hot - clearing checkpoints must not cost the live sessions
+  // their warm state.
+  async clearSsdStates() {
+    return this.#exclusive(async () => {
+      if (typeof this.store.clearAll !== "function") return { cleared: 0 };
+      const result = await this.store.clearAll();
+      const cleared = result?.cleared?.length || 0;
+      this.#counters.cleared += cleared;
+      return { cleared };
     });
   }
 
@@ -193,7 +227,10 @@ export class LocalHostKvCoordinator {
         if (!this.assignSlots) return run({ cache: { tier: "llama_auto" }, slot: null });
         const prepared = await this.#prepare(sessionKey, signal);
         try {
-          const result = await run({ cache: { tier: prepared.tier }, slot: prepared.slot });
+          const result = await run({
+            cache: { tier: prepared.tier, ...(prepared.restoreMs ? { restoreMs: prepared.restoreMs } : {}) },
+            slot: prepared.slot,
+          });
           await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false });
           return result;
         } catch (error) {

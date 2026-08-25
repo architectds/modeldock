@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   createLocalHostKvStateManifest,
   createLocalHostKvStorage,
+  expireLocalHostKvStates,
   findLocalHostKvState,
   invalidateLocalHostKvStates,
   planLocalHostKvStateWrite,
@@ -17,6 +18,12 @@ import {
   sameKvStorageDirectory,
   touchLocalHostKvState,
 } from "./local-host-kv-state.mjs";
+
+// How long an untouched session checkpoint may live. Seven days covers "back
+// next week" without letting dead conversations squat in the budget for
+// months; the space cap already bounds the worst case, and the price of an
+// expired state that does return is one cold prefill.
+export const KV_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function text(value, label) {
   const result = typeof value === "string" ? value.trim() : "";
@@ -66,6 +73,11 @@ function fitStatesToBudget(states, budgetBytes) {
 }
 
 export class LocalHostKvStateStore {
+  // Last-known manifest totals, refreshed by every successful load/write. The
+  // status SSE broadcast reads this synchronously; it must never cost a disk
+  // read per broadcast.
+  #lastTotals = null;
+
   constructor({ hostId, storage, manifestFile, slotClient, makeId = randomUUID } = {}) {
     if (!slotClient || typeof slotClient.save !== "function" || typeof slotClient.restore !== "function") {
       throw new TypeError("A local KV state store needs a llama.cpp slot client.");
@@ -91,7 +103,20 @@ export class LocalHostKvStateStore {
     const target = `${this.manifestFile}.corrupt-${Date.now()}`;
     await rename(this.manifestFile, target).catch(() => {});
     console.log(`[gate] local KV manifest quarantined to ${path.basename(target)}: ${String(reason?.message || reason)}`);
-    return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage });
+    return this.#remember(createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage }));
+  }
+
+  #remember(manifest) {
+    this.#lastTotals = Object.freeze({
+      totalBytes: manifest.totalBytes,
+      budgetBytes: manifest.storage.budgetBytes,
+      states: manifest.states.length,
+    });
+    return manifest;
+  }
+
+  totals() {
+    return this.#lastTotals;
   }
 
   async load() {
@@ -99,7 +124,7 @@ export class LocalHostKvStateStore {
     try {
       source = await readFile(this.manifestFile, "utf8");
     } catch (error) {
-      if (error?.code === "ENOENT") return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage });
+      if (error?.code === "ENOENT") return this.#remember(createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage }));
       throw error;
     }
     let stored;
@@ -119,7 +144,7 @@ export class LocalHostKvStateStore {
     // Adopt the live storage policy (the directory's current spelling and the
     // current budget); the stored copy of the policy is a snapshot, not a veto.
     try {
-      return createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage, states: stored?.states || [] });
+      return this.#remember(createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage, states: stored?.states || [] }));
     } catch (error) {
       const fit = fitStatesToBudget(stored?.states, this.storage.budgetBytes);
       if (!fit) return this.#quarantine(error);
@@ -146,7 +171,7 @@ export class LocalHostKvStateStore {
     } finally {
       await rm(temporary, { force: true }).catch(() => {});
     }
-    return normalized;
+    return this.#remember(normalized);
   }
 
   async #removeState(filename) {
@@ -262,5 +287,32 @@ export class LocalHostKvStateStore {
     await this.#write(result.manifest);
     const removalFailures = await this.#removeEvicted(result.evicted);
     return Object.freeze({ invalidated: Object.freeze(result.evicted.map(copy)), removalFailures: Object.freeze(removalFailures) });
+  }
+
+  // Time-bounding for checkpoints the budget alone never touches: see the
+  // KV_STATE_TTL_MS rationale. Skips the write entirely when nothing is stale.
+  async expireStale({ maxAgeMs = KV_STATE_TTL_MS, now = Date.now() } = {}) {
+    const current = await this.load();
+    const result = expireLocalHostKvStates(current, { maxAgeMs, now });
+    if (!result.evicted.length) {
+      return Object.freeze({ expired: Object.freeze([]), removalFailures: Object.freeze([]) });
+    }
+    await this.#write(result.manifest);
+    const removalFailures = await this.#removeEvicted(result.evicted);
+    return Object.freeze({ expired: Object.freeze(result.evicted.map(copy)), removalFailures: Object.freeze(removalFailures) });
+  }
+
+  // The explicit destructive reclaim behind the dashboard's Clear button.
+  // Manifest first, files second - the same crash ordering every other
+  // mutation here uses: a crash in between leaves orphans for gcOrphans,
+  // never a manifest pointing at deleted files.
+  async clearAll() {
+    const current = await this.load();
+    if (!current.states.length) {
+      return Object.freeze({ cleared: Object.freeze([]), removalFailures: Object.freeze([]) });
+    }
+    await this.#write(createLocalHostKvStateManifest({ hostId: this.hostId, storage: this.storage }));
+    const removalFailures = await this.#removeEvicted(current.states);
+    return Object.freeze({ cleared: Object.freeze(current.states.map(copy)), removalFailures: Object.freeze(removalFailures) });
   }
 }

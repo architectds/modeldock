@@ -33,6 +33,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01" /></svg>
         <span class="rail-label" data-i18n="nav.local"></span>
       </a>
+      <a class="rail-link" href="#hostmonitor" data-rail="hostmonitor" id="rail-hostmonitor" hidden data-i18n-title="nav.hostmonitor">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
+        <span class="rail-label" data-i18n="nav.hostmonitor"></span>
+      </a>
     </nav>
     <main class="shell">
       <header class="topbar">
@@ -438,6 +442,48 @@
           </div>
           <div id="roster-groups"></div>
           <p id="roster-note" class="custom-hint" aria-live="polite"></p>
+        </section>
+      </div>
+
+      <div class="view" data-view="hostmonitor">
+        <p id="hostdash-empty" class="custom-hint" data-i18n="hostdash.empty" hidden>Host monitoring appears while a local host is under ModelDock management.</p>
+        <section id="local-host-dashboard" class="panel page-panel" hidden aria-labelledby="local-host-dashboard-title">
+          <p class="eyebrow" data-i18n="hostdash.eyebrow">MANAGED HOST</p>
+          <h2 id="local-host-dashboard-title" data-i18n="hostdash.title">Local host monitor</h2>
+          <section class="metric-grid">
+            <article class="metric-card accent-blue wave-card">
+              <div class="metric-head"><span data-i18n="hostdash.prefill">Prefill</span><b><span id="hostdash-prefill-last">&mdash;</span> <span data-i18n="metric.tpsLast">tps</span></b></div>
+              <div class="wave-stats"><span><b id="hostdash-prefill-avg">&mdash;</b> <span data-i18n="metric.tpsAvg">avg</span></span><span><b id="hostdash-restore-last">&mdash;</b> <span data-i18n="hostdash.restoreLast">restore</span></span></div>
+              <div class="wave-wrap">
+                <canvas id="hostdash-prefill-wave" width="340" height="92"></canvas>
+              </div>
+              <p><span id="hostdash-prefill-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
+            </article>
+            <article class="metric-card accent-violet wave-card">
+              <div class="metric-head"><span data-i18n="hostdash.decode">Decode</span><b><span id="hostdash-decode-last">&mdash;</span> <span data-i18n="metric.tpsLast">tps</span></b></div>
+              <div class="wave-stats"><span><b id="hostdash-decode-avg">&mdash;</b> <span data-i18n="metric.tpsAvg">avg</span></span><span><b id="hostdash-hot-lanes">&mdash;</b> <span data-i18n="hostdash.hotLanes">hot lanes</span></span></div>
+              <div class="wave-wrap">
+                <canvas id="hostdash-decode-wave" width="340" height="92"></canvas>
+              </div>
+            </article>
+            <article class="metric-card accent-amber">
+              <div class="metric-head"><span data-i18n="hostdash.tiers">Cache tiers</span><b><span id="hostdash-tier-counts">&mdash;</span></b></div>
+              <div id="hostdash-tier-strip" class="tier-strip" aria-label="Recent requests by cache tier"></div>
+              <p class="tier-legend">
+                <span class="tier-dot tier-gpu"></span><span data-i18n="hostdash.tierGpu">GPU hot</span>
+                <span class="tier-dot tier-ssd"></span><span data-i18n="hostdash.tierSsd">SSD restore</span>
+                <span class="tier-dot tier-cold"></span><span data-i18n="hostdash.tierCold">Cold prefill</span>
+                <span class="tier-dot tier-auto"></span><span data-i18n="hostdash.tierAuto">llama auto</span>
+              </p>
+            </article>
+            <article class="metric-card accent-green">
+              <div class="metric-head"><span data-i18n="hostdash.ssd">SSD KV cache</span><b><span id="hostdash-ssd-used">&mdash;</span></b></div>
+              <div class="ssd-fill-track"><div id="hostdash-ssd-fill" class="ssd-fill-bar"></div></div>
+              <p class="ssd-counts"><span id="hostdash-ssd-states">0</span> <span data-i18n="hostdash.states">states</span> · <span id="hostdash-ssd-evictions">0</span> <span data-i18n="hostdash.evictions">evicted</span> · <span id="hostdash-ssd-expired">0</span> <span data-i18n="hostdash.expired">expired</span></p>
+              <p class="custom-hint" data-i18n="hostdash.ttlNote">Unused session states expire after 7 days.</p>
+              <button id="hostdash-ssd-clear" type="button" class="custom-action" data-i18n="hostdash.clear">Clear SSD cache</button>
+            </article>
+          </section>
         </section>
       </div>
 

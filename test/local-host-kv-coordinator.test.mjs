@@ -51,7 +51,9 @@ test("single-slot coordinator keeps the current conversation hot and restores an
     ["a1", { tier: "cold" }],
     ["a2", { tier: "gpu" }],
     ["b1", { tier: "cold" }],
-    ["a3", { tier: "ssd" }],
+    // An SSD hit reports how long the restore took: the dashboard's tier view
+    // charges the recovery time to the request that paid it.
+    ["a3", { tier: "ssd", restoreMs: 4 }],
   ]);
   const aKey = kvSessionKey(a);
   const bKey = kvSessionKey(b);

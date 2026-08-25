@@ -968,3 +968,27 @@ body { padding-left: 88px; }
 .engine-warnings { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
 .engine-warnings[hidden] { display: none; }
 .engine-warnings li { padding: 7px 10px; border: 1px solid rgba(247,185,85,.32); border-radius: 8px; background: rgba(247,185,85,.07); color: var(--amber); font-size: 11px; line-height: 1.4; }
+
+/* Managed local-host monitor: tier events are discrete requests, so they read
+   as a dot pattern (like CI status dots), never as a line that changes color. */
+.tier-strip { display: flex; flex-wrap: wrap; gap: 4px; min-height: 40px; align-content: flex-start; margin: 10px 0 6px; }
+.tier-strip .tier-dot { cursor: default; }
+.tier-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; background: var(--muted); flex: none; }
+.tier-gpu { background: var(--green); }
+.tier-ssd { background: var(--blue); }
+.tier-cold { background: var(--amber); }
+.tier-auto { background: rgba(154,166,188,.55); }
+.tier-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin: 8px 0 0; }
+.tier-legend .tier-dot { margin-left: 8px; }
+.tier-legend .tier-dot:first-child { margin-left: 0; }
+
+/* SSD budget fill: a bounded quantity gets a bar, not a wave - the line would
+   just climb to the cap and flatline. */
+.ssd-fill-track { height: 10px; border-radius: 5px; background: rgba(154,166,188,.15); overflow: hidden; margin: 12px 0 8px; }
+.ssd-fill-bar { height: 100%; width: 0; border-radius: 5px; background: var(--green); transition: width .3s ease; }
+.ssd-fill-bar.is-tight { background: var(--amber); }
+.ssd-counts { font-size: 11px; color: var(--muted); margin: 0 0 6px; }
+
+/* The managed-host tab exists only while a takeover is active; rail links are
+   flex, so the hidden attribute needs an explicit override to actually hide. */
+.rail-link[hidden] { display: none; }

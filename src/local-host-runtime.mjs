@@ -134,7 +134,18 @@ export class LocalHostRuntime {
       hotCount: live.hotCount || 0,
       slotAffinity: Boolean(live.slotAffinity),
       lanes: (live.lanes || []).map((lane) => ({ slot: lane.slot, state: lane.state, lastAccessedAt: lane.lastAccessedAt })),
+      ssd: live.ssd || null,
+      counters: live.counters || null,
     });
+  }
+
+  // Dashboard "Clear SSD cache": delegates to the coordinator's exclusive
+  // lock so it cannot race an in-flight save. No coordinator means nothing
+  // is managed and there is nothing this runtime owns to clear.
+  async clearKvStates() {
+    if (!this.#loaded) await this.refresh();
+    if (!this.#coordinator || typeof this.#coordinator.clearSsdStates !== "function") return null;
+    return this.#coordinator.clearSsdStates();
   }
 
   async status() {
