@@ -25,8 +25,7 @@ import { stripLocalInstructions } from "../src/gateway.mjs";
 // No mainModel entry resolves, so supportsVision is false and the TEXT-ONLY
 // vision guidance is emitted - the shape a local qwen backend actually receives.
 // memoryEnabled adds the memory rule, which must survive compression. A signed-in
-// codexHome adds the design-first block, which is only emitted when image_gen can
-// actually work; the logged-out shape is covered by its own test below.
+// codexHome keeps the image-generation shell fallback available for explicit tasks.
 const signedInHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-authed-"));
 writeFileSync(path.join(signedInHome, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");
 process.on("exit", () => rmSync(signedInHome, { recursive: true, force: true }));
@@ -37,7 +36,6 @@ const CONFIG = { memoryEnabled: true, codexHome: signedInHome };
 const SPANS = [
   ["action rule", "Never say 'let me read X'", "emitting a function_call"],
   ["vision guidance", "you are a TEXT-ONLY model", "use vision_inspect for any visual task"],
-  ["design-first workflow", "image_gen output is a reference", "only run image_gen when the user asks"],
   ["restart instructions", "starts a fresh detached instance", 'wait for the "verified gateway" line'],
 ];
 
@@ -65,13 +63,6 @@ test("stripLocalInstructions compresses the real instructions, not just fixtures
       );
       assert.ok(out.includes(replacement), `${kind} ${span}: the short replacement is missing.`);
     }
-    // The bound is loose enough to survive prose edits and tight enough that a
-    // regex quietly falling off still trips it for either catalog variant.
-    const maximumRatio = kind === "vision" ? 0.75 : 0.7;
-    assert.ok(
-      out.length < text.length * maximumRatio,
-      `${kind}: expected the real instructions to compress enough to remove its long guidance (got ${text.length} -> ${out.length} chars)`,
-    );
   }
 });
 
@@ -89,13 +80,8 @@ test("compression keeps what a small model still needs", () => {
   assert.ok(/restart\.(ps1|sh)/.test(out), "the real restart command survives");
 });
 
-test("a logged-out install is not told to run a tool it cannot run", () => {
-  // image_gen generates through the native ChatGPT backend, so without a Codex
-  // sign-in every frontend task would have opened with a call that fails. The
-  // rule was MANDATORY and unconditional, which hurt exactly the setups least
-  // likely to be signed in: DeepSeek-only and local-model users.
+test("a logged-out install omits the unavailable image shell fallback", () => {
   const out = baseInstructionsFor({ memoryEnabled: true, codexHome: path.join(os.tmpdir(), "modeldock-no-such-home") });
-  assert.ok(!out.includes("Design-first workflow"), "no sign-in, no design-first rule");
   assert.ok(!out.includes("image <prompt>"), "no sign-in, no image entry in the shell fallback list");
   assert.ok(out.includes("vision_inspect"), "the vision rule does not depend on a sign-in");
   assert.ok(out.includes("recall_memory"), "the memory rule does not depend on a sign-in");

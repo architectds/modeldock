@@ -214,39 +214,27 @@ test("baseInstructionsFor takes the vision capability explicitly, not from mainM
   assert.doesNotMatch(vision, /TEXT-ONLY model and CANNOT see images/);
 });
 
-test("baseInstructionsFor matches design review to visual capability", () => {
-  // image_gen posts to the native ChatGPT backend, so the rule is only emitted
-  // for a signed-in install (see the logged-out case below).
+test("baseInstructionsFor never prescribes image generation for frontend work", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-catalog-auth-"));
   writeFileSync(path.join(home, "auth.json"), JSON.stringify({ tokens: { access_token: "tok" } }), "utf8");
   try {
     const text = baseInstructionsFor({ ...configStub(), codexHome: home });
     const vision = baseInstructionsFor({ ...configStub(), codexHome: home }, { supportsVision: true });
     for (const instructions of [text, vision]) {
-      assert.match(instructions, /Design-first workflow \(MANDATORY for frontend\/UI work\)/);
-      assert.match(instructions, /run image_gen first/);
-      assert.match(instructions, /implement by translating structure, palette, and hierarchy/);
-      assert.match(instructions, /`image <prompt> \[size\]`/, "the shell fallback lists image generation too");
+      assert.doesNotMatch(instructions, /Design-first workflow/);
+      assert.doesNotMatch(instructions, /run image_gen first/);
+      assert.match(instructions, /`image <prompt> \[size\]`/, "the shell fallback keeps explicit image generation available");
     }
-    assert.match(text, /read the output with vision_inspect/);
-    assert.match(text, /read it with vision_inspect instead/);
-    assert.match(vision, /inspect the output directly/);
-    assert.match(vision, /inspect it directly instead/);
-    assert.doesNotMatch(vision, /read the output with vision_inspect/);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("baseInstructionsFor drops the design-first workflow without a Codex sign-in", () => {
-  // A MANDATORY rule that opens every frontend task with an impossible tool call
-  // is worse than no rule, and it landed hardest on DeepSeek-only and local-model
-  // users - the ones least likely to be signed in to ChatGPT.
+test("baseInstructionsFor omits an unavailable image shell fallback", () => {
   const instructions = baseInstructionsFor({
     ...configStub(),
     codexHome: path.join(os.tmpdir(), "modeldock-catalog-no-auth"),
   });
-  assert.doesNotMatch(instructions, /Design-first workflow/);
   assert.doesNotMatch(instructions, /image <prompt>/);
   assert.match(instructions, /vision_inspect/, "vision guidance does not depend on a sign-in");
 });

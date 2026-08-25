@@ -1227,13 +1227,10 @@ const AGENT_BLOCK_RE = /You are `\/root`, the primary agent[\s\S]*?<\/multi_agen
 // The memory citation ceremony (oai-mem-citation block, rollout ids, format
 // rules) is platform bookkeeping; recall_memory results do not need it.
 const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating memories:)/g;
-// ModelDock's own base instructions, shortened for small models: the
-// mandatory design-first image-gen loop and the long vision preamble are
-// disproportionate for a small-context local backend.
+// ModelDock's own base instructions are shortened for small local models. The
+// long text-only vision preamble is disproportionate for a small context.
 const VERBOSE_VISION_GUIDANCE =
   /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
-const VERBOSE_DESIGN_FIRST =
-  /Design-first workflow \(MANDATORY for frontend\/UI work\):[\s\S]*?instead\./g;
 const VERBOSE_ACTION_RULE =
   /IMPORTANT: To perform any action[\s\S]*?re-emit the call\./g;
 const VERBOSE_RESTART =
@@ -1299,7 +1296,6 @@ function stripLocalInstructionText(text) {
   out = stripAppContextBlock(out);
   out = out
     .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images; use vision_inspect for any visual task.")
-    .replace(VERBOSE_DESIGN_FIRST, "Design: only run image_gen when the user asks for a visual direction.")
     .replace(VERBOSE_ACTION_RULE, "IMPORTANT: perform any action by emitting a function_call in this turn; never describe an action in text.")
     .replace(VERBOSE_RESTART, (match) => {
       const path = match.match(/"([^"]+\\restart\.ps1)"/)?.[1] || "scripts/restart.ps1";

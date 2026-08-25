@@ -15,11 +15,9 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
   const restartCommand = process.platform === "win32"
     ? `powershell -ExecutionPolicy Bypass -File "${restartScript}"`
     : `sh "${restartScript}"`;
-  // image_gen generates through the native ChatGPT backend, so it needs a Codex
-  // sign-in. Without one the design-first rule told every model to open frontend
-  // work with a call that cannot succeed - a MANDATORY instruction resting on an
-  // optional credential, and worst for exactly the users least likely to have it
-  // (DeepSeek-only and local-model setups). No sign-in, no rule.
+  // image_gen generates through the native ChatGPT backend, so its shell fallback
+  // is useful only for a signed-in install. Image generation itself remains an
+  // explicit user-directed tool, not a prerequisite for frontend work.
   const canGenerateImages = hasChatGptLogin(config.codexHome);
   return [
     "You are Codex, a coding agent collaborating with the user in their workspace.",
@@ -30,11 +28,6 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
     ...(supportsVision
       ? []
       : ["Vision guidance (MANDATORY): you are a TEXT-ONLY model and CANNOT see images, so you must NEVER analyze image bytes yourself (no pixel reading, brightness, decoding, System.Drawing, or file checks on screenshots - they are useless and waste turns). Whenever a task involves screenshots, rendering, UI, charts, or any visual output, you MUST take a screenshot and call vision_inspect with its local path plus a specific question, then act on the text description it returns. When the user attaches an image (or you need to re-inspect one referenced by image_ref), analyze it with vision_inspect, or spawn a vision-capable subagent (agent_type=\"modeldock_subagent\") to analyze it and use its description. Put the complete question in spawn_agent's message; omit fork_turns or use \"all\". Never guess or fabricate what an image shows. view_image is only for showing the human the file. If you are about to verify a visual result, call vision_inspect instead of inspecting the file directly."]),
-    ...(canGenerateImages
-      ? [`Design-first workflow (MANDATORY for frontend/UI work): before coding any frontend surface (web page, dashboard, game UI, component, landing page, mobile UI, data-viz page), run image_gen first (1-3 direction images, brief-style prompt with purpose, layout, color mood, style keywords, and an avoid-list), ${supportsVision
-        ? "inspect the output directly (describe layout, colors, text hierarchy, component styles, spacing rhythm)"
-        : "read the output with vision_inspect (describe layout, colors, text hierarchy, component styles, spacing rhythm)"}, write a one-paragraph review, then implement by translating structure, palette, and hierarchy into the project's framework. image_gen output is a reference, never a final artifact; do not copy icons, copy, or artwork from the draft. Skip for tiny changes; skip image_gen when the user already provided a design - ${supportsVision ? "inspect it directly" : "read it with vision_inspect"} instead.`]
-      : []),
     "Before starting a task, check ~/.codex/memories/MEMORY.md (or $CODEX_HOME/memories/MEMORY.md) for memory groups whose applies_to matches the current working directory, and reuse them when relevant.",
     ...(config.memoryEnabled
       ? ["Memory (MANDATORY): this project keeps persistent memory across sessions. Before starting substantive work, call recall_memory once with a query about the task - past decisions, baselines, and fixes are usually relevant. Call store_memory as soon as you learn something reusable: a hard-won fix, a stable project fact, a decision or baseline you relied on, or a correction to an earlier belief. If you would want it in the next session, store it now rather than leaving it only in this conversation. To correct a stale entry, recall it and store the correction under the same key from its result. Keep stored text short and factual."]
@@ -46,8 +39,8 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
     "Track the current objective with the goal tools (create_goal when a task starts, update_goal as it progresses); goals survive context compaction, so after compaction call get_goal to recover the plan.",
     // The MCP connection goes stale on a gateway restart and Codex never
     // re-establishes it, so this list is the only way a tool survives that. It
-    // omitted image_gen, which quietly removed the "first-class" image tool
-    // exactly when the fallback was needed - and named it mandatory anyway.
+    // omitted image_gen, which quietly removed the tool exactly when an explicit
+    // user-requested image task needed its fallback.
     // The rule is stated as a hard trigger ("if the call fails, switch") rather
     // than a passive availability note: a text-only model otherwise retries the
     // dead tool and reports the capability as gone.
