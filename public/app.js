@@ -1713,11 +1713,6 @@ function formatContextTokens(tokens) {
   return Number.isSafeInteger(value) && value > 0 ? value.toLocaleString() : "?";
 }
 
-function formatGiB(bytes) {
-  const value = Number(bytes) / 1024 ** 3;
-  return Number.isFinite(value) && value > 0 ? `${Math.round(value)} GiB` : "";
-}
-
 function managedPlanSummary(profile) {
   if (!profile?.laneCount || !profile?.laneContextTokens) return "";
   return t("host.plan", {
@@ -1732,20 +1727,7 @@ function hostControlSummary(management) {
     state: management.state,
     failure: management.failure ? ` - ${management.failure}` : "",
   });
-  const budget = formatGiB(management.cacheBudgetBytes);
-  const cache = management.ssdState === "configured"
-    ? t("host.cacheConfigured")
-    : t("host.restartRequired");
-  const profile = management.profile;
-  const runtime = management.runtime;
-  const plan = managedPlanSummary(profile) || "automatic profile pending";
-  const activity = runtime
-    ? `; ${runtime.hotCount || 0} hot, ${runtime.activeCount || 0} active, ${runtime.pendingCount || 0} queued`
-    : "";
-  return t("host.managed", {
-    cache: `${plan}; ${cache}${activity}`,
-    budget: budget ? t("host.budget", { budget }) : "",
-  });
+  return managedPlanSummary(management.profile) || "automatic profile pending";
 }
 
 async function renderLocalEngines() {

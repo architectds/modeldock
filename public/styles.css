@@ -889,6 +889,12 @@ body { padding-left: 88px; }
   .view[data-view="local"] { position: relative; }
   .view[data-view="local"] > .page-panel { flex: none; }
   .local-drawer { position: absolute; inset: 0 0 auto 0; z-index: 5; }
+  .local-drawer-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.32);
+  }
 }
 
 /* Blue = a probe answered. Carried by the row now that the trigger is the row

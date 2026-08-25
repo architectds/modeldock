@@ -59,6 +59,19 @@ async function stop(child) {
   if (child.exitCode === null) child.kill("SIGKILL");
 }
 
+async function closeServer(server) {
+  // The bundle uses keep-alive for its strict upstream request. close() waits
+  // for that idle socket, while this test's child shutdown runs separately and
+  // can therefore leave the whole suite waiting forever during cleanup.
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+  await new Promise((resolve, reject) => server.close((error) => {
+    if (error?.code === "ERR_SERVER_NOT_RUNNING") return resolve();
+    if (error) return reject(error);
+    resolve();
+  }));
+}
+
 test("built bundle accepts the full original Codex xAI package after dialect normalization", async (t) => {
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.capture.originalToolCount, 164);
@@ -106,7 +119,7 @@ test("built bundle accepts the full original Codex xAI package after dialect nor
     ].join("\n"));
   });
   const upstreamPort = await listen(upstream);
-  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  t.after(() => closeServer(upstream));
 
   // The probe server only reserves a free port; do not leave it listening when
   // the bundle starts its own loopback server.

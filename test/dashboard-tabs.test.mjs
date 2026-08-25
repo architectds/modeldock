@@ -131,16 +131,16 @@ async function startDashboard(t) {
 }
 
 // The smallest CDP client that can drive a page and read a value back.
-async function openBrowser(t, chromePath) {
-  const port = 9350 + Math.floor(process.pid % 200);
-  const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}`);
+async function openBrowser(t, chromePath, { width = 1500, height = 1000, instance = "default" } = {}) {
+  const port = 9350 + Math.floor(process.pid % 200) + (instance === "default" ? 0 : 300);
+  const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
   const chrome = spawn(chromePath, [
     "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox",
     // A CI container gets a 64 MB /dev/shm, and Chrome puts its renderer's
     // shared memory there: without this it dies during startup and the only
     // symptom upstairs is a debugging port that never answers.
     "--disable-dev-shm-usage",
-    `--remote-debugging-port=${port}`, "--window-size=1500,1000",
+    `--remote-debugging-port=${port}`, `--window-size=${width},${height}`,
     `--user-data-dir=${profile}`, "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
 
@@ -344,6 +344,45 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
   assert.deepEqual(errors, [], "the dashboard threw while rendering its tabs");
+});
+
+test("the narrow local drawer is an opaque configuration surface", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const base = await startDashboard(t);
+  const { evaluate } = await openBrowser(t, chromePath, { width: 1100, instance: "narrow" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#llamacpp-configure')`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    document.getElementById('llamacpp-configure').click();
+    return true;
+  })()`);
+  await sleep(400);
+  const surface = JSON.parse(await evaluate(`JSON.stringify((() => {
+    const drawer = document.getElementById('local-drawer');
+    const card = drawer.querySelector('.local-drawer-card');
+    const style = getComputedStyle(card);
+    return {
+      drawerPosition: getComputedStyle(drawer).position,
+      cardBackground: style.backgroundColor,
+      cardBorder: style.borderTopColor,
+      cardVisible: card.offsetParent !== null,
+    };
+  })())`));
+  assert.deepEqual(surface, {
+    drawerPosition: "absolute",
+    cardBackground: "rgb(16, 27, 38)",
+    cardBorder: "rgb(35, 55, 71)",
+    cardVisible: true,
+  }, "the narrow drawer must cover the engine list with an opaque card");
 });
 
 // A canvas is sized from its CSS box, and from nothing else.
