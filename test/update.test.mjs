@@ -366,6 +366,8 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   for (const [relative, body] of Object.entries(oldFiles)) {
     writeFileSync(path.join(rootDir, relative), body);
   }
+  const userEnv = "MODELDOCK_VISION_MODEL=kimi-k2.5@opencode-go\n";
+  writeFileSync(path.join(rootDir, ".env"), userEnv);
 
   const assets = {
     "modeldock.mjs": "new gateway".repeat(20_000),
@@ -423,6 +425,8 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
     oldFiles["scripts/start-hidden.sh"],
     "a non-current-platform helper must not be overwritten",
   );
+  assert.equal(readFileSync(path.join(rootDir, ".env"), "utf8"), userEnv,
+    "the updater must preserve the user's durable model settings");
   const rollbackName = readFileSync(path.join(rootDir, ".modeldock-rollback/current"), "utf8").trim();
   const rollbackDir = path.join(rootDir, ".modeldock-rollback", rollbackName);
   const manifest = JSON.parse(readFileSync(path.join(rollbackDir, "manifest.json"), "utf8"));

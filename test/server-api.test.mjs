@@ -177,6 +177,39 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   assert.equal(invalid.status, 400);
 });
 
+test("vision selection is persisted for a later gateway update restart", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-vision-selection-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const envFile = path.join(dir, ".env");
+  await writeFile(envFile, "UNRELATED_SETTING=kept\n", "utf8");
+  const previousVision = process.env.MODELDOCK_VISION_MODEL;
+  t.after(() => {
+    if (previousVision === undefined) delete process.env.MODELDOCK_VISION_MODEL;
+    else process.env.MODELDOCK_VISION_MODEL = previousVision;
+  });
+  const instance = await startApp({ envFile });
+  t.after(instance.stop);
+
+  const changed = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ visionModel: "kimi-k2.5@opencode-go" }),
+  });
+  assert.equal(changed.status, 200);
+  const persisted = await readFile(envFile, "utf8");
+  assert.match(persisted, /^MODELDOCK_VISION_MODEL=kimi-k2\.5@opencode-go$/m);
+  assert.match(persisted, /^UNRELATED_SETTING=kept$/m, "the selection write preserves unrelated user settings");
+
+  const disabled = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ visionModel: "" }),
+  });
+  assert.equal(disabled.status, 200);
+  assert.match(await readFile(envFile, "utf8"), /^MODELDOCK_VISION_MODEL=none$/m,
+    "None stays disabled after a restart instead of falling back to a default");
+});
+
 test("connecting Ollama publishes local models without changing the selected main model", async (t) => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-ollama-"));
   t.after(() => rm(stateDir, { recursive: true, force: true }));

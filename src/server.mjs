@@ -1282,6 +1282,16 @@ export function createApp(services = createServices()) {
     const main = options.find((entry) => entry.id === nextMain);
     const vision = nextVision ? options.find((entry) => entry.id === nextVision) : null;
     if (!main || (nextVision && (!vision || !vision.supportsVision))) return res.status(400).json({ error: { type: "invalid_model_selection", message: "Vision must be None or selected from a vision-capable model." } });
+    // Main-model choice belongs to Codex's per-session picker. Vision is the
+    // gateway's fallback policy, so a dashboard choice must survive a gateway
+    // restart and its normal update restart. "none" is deliberate: an empty
+    // .env value would be interpreted as a request for the shipped default.
+    try {
+      writeEnvFile({ MODELDOCK_VISION_MODEL: nextVision || "none" }, config.envFile);
+    } catch (error) {
+      recordConfigAction(metrics, "models_update", { ok: false, error: error.message });
+      return res.status(500).json({ error: { type: "model_selection_write_failed", message: error.message } });
+    }
     services.modelSelection.mainModel = nextMain;
     services.modelSelection.visionModel = nextVision;
     config.visionModel = nextVision;
