@@ -23,6 +23,22 @@ function abortError() {
   return error;
 }
 
+function waitForRelease(job, signal) {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      detach();
+      reject(abortError());
+    };
+    const detach = () => signal?.removeEventListener("abort", onAbort);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    job.released.then(() => {
+      detach();
+      resolve();
+    });
+  });
+}
+
 export class LocalHostScheduler {
   #active = new Map();
   #pending = [];
@@ -51,11 +67,25 @@ export class LocalHostScheduler {
     if (typeof run !== "function") throw new TypeError("A local host scheduler job needs a run function.");
     if (signal?.aborted) return Promise.reject(abortError());
     const key = conversationKey(normalizedPrincipalId, normalizedConversationId);
-    if (this.#byConversation.has(key)) {
+    const existing = this.#byConversation.get(key);
+    if (existing?.signal?.aborted) {
+      // Codex retries immediately after it abandons a long local stream. The
+      // old fetch is already being aborted, but its finally path has not yet
+      // released the lane. Wait for that release and admit this retry normally
+      // rather than returning a transient 502 for the same conversation.
+      return waitForRelease(existing, signal).then(() => this.enqueue({
+        principalId: normalizedPrincipalId,
+        conversationId: normalizedConversationId,
+        run,
+        signal,
+      }));
+    }
+    if (existing) {
       return Promise.reject(new Error("This conversation already has an active or waiting local host request."));
     }
     let resolve;
     let reject;
+    let release;
     const promise = new Promise((resolvePromise, rejectPromise) => {
       resolve = resolvePromise;
       reject = rejectPromise;
@@ -67,6 +97,9 @@ export class LocalHostScheduler {
       run,
       resolve,
       reject,
+      signal,
+      released: new Promise((resolveRelease) => { release = resolveRelease; }),
+      release,
       detachAbort: () => {},
     };
     if (signal) {
@@ -116,6 +149,7 @@ export class LocalHostScheduler {
   #release(job) {
     this.#active.delete(job.key);
     this.#byConversation.delete(job.key);
+    job.release();
     this.#pump();
   }
 }

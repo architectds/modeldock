@@ -63,6 +63,26 @@ test("ready llama.cpp fails immediately on a slot or visual-capability mismatch"
   );
 });
 
+test("a managed restart checkpoints hot sessions only after both drains pass", async () => {
+  const steps = [];
+  const operations = createLocalHostLifecycleOperations({
+    hostId: "llamacpp-11435",
+    endpoint: "http://127.0.0.1:11435/v1",
+    registryFile: "D:/state/local-hosts.json",
+    discover: async () => [{ engine: "llamacpp", baseUrl: "http://127.0.0.1:11435", pid: 42, binary: SPEC.binary, cmdline: `\"${SPEC.binary}\" ${SPEC.args.join(" ")}` }],
+    runtime: {
+      drain: async () => { steps.push("runtime-drain"); return true; },
+      checkpointHotStates: async () => { steps.push("checkpoint"); return { saved: 1, failed: 0 }; },
+    },
+    fetchImpl: async () => {
+      steps.push("slot-idle");
+      return new Response(JSON.stringify([{ is_processing: false }]), { status: 200 });
+    },
+  });
+  await operations.drain();
+  assert.deepEqual(steps, ["runtime-drain", "slot-idle", "checkpoint"]);
+});
+
 test("a launched llama.cpp process that exits fails verification without waiting for the full deadline", async () => {
   const operations = createLocalHostLifecycleOperations({
     hostId: "llamacpp-11435",

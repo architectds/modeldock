@@ -90,6 +90,25 @@ test("a failed model response clears its resident state before another conversat
   assert.equal(calls.some((call) => call.action === "save"), false, "partial A state was never saved");
 });
 
+test("a managed restart checkpoints hot conversations before the server stops", async () => {
+  const { coordinator, calls } = fixture();
+  const session = { principalId: "local", conversationId: "resume-me" };
+  await coordinator.run({ ...session, run: async () => ({ ok: true }) });
+  const checkpoint = await coordinator.checkpointHotStates();
+  assert.deepEqual(checkpoint, { saved: 1, failed: 0 });
+  assert.ok(calls.some((call) => call.action === "save" && call.sessionKey === kvSessionKey(session)));
+  assert.equal(coordinator.snapshot().hotCount, 1, "checkpointing preserves the running server's hot lane until it is stopped");
+});
+
+test("a restart is refused when the SSD budget cannot retain a hot conversation", async () => {
+  const { coordinator, store, diagnostics } = fixture();
+  await coordinator.run({ conversationId: "too-large", run: async () => ({ ok: true }) });
+  store.save = async () => ({ saved: false, reason: "state_exceeds_budget", evicted: [] });
+  const checkpoint = await coordinator.checkpointHotStates();
+  assert.deepEqual(checkpoint, { saved: 0, failed: 1 });
+  assert.ok(diagnostics.some((entry) => entry.kind === "slot_checkpoint_rejected"));
+});
+
 test("two managed lanes run concurrently and a third conversation waits automatically", async () => {
   const { coordinator } = fixture({ laneCount: 2 });
   const releases = [];

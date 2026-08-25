@@ -40,6 +40,7 @@ export class LocalHostRuntime {
   #record = null;
   #coordinator = null;
   #transition = null;
+  #restartPreparation = null;
   #refreshing = null;
 
   constructor({ registryFile, manifestDirectory, fetchImpl = fetch, onDiagnostic = () => {} } = {}) {
@@ -117,6 +118,7 @@ export class LocalHostRuntime {
   }
 
   invalidate() {
+    this.releaseGatewayRestartPreparation();
     this.#loaded = false;
     this.#record = null;
     this.#coordinator = null;
@@ -146,6 +148,63 @@ export class LocalHostRuntime {
     if (!this.#loaded) await this.refresh();
     if (!this.#coordinator || typeof this.#coordinator.clearSsdStates !== "function") return null;
     return this.#coordinator.clearSsdStates();
+  }
+
+  async checkpointHotStates() {
+    if (!this.#loaded) await this.refresh();
+    if (!this.#coordinator || typeof this.#coordinator.checkpointHotStates !== "function") return { saved: 0, failed: 0 };
+    return this.#coordinator.checkpointHotStates();
+  }
+
+  // The outer gateway restart script cannot safely infer which Codex session
+  // owns which llama.cpp slot. It asks the live runtime to close admission,
+  // drain the already admitted turn, then checkpoint every hot lane while
+  // that mapping still exists. Admission stays closed briefly so a request
+  // cannot slip in between the checkpoint and the script stopping Node.
+  async prepareGatewayRestart({ timeoutMs = 120_000, holdMs = 45_000 } = {}) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError("A positive restart checkpoint timeout is required.");
+    if (!Number.isSafeInteger(holdMs) || holdMs <= 0) throw new TypeError("A positive restart checkpoint hold is required.");
+    if (this.#restartPreparation) return { ...this.#restartPreparation.result, alreadyPrepared: true };
+    if (!this.#loaded) await this.refresh();
+    if (!this.#coordinator) return { managed: false, saved: 0, failed: 0, holdMs: 0 };
+
+    const releaseTransition = this.beginTransition();
+    try {
+      const idle = await this.drain({ timeoutMs });
+      if (!idle) throw new Error("Timed out waiting for local model requests to finish before restart.");
+      const checkpoint = await this.checkpointHotStates();
+      if (checkpoint.failed) throw new Error("Could not checkpoint active local conversations before restart.");
+      const result = Object.freeze({
+        managed: true,
+        saved: checkpoint.saved,
+        failed: checkpoint.failed,
+        holdMs,
+      });
+      const release = () => {
+        const preparation = this.#restartPreparation;
+        if (!preparation) return false;
+        this.#restartPreparation = null;
+        clearTimeout(preparation.timer);
+        releaseTransition();
+        return true;
+      };
+      const timer = setTimeout(release, holdMs);
+      timer.unref?.();
+      this.#restartPreparation = { result, timer, release };
+      return result;
+    } catch (error) {
+      releaseTransition();
+      throw error;
+    }
+  }
+
+  // A failed outer stop (for example an elevation mismatch on Windows) must
+  // not leave local work paused for the full handoff timer. The restart script
+  // calls this best-effort endpoint before it reports that the old gateway is
+  // still serving.
+  releaseGatewayRestartPreparation() {
+    if (!this.#restartPreparation) return false;
+    return this.#restartPreparation.release();
   }
 
   async status() {

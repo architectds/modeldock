@@ -409,6 +409,7 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     label: "Qwen3-VL-27B",
     supportsVision: true,
     contextWindow: body.management.capacity.maxSingleRequestTokens,
+    autoCompactTokenLimit: Math.floor(body.management.capacity.maxSingleRequestTokens * 0.7),
   }], "only the verified managed visual model reaches the Codex catalog");
 });
 
@@ -585,6 +586,26 @@ test("clearing SSD KV state without a managed host is a readable refusal", async
   const body = await refused.json();
   assert.equal(refused.status, 409, JSON.stringify(body));
   assert.equal(body.error?.type, "not_managed");
+});
+
+test("restart checkpoint endpoint delegates slot matching to the managed runtime", async (t) => {
+  const { base, services } = await startApp(t, { discoverEngines: async () => [] });
+  let released = 0;
+  services.localHostRuntime = {
+    prepareGatewayRestart: async () => ({ managed: true, saved: 2, failed: 0, holdMs: 45_000 }),
+    releaseGatewayRestartPreparation: () => { released += 1; return true; },
+  };
+  const checkpoint = await fetch(`${base}/api/local/restart-checkpoint`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(checkpoint.status, 200);
+  assert.deepEqual(await checkpoint.json(), { managed: true, saved: 2, failed: 0, holdMs: 45_000 });
+  const release = await fetch(`${base}/api/local/restart-checkpoint/release`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(release.status, 200);
+  assert.deepEqual(await release.json(), { released: true });
+  assert.equal(released, 1);
 });
 
 test("unmanage releases a host whose first takeover verification failed", async (t) => {

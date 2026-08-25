@@ -81,6 +81,8 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
 
   const snapshot = readLocalEnginesSnapshot(enginesFile);
   assert.equal(snapshot.llamacpp.models[0].supportsVision, false);
+  assert.equal(snapshot.llamacpp.models[0].autoCompactTokenLimit, 183_500,
+    "a managed local lane compacts early enough to avoid Codex's first-token timeout");
   assert.equal(catalogWrites, 1);
   assert.equal(restartMarks, 1, "Codex is told to reload the corrected Catalog after the gateway comes up");
 });

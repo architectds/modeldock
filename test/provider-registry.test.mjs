@@ -388,6 +388,7 @@ test("a single GGUF is shown by its header name while its provider remains expli
       id: "Qwen3.8-27B",
       label: "Qwen3.8-27B",
       upstreamId: "qwen3.8:27b",
+      autoCompactTokenLimit: 165_000,
     }],
   });
   const config = {
@@ -404,4 +405,5 @@ test("a single GGUF is shown by its header name while its provider remains expli
   assert.ok(entry, "the friendly local model is published");
   assert.equal(entry.display_name, "llama.cpp (local) - Qwen3.8-27B");
   assert.equal(entry.slug, "Qwen3.8-27B@llamacpp", "the provider address stays separate from the model name");
+  assert.equal(entry.auto_compact_token_limit, 165_000, "a managed local model carries its measured compaction limit to Codex");
 });

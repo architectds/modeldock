@@ -74,6 +74,32 @@ test("an aborted waiting job never reaches the model operation", async () => {
   await one;
 });
 
+test("a retry waits for an aborted active conversation to release", async () => {
+  const scheduler = new LocalHostScheduler({ hostId: "host-qwen", maxActiveRequests: 1 });
+  const stale = deferred();
+  const controller = new AbortController();
+  const first = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "one",
+    signal: controller.signal,
+    run: () => stale.promise,
+  });
+  await waitForTurn();
+  controller.abort();
+  let retried = false;
+  const retry = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "one",
+    run: () => { retried = true; return "retry"; },
+  });
+  await waitForTurn();
+  assert.equal(retried, false, "retry waits for the abandoned active request to release");
+  stale.resolve("stale");
+  assert.equal(await first, "stale");
+  assert.equal(await retry, "retry");
+  assert.equal(scheduler.snapshot().activeCount, 0);
+});
+
 test("a failed operation releases its lease for the next conversation", async () => {
   const scheduler = new LocalHostScheduler({ hostId: "host-qwen", maxActiveRequests: 1 });
   let secondRan = false;

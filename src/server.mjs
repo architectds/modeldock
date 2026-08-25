@@ -259,6 +259,11 @@ async function publishManagedLocalEngine(services, record, running) {
     || Number(running?.launch?.ctxSize)
     || Number(record.capabilities?.contextTokens)
     || 0;
+  // Fitting a physical lane and delivering its first token within Codex's
+  // five-minute response deadline are different constraints. Keep the lane
+  // available, but compact managed local histories at 70% before a long
+  // prefill is forced to race the client reconnect timeout.
+  const autoCompactTokenLimit = contextWindow > 0 ? Math.floor(contextWindow * 0.7) : 0;
   const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
   const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
   // A managed argv is useful fallback during recovery, but a running
@@ -270,6 +275,7 @@ async function publishManagedLocalEngine(services, record, running) {
   const models = snapshot.models.map((model) => ({
     ...model,
     ...(contextWindow ? { contextWindow } : {}),
+    ...(autoCompactTokenLimit ? { autoCompactTokenLimit } : {}),
     ...(facts?.modelSlug ? { id: facts.modelSlug } : {}),
     ...(facts?.modelName ? { label: facts.modelName } : {}),
     ...(endpointModel ? { upstreamId: endpointModel } : {}),
@@ -802,32 +808,42 @@ async function relayGatewayRequest(req, res, services) {
   // Codex's retry then issues a duplicate. The streaming leg already tears down
   // on res "close"; the signal covers the phases before/around it.
   const controller = new AbortController();
-  res.on("close", () => {
+  const abortRelay = () => {
     if (!res.writableFinished) controller.abort();
-  });
-  const result = await relayGatewayResponses(req.body, res, {
-    config,
-    metrics,
-    mediaStore,
-    routeAffinity,
-    knownModels: publishedModelIds(config),
-    nativeSlugs: services.nativeSlugs,
-    mainModel: modelSelection?.mainModel || config.mainModel,
-    visionModel: modelSelection?.visionModel || config.visionModel,
-    // The native passthrough leg forwards these to ChatGPT's backend untouched.
-    incomingHeaders: req.headers,
-    // zstdRequestDecoder preserves the original compressed and decoded sizes
-    // before Express sees an identity JSON body. The gateway must receive those
-    // values instead of inferring a second serialized copy for metrics.
-    ingressBytes: req.modeldockIngressBytes,
-    requestUrl: req.originalUrl,
-    localHostRuntime: services.localHostRuntime,
-    signal: controller.signal,
-  });
-  if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
-    modelSelection.mainModel = result.route.model;
+  };
+  // A client can disappear before Node closes the response socket. Watch the
+  // incoming request too, but only its explicit abort event: request "close"
+  // also happens after a normal fully-read request body.
+  req.once("aborted", abortRelay);
+  res.once("close", abortRelay);
+  try {
+    const result = await relayGatewayResponses(req.body, res, {
+      config,
+      metrics,
+      mediaStore,
+      routeAffinity,
+      knownModels: publishedModelIds(config),
+      nativeSlugs: services.nativeSlugs,
+      mainModel: modelSelection?.mainModel || config.mainModel,
+      visionModel: modelSelection?.visionModel || config.visionModel,
+      // The native passthrough leg forwards these to ChatGPT's backend untouched.
+      incomingHeaders: req.headers,
+      // zstdRequestDecoder preserves the original compressed and decoded sizes
+      // before Express sees an identity JSON body. The gateway must receive those
+      // values instead of inferring a second serialized copy for metrics.
+      ingressBytes: req.modeldockIngressBytes,
+      requestUrl: req.originalUrl,
+      localHostRuntime: services.localHostRuntime,
+      signal: controller.signal,
+    });
+    if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
+      modelSelection.mainModel = result.route.model;
+    }
+    return result;
+  } finally {
+    req.removeListener("aborted", abortRelay);
+    res.removeListener("close", abortRelay);
   }
-  return result;
 }
 
 // Codex compresses some request bodies (observed on remote compact tasks) with
@@ -2401,6 +2417,29 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, "local_kv_clear", { ok: false, error: error.message });
       return res.status(502).json({ error: { type: "local_kv_clear_failed", message: error.message } });
     }
+  });
+
+  // The process-level restart scripts call this while the old gateway is
+  // still alive. The runtime, unlike the script, knows the private mapping
+  // from a Codex session hash to its llama.cpp slot and can make a durable
+  // checkpoint before Node is stopped. It deliberately keeps local admission
+  // closed for a short handoff window; the companion release route reopens it
+  // when the outer script cannot stop the gateway.
+  app.post("/api/local/restart-checkpoint", mutateConfig, async (_req, res) => {
+    try {
+      const result = await services.localHostRuntime?.prepareGatewayRestart?.();
+      recordConfigAction(metrics, "local_restart_checkpoint", { ok: true, managed: Boolean(result?.managed), saved: result?.saved || 0 });
+      return res.json(result || { managed: false, saved: 0, failed: 0, holdMs: 0 });
+    } catch (error) {
+      recordConfigAction(metrics, "local_restart_checkpoint", { ok: false, error: error.message });
+      return res.status(503).json({ error: { type: "local_restart_checkpoint_failed", message: error.message } });
+    }
+  });
+
+  app.post("/api/local/restart-checkpoint/release", mutateConfig, (_req, res) => {
+    const released = Boolean(services.localHostRuntime?.releaseGatewayRestartPreparation?.());
+    recordConfigAction(metrics, "local_restart_checkpoint_release", { ok: true, released });
+    return res.json({ released });
   });
 
   // Start an engine again exactly as it was running when it was connected.

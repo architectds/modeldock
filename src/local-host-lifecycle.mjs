@@ -166,6 +166,12 @@ export function createLocalHostLifecycleOperations({
       if (!await waitForIdleSlots(endpoint, fetchImpl, 120_000)) {
         throw new Error("Timed out waiting for llama.cpp slots to become idle.");
       }
+      if (runtime?.checkpointHotStates) {
+        const checkpoint = await runtime.checkpointHotStates();
+        if (checkpoint?.failed) {
+          throw new Error("Could not checkpoint active local conversations; managed restart was not performed.");
+        }
+      }
     },
     async stop(record) {
       const current = await findCurrent();

@@ -210,6 +210,42 @@ export class LocalHostKvCoordinator {
     });
   }
 
+  // A managed restart has already closed admission and drained active work.
+  // Persist every remaining hot lane before llama.cpp is stopped so the next
+  // gateway/runtime can restore the exact conversation instead of prefilling
+  // its complete Codex history again.
+  async checkpointHotStates() {
+    return this.#exclusive(async () => {
+      let saved = 0;
+      let failed = 0;
+      for (const lane of this.#residency.lanes) {
+        if (lane.state !== "hot") continue;
+        try {
+          const result = await this.store.save({
+            sessionKey: lane.sessionKey,
+            fingerprint: lane.fingerprint,
+            slot: lane.slot,
+          });
+          if (result?.saved) {
+            saved += 1;
+          } else {
+            // A budget rejection is not a successful handoff. Restarting now
+            // would discard the only hot state and turn a recoverable local
+            // conversation into a full cold prefill, so surface it exactly
+            // like an adapter save failure and keep the old gateway alive.
+            failed += 1;
+            await this.#diagnose("slot_checkpoint_rejected", new Error("The SSD KV budget cannot hold this local conversation state."));
+          }
+          this.#counters.evictions += result?.evicted?.length || 0;
+        } catch (error) {
+          failed += 1;
+          await this.#diagnose("slot_checkpoint_failed", error);
+        }
+      }
+      return { saved, failed };
+    });
+  }
+
   async run({ principalId = "local", conversationId, signal, run } = {}) {
     if (typeof run !== "function") throw new TypeError("A KV coordinator request needs a run function.");
     const normalizedPrincipalId = text(principalId, "A local principal id");

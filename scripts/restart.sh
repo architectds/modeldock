@@ -163,6 +163,7 @@ try {
   // /proc vanished: the listener died between discovery and the check.
   process.exit(0);
 }
+
 if (listenerIsOurs) process.exit(0);
 
 // Not provably ours. A record naming a LIVE pid that is not the listener is a
@@ -193,6 +194,47 @@ console.error(`ERROR: refusing to stop PID ${oldPid} on port ${port} because own
 console.error("Re-run with --force to take the port over deliberately.");
 process.exit(2);
 NODE
+}
+
+# The gateway knows the private Codex-session-to-slot mapping; this shell
+# script does not. Ask it to drain and checkpoint hot local slots before a
+# restart. A 404 is an older installed gateway that cannot do this yet, which
+# must remain upgrade-compatible. Any other failure leaves the old gateway up.
+prepare_local_restart_checkpoint() {
+  [ -n "$OLD_PID" ] || return 0
+  key_file="$STATE_DIR/caller-key"
+  if [ ! -r "$key_file" ]; then
+    status "restart.sh: no caller key found; local KV checkpoint is unavailable for this restart"
+    return 0
+  fi
+  caller_key="$(tr -d '\r\n' < "$key_file")"
+  case "$caller_key" in
+    ''|*[!A-Za-z0-9_-]*) status "restart.sh: caller key is unavailable; local KV checkpoint is skipped"; return 0 ;;
+  esac
+  [ "${#caller_key}" -ge 32 ] || { status "restart.sh: caller key is unavailable; local KV checkpoint is skipped"; return 0; }
+  if ! command -v curl >/dev/null 2>&1; then
+    status "restart.sh: curl is unavailable; local KV checkpoint is skipped"
+    return 0
+  fi
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 130 \
+    -X POST -H "x-modeldock-key: $caller_key" -H 'content-type: application/json' \
+    --data '{}' "http://127.0.0.1:$PORT/api/local/restart-checkpoint" || true)"
+  case "$code" in
+    2??) status "restart.sh: local KV checkpoint complete; handing off gateway"; return 0 ;;
+    404) status "restart.sh: installed gateway predates local KV checkpoints; continuing without a hot-state dump"; return 0 ;;
+    *) status "ERROR: local KV checkpoint failed (HTTP ${code:-unreachable}); leaving the existing gateway running"; return 1 ;;
+  esac
+}
+
+release_local_restart_checkpoint() {
+  key_file="$STATE_DIR/caller-key"
+  [ -r "$key_file" ] || return 0
+  caller_key="$(tr -d '\r\n' < "$key_file")"
+  case "$caller_key" in ''|*[!A-Za-z0-9_-]*) return 0 ;; esac
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -sS -o /dev/null --connect-timeout 1 --max-time 5 \
+    -X POST -H "x-modeldock-key: $caller_key" -H 'content-type: application/json' \
+    --data '{}' "http://127.0.0.1:$PORT/api/local/restart-checkpoint/release" || true
 }
 
 try_launchd_restart() {
@@ -228,6 +270,10 @@ verify_gateway() {
 
 check_owner
 
+if ! prepare_local_restart_checkpoint; then
+  exit 4
+fi
+
 STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
 if try_launchd_restart; then
   status "restart.sh: launchd service com.modeldock.gateway restarted; verifying readiness"
@@ -259,6 +305,11 @@ if [ -n "$OLD_PID" ]; then
     status "restart.sh: gateway did not stop after SIGTERM; forcing PID $OLD_PID"
     kill -9 "$OLD_PID" 2>/dev/null || true
     sleep 0.5
+  fi
+  if kill -0 "$OLD_PID" 2>/dev/null; then
+    status "ERROR: the existing gateway could not be stopped; no new instance was started"
+    release_local_restart_checkpoint
+    exit 3
   fi
 else
   status "restart.sh: no gateway on port $PORT; starting fresh"

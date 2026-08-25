@@ -83,8 +83,10 @@ const EXPERIMENTAL_SUPPORTED_TOOLS = ["artifact", "tool_call_mcp_elicitation", "
 // default; an upstream with no `custom` variant in its tool enum takes the
 // other one, because there the freeform tool is not a worse patch tool, it is
 // a 422 that ends the turn.
-function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority, contextWindow = CONTEXT_WINDOW, applyPatchToolType = "freeform" }) {
-  const autoCompactTokenLimit = Math.floor(contextWindow * AUTO_COMPACT_PERCENT);
+function catalogEntry({ slug, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, priority, contextWindow = CONTEXT_WINDOW, autoCompactTokenLimit = 0, applyPatchToolType = "freeform" }) {
+  const compactLimit = Number.isSafeInteger(autoCompactTokenLimit) && autoCompactTokenLimit > 0
+    ? Math.min(autoCompactTokenLimit, contextWindow)
+    : Math.floor(contextWindow * AUTO_COMPACT_PERCENT);
   return {
         slug,
         display_name: displayName,
@@ -106,7 +108,7 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
         context_window: contextWindow,
         max_context_window: contextWindow,
         effective_context_window_percent: 95,
-        auto_compact_token_limit: autoCompactTokenLimit,
+        auto_compact_token_limit: compactLimit,
         comp_hash: compHash,
         reasoning_summary_format: "experimental",
         default_reasoning_summary: "none",
@@ -216,6 +218,7 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         defaultReasoningLevel:
           ownerEntryFor(qualifiedMain)?.defaultReasoningLevel || mainEntry?.defaultReasoningLevel || base.defaultReasoningLevel,
         contextWindow: ownerEntryFor(qualifiedMain)?.contextWindow || mainEntry?.contextWindow || CONTEXT_WINDOW,
+        autoCompactTokenLimit: ownerEntryFor(qualifiedMain)?.autoCompactTokenLimit || mainEntry?.autoCompactTokenLimit,
       }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
@@ -229,6 +232,7 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         supportedReasoningLevels: model.supportedReasoningLevels || base.supportedReasoningLevels,
         defaultReasoningLevel: model.defaultReasoningLevel || base.defaultReasoningLevel,
         contextWindow: model.contextWindow,
+        autoCompactTokenLimit: model.autoCompactTokenLimit,
         // 1 is the selected main model; the rest follow in provider order.
         priority: index + 2,
       })),
@@ -875,8 +879,8 @@ export function applyOllamaProfile(config, snapshot) {
 
 // Fill a local engine profile from its connection snapshot, so the catalog and
 // per-model routing publish local models across restarts without re-contacting
-// the engine. Only two facts survive the trip: whether the model takes images,
-// and how much context it advertises.
+// the engine. The managed launcher may additionally publish a safe compaction
+// limit derived from the host's measured first-token budget.
 export function applyLocalEngineProfile(engineId, snapshot) {
   const profile = PROFILES[engineId];
   if (!profile) return null;
@@ -891,6 +895,7 @@ export function applyLocalEngineProfile(engineId, snapshot) {
           endpoint: "responses",
           supportsVision: Boolean(model.supportsVision),
           contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
+          autoCompactTokenLimit: Number(model.autoCompactTokenLimit) || 0,
           ownerQualified: true,
           status: model.status || "available",
         }))

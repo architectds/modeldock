@@ -553,6 +553,57 @@ function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
   }
 }
 
+# A gateway restart normally has no idea which Codex conversation owns a
+# llama.cpp slot. Before this script stops Node, ask the still-running gateway
+# to close local admission, drain the active request, and save its hot slots.
+# This endpoint was added after the first shipped restart scripts, so a 404 is
+# a compatible old-gateway handoff rather than a reason to strand an upgrade.
+function Invoke-LocalRestartCheckpoint {
+  $keyFile = Join-Path $stateDir "caller-key"
+  if (-not (Test-Path -LiteralPath $keyFile)) {
+    Write-Status "restart.ps1: no caller key found; local KV checkpoint is unavailable for this restart"
+    return $true
+  }
+  $callerKey = ""
+  try { $callerKey = (Get-Content -LiteralPath $keyFile -Raw -ErrorAction Stop).Trim() } catch {}
+  if ($callerKey -notmatch '^[A-Za-z0-9_-]{32,}$') {
+    Write-Status "restart.ps1: caller key is unavailable; local KV checkpoint is skipped"
+    return $true
+  }
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:$port/api/local/restart-checkpoint" -Headers @{ "x-modeldock-key" = $callerKey } -ContentType "application/json" -Body "{}" -TimeoutSec 130 -ErrorAction Stop
+    $payload = $null
+    try { $payload = $response.Content | ConvertFrom-Json } catch {}
+    if ($payload -and $payload.managed) {
+      Write-Status "restart.ps1: checkpointed $($payload.saved) local session state(s); handing off gateway"
+    }
+    return $true
+  } catch {
+    $statusCode = 0
+    try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+    if ($statusCode -eq 404) {
+      Write-Status "restart.ps1: installed gateway predates local KV checkpoints; continuing without a hot-state dump"
+      return $true
+    }
+    Write-Status "ERROR: local KV checkpoint failed; leaving the existing gateway running: $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Release-LocalRestartCheckpoint {
+  $keyFile = Join-Path $stateDir "caller-key"
+  if (-not (Test-Path -LiteralPath $keyFile)) { return }
+  $callerKey = ""
+  try { $callerKey = (Get-Content -LiteralPath $keyFile -Raw -ErrorAction Stop).Trim() } catch {}
+  if ($callerKey -notmatch '^[A-Za-z0-9_-]{32,}$') { return }
+  try {
+    Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:$port/api/local/restart-checkpoint/release" -Headers @{ "x-modeldock-key" = $callerKey } -ContentType "application/json" -Body "{}" -TimeoutSec 5 -ErrorAction Stop | Out-Null
+  } catch {
+    # The old gateway may already be gone. The runtime's short handoff timer is
+    # also a backstop, so a failed best-effort release is never a restart error.
+  }
+}
+
 # Seed from the environment before consulting .env, matching restart.sh. This script
 # used to ignore $env:MODELDOCK_PORT entirely, so a gateway told to use another port
 # by environment restarted against 4097 instead: it stopped whatever unrelated process
@@ -648,6 +699,12 @@ if ($listener) {
     Write-Status "ERROR: the listener on port $port changed during ownership verification; refusing to stop it."
     exit 2
   }
+  # Write-Status deliberately emits human-readable lines on stdout as well as
+  # stderr, so inspect the explicit Boolean result instead of PowerShell's
+  # truthiness for the mixed output collection.
+  if (@(Invoke-LocalRestartCheckpoint) -contains $false) {
+    exit 4
+  }
   Write-Status "restart.ps1: stopping gateway (PID $oldPid, port $port)"
   if (Get-Process -Id $oldPid -ErrorAction SilentlyContinue) {
     # Stop-Process is the one step that can strand the machine with no gateway,
@@ -674,6 +731,7 @@ if ($listener) {
           Write-Status "ERROR: cannot stop PID $oldPid on port ${port}: $stopError"
         }
         Write-Status "The old gateway is still serving on port $port; no new instance was started."
+        Release-LocalRestartCheckpoint
         exit 3
       }
       # Gone despite the error (it exited on its own, or only the status read
