@@ -47,7 +47,23 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A dashboard on a scratch port with its state in a temp dir, so looking at it
 // cannot touch the developer's own configuration.
-async function startDashboard(t) {
+function managedHostSnapshot() {
+  return {
+    managed: true,
+    hostId: "host-monitor-render-test",
+    profile: { laneCount: 1, laneContextTokens: 215040 },
+    maxActiveRequests: 1,
+    activeCount: 0,
+    pendingCount: 0,
+    hotCount: 0,
+    slotAffinity: false,
+    lanes: [{ slot: 0, state: "cold", lastAccessedAt: 0 }],
+    ssd: { totalBytes: 0, budgetBytes: 32 * 1024 ** 3, states: 0 },
+    counters: { evictions: 0, expired: 0 },
+  };
+}
+
+async function startDashboard(t, { managed = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const services = createServices({
     host: "127.0.0.1",
@@ -117,6 +133,15 @@ async function startDashboard(t) {
     launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
   }];
   services.probeGpus = async () => [];
+  if (managed) {
+    // This is deliberately a server-authoritative fake runtime, not a DOM
+    // fixture. The dashboard only opens this tab after /api/status reports an
+    // actively managed host, which is the production visibility contract.
+    services.localHostRuntime = {
+      snapshot: () => managedHostSnapshot(),
+      status: async () => managedHostSnapshot(),
+    };
+  }
 
   const { app } = createApp(services);
   const server = app.listen(0, "127.0.0.1");
@@ -127,11 +152,11 @@ async function startDashboard(t) {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   });
-  return `http://127.0.0.1:${server.address().port}`;
+  return { base: `http://127.0.0.1:${server.address().port}`, services };
 }
 
 // The smallest CDP client that can drive a page and read a value back.
-async function openBrowser(t, chromePath, { width = 1500, height = 1000, instance = "default" } = {}) {
+async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceScaleFactor = 1, instance = "default" } = {}) {
   const port = 9350 + Math.floor(process.pid % 200) + (instance === "default" ? 0 : 300);
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
   const chrome = spawn(chromePath, [
@@ -141,6 +166,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, instanc
     // symptom upstairs is a debugging port that never answers.
     "--disable-dev-shm-usage",
     `--remote-debugging-port=${port}`, `--window-size=${width},${height}`,
+    ...(deviceScaleFactor === 1 ? [] : [`--force-device-scale-factor=${deviceScaleFactor}`]),
     `--user-data-dir=${profile}`, "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
 
@@ -214,7 +240,7 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
     return;
   }
-  const base = await startDashboard(t);
+  const { base } = await startDashboard(t);
   const { send, evaluate } = await openBrowser(t, chromePath);
 
   // Record what the page throws, before it has a chance to throw anything.
@@ -357,13 +383,79 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   assert.deepEqual(errors, [], "the dashboard threw while rendering its tabs");
 });
 
+// The monitor redraws whenever an SSE status snapshot arrives. At fractional
+// display scaling a canvas whose bitmap width is also its CSS layout width
+// grows by the DPR on each redraw. This opens the actual managed-only tab at
+// DPR 1.5 and redraws it repeatedly, so a missing CSS size cannot hide behind
+// the headless browser's usual DPR 1.0 default.
+test("the managed-host monitor keeps its canvas geometry and history bounded", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const { base, services } = await startDashboard(t, { managed: true });
+  const { evaluate } = await openBrowser(t, chromePath, { deviceScaleFactor: 1.5, instance: "hostmonitor" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#hostmonitor`)}`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && !document.getElementById('local-host-dashboard').hidden`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    return true;
+  })()`);
+  await sleep(300);
+
+  // This uses the same Metrics -> coalesced SSE -> browser render path as a
+  // completed local response. The 100ms spacing intentionally lets every
+  // status event repaint; direct page calls would miss this integration seam.
+  for (let redraw = 0; redraw < 6; redraw += 1) {
+    const finish = services.metrics.begin("responses", {
+      localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] },
+      inputTokens: 1_000,
+      outputTokens: 100,
+    });
+    finish.markFirstResponse();
+    finish({ localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] } });
+    await sleep(160);
+  }
+
+  const monitor = JSON.parse(await evaluate(`(() => {
+    const canvases = ['hostdash-prefill-wave', 'hostdash-decode-wave'].map((id) => {
+      const canvas = document.getElementById(id);
+      const box = canvas.getBoundingClientRect();
+      return { cssWidth: box.width, cssHeight: box.height, bitmapWidth: canvas.width, bitmapHeight: canvas.height };
+    });
+    return JSON.stringify({
+      dpr: window.devicePixelRatio,
+      panelHeight: document.getElementById('local-host-dashboard').getBoundingClientRect().height,
+      canvases,
+      recentTierDots: document.querySelectorAll('#hostdash-tier-strip .tier-dot').length,
+    });
+  })()`));
+
+  assert.equal(monitor.dpr, 1.5, "the regression must run at fractional display scaling");
+  assert.ok(monitor.panelHeight < 900, `monitor panel grew to ${monitor.panelHeight}px after redraws`);
+  for (const canvas of monitor.canvases) {
+    assert.equal(Math.round(canvas.cssHeight), 92, "monitor canvas keeps its 92px CSS height");
+    assert.ok(Math.abs(canvas.bitmapWidth - Math.round(canvas.cssWidth * monitor.dpr)) <= 1,
+      "bitmap width follows the fixed CSS box once");
+    assert.ok(Math.abs(canvas.bitmapHeight - Math.round(canvas.cssHeight * monitor.dpr)) <= 1,
+      "bitmap height follows the fixed CSS box once");
+  }
+  assert.ok(monitor.recentTierDots > 0 && monitor.recentTierDots <= 6,
+    "completed local requests reached the managed-host monitor over SSE");
+});
+
 test("the narrow local drawer is an opaque configuration surface", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {
     assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
     return;
   }
-  const base = await startDashboard(t);
+  const { base } = await startDashboard(t);
   const { evaluate } = await openBrowser(t, chromePath, { width: 1100, instance: "narrow" });
   await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
   for (let i = 0; i < 40; i += 1) {

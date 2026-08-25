@@ -155,6 +155,10 @@ h2 { margin: 0; font-size: 17px; }
 #cache-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 #data-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 #tps-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
+/* Canvas bitmap dimensions change with device pixel ratio. The local monitor
+   must still keep a fixed CSS box; otherwise each redraw feeds the enlarged
+   bitmap back into layout and grows exponentially. */
+#hostdash-prefill-wave, #hostdash-decode-wave { display: block; width: 100%; height: 92px; }
 .wave-tooltip {
   position: absolute;
   top: 2px;

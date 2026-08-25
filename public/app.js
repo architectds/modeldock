@@ -707,8 +707,17 @@ function renderLocalHostDashboard(data) {
   section.hidden = !managed;
   if (!managed) return;
 
+  // The backend exposes a bounded recent window. Retain dedupe ids only while
+  // they remain in that window: otherwise a long-running browser tab retains
+  // one Set entry for every completed local request forever.
+  const recent = data.recent || [];
+  const currentRecentIds = new Set(recent.map((item) => item?.id).filter(Boolean));
+  for (const id of hostDash.seen) {
+    if (!currentRecentIds.has(id)) hostDash.seen.delete(id);
+  }
+
   let lastRestoreMs = 0;
-  for (const item of data.recent || []) {
+  for (const item of recent) {
     if (item.kind !== "responses" || item.status !== "ok" || !item.localCache?.tier || hostDash.seen.has(item.id)) continue;
     hostDash.seen.add(item.id);
     const tier = String(item.localCache.tier);
