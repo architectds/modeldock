@@ -1708,9 +1708,22 @@ function formatContextSize(tokens) {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : String(tokens);
 }
 
+function formatContextTokens(tokens) {
+  const value = Number(tokens);
+  return Number.isSafeInteger(value) && value > 0 ? value.toLocaleString() : "?";
+}
+
 function formatGiB(bytes) {
   const value = Number(bytes) / 1024 ** 3;
   return Number.isFinite(value) && value > 0 ? `${Math.round(value)} GiB` : "";
+}
+
+function managedPlanSummary(profile) {
+  if (!profile?.laneCount || !profile?.laneContextTokens) return "";
+  return t("host.plan", {
+    context: formatContextTokens(profile.totalContextTokens),
+    lanes: profile.laneCount,
+  });
 }
 
 function hostControlSummary(management) {
@@ -1725,14 +1738,12 @@ function hostControlSummary(management) {
     : t("host.restartRequired");
   const profile = management.profile;
   const runtime = management.runtime;
-  const automatic = profile
-    ? `P${profile.laneCount} x ${formatContextSize(profile.laneContextTokens)} per session`
-    : "automatic profile pending";
+  const plan = managedPlanSummary(profile) || "automatic profile pending";
   const activity = runtime
     ? `; ${runtime.hotCount || 0} hot, ${runtime.activeCount || 0} active, ${runtime.pendingCount || 0} queued`
     : "";
   return t("host.managed", {
-    cache: `${automatic}; ${cache}${activity}`,
+    cache: `${plan}; ${cache}${activity}`,
     budget: budget ? t("host.budget", { budget }) : "",
   });
 }
@@ -2830,6 +2841,7 @@ async function submitLocalManage() {
     if (!response.ok) throw new Error(body.error?.message || `Manage ${response.status}`);
     await renderLocalEngines();
     openLocalConfig("llamacpp");
+    showLocalHostManageStatus(managedPlanSummary(body.management?.profile));
   } catch (error) {
     showLocalHostManageStatus(error.message, true);
   } finally {
