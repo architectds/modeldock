@@ -144,60 +144,70 @@ export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile =
 export async function calibrateAndApplyLocalHostPlan(record, {
   calibrationSpec,
   calibrationProfile,
+  calibrationSteps,
   measureBaseline,
   measureCalibration,
   createFinalPlan,
-  createFinalPlans,
+  createFallbackPlan,
   targetCapabilities,
   policy,
 } = {}, suppliedOperations) {
-  if (typeof measureBaseline !== "function" || typeof measureCalibration !== "function" || (typeof createFinalPlan !== "function" && typeof createFinalPlans !== "function")) {
+  if (typeof measureBaseline !== "function" || typeof measureCalibration !== "function" || typeof createFinalPlan !== "function") {
     throw new TypeError("Target calibration needs baseline, target, and final-plan operations.");
   }
+  const steps = Array.isArray(calibrationSteps) && calibrationSteps.length
+    ? calibrationSteps
+    : [{ id: "bootstrap", desiredSpec: calibrationSpec, desiredProfile: calibrationProfile }];
+  if (steps.some((step) => !step?.id || !step?.desiredSpec || !step?.desiredProfile)) {
+    throw new TypeError("Target calibration needs complete named calibration steps.");
+  }
   let baseline;
-  const calibration = await applyLocalHostPlan(record, {
-    desiredSpec: calibrationSpec,
-    desiredProfile: calibrationProfile,
-    capabilities: targetCapabilities,
-    policy,
-    afterStop: async (current) => {
-      baseline = await measureBaseline(current);
-    },
-  }, suppliedOperations);
-  if (calibration.outcome !== "applied") return calibration;
+  let current = record;
+  const measurements = {};
   try {
-    const target = await measureCalibration(calibration.record);
-    const planned = typeof createFinalPlans === "function"
-      ? await createFinalPlans({ baseline, target, record: calibration.record })
-      : [await createFinalPlan({ baseline, target, record: calibration.record })];
-    const finals = Array.isArray(planned) ? planned : [];
-    if (!finals.length || finals.some((final) => !final?.desiredSpec || !final?.desiredProfile)) {
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index];
+      if (typeof step.shouldRun === "function" && !await step.shouldRun({ baseline, measurements, record: current })) continue;
+      const result = await applyLocalHostPlan(current, {
+        desiredSpec: step.desiredSpec,
+        desiredProfile: step.desiredProfile,
+        capabilities: targetCapabilities,
+        policy,
+        afterStop: index === 0 ? async (stopped) => { baseline = await measureBaseline(stopped); } : undefined,
+      }, suppliedOperations);
+      if (result.outcome !== "applied") {
+        if (step.optional && result.outcome === "recovered") {
+          current = result.record;
+          continue;
+        }
+        return result;
+      }
+      current = result.record;
+      measurements[step.id] = await measureCalibration(current, step);
+    }
+    const final = await createFinalPlan({ baseline, measurements, target: measurements.bootstrap, record: current });
+    if (!final?.desiredSpec || !final?.desiredProfile) {
       throw new TypeError("Target calibration did not produce a final managed profile.");
     }
-    let current = calibration.record;
-    let last = null;
-    for (const final of finals) {
-      const attempted = await applyLocalHostPlan(current, { ...final, capabilities: targetCapabilities, policy }, suppliedOperations);
-      if (attempted.outcome === "applied") return attempted;
-      if (attempted.outcome !== "recovered") return attempted;
-      // A failed final load has restored the immutable user command. That is
-      // the safe known-good starting point for a smaller target candidate.
-      current = attempted.record;
-      last = attempted;
-    }
-    return last || { outcome: "recovered", record: current, failure: "No final managed profile verified." };
+    const applied = await applyLocalHostPlan(current, { ...final, capabilities: targetCapabilities, policy }, suppliedOperations);
+    if (applied.outcome !== "recovered" || typeof createFallbackPlan !== "function") return applied;
+    const fallback = await createFallbackPlan({ baseline, measurements, final, record: applied.record, failure: applied.failure });
+    if (!fallback?.desiredSpec || !fallback?.desiredProfile) return applied;
+    // The only retry is a mathematically adjacent backoff from the calculated
+    // profile. It is not a scan through a product-wide P/C ladder.
+    return applyLocalHostPlan(applied.record, { ...fallback, capabilities: targetCapabilities, policy }, suppliedOperations);
   } catch (error) {
     const failure = failureText(error);
     try {
-      const restored = await applyLocalHostPlan(calibration.record, {
-        desiredSpec: calibration.record.preTakeoverSpec,
+      const restored = await applyLocalHostPlan(current, {
+        desiredSpec: current.preTakeoverSpec,
         desiredProfile: null,
         policy,
       }, suppliedOperations);
       if (restored.outcome === "applied") return { outcome: "recovered", record: restored.record, failure };
       return { ...restored, failure };
     } catch (restoreError) {
-      return { outcome: "degraded", record: calibration.record, failure, recoveryFailure: failureText(restoreError) };
+      return { outcome: "degraded", record: current, failure, recoveryFailure: failureText(restoreError) };
     }
   }
 }

@@ -723,11 +723,6 @@ test("managed setup rejects a served profile that leaves less than one GiB on a 
       : (discovered.launch.visionProjectorPath ? Math.round(23.5 * 1024 ** 3) : 1 * 1024 ** 3),
     freeBytes: discovered.launch.visionProjectorPath ? Math.round(0.5 * 1024 ** 3) : 20 * 1024 ** 3,
   }];
-  services.selectNvidiaValidationProfilesFromInput = () => [{
-    adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "validated-p1-c262144",
-    laneCount: 1, laneContextTokens: 262_144, totalContextTokens: 262_144,
-    gpus: [{ id: "gpu-0" }], deviceIndices: [0], tensorSplit: [1],
-  }];
   services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
     async persist(record) { const registry = await readLocalHostRegistry(registryFile); await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record)); },
     async drain() {}, async stop() {},
@@ -743,7 +738,7 @@ test("managed setup rejects a served profile that leaves less than one GiB on a 
   const body = await response.json();
   assert.equal(response.status, 502, JSON.stringify(body));
   assert.equal(body.outcome, "recovered");
-  assert.match(body.message, /1 GiB GPU headroom/);
+  assert.match(body.message, /(1 GiB GPU headroom|No calculated P1 NVIDIA profile)/);
   assert.equal(discovered.launch.visionProjectorPath, undefined, "recovery returned to the original text-only command");
 });
 

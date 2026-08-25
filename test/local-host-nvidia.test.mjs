@@ -3,10 +3,12 @@ import test from "node:test";
 import {
   createCalibratedNvidiaProfileInput,
   createNvidiaProfileInput,
+  estimateNvidiaRuntimeCapacity,
   LOCAL_HOST_NVIDIA_RUNTIME_RESERVE_BYTES,
   LOCAL_HOST_NVIDIA_SYSTEM_RESERVE_BYTES,
-  selectNvidiaValidationProfilesFromInput,
+  optimisticNvidiaParallelContext,
   selectNvidiaProfileFromInput,
+  selectNvidiaRuntimeProfile,
   selectNvidiaManagedProfile,
 } from "../src/local-host-nvidia.mjs";
 
@@ -102,28 +104,37 @@ test("target calibration measures the real Windows baseline and llama footprint"
   assert.ok(profile.gpus[0].remainingBytes >= GiB, "final selection keeps the separate one GiB headroom after measured fixed costs");
 });
 
-test("final load candidates retain two long lanes before falling back to one lane", () => {
+test("runtime calibration calculates one profile instead of scanning P/C rungs", () => {
   const target = createNvidiaProfileInput({
-    gpus: [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 18 * GiB }],
+    gpus: [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 16 * GiB }],
     targetModelFacts: TARGET,
   });
   const allocation = target.gpus[0];
-  const calibrated = createCalibratedNvidiaProfileInput({
+  const bootstrapContext = 8_192;
+  const slopeContext = 16_384;
+  const fixedReserve = 4 * GiB;
+  const bootstrapKv = bootstrapContext * allocation.kvBytesPerToken;
+  const bootstrapUsed = allocation.weightBytes + fixedReserve + bootstrapKv;
+  const bootstrapFree = 16 * GiB - bootstrapUsed;
+  const runtimeSlope = 20 * 1024;
+  const slopeUsed = bootstrapUsed + ((slopeContext - bootstrapContext) * runtimeSlope);
+  const slopeFree = 16 * GiB - slopeUsed;
+  const estimate = estimateNvidiaRuntimeCapacity({
     target,
-    baselineSample: [{ index: 0, uuid: "gpu-0", usedBytes: GiB }],
-    calibrationSample: [{
+    bootstrapSample: [{ index: 0, uuid: "gpu-0", usedBytes: bootstrapUsed, freeBytes: bootstrapFree }],
+    slopeSample: [{ index: 0, uuid: "gpu-0", usedBytes: slopeUsed, freeBytes: slopeFree }],
+    parallelSamples: { 2: [{
       index: 0,
       uuid: "gpu-0",
-      usedBytes: GiB + allocation.weightBytes + 2 * GiB + (8_192 * allocation.kvBytesPerToken),
-    }],
+      usedBytes: bootstrapUsed + (128 * 1024 ** 2),
+      freeBytes: bootstrapFree - (128 * 1024 ** 2),
+    }] },
   });
-  const candidates = selectNvidiaValidationProfilesFromInput(calibrated);
-  assert.equal(candidates[0].laneCount, 2);
-  assert.equal(candidates[0].laneContextTokens, 262_144);
-  assert.ok(candidates.some((candidate) => candidate.laneCount === 2 && candidate.laneContextTokens === 215_040));
-  assert.ok(candidates.findIndex((candidate) => candidate.laneCount === 1) > candidates.findIndex((candidate) => candidate.laneCount === 2));
-  assert.ok(candidates.some((candidate) => candidate.laneCount === 1 && candidate.laneContextTokens === 163_840));
-  assert.ok(candidates.every((candidate) => candidate.gpus.every((gpu) => gpu.remainingBytes >= GiB)));
+  assert.equal(estimate.gpus[0].fixedReserveBytes, fixedReserve);
+  assert.ok(optimisticNvidiaParallelContext(estimate, 2) < Math.ceil(TARGET.trainedContext * 0.75));
+  const profile = selectNvidiaRuntimeProfile(estimate);
+  assert.equal(profile.laneCount, 1);
+  assert.equal(profile.laneContextTokens, 235_776, "the calculator selects one conservative 90% profile");
 });
 
 test("a zero-use secondary GPU is a valid calibration baseline", () => {

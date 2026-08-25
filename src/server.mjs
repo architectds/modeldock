@@ -55,10 +55,13 @@ import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
 import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
 import { applyLocalHostPlan, calibrateAndApplyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
 import {
-  createCalibratedNvidiaProfileInput,
+  backoffNvidiaRuntimeProfile,
   createNvidiaProfileInput,
+  estimateNvidiaRuntimeCapacity,
   LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
-  selectNvidiaValidationProfilesFromInput,
+  LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS,
+  optimisticNvidiaParallelContext,
+  selectNvidiaRuntimeProfile,
 } from "./local-host-nvidia.mjs";
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
@@ -475,15 +478,15 @@ async function probeManagedNvidiaGpus(services) {
   return probe({});
 }
 
-function calibrationLaneProfile(target) {
-  const context = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS;
+function calibrationLaneProfile(target, { laneCount = 1, laneContextTokens = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS, id = "bootstrap" } = {}) {
+  const context = laneContextTokens;
   return Object.freeze({
     adapterId: target.adapterId,
     modelId: target.modelId,
-    profileId: `calibration-p1-c${context}`,
-    laneCount: 1,
+    profileId: `calibration-${id}-p${laneCount}-c${context}`,
+    laneCount,
     laneContextTokens: context,
-    totalContextTokens: context,
+    totalContextTokens: laneCount * context,
     deviceIndices: target.deviceIndices,
     tensorSplit: target.tensorSplit,
   });
@@ -2058,12 +2061,18 @@ export function createApp(services = createServices()) {
         cacheTypeV: "q4_0",
         visionProjectorBytes,
       });
-      const calibrationProfile = calibrationLaneProfile(target);
+      const bootstrapProfile = calibrationLaneProfile(target);
+      const slopeProfile = calibrationLaneProfile(target, {
+        id: "slope",
+        laneContextTokens: Math.min(LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS, target.modelMaxContextTokens),
+      });
+      const p2BootstrapProfile = calibrationLaneProfile(target, { id: "p2", laneCount: 2 });
+      const p3BootstrapProfile = calibrationLaneProfile(target, { id: "p3", laneCount: 3 });
       await mkdir(String(cacheDirectory).trim(), { recursive: true });
-      const calibrationSpec = {
+      const specForProfile = (profile) => ({
         binary: launch.binary,
         args: managedLlamaLaunchArgs(launch.args, {
-          profile: calibrationProfile,
+          profile,
           slotSavePath: String(cacheDirectory).trim(),
           modelPath,
           // Managed setup owns this switch: an empty field removes an old
@@ -2072,7 +2081,7 @@ export function createApp(services = createServices()) {
           cacheTypeK: "q4_0",
           cacheTypeV: "q4_0",
         }),
-      };
+      });
       const observed = createObservedHost({
         id,
         adapterId: "llamacpp-nvidia",
@@ -2135,9 +2144,42 @@ export function createApp(services = createServices()) {
           });
         }
         let profile = null;
+        let runtimeEstimate = null;
         let result = await calibrateAndApplyLocalHostPlan(authorized.record, {
-          calibrationSpec,
-          calibrationProfile,
+          calibrationSteps: [
+            { id: "bootstrap", desiredSpec: specForProfile(bootstrapProfile), desiredProfile: bootstrapProfile },
+            { id: "slope", desiredSpec: specForProfile(slopeProfile), desiredProfile: slopeProfile },
+            {
+              id: "p2",
+              desiredSpec: specForProfile(p2BootstrapProfile),
+              desiredProfile: p2BootstrapProfile,
+              optional: true,
+              shouldRun: ({ measurements }) => {
+                const interim = estimateNvidiaRuntimeCapacity({
+                  target,
+                  bootstrapSample: measurements.bootstrap,
+                  slopeSample: measurements.slope,
+                });
+                return optimisticNvidiaParallelContext(interim, 2) >= Math.ceil(target.modelMaxContextTokens * 0.75);
+              },
+            },
+            {
+              id: "p3",
+              desiredSpec: specForProfile(p3BootstrapProfile),
+              desiredProfile: p3BootstrapProfile,
+              optional: true,
+              shouldRun: ({ measurements }) => {
+                if (!measurements.p2) return false;
+                const interim = estimateNvidiaRuntimeCapacity({
+                  target,
+                  bootstrapSample: measurements.bootstrap,
+                  slopeSample: measurements.slope,
+                  parallelSamples: { 2: measurements.p2 },
+                });
+                return interim.lanes.find((lane) => lane?.laneCount === 2)?.nominalContextTokens >= target.modelMaxContextTokens;
+              },
+            },
+          ],
           targetCapabilities: {
             ...authorized.record.capabilities,
             model: modelPath,
@@ -2154,19 +2196,20 @@ export function createApp(services = createServices()) {
             await new Promise((resolve) => setTimeout(resolve, 500));
             return probeManagedNvidiaGpus(services);
           },
-          createFinalPlans: async ({ baseline, target: calibrationSample }) => {
-            const calibrated = (services.createCalibratedNvidiaProfileInput || createCalibratedNvidiaProfileInput)({
+          createFinalPlan: async ({ measurements }) => {
+            runtimeEstimate = (services.estimateNvidiaRuntimeCapacity || estimateNvidiaRuntimeCapacity)({
               target,
-              baselineSample: baseline,
-              calibrationSample,
+              bootstrapSample: measurements.bootstrap,
+              slopeSample: measurements.slope,
+              parallelSamples: { 2: measurements.p2, 3: measurements.p3 },
             });
-            const selected = (services.selectNvidiaValidationProfilesFromInput || selectNvidiaValidationProfilesFromInput)(calibrated);
-            return selected.map((finalProfile) => ({
-              desiredProfile: finalProfile,
+            profile = (services.selectNvidiaRuntimeProfile || selectNvidiaRuntimeProfile)(runtimeEstimate);
+            return {
+              desiredProfile: profile,
               desiredSpec: {
                 binary: launch.binary,
                 args: managedLlamaLaunchArgs(launch.args, {
-                  profile: finalProfile,
+                  profile,
                   slotSavePath: String(cacheDirectory).trim(),
                   modelPath,
                   visionProjectorPath: visionProjectorPath || null,
@@ -2174,7 +2217,27 @@ export function createApp(services = createServices()) {
                   cacheTypeV: "q4_0",
                 }),
               },
-            }));
+            };
+          },
+          createFallbackPlan: async ({ final }) => {
+            if (!runtimeEstimate) return null;
+            const fallback = (services.backoffNvidiaRuntimeProfile || backoffNvidiaRuntimeProfile)(runtimeEstimate, final.desiredProfile);
+            if (fallback.laneCount === final.desiredProfile.laneCount && fallback.laneContextTokens === final.desiredProfile.laneContextTokens) return null;
+            profile = fallback;
+            return {
+              desiredProfile: fallback,
+              desiredSpec: {
+                binary: launch.binary,
+                args: managedLlamaLaunchArgs(launch.args, {
+                  profile: fallback,
+                  slotSavePath: String(cacheDirectory).trim(),
+                  modelPath,
+                  visionProjectorPath: visionProjectorPath || null,
+                  cacheTypeK: "q4_0",
+                  cacheTypeV: "q4_0",
+                }),
+              },
+            };
           },
         }, operations);
         if (result.outcome === "applied") profile = result.record.activeProfile;

@@ -152,38 +152,6 @@ function gpuCandidate(input, gpu, laneCount, laneContextTokens) {
   };
 }
 
-function candidateAtContext(input, laneCount, requestedContextTokens) {
-  const normalized = createLocalHostProfileInput(input);
-  const lanes = positiveInteger(laneCount, "A local host lane count");
-  const maximum = maxLaneContext(normalized, lanes, normalized.minimumHeadroomBytes);
-  const requested = Number(requestedContextTokens);
-  if (!Number.isFinite(requested) || requested <= 0) {
-    throw new TypeError("A requested lane context must be positive.");
-  }
-  const laneContextTokens = Math.min(maximum, Math.max(
-    normalized.contextQuantumTokens,
-    Math.round(requested / normalized.contextQuantumTokens) * normalized.contextQuantumTokens,
-  ));
-  const gpus = normalized.gpus.map((gpu) => gpuCandidate(normalized, gpu, lanes, laneContextTokens));
-  const allocationFits = laneContextTokens > 0 && gpus.every((gpu) => gpu.meetsMinimumHeadroom);
-  const minimumLongContextTokens = Math.ceil(normalized.modelMaxContextTokens * normalized.minimumLaneContextRatio);
-  return freezeCandidate({
-    version: 1,
-    adapterId: normalized.adapterId,
-    modelId: normalized.modelId,
-    laneCount: lanes,
-    laneContextTokens,
-    totalContextTokens: laneContextTokens * lanes,
-    minimumLaneContextTokens: maximum,
-    preferredLaneContextTokens: maximum,
-    minimumLongContextTokens,
-    allocationFits,
-    meetsLongContextFloor: laneContextTokens >= minimumLongContextTokens,
-    headroomLevel: gpus.every((gpu) => gpu.meetsPreferredHeadroom) ? "preferred" : (allocationFits ? "minimum" : "insufficient"),
-    gpus,
-  });
-}
-
 export function evaluateLocalHostLaneProfile(input, laneCount) {
   const normalized = createLocalHostProfileInput(input);
   const lanes = positiveInteger(laneCount, "A local host lane count");
@@ -253,50 +221,6 @@ export function selectLocalHostLaneProfile(input) {
     minimumLongContextTokens: Math.ceil(normalized.modelMaxContextTokens * normalized.minimumLaneContextRatio),
     candidates: Object.freeze(candidates),
   });
-}
-
-// A calibration can measure the fixed target footprint, but llama.cpp also
-// allocates context-dependent CUDA graph buffers only when a final slot shape
-// starts. Return a small, deterministic set of target-first shapes for that
-// final load check. The runner tries them in product order and retains only a
-// profile that really launches with the per-card operating reserve intact.
-export function localHostLaneValidationCandidates(input) {
-  const normalized = createLocalHostProfileInput(input);
-  const maximums = new Map();
-  for (let lanes = 1; lanes <= LOCAL_HOST_MAX_LANES; lanes += 1) {
-    maximums.set(lanes, evaluateLocalHostLaneProfile(normalized, lanes));
-  }
-  const sharedLevels = [1, 0.875, 0.82, normalized.minimumLaneContextRatio];
-  const oneLaneLevels = [...sharedLevels, 0.625, 0.5];
-  const candidates = [];
-  const seen = new Set();
-  const add = (lanes, context) => {
-    const candidate = candidateAtContext(normalized, lanes, context);
-    const key = `${candidate.laneCount}:${candidate.laneContextTokens}`;
-    if (seen.has(key) || !candidate.allocationFits) return;
-    if (lanes > 1 && !candidate.meetsLongContextFloor) return;
-    seen.add(key);
-    candidates.push(Object.freeze({
-      ...candidate,
-      profileId: `validated-p${candidate.laneCount}-c${candidate.laneContextTokens}`,
-    }));
-  };
-
-  // Three simultaneous full windows are useful only where the capacity model
-  // says all three stay at the model maximum. Do not trade every session's
-  // working context for a third lane on smaller machines.
-  const three = maximums.get(3);
-  if (three?.allocationFits && three.laneContextTokens === normalized.modelMaxContextTokens) {
-    add(3, normalized.modelMaxContextTokens);
-  }
-  for (const lanes of [2, 1]) {
-    const maximum = maximums.get(lanes);
-    if (!maximum?.allocationFits) continue;
-    for (const level of lanes === 1 ? oneLaneLevels : sharedLevels) {
-      add(lanes, Math.min(maximum.laneContextTokens, normalized.modelMaxContextTokens * level));
-    }
-  }
-  return Object.freeze(candidates);
 }
 
 function sameProfileIdentity(current, target) {
