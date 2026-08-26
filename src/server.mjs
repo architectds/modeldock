@@ -210,10 +210,13 @@ function managedHostSummary(record, engine) {
   return {
     id: record.id,
     state: record.state,
-    modelPath: record.capabilities?.model || engine?.launch?.model || "",
+    // These choices are durable managed facts. The active argv is the fallback
+    // for a record written by an earlier build that did not mirror one of them
+    // into capabilities; a newly observed process must never erase either.
+    modelPath: record.capabilities?.model || llamaLaunchArgument(record.activeSpec, ["-m", "--model"]) || engine?.launch?.model || "",
     modelName: record.capabilities?.modelFacts?.modelName || engine?.modelFacts?.modelName || "",
-    visionProjectorPath: record.capabilities?.visionProjectorPath || "",
-    cacheDirectory: storage?.directory || "",
+    visionProjectorPath: record.capabilities?.visionProjectorPath || llamaLaunchArgument(record.activeSpec, ["--mmproj"]) || "",
+    cacheDirectory: storage?.directory || llamaLaunchArgument(record.activeSpec, ["--slot-save-path"]) || "",
     cacheBudgetBytes: storage?.budgetBytes || 0,
     profile,
     capacity,
@@ -1810,6 +1813,23 @@ export function createApp(services = createServices()) {
           return perToken && context ? perToken * context : 0;
         })(),
       })).map((engine) => ({ ...engine, warnings: engineWarnings(engine, gpus) }));
+      // A gateway update can come up before a managed local engine has started
+      // answering again. Keep its durable row in this scan so the drawer can
+      // still show the user's selected model, projector, and SSD KV settings
+      // instead of replacing them with empty defaults while the host returns.
+      for (const [engine, snapshot] of Object.entries(saved)) {
+        if (engines.some((found) => found.engine === engine && found.connected)) continue;
+        engines.push({
+          engine,
+          label: LOCAL_ENGINE_LABELS[engine] || engine,
+          baseUrl: snapshot.baseUrl || "",
+          models: (snapshot.models || []).map((model) => model.id),
+          connectable: CONNECTABLE_ENGINES.includes(engine),
+          connected: true,
+          connectedModels: snapshot.models?.length || 0,
+          offline: true,
+        });
+      }
       const hostSummaries = await localHostSummaries(engines, services.localHostRegistryFile);
       // The window Codex is told about has to follow the per-lane window the
       // engine is actually serving. In managed P2/P3 mode llama.cpp's -c is the
@@ -1853,22 +1873,6 @@ export function createApp(services = createServices()) {
         services.writeCatalogFile?.();
         await services.configSwitcher.markRestartRequired();
         recordConfigAction(metrics, `local_model_name_refreshed_${engine.engine}`, { ok: true });
-      }
-      // An engine that was connected and has since been stopped still belongs on
-      // the page. Dropping it would leave a profile published against a server
-      // that is gone, with no control anywhere to take it back down.
-      for (const [engine, snapshot] of Object.entries(saved)) {
-        if (engines.some((found) => found.engine === engine && found.connected)) continue;
-        engines.push({
-          engine,
-          label: LOCAL_ENGINE_LABELS[engine] || engine,
-          baseUrl: snapshot.baseUrl || "",
-          models: (snapshot.models || []).map((model) => model.id),
-          connectable: CONNECTABLE_ENGINES.includes(engine),
-          connected: true,
-          connectedModels: snapshot.models?.length || 0,
-          offline: true,
-        });
       }
       const runtimeStatus = await services.localHostRuntime?.status?.() || services.localHostRuntime?.snapshot?.() || null;
       return res.json({

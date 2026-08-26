@@ -65,6 +65,49 @@ test("single-slot coordinator keeps the current conversation hot and restores an
   assert.equal(coordinator.snapshot().hotCount, 1);
 });
 
+test("coordinator exposes bounded content-free lane events and measures cached-work savings from a cold baseline", async () => {
+  const { coordinator } = fixture();
+  await coordinator.run({
+    conversationId: "cold",
+    run: async () => ({
+      ok: true,
+      firstResponseLatencyMs: 2_000,
+      usage: { input_tokens: 1_000, output_tokens: 10, input_tokens_details: { cached_tokens: 0 } },
+    }),
+  });
+  await coordinator.run({
+    conversationId: "cold",
+    run: async () => ({
+      ok: true,
+      firstResponseLatencyMs: 300,
+      usage: { input_tokens: 1_000, output_tokens: 10, input_tokens_details: { cached_tokens: 800 } },
+    }),
+  });
+
+  const telemetry = coordinator.snapshot().telemetry;
+  assert.equal(telemetry.windowMs, 300_000);
+  assert.equal(telemetry.totals.inputTokens, 2_000);
+  assert.equal(telemetry.totals.cachedTokens, 800);
+  assert.equal(telemetry.totals.outputTokens, 20);
+  assert.equal(Math.round(telemetry.coldPrefillTps), 500);
+  assert.equal(Math.round(telemetry.totals.timeSavedMs), 1_600);
+  assert.ok(telemetry.events.some((event) => event.kind === "cold_prefill"));
+  assert.ok(telemetry.events.some((event) => event.kind === "running"));
+  assert.ok(telemetry.events.some((event) => event.kind === "hot"));
+  assert.equal(telemetry.events.some((event) => "sessionKey" in event || "conversationId" in event), false,
+    "monitor telemetry never exposes a conversation identity");
+});
+
+test("coordinator caps the five-minute swimlane event stream under repeated session switches", async () => {
+  const { coordinator } = fixture();
+  for (let index = 0; index < 150; index += 1) {
+    await coordinator.run({ conversationId: `switch-${index}`, run: async () => ({ ok: true }) });
+  }
+  const events = coordinator.snapshot().telemetry.events;
+  assert.ok(events.length <= 240, `telemetry retained ${events.length} events instead of its fixed cap`);
+  assert.equal(events.some((event) => "sessionKey" in event || "conversationId" in event), false);
+});
+
 test("restore and save faults degrade only the cache tier, never the user request", async () => {
   const { coordinator, store, diagnostics } = fixture();
   store.has = async () => true;

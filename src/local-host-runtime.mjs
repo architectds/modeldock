@@ -138,6 +138,7 @@ export class LocalHostRuntime {
       lanes: (live.lanes || []).map((lane) => ({ slot: lane.slot, state: lane.state, lastAccessedAt: lane.lastAccessedAt })),
       ssd: live.ssd || null,
       counters: live.counters || null,
+      telemetry: live.telemetry || null,
     });
   }
 

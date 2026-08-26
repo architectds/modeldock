@@ -25,13 +25,36 @@ function diagnosticMessage(error) {
   return error instanceof Error && error.message ? error.message : String(error || "Unknown KV state error.");
 }
 
+const TELEMETRY_WINDOW_MS = 300_000;
+const TELEMETRY_EVENT_LIMIT = 240;
+const COLD_PREFILL_SAMPLE_LIMIT = 8;
+const MIN_COLD_PREFILL_TOKENS = 256;
+
+function nonNegativeNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function median(values) {
+  if (!values.length) return 0;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
 export class LocalHostKvCoordinator {
   #residency;
   #mutation = Promise.resolve();
   #validatedFingerprint = false;
   // Lifetime tallies for the local dashboard: what the SSD cache is actually
   // doing, counted where the actions happen instead of re-derived from logs.
-  #counters = { saves: 0, restores: 0, evictions: 0, expired: 0, cleared: 0 };
+  #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0 };
+  // A content-free, time-bounded record of lane changes. It never contains a
+  // Codex conversation id, prompt, or tool data; lanes are the only identity
+  // the monitor needs to draw the scheduler's swimlanes.
+  #events = [];
+  #coldPrefillRates = [];
+  #totals = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, timeSavedMs: 0 };
 
   constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp } = {}) {
     if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function" || typeof store.has !== "function") {
@@ -50,6 +73,7 @@ export class LocalHostKvCoordinator {
   }
 
   snapshot() {
+    this.#pruneEvents();
     return Object.freeze({
       ...this.scheduler.snapshot(),
       fingerprint: this.fingerprint,
@@ -60,7 +84,59 @@ export class LocalHostKvCoordinator {
       // never touch the disk. The store keeps its last-known manifest totals.
       ssd: typeof this.store.totals === "function" ? this.store.totals() : null,
       counters: { ...this.#counters },
+      telemetry: {
+        windowMs: TELEMETRY_WINDOW_MS,
+        events: this.#events.map((event) => ({ ...event })),
+        totals: { ...this.#totals },
+        coldPrefillTps: median(this.#coldPrefillRates),
+        coldPrefillSamples: this.#coldPrefillRates.length,
+      },
     });
+  }
+
+  #pruneEvents(now = Date.now()) {
+    const cutoff = now - TELEMETRY_WINDOW_MS;
+    const firstVisible = this.#events.findIndex((event) => event.at >= cutoff);
+    if (firstVisible > 0) this.#events.splice(0, firstVisible);
+    if (firstVisible === -1) this.#events.length = 0;
+    if (this.#events.length > TELEMETRY_EVENT_LIMIT) this.#events.splice(0, this.#events.length - TELEMETRY_EVENT_LIMIT);
+  }
+
+  #recordEvent(kind, { slot = null, durationMs = 0, savedMs = 0 } = {}) {
+    const event = { at: Date.now(), kind };
+    if (Number.isSafeInteger(slot) && slot >= 0) event.slot = slot;
+    if (nonNegativeNumber(durationMs) > 0) event.durationMs = Math.round(nonNegativeNumber(durationMs));
+    if (nonNegativeNumber(savedMs) > 0) event.savedMs = Math.round(nonNegativeNumber(savedMs));
+    this.#events.push(event);
+    this.#pruneEvents(event.at);
+  }
+
+  #recordUsage(result, cache) {
+    const usage = result?.usage;
+    if (!usage || typeof usage !== "object") return 0;
+    const inputTokens = nonNegativeNumber(usage.input_tokens);
+    const cachedTokens = Math.min(inputTokens, nonNegativeNumber(usage.input_tokens_details?.cached_tokens));
+    const outputTokens = nonNegativeNumber(usage.output_tokens);
+    this.#totals.inputTokens += inputTokens;
+    this.#totals.cachedTokens += cachedTokens;
+    this.#totals.outputTokens += outputTokens;
+
+    if (result?.ok === false) return 0;
+
+    const firstResponseMs = nonNegativeNumber(result?.firstResponseLatencyMs);
+    if (cache?.tier === "cold" && cachedTokens === 0 && inputTokens >= MIN_COLD_PREFILL_TOKENS && firstResponseMs > 0) {
+      this.#coldPrefillRates.push(inputTokens / (firstResponseMs / 1000));
+      if (this.#coldPrefillRates.length > COLD_PREFILL_SAMPLE_LIMIT) this.#coldPrefillRates.splice(0, this.#coldPrefillRates.length - COLD_PREFILL_SAMPLE_LIMIT);
+    }
+
+    const baselineTps = median(this.#coldPrefillRates);
+    if (!baselineTps || !cachedTokens) return 0;
+    // Cached prompt tokens are known from the upstream usage response. The
+    // cold baseline is measured on this same managed host; restore time is
+    // subtracted because it is work the current request actually paid for.
+    const savedMs = Math.max(0, (cachedTokens / baselineTps) * 1000 - nonNegativeNumber(cache?.restoreMs));
+    this.#totals.timeSavedMs += savedMs;
+    return savedMs;
   }
 
   async waitForIdle({ timeoutMs = 30_000 } = {}) {
@@ -147,13 +223,18 @@ export class LocalHostKvCoordinator {
           continue;
         }
         if (action.type === "erase_slot") {
+          this.#recordEvent("switching", { slot: action.slot });
           await this.#erase(action.slot);
           continue;
         }
         if (action.type === "save_lru_to_ssd") {
+          this.#recordEvent("switching", { slot: action.slot });
           try {
             const saved = await this.store.save({ sessionKey: action.sessionKey, fingerprint: action.fingerprint, slot: action.slot, signal });
-            if (saved?.saved) this.#counters.saves += 1;
+            if (saved?.saved) {
+              this.#counters.saves += 1;
+              this.#recordEvent("checkpointed", { slot: action.slot });
+            }
             this.#counters.evictions += saved?.evicted?.length || 0;
           } catch (error) {
             await this.#diagnose("slot_save_failed", error);
@@ -161,6 +242,7 @@ export class LocalHostKvCoordinator {
           continue;
         }
         if (action.type === "restore_ssd") {
+          this.#recordEvent("restoring", { slot: action.slot });
           try {
             const restored = await this.store.restore({ sessionKey, fingerprint: this.fingerprint, slot: action.slot, signal });
             if (!restored.restored) {
@@ -169,6 +251,7 @@ export class LocalHostKvCoordinator {
             } else {
               this.#counters.restores += 1;
               restoreMs = Number(restored.restoreMs) || 0;
+              this.#recordEvent("restored", { slot: action.slot, durationMs: restoreMs });
             }
           } catch (error) {
             tier = "cold";
@@ -177,8 +260,13 @@ export class LocalHostKvCoordinator {
           }
           continue;
         }
-        if (action.type === "cold_prefill") await this.#erase(action.slot);
+        if (action.type === "cold_prefill") {
+          this.#counters.coldPrefills += 1;
+          this.#recordEvent("cold_prefill", { slot: action.slot });
+          await this.#erase(action.slot);
+        }
       }
+      if (tier === "gpu") this.#recordEvent("running", { slot: lease.slot });
       return { slot: lease.slot, tier, restoreMs };
     });
   }
@@ -192,7 +280,12 @@ export class LocalHostKvCoordinator {
         fingerprint: this.fingerprint,
         success,
       });
-      if (!success) await this.#erase(slot);
+      if (!success) {
+        this.#recordEvent("failed", { slot });
+        await this.#erase(slot);
+      } else {
+        this.#recordEvent("hot", { slot });
+      }
     });
   }
 
@@ -228,6 +321,7 @@ export class LocalHostKvCoordinator {
           });
           if (result?.saved) {
             saved += 1;
+            this.#recordEvent("checkpointed", { slot: lane.slot });
           } else {
             // A budget rejection is not a successful handoff. Restarting now
             // would discard the only hot state and turn a recoverable local
@@ -251,6 +345,8 @@ export class LocalHostKvCoordinator {
     const normalizedPrincipalId = text(principalId, "A local principal id");
     const normalizedConversationId = text(conversationId, "A local conversation id");
     const sessionKey = kvSessionKey({ principalId: normalizedPrincipalId, conversationId: normalizedConversationId });
+    const scheduler = this.scheduler.snapshot();
+    if (scheduler.activeCount >= scheduler.maxActiveRequests || scheduler.pendingCount) this.#recordEvent("waiting");
     return this.scheduler.enqueue({
       principalId: normalizedPrincipalId,
       conversationId: normalizedConversationId,
@@ -267,7 +363,9 @@ export class LocalHostKvCoordinator {
             cache: { tier: prepared.tier, ...(prepared.restoreMs ? { restoreMs: prepared.restoreMs } : {}) },
             slot: prepared.slot,
           });
+          const savedMs = this.#recordUsage(result, prepared);
           await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false });
+          if (savedMs) this.#recordEvent("time_saved", { slot: prepared.slot, savedMs });
           return result;
         } catch (error) {
           await this.#complete({ slot: prepared.slot, sessionKey, success: false });

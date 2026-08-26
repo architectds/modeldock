@@ -411,6 +411,18 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     contextWindow: body.management.capacity.maxSingleRequestTokens,
     autoCompactTokenLimit: Math.floor(body.management.capacity.maxSingleRequestTokens * 0.7),
   }], "only the verified managed visual model reaches the Codex catalog");
+
+  // A ModelDock update can restart the gateway before llama.cpp has answered
+  // its first discovery probe. The durable managed record, not a live process
+  // observation, must keep the drawer's user-owned choices intact.
+  services.discoverEngines = async () => [];
+  const afterGatewayRestart = await (await fetch(`${base}/api/local/discover`)).json();
+  const remembered = afterGatewayRestart.engines.find((candidate) => candidate.engine === "llamacpp");
+  assert.equal(remembered.offline, true);
+  assert.equal(remembered.management.modelPath, selectedModel);
+  assert.equal(remembered.management.visionProjectorPath, projector);
+  assert.equal(remembered.management.cacheDirectory, path.join(dir, "kv"));
+  assert.equal(remembered.management.cacheBudgetBytes, 8 * 1024 ** 3);
 });
 
 test("the local picker API permits only the fixed native dialog kinds", async (t) => {

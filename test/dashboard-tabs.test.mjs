@@ -55,11 +55,24 @@ function managedHostSnapshot() {
     maxActiveRequests: 1,
     activeCount: 0,
     pendingCount: 0,
-    hotCount: 0,
+    hotCount: 1,
     slotAffinity: false,
-    lanes: [{ slot: 0, state: "cold", lastAccessedAt: 0 }],
+    lanes: [{ slot: 0, state: "hot", lastAccessedAt: new Date().toISOString() }],
     ssd: { totalBytes: 0, budgetBytes: 32 * 1024 ** 3, states: 0 },
-    counters: { evictions: 0, expired: 0 },
+    counters: { saves: 2, restores: 1, coldPrefills: 1, evictions: 0, expired: 0 },
+    telemetry: {
+      windowMs: 300_000,
+      events: [
+        { at: Date.now() - 60_000, kind: "cold_prefill", slot: 0 },
+        { at: Date.now() - 40_000, kind: "hot", slot: 0 },
+        { at: Date.now() - 12_000, kind: "restoring", slot: 0 },
+        { at: Date.now() - 10_800, kind: "restored", slot: 0, durationMs: 1_200 },
+        { at: Date.now() - 1_000, kind: "hot", slot: 0 },
+      ],
+      totals: { inputTokens: 240_000, cachedTokens: 180_000, outputTokens: 12_000, timeSavedMs: 48_000 },
+      coldPrefillTps: 500,
+      coldPrefillSamples: 2,
+    },
   };
 }
 
@@ -384,6 +397,14 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
   assert.deepEqual(errors, [], "the dashboard threw while rendering its tabs");
+
+  const duplicateIds = JSON.parse(await evaluate(`(() => {
+    const seen = new Set();
+    return JSON.stringify([...document.querySelectorAll('[id]')]
+      .map((node) => node.id)
+      .filter((id) => seen.has(id) ? true : (seen.add(id), false)));
+  })()`));
+  assert.deepEqual(duplicateIds, [], "the dashboard has duplicate ids that can direct live data to the wrong card");
 });
 
 // The monitor redraws whenever an SSE status snapshot arrives. At fractional
@@ -435,7 +456,11 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
       dpr: window.devicePixelRatio,
       panelHeight: document.getElementById('local-host-dashboard').getBoundingClientRect().height,
       canvases,
-      recentTierDots: document.querySelectorAll('#hostdash-tier-strip .tier-dot').length,
+      swimlanes: document.querySelectorAll('#hostdash-swimlanes .swimlane').length,
+      swimSegments: document.querySelectorAll('#hostdash-swimlanes .swim-segment').length,
+      overflowing: [...document.querySelectorAll('#local-host-dashboard, .hostdash-grid, .hostdash-totals, .swimlane-track')]
+        .filter((node) => node.scrollWidth > node.clientWidth + 1)
+        .map((node) => node.id || node.className),
     });
   })()`));
 
@@ -448,8 +473,52 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
     assert.ok(Math.abs(canvas.bitmapHeight - Math.round(canvas.cssHeight * monitor.dpr)) <= 1,
       "bitmap height follows the fixed CSS box once");
   }
-  assert.ok(monitor.recentTierDots > 0 && monitor.recentTierDots <= 6,
-    "completed local requests reached the managed-host monitor over SSE");
+  assert.equal(monitor.swimlanes, 1, "the managed lane renders as one swimlane");
+  assert.ok(monitor.swimSegments >= 2, "the lane timeline renders cold, restore, and hot events");
+  assert.deepEqual(monitor.overflowing, [], "the managed-host board does not overflow its visible columns");
+});
+
+test("the managed-host board collapses to one column without horizontal overflow", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const { base } = await startDashboard(t, { managed: true });
+  const { evaluate } = await openBrowser(t, chromePath, { width: 720, height: 900, instance: "hostmonitor-narrow" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#hostmonitor`)}`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && !document.getElementById('local-host-dashboard').hidden`)) break;
+  }
+  await evaluate("document.body.style.minWidth = '0'");
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    return true;
+  })()`);
+  await sleep(300);
+  const layout = JSON.parse(await evaluate(`(() => {
+    const board = document.getElementById('local-host-dashboard');
+    const box = board.getBoundingClientRect();
+    const cards = [...board.querySelectorAll('.hostdash-grid > .metric-card')].map((card) => {
+      const rect = card.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, width: rect.width, scrollWidth: card.scrollWidth, clientWidth: card.clientWidth };
+    });
+    return JSON.stringify({
+      viewport: window.innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      board: { left: box.left, right: box.right, width: box.width },
+      cards,
+      columns: getComputedStyle(document.querySelector('.hostdash-grid')).gridTemplateColumns,
+    });
+  })()`));
+  assert.ok(layout.documentWidth <= layout.viewport + 1, `host monitor widened document to ${layout.documentWidth}px at ${layout.viewport}px viewport`);
+  assert.equal(layout.columns.split(' ').length, 1, `narrow host monitor must use one column, got ${layout.columns}`);
+  for (const card of layout.cards) {
+    assert.ok(card.left >= layout.board.left - 1 && card.right <= layout.board.right + 1, "host-monitor card escaped its board");
+    assert.ok(card.scrollWidth <= card.clientWidth + 1, "host-monitor card has internal horizontal overflow");
+  }
 });
 
 test("the narrow local drawer is an opaque configuration surface", { timeout: 120_000 }, async (t) => {

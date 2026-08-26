@@ -973,18 +973,41 @@ body { padding-left: 88px; }
 .engine-warnings[hidden] { display: none; }
 .engine-warnings li { padding: 7px 10px; border: 1px solid rgba(247,185,85,.32); border-radius: 8px; background: rgba(247,185,85,.07); color: var(--amber); font-size: 11px; line-height: 1.4; }
 
-/* Managed local-host monitor: tier events are discrete requests, so they read
-   as a dot pattern (like CI status dots), never as a line that changes color. */
-.tier-strip { display: flex; flex-wrap: wrap; gap: 4px; min-height: 40px; align-content: flex-start; margin: 10px 0 6px; }
-.tier-strip .tier-dot { cursor: default; }
-.tier-dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; background: var(--muted); flex: none; }
-.tier-gpu { background: var(--green); }
-.tier-ssd { background: var(--blue); }
-.tier-cold { background: var(--amber); }
-.tier-auto { background: rgba(154,166,188,.55); }
-.tier-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin: 8px 0 0; }
-.tier-legend .tier-dot { margin-left: 8px; }
-.tier-legend .tier-dot:first-child { margin-left: 0; }
+/* The host monitor is an operational board, not the dashboard's four narrow
+   metric cards. Its events remain content-free and bounded to five minutes. */
+.hostdash-panel { max-width: none; }
+.hostdash-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
+.hostdash-totals > span { min-width: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.hostdash-totals b { display: block; overflow: hidden; color: var(--text); font: 650 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; }
+.hostdash-totals small { display: block; margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.hostdash-saving b { color: var(--green); }
+.hostdash-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.hostdash-grid .metric-card { min-width: 0; min-height: 238px; }
+.hostdash-swim-card, .hostdash-continuity-card { display: flex; flex-direction: column; }
+.swimlanes { display: grid; gap: 9px; margin: 18px 0 0; }
+.swimlane { display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: center; gap: 9px; min-width: 0; }
+.swimlane-label { overflow: hidden; color: var(--muted); font: 700 9px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; text-overflow: ellipsis; white-space: nowrap; }
+.swimlane-track { position: relative; height: 26px; overflow: hidden; border: 1px solid rgba(137,160,175,.18); border-radius: 7px; background: repeating-linear-gradient(90deg, rgba(137,160,175,.08) 0 1px, transparent 1px 25%); }
+.swimlane-track::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 1px; background: rgba(236,244,248,.55); box-shadow: 0 0 7px rgba(236,244,248,.4); }
+.swim-segment { position: absolute; top: 4px; bottom: 4px; min-width: 3px; border-radius: 4px; opacity: .9; }
+.swim-segment.swim-running { background: var(--violet); }.swim-segment.swim-switching { background: var(--amber); }.swim-segment.swim-restoring { background: var(--blue); }.swim-segment.swim-hot { background: var(--green); }.swim-segment.swim-cold { background: rgba(247,185,85,.62); }.swim-segment.swim-failed { background: #ff6b6b; }
+.swim-current { position: absolute; top: 50%; right: 1px; width: 7px; height: 7px; border: 2px solid var(--panel); border-radius: 50%; background: var(--muted); box-shadow: 0 0 10px currentColor; transform: translateY(-50%); }
+.swim-current.is-active { color: var(--amber); background: var(--amber); }.swim-current.is-hot { color: var(--green); background: var(--green); }
+.swimlane-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: auto 0 0; color: var(--muted); font-size: 10px; }
+.swimlane-legend .swim-segment { position: static; width: 10px; height: 8px; min-width: 10px; }
+.swimlane-legend .swim-segment:not(:first-child) { margin-left: 6px; }
+
+/* GPU residency and SSD checkpoint capacity are distinct bounded quantities.
+   The joining rail makes restores visible without pretending they are a rate. */
+.kv-residency { display: grid; grid-template-columns: minmax(0, 1fr) 66px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 104px; margin-top: 10px; }
+.kv-tier { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
+.kv-tier > span { display: block; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.kv-tier > strong { display: block; margin-top: 6px; color: var(--text); font: 700 17px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.04em; }
+.kv-slots { display: flex; gap: 4px; min-height: 8px; margin-top: 10px; }
+.kv-slot { display: block; min-width: 10px; height: 8px; flex: 1; border-radius: 99px; background: rgba(137,160,175,.2); }.kv-slot.is-hot { background: var(--green); }.kv-slot.is-active { background: var(--amber); }
+.kv-transfer { position: relative; display: grid; justify-items: center; gap: 2px; min-width: 0; color: var(--blue); font-size: 9px; text-align: center; }
+.kv-transfer i { width: 100%; height: 1px; background: var(--blue); box-shadow: 0 0 9px rgba(80,183,255,.5); }.kv-transfer i::after { content: ""; float: right; width: 5px; height: 5px; margin-top: -2px; border-top: 1px solid var(--blue); border-right: 1px solid var(--blue); transform: rotate(45deg); }
+.kv-transfer b { font: 700 15px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }.kv-transfer span { overflow: hidden; max-width: 100%; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 
 /* SSD budget fill: a bounded quantity gets a bar, not a wave - the line would
    just climb to the cap and flatline. */
@@ -992,6 +1015,14 @@ body { padding-left: 88px; }
 .ssd-fill-bar { height: 100%; width: 0; border-radius: 5px; background: var(--green); transition: width .3s ease; }
 .ssd-fill-bar.is-tight { background: var(--amber); }
 .ssd-counts { font-size: 11px; color: var(--muted); margin: 0 0 6px; }
+
+@media (max-width: 900px) {
+  .hostdash-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .hostdash-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kv-residency { grid-template-columns: minmax(0, 1fr) 52px minmax(0, 1fr); gap: 6px; }
+}
 
 /* The managed-host tab exists only while a takeover is active; rail links are
    flex, so the hidden attribute needs an explicit override to actually hide. */

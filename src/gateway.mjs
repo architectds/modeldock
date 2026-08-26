@@ -3664,8 +3664,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     sessionId,
     threadId,
   });
-  const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
+  let firstResponseLatencyMs = 0;
+  const markFirstResponse = () => {
+    if (!firstResponseLatencyMs) firstResponseLatencyMs = Math.max(0, Date.now() - startedAt);
+    finish?.markFirstResponse?.();
+  };
   const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
   const relayRoute = { model: normalizedPayload.model, provider: target.provider, route: route.reason };
   let usage;
@@ -3942,6 +3946,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       usage: traceUsage,
       bytesOut,
       upstreamBytes,
+      firstResponseLatencyMs,
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
     };

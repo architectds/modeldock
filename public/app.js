@@ -662,23 +662,26 @@ function renderSessions(recent, names = {}) {
 }
 
 // The managed local-host monitor. Hidden unless a host is under takeover:
-// this whole section is the "hidden local numbers page" that only management
-// mode opens. It reuses the dashboard's wave machinery; the tier view is a
-// dot strip of discrete requests (never a line that changes color), and the
-// SSD budget - a bounded quantity - is a fill bar, not a wave that would
-// climb to the cap and flatline.
+// it uses the gateway's bounded, content-free lane events rather than trying
+// to reverse-engineer scheduler state from a completed-request log.
 const hostDash = {
   prefill: [],
   decode: [],
-  tiers: [],
   seen: new Set(),
   prefillPeak: { peak: 0 },
   decodePeak: { peak: 0 },
   prefillPoints: [],
   decodePoints: [],
 };
-const HOSTDASH_TIER_CLASS = { gpu: "tier-gpu", ssd: "tier-ssd", cold: "tier-cold", llama_auto: "tier-auto" };
-const HOSTDASH_MAX_DOTS = 60;
+const HOSTDASH_SWIM_STATE = {
+  running: "running",
+  switching: "switching",
+  restoring: "restoring",
+  restored: "restoring",
+  cold_prefill: "cold",
+  hot: "hot",
+  failed: "failed",
+};
 
 function hostDashPush(history, point) {
   history.push(point);
@@ -689,6 +692,81 @@ function hostDashPush(history, point) {
 function hostDashAvg(history) {
   if (!history.length) return 0;
   return history.reduce((sum, point) => sum + point.v, 0) / history.length;
+}
+
+function compactTokens(value) {
+  const count = Math.max(0, Number(value) || 0);
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(count >= 10_000_000 ? 0 : 1)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(count >= 10_000 ? 0 : 1)}K`;
+  return number(Math.round(count));
+}
+
+function hostDashState(kind) {
+  return HOSTDASH_SWIM_STATE[String(kind || "")] || "";
+}
+
+function hostDashEvents(telemetry) {
+  return Array.isArray(telemetry?.events)
+    ? telemetry.events.filter((event) => Number.isFinite(Number(event?.at))).sort((left, right) => Number(left.at) - Number(right.at))
+    : [];
+}
+
+function createSwimSegment({ event, next, windowStart, now }) {
+  const state = hostDashState(event.kind);
+  if (!state) return null;
+  let start = Math.max(windowStart, Number(event.at));
+  let end = Math.min(now, Number(next?.at) || now);
+  if (event.kind === "restored" && Number(event.durationMs) > 0) {
+    start = Math.max(windowStart, Number(event.at) - Number(event.durationMs));
+    end = Math.min(now, Number(event.at));
+  }
+  if (end <= start) end = Math.min(now, start + Math.max(350, Number(event.durationMs) || 0));
+  if (end <= windowStart || start >= now) return null;
+  const segment = document.createElement("span");
+  segment.className = `swim-segment swim-${state}`;
+  const left = Math.max(0, Math.min(100, ((start - windowStart) / (now - windowStart)) * 100));
+  const width = Math.min(100 - left, Math.max(0.7, ((end - start) / (now - windowStart)) * 100));
+  segment.style.left = `${left}%`;
+  segment.style.width = `${width}%`;
+  segment.title = `${event.kind} · ${new Date(Number(event.at)).toLocaleTimeString()}`;
+  return segment;
+}
+
+function renderHostSwimlanes(localHost, telemetry) {
+  const container = $("hostdash-swimlanes");
+  if (!container) return;
+  const now = Date.now();
+  const windowMs = Math.max(1_000, Number(telemetry?.windowMs) || 300_000);
+  const windowStart = now - windowMs;
+  const events = hostDashEvents(telemetry);
+  const lanes = [...(localHost.lanes || [])].sort((left, right) => Number(left.slot) - Number(right.slot));
+  const rows = lanes.map((lane) => {
+    const row = document.createElement("div");
+    row.className = "swimlane";
+    const label = document.createElement("span");
+    label.className = "swimlane-label";
+    label.textContent = `SLOT ${Number(lane.slot) + 1}`;
+    const track = document.createElement("div");
+    track.className = "swimlane-track";
+    const laneEvents = events.filter((event) => Number(event.slot) === Number(lane.slot) && hostDashState(event.kind));
+    if (!laneEvents.length && lane.state !== "empty") {
+      laneEvents.push({
+        at: Math.max(windowStart, Date.parse(lane.lastAccessedAt || "") || now),
+        kind: lane.state === "hot" ? "hot" : "running",
+      });
+    }
+    laneEvents.forEach((event, index) => {
+      const segment = createSwimSegment({ event, next: laneEvents[index + 1], windowStart, now });
+      if (segment) track.append(segment);
+    });
+    const current = document.createElement("span");
+    current.className = `swim-current${lane.state === "active" ? " is-active" : lane.state === "hot" ? " is-hot" : ""}`;
+    current.title = lane.state || "empty";
+    track.append(current);
+    row.append(label, track);
+    return row;
+  });
+  container.replaceChildren(...rows);
 }
 
 function renderLocalHostDashboard(data) {
@@ -716,21 +794,20 @@ function renderLocalHostDashboard(data) {
     if (!currentRecentIds.has(id)) hostDash.seen.delete(id);
   }
 
-  let lastRestoreMs = 0;
   for (const item of recent) {
     if (item.kind !== "responses" || item.status !== "ok" || !item.localCache?.tier || hostDash.seen.has(item.id)) continue;
     hostDash.seen.add(item.id);
-    const tier = String(item.localCache.tier);
-    hostDash.tiers.push({ tier, t: item.startedAt || 0 });
     const restoreMs = Number(item.localCache.restoreMs) || 0;
-    if (restoreMs) lastRestoreMs = restoreMs;
     // Prefill speed is charged net of the SSD restore: the restore bought the
-    // speed, so it must not be billed against it.
+    // speed, so it must not be billed against it. Cached input is likewise
+    // excluded: reporting cached history as new prefill made the old card lie.
     const firstMs = Number(item.firstResponseLatencyMs) || 0;
     const prefillMs = Math.max(0, firstMs - restoreMs);
     const inTokens = Number(item.inputTokens) || 0;
-    if (inTokens > 0 && prefillMs > 0) {
-      hostDashPush(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: inTokens / (prefillMs / 1000) });
+    const cachedTokens = Math.min(inTokens, Number(item.cachedTokens) || 0);
+    const prefillTokens = Math.max(0, inTokens - cachedTokens);
+    if (prefillTokens > 0 && prefillMs > 0) {
+      hostDashPush(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: prefillTokens / (prefillMs / 1000) });
     }
     const outTokens = Number(item.outputTokens) || 0;
     const decodeMs = Math.max(0, (Number(item.latencyMs) || 0) - firstMs);
@@ -738,8 +815,6 @@ function renderLocalHostDashboard(data) {
       hostDashPush(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: outTokens / (decodeMs / 1000) });
     }
   }
-  hostDash.tiers.sort((a, b) => a.t - b.t);
-  if (hostDash.tiers.length > HOSTDASH_MAX_DOTS) hostDash.tiers.splice(0, hostDash.tiers.length - HOSTDASH_MAX_DOTS);
 
   const prefillVisible = visiblePoints(hostDash.prefill);
   hostDash.prefillPeak.peak = prefillVisible.reduce((max, point) => Math.max(max, point.v), 0);
@@ -748,7 +823,6 @@ function renderLocalHostDashboard(data) {
   set("hostdash-prefill-last", prefillVisible.length ? number(Math.round(prefillVisible[prefillVisible.length - 1].v)) : "—");
   set("hostdash-prefill-avg", prefillVisible.length ? number(Math.round(hostDashAvg(prefillVisible))) : "—");
   set("hostdash-prefill-count", number(prefillVisible.length));
-  set("hostdash-restore-last", lastRestoreMs ? duration(lastRestoreMs) : "—");
 
   const decodeVisible = visiblePoints(hostDash.decode);
   hostDash.decodePeak.peak = decodeVisible.reduce((max, point) => Math.max(max, point.v), 0);
@@ -756,23 +830,37 @@ function renderLocalHostDashboard(data) {
   if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, -1, WAVE_VIOLET, hostDash.decodePoints);
   set("hostdash-decode-last", decodeVisible.length ? number(Math.round(decodeVisible[decodeVisible.length - 1].v)) : "—");
   set("hostdash-decode-avg", decodeVisible.length ? number(Math.round(hostDashAvg(decodeVisible))) : "—");
-  set("hostdash-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
 
-  const strip = $("hostdash-tier-strip");
-  if (strip) {
-    strip.replaceChildren(...hostDash.tiers.map((entry) => {
-      const dot = document.createElement("span");
-      dot.className = `tier-dot ${HOSTDASH_TIER_CLASS[entry.tier] || "tier-auto"}`;
-      dot.title = `${entry.tier} · ${entry.t ? new Date(entry.t).toLocaleTimeString() : ""}`;
-      return dot;
+  const telemetry = localHost.telemetry || {};
+  const totals = telemetry.totals || {};
+  const counters = localHost.counters || {};
+  const events = hostDashEvents(telemetry);
+  const lastRestore = [...events].reverse().find((event) => event.kind === "restored" && Number(event.durationMs) > 0);
+  set("hostdash-read-total", compactTokens(totals.inputTokens));
+  set("hostdash-reused-total", compactTokens(totals.cachedTokens));
+  set("hostdash-output-total", compactTokens(totals.outputTokens));
+  const calibrated = Number(telemetry.coldPrefillSamples) > 0;
+  set("hostdash-time-saved", calibrated ? duration(totals.timeSavedMs || 0) : "—");
+  set("hostdash-time-saved-label", calibrated ? t("hostdash.timeSaved") : t("hostdash.calibrating"));
+  set("hostdash-active-count", number(localHost.activeCount || 0));
+  set("hostdash-pending-count", number(localHost.pendingCount || 0));
+  renderHostSwimlanes(localHost, telemetry);
+  set("hostdash-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
+  set("hostdash-gpu-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
+  set("hostdash-restores", number(counters.restores || 0));
+  set("hostdash-prefill-restore-last", lastRestore ? duration(lastRestore.durationMs) : "—");
+  set("hostdash-restore-last", lastRestore ? duration(lastRestore.durationMs) : "—");
+  const slots = $("hostdash-gpu-slots");
+  if (slots) {
+    slots.replaceChildren(...(localHost.lanes || []).map((lane) => {
+      const slot = document.createElement("i");
+      slot.className = `kv-slot${lane.state === "active" ? " is-active" : lane.state === "hot" ? " is-hot" : ""}`;
+      slot.title = lane.state || "empty";
+      return slot;
     }));
   }
-  const tally = { gpu: 0, ssd: 0, cold: 0, llama_auto: 0 };
-  for (const entry of hostDash.tiers) tally[entry.tier] = (tally[entry.tier] || 0) + 1;
-  set("hostdash-tier-counts", `${tally.gpu} · ${tally.ssd} · ${tally.cold} · ${tally.llama_auto}`);
 
   const ssd = localHost.ssd;
-  const counters = localHost.counters || {};
   const fill = $("hostdash-ssd-fill");
   if (ssd && ssd.budgetBytes > 0) {
     const ratio = Math.min(1, (Number(ssd.totalBytes) || 0) / Number(ssd.budgetBytes));
@@ -786,8 +874,8 @@ function renderLocalHostDashboard(data) {
     set("hostdash-ssd-used", "—");
   }
   set("hostdash-ssd-states", number(ssd?.states || 0));
-  set("hostdash-ssd-evictions", number(counters.evictions || 0));
-  set("hostdash-ssd-expired", number(counters.expired || 0));
+  set("hostdash-checkpoints", number(counters.saves || 0));
+  set("hostdash-cold-prefills", number(counters.coldPrefills || 0));
 }
 
 function gib(bytes) {
