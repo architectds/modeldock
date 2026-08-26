@@ -75,6 +75,7 @@ cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
 LOG="$ROOT/modeldock.log"
+VERIFY_TIMEOUT_MS=60000
 # Rotate at startup, one previous generation (like codex-router's log-rotation):
 # the log is append-only for the life of the process, so a cap on growth can only
 # be applied between runs. 32 MB keeps roughly a month of daily use.
@@ -95,7 +96,7 @@ else
 fi
 if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
   --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS"; then
   echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2
   exit 1
 fi

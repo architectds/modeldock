@@ -15,6 +15,7 @@ import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
+import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 
 // Re-exported so the existing import path keeps working: the tee is SSE
 // machinery and lives with the rest of the framing rules in sse.mjs.
@@ -3590,7 +3591,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     blockedToolTypes: routedProfile.blockedToolTypes,
     hostedToolTypes: routedProfile.hostedToolTypes,
     customToolsAsFunctions: routedProfile.customToolsAsFunctions,
-    flattenAllNamespaces: routedProfile.flattenAllNamespaces,
+    // Chat Completions has no namespace descriptor. Flatten only for a profile
+    // that explicitly selects that transport; Responses routes keep their
+    // existing declaration shape unchanged.
+    flattenAllNamespaces: routedProfile.flattenAllNamespaces || routedProfile.transport === "chat",
     safeNamespaceFunctionNames: routedProfile.safeNamespaceFunctionNames,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
@@ -3695,8 +3699,20 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     const normalizedPayload = Number.isSafeInteger(slot) && slot >= 0
       ? { ...relayPayload, id_slot: slot }
       : relayPayload;
+    // llama.cpp's Responses compatibility endpoint cannot reuse a restored KV
+    // slot for Qwen hybrid contexts. Its Chat endpoint can, while retaining the
+    // engine-owned template and function-call parser. This is selected by the
+    // local profile only; every other provider keeps the exact Responses wire.
+    const chatBridge = target.transport === "chat" ? responsesToChat(normalizedPayload) : null;
+    const localCustomToolNames = chatBridge
+      ? new Set([...customToolNames, ...chatBridge.customToolNames])
+      : customToolNames;
+    const restoreChatCall = (item) => restoreCustomToolCall(
+      restoreNamespaceCall(item, namespaces),
+      localCustomToolNames,
+    );
     try {
-    const routed = serializedBody({ ...normalizedPayload, model: upstreamModel });
+    const routed = serializedBody({ ...(chatBridge ? chatBridge.payload : normalizedPayload), model: upstreamModel });
     const upstreamBytes = routed.bytes;
     const upstream = await fetch(target.url, {
       method: "POST",
@@ -3778,7 +3794,38 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
-    if (target.free && normalizedPayload.stream === true) {
+    if (chatBridge) {
+      if (normalizedPayload.stream === true) {
+        const piped = await pipeChatCompletionStream(upstreamBody, res, {
+          onEvent: (event) => tee.push(Buffer.from(`data: ${JSON.stringify(event)}\r\n\r\n`)),
+          onFirstResponse: markFirstResponse,
+          restoreCall: restoreChatCall,
+        });
+        tee.end();
+        bytesOut = piped.bytes;
+        upstreamResponseBytes = piped.upstreamBytes || piped.bytes;
+        if (piped.completedResponse) completedResponse = piped.completedResponse;
+        if (piped.failure) responseFailure = piped.failure;
+        interrupted = piped.interrupted && !responseCompleted;
+      } else {
+        const raw = await upstream.text();
+        upstreamResponseBytes = Buffer.byteLength(raw);
+        let chatCompletion;
+        try {
+          chatCompletion = JSON.parse(raw);
+        } catch {
+          throw new Error("Local Chat upstream returned invalid JSON.");
+        }
+        const response = chatCompletionToResponse(chatCompletion, { restoreCall: restoreChatCall });
+        const body = JSON.stringify(response);
+        completedResponse = response;
+        tee.push(Buffer.from(body));
+        tee.end();
+        bytesOut = Buffer.byteLength(body);
+        markFirstResponse();
+        res.end(body);
+      }
+    } else if (target.free && normalizedPayload.stream === true) {
       const result = await pipeFreeStream(upstreamBody, res, tee, freeEmptyError?.body.error.message, markFirstResponse);
       bytesOut = result.bytes;
       upstreamResponseBytes = result.upstreamBytes || result.bytes;
@@ -3815,7 +3862,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       interrupted = piped.interrupted && !responseCompleted;
     }
     markFirstResponse();
-    if (completedResponse && routeAffinity) {
+    if (completedResponse && routeAffinity && (!chatBridge || completedResponse.status === "completed")) {
       routeAffinity.registerResponse(completedResponse, route.model);
     }
     // The zen free stream reports usage in the trailing chat chunk

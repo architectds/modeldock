@@ -480,6 +480,7 @@ if ($preflightExit -eq 0) { exit 0 }
 # command starts with a quoted program path, so wrap the whole command in one extra
 # pair of quotes (the ""prog" args" form).
 $log = Join-Path $root "modeldock.log"
+$verifyTimeoutMs = 60000
 # Rotate at startup, one previous generation (like codex-router's log-rotation):
 # the log is append-only for the life of the process, so a cap on growth can only
 # be applied between runs. 32 MB keeps roughly a month of daily use. Rotation is
@@ -494,7 +495,7 @@ if ((Test-Path -LiteralPath $log) -and ((Get-Item -LiteralPath $log).Length -gt 
 }
 $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
-$verifyExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "15000") -Quiet
+$verifyExit = Invoke-GatewayVerifier -VerifierArgs @("--verify-gateway", "--root", $root, "--port", "$port", "--state-dir", $stateDir, "--started-after-ms", "$startedAfterMs", "--timeout-ms", "$verifyTimeoutMs") -Quiet
 if ($verifyExit -ne 0) {
   Write-Output "ERROR: Gateway did not verify after hidden start. Check $log."
   exit 1
@@ -824,6 +825,7 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifyTimeoutMs = 60000
 $verifier = Join-Path $root "scripts\gateway-verifier.mjs"
 if (Test-Path -LiteralPath $verifier) {
   $verifierEntry = $verifier
@@ -862,7 +864,7 @@ $verifyArgs = @(
   "--port", "$port",
   "--state-dir", $stateDir,
   "--started-after-ms", "$startedAfterMs",
-  "--timeout-ms", "15000"
+  "--timeout-ms", "$verifyTimeoutMs"
 )
 if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
 $verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs

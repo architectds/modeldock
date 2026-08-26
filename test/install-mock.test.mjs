@@ -427,7 +427,7 @@ async function cleanupMockInstall(port, installDir) {
   await waitForPortFree(port);
   // A hidden Windows launcher can release its redirected log handle shortly
   // after the listener disappears. Let rmSync absorb that normal hand-off.
-  rmSync(installDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmSync(installDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
 }
 
 function sha256(buf) {

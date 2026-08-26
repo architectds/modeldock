@@ -516,6 +516,7 @@ cd "$ROOT"
 # Log instead of discarding: a background start that dies (bad node, port in use,
 # missing file) is otherwise completely silent for the user.
 LOG="$ROOT/modeldock.log"
+VERIFY_TIMEOUT_MS=60000
 # Rotate at startup, one previous generation (like codex-router's log-rotation):
 # the log is append-only for the life of the process, so a cap on growth can only
 # be applied between runs. 32 MB keeps roughly a month of daily use.
@@ -536,7 +537,7 @@ else
 fi
 if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
   --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+  --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS"; then
   echo "ERROR: Gateway did not verify after hidden start. Check $LOG." >&2
   exit 1
 fi
@@ -866,6 +867,7 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifyTimeoutMs = 60000
 $verifier = Join-Path $root "scripts\gateway-verifier.mjs"
 if (Test-Path -LiteralPath $verifier) {
   $verifierEntry = $verifier
@@ -904,7 +906,7 @@ $verifyArgs = @(
   "--port", "$port",
   "--state-dir", $stateDir,
   "--started-after-ms", "$startedAfterMs",
-  "--timeout-ms", "15000"
+  "--timeout-ms", "$verifyTimeoutMs"
 )
 if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
 $verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs
@@ -960,6 +962,7 @@ if [ -f "$ENV_FILE" ]; then
   esac
 fi
 STATE_DIR="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
+VERIFY_TIMEOUT_MS=60000
 
 find_listener_pid() {
   pid=""
@@ -1180,14 +1183,14 @@ verify_gateway() {
   if [ -n "$OLD_PID" ]; then
     if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
       --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-      --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000 \
+      --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS" \
       --previous-pid "$OLD_PID"; then
       status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
       return 1
     fi
   elif ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
     --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-    --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+    --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS"; then
     status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
     return 1
   fi

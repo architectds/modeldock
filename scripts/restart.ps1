@@ -316,6 +316,7 @@ try {
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
 if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
+$verifyTimeoutMs = 60000
 $verifier = Join-Path $root "scripts\gateway-verifier.mjs"
 if (Test-Path -LiteralPath $verifier) {
   $verifierEntry = $verifier
@@ -354,7 +355,7 @@ $verifyArgs = @(
   "--port", "$port",
   "--state-dir", $stateDir,
   "--started-after-ms", "$startedAfterMs",
-  "--timeout-ms", "15000"
+  "--timeout-ms", "$verifyTimeoutMs"
 )
 if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
 $verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs

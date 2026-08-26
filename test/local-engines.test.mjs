@@ -210,7 +210,7 @@ test("a connected local engine is routed to itself, keyless", async () => {
 
   const config = { tokens: { "opencode-go": "should-never-be-used" } };
   const cases = [
-    ["qwen3-30b.gguf@llamacpp", "http://127.0.0.1:8080/v1/responses", "llamacpp"],
+    ["qwen3-30b.gguf@llamacpp", "http://127.0.0.1:8080/v1/chat/completions", "llamacpp"],
     ["Qwen/Qwen3-8B@vllm", "http://127.0.0.1:8000/v1/responses", "vllm"],
   ];
   for (const [model, url, provider] of cases) {

@@ -434,7 +434,7 @@ const OLLAMA_PROFILE = {
 // They are distinct providers rather than one "local" slot so a machine can run
 // more than one at a time: a small model under Ollama and a tuned 27B under
 // llama-server is the case this exists for, and one slot would force a choice.
-function localEngineProfile(id, label, defaultBaseUrl, compHash) {
+function localEngineProfile(id, label, defaultBaseUrl, compHash, transport = "responses") {
   const profile = {
     id,
     label,
@@ -442,13 +442,14 @@ function localEngineProfile(id, label, defaultBaseUrl, compHash) {
     tokenEnvName: "",
     blockedToolTypes: new Set([]),
     hiddenToolNames: new Set([]),
+    transport,
     availableModels: [],
     modelCatalog({ mainModel, baseInstructions }) {
       return modelCatalogDefaults({
         profileId: id,
         mainModel,
         displayName: label,
-        description: `Local ${label} models through the ModelDock Responses gate.`,
+        description: `Local ${label} models through the ModelDock gate.`,
         compHash,
         inputModalities: ["text", "image"],
         supportsSearchTool: false,
@@ -460,7 +461,7 @@ function localEngineProfile(id, label, defaultBaseUrl, compHash) {
   return profile;
 }
 
-const LLAMACPP_PROFILE = localEngineProfile("llamacpp", "llama.cpp (local)", "http://127.0.0.1:8080", "modeldock-llamacpp-v1");
+const LLAMACPP_PROFILE = localEngineProfile("llamacpp", "llama.cpp (local)", "http://127.0.0.1:8080", "modeldock-llamacpp-v1", "chat");
 const VLLM_PROFILE = localEngineProfile("vllm", "vLLM (local)", "http://127.0.0.1:8000", "modeldock-vllm-v1");
 
 // Grok through a Grok subscription rather than through metered API credits.
@@ -664,13 +665,17 @@ defineRouting(OLLAMA_PROFILE, {
 // Same rule Ollama uses - its slug is colon-free but the server serves the
 // original tag - and the comment there applies verbatim.
 function localWireTarget(providerId) {
-  return (config, model) => ({
-    provider: providerId,
-    model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
-    url: `${trimBase(profileById(providerId).baseUrl)}/responses`,
-    token: "",
-    tokenRequired: false,
-  });
+  return (config, model) => {
+    const transport = profileById(providerId).transport || "responses";
+    return {
+      provider: providerId,
+      model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
+      url: `${trimBase(profileById(providerId).baseUrl)}/${transport === "chat" ? "chat/completions" : "responses"}`,
+      transport,
+      token: "",
+      tokenRequired: false,
+    };
+  };
 }
 
 defineRouting(LLAMACPP_PROFILE, {

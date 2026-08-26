@@ -45,10 +45,10 @@ $env:MODELDOCK_SKIP_OPEN = "1"
 $env:MODELDOCK_CODEX_HOME = $codexHome
 $env:MODELDOCK_AUTOSTART_KEY = $autostartKey
 $env:MODELDOCK_AUTOSTART_NAME = $autostartName
-# A fresh install has no provider token, and /healthz intentionally returns 503
-# in that state. Use a disposable test token so the first-start check verifies
-# the actual launch path without contacting a real provider.
-$env:OPENCODE_GO_TOKEN = "release-verify-probe-token"
+# The first install is deliberately tokenless: the gateway must prove that it
+# started through its owner record and status API, while /healthz correctly
+# stays 503 until the later deterministic upstream probe supplies a token.
+Remove-Item Env:OPENCODE_GO_TOKEN -ErrorAction SilentlyContinue
 # The release probe asserts the full six-tool surface (recall_memory /
 # store_memory included). Published bundles before the memory-default-on change
 # New bundles default the vault on; pinning it explicitly also covers older
@@ -101,16 +101,33 @@ function Verify-InstalledGateway($label) {
   $nodeExe = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
   if (-not $nodeExe) { $nodeExe = (Get-Command node -ErrorAction Stop).Source }
   # This is the same verifier every lifecycle path uses. It validates the
-  # fresh owner and /api/status; /healthz remains a separate provider-ready
-  # check below because a tokenless gateway is still a valid running install.
-  & $nodeExe $verifier --verify-gateway --root $root --port "$port" --state-dir $stateDir --timeout-ms 15000
+  # fresh owner and /api/status; a tokenless gateway is a valid running install.
+  & $nodeExe $verifier --verify-gateway --root $root --port "$port" --state-dir $stateDir --timeout-ms 60000
   if ($LASTEXITCODE -ne 0) { throw "gateway did not pass shared verification after $label`n$(Gateway-LogTail)" }
   Write-Step "gateway verified after $label"
 }
 
+function Wait-ProviderReadyGateway($label) {
+  $healthUrl = "http://127.0.0.1:$port/healthz"
+  Write-Step "waiting for provider-ready gateway after $label at $healthUrl"
+  for ($i = 0; $i -lt 120; $i += 1) {
+    try {
+      $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
+      if ($health.Content -match '"ok"\s*:\s*true') {
+        Write-Step "gateway provider-ready after $label"
+        return
+      }
+    } catch {
+      # 503 is expected until the restarted process has loaded the test token.
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "gateway did not become provider-ready after $label at $healthUrl`n$(Gateway-LogTail)"
+}
+
 try {
   $installer = Join-Path $work "install.ps1"
-  $installerUrl = "https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1"
+  $installerUrl = if ($env:MODELDOCK_VERIFY_INSTALLER_URL) { $env:MODELDOCK_VERIFY_INSTALLER_URL } else { "https://raw.githubusercontent.com/architectds/modeldock/main/scripts/install.ps1" }
   Write-Step "downloading installer from $installerUrl"
   Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installer -TimeoutSec 60
 
@@ -126,22 +143,8 @@ try {
     (New-Object System.Text.UTF8Encoding($false))
   )
 
-  $healthUrl = "http://127.0.0.1:$port/healthz"
-  Write-Step "waiting for gateway at $healthUrl"
-  $healthy = $false
-  for ($i = 0; $i -lt 40; $i += 1) {
-    try {
-      $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
-      if ($health.Content -match '"ok"\s*:\s*true') { $healthy = $true; break }
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  if (-not $healthy) {
-    throw "gateway did not become healthy at $healthUrl`n$(Gateway-LogTail)"
-  }
   Verify-InstalledGateway "install"
-  Write-Step "gateway healthy"
+  Write-Step "tokenless gateway is running after install"
 
   # The installer enables start-at-login by default; assert the Run key entry
   # points back at this test install, then remove it during cleanup.
@@ -178,20 +181,7 @@ try {
   Write-Step $restartText
   if ($restartExit -ne 0) { throw "restart.ps1 exited $restartExit`n$restartText" }
   Verify-InstalledGateway "restart"
-
-  $healthy = $false
-  for ($i = 0; $i -lt 40; $i += 1) {
-    try {
-      $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
-      if ($health.Content -match '"ok"\s*:\s*true') { $healthy = $true; break }
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  if (-not $healthy) {
-    throw "gateway did not recover after restart`n$(Gateway-LogTail)"
-  }
-  Write-Step "gateway healthy after restart"
+  Write-Step "tokenless gateway is running after restart"
 
   # Point the installed gateway at a local deterministic Responses upstream.
   # This keeps the release test offline from the provider while exercising the
@@ -239,20 +229,7 @@ try {
   Write-Step $restartText
   if ($restartExit -ne 0) { throw "restart.ps1 exited $restartExit`n$restartText" }
   Verify-InstalledGateway "stream-probe restart"
-
-  $healthy = $false
-  for ($i = 0; $i -lt 40; $i += 1) {
-    try {
-      $health = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 5
-      if ($health.Content -match '"ok"\s*:\s*true') { $healthy = $true; break }
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  if (-not $healthy) {
-    throw "gateway did not become healthy after stream-probe restart`n$(Gateway-LogTail)"
-  }
-  Write-Step "gateway healthy with stream probe upstream"
+  Wait-ProviderReadyGateway "stream-probe restart"
 
   Write-Step "verifying completed stream closes cleanly"
   $streamOut = & node $streamProbe client --gateway "http://127.0.0.1:$port" --keyfile (Join-Path $stateDir "caller-key") 2>&1

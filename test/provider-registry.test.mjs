@@ -159,8 +159,10 @@ test("the address shown is the address used", () => {
   ]) {
     const profile = profileById(model.includes("@") ? model.split("@").pop() : "opencode-go");
     const shown = profile.baseUrlFor(config, model);
-    const used = upstreamTargetFor(config, model).url;
-    assert.equal(used, `${shown}/responses`, `${model}: shown ${shown}, used ${used}`);
+    const target = upstreamTargetFor(config, model);
+    const used = target.url;
+    const endpoint = target.transport === "chat" ? "chat/completions" : "responses";
+    assert.equal(used, `${shown}/${endpoint}`, `${model}: shown ${shown}, used ${used}`);
   }
   disconnectLocalEngines();
 });

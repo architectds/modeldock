@@ -157,7 +157,10 @@ async function startDashboard(t, { managed = false } = {}) {
 
 // The smallest CDP client that can drive a page and read a value back.
 async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceScaleFactor = 1, instance = "default" } = {}) {
-  const port = 9350 + Math.floor(process.pid % 200) + (instance === "default" ? 0 : 300);
+  // Top-level node:test cases can overlap. Each dashboard scenario therefore
+  // needs its own CDP port, not merely a "default versus other" split.
+  const instanceOffset = { default: 0, hostmonitor: 300, narrow: 600 }[instance] ?? 900;
+  const port = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
   const chrome = spawn(chromePath, [
     "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox",

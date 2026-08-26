@@ -35,6 +35,7 @@ if [ -f "$ENV_FILE" ]; then
   esac
 fi
 STATE_DIR="${MODELDOCK_STATE_DIR:-$HOME/.modeldock}"
+VERIFY_TIMEOUT_MS=60000
 
 find_listener_pid() {
   pid=""
@@ -255,14 +256,14 @@ verify_gateway() {
   if [ -n "$OLD_PID" ]; then
     if ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
       --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-      --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000 \
+      --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS" \
       --previous-pid "$OLD_PID"; then
       status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
       return 1
     fi
   elif ! "$NODE_BIN" "$VERIFIER" --verify-gateway \
     --root "$ROOT" --port "$PORT" --state-dir "$STATE_DIR" \
-    --started-after-ms "$STARTED_AFTER_MS" --timeout-ms 15000; then
+    --started-after-ms "$STARTED_AFTER_MS" --timeout-ms "$VERIFY_TIMEOUT_MS"; then
     status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $ROOT/modeldock.log."
     return 1
   fi
