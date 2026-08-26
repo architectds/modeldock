@@ -63,6 +63,7 @@ function compareOldest(a, b) {
 }
 
 function normalizeState(value) {
+  const warmBaseKey = value?.warmBaseKey ? assertSessionKey(value.warmBaseKey) : "";
   return Object.freeze({
     sessionKey: assertSessionKey(value?.sessionKey),
     fingerprint: text(value?.fingerprint, "A KV state host fingerprint"),
@@ -71,6 +72,7 @@ function normalizeState(value) {
     promptTokens: nonNegativeInteger(value?.promptTokens, "A KV state prompt token count"),
     savedAt: timestamp(value?.savedAt, "A KV state saved timestamp"),
     lastAccessedAt: timestamp(value?.lastAccessedAt || value?.savedAt, "A KV state access timestamp"),
+    ...(warmBaseKey ? { warmBaseKey } : {}),
   });
 }
 
@@ -155,6 +157,7 @@ export function touchLocalHostKvState(manifest, { sessionKey, fingerprint, at = 
 export function planLocalHostKvStateWrite(manifest, {
   sessionKey,
   fingerprint,
+  warmBaseKey,
   filename,
   bytes,
   promptTokens,
@@ -164,6 +167,7 @@ export function planLocalHostKvStateWrite(manifest, {
   const state = normalizeState({
     sessionKey: assertSessionKey(sessionKey),
     fingerprint,
+    ...(warmBaseKey ? { warmBaseKey: assertSessionKey(warmBaseKey) } : {}),
     filename,
     bytes,
     promptTokens,

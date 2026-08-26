@@ -15,6 +15,11 @@ function fingerprintFor(record) {
     endpoint: record.endpoint,
     activeSpec: record.activeSpec,
     activeProfile: record.activeProfile,
+    // New local sessions inject a completed synthetic bootstrap turn before
+    // their first user message. Include this protocol in the fingerprint so
+    // checkpoints made by an older gateway are cold-started once, never replayed
+    // against a different Chat prefix.
+    localChatWarmBootstrapVersion: 1,
     verifiedHost: {
       binaryBytes: record.capabilities?.verifiedBinaryBytes || 0,
       binaryMtimeMs: record.capabilities?.verifiedBinaryMtimeMs || 0,
@@ -230,7 +235,7 @@ export class LocalHostRuntime {
     return this.#coordinator.waitForIdle({ timeoutMs });
   }
 
-  async run({ sessionId, threadId, signal, run } = {}) {
+  async run({ sessionId, threadId, signal, warmBase = null, run } = {}) {
     if (typeof run !== "function") throw new TypeError("A local host runtime request needs a run function.");
     // Refresh can yield for disk IO. Recheck the transition barrier afterward
     // so a first request cannot slip between a takeover's admission close and
@@ -240,7 +245,7 @@ export class LocalHostRuntime {
     while (this.#transition) await this.#transition;
     const conversationId = String(sessionId || threadId || "").trim();
     if (!this.#coordinator || !conversationId) return run({ cache: { tier: "unmanaged" }, slot: null });
-    return this.#coordinator.run({ principalId: "local", conversationId, signal, run });
+    return this.#coordinator.run({ principalId: "local", conversationId, signal, warmBase, run });
   }
 }
 

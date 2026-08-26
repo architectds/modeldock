@@ -1150,6 +1150,8 @@ test("relayResponses strips dead-weight sections from instructions for an 80K cu
     const sent = calls[0].body;
     assert.ok(!sent.instructions.includes("hyperframes"), "hyperframes stripped for an 80K custom model");
     assert.ok(sent.instructions.includes("imagegen"), "other skill entries survive the relay");
+    assert.match(sent.instructions, /LOCAL HOST RULE:.*Never stop, restart, unload, or reconfigure/i,
+      "a local model is told not to stop the server that generates its next turn");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1392,6 +1394,92 @@ test("managed llama dispatch pins the selected hot slot on the real upstream wir
     assert.deepEqual(dispatched, ["session-managed"]);
     assert.equal(calls[0].id_slot, 1);
     assert.equal(calls[0].model, "qwen3.8:27b");
+  } finally {
+    globalThis.fetch = originalFetch;
+    applyLocalEngineProfile("llamacpp", null);
+  }
+});
+
+test("managed llama creates a completed bootstrap turn, then appends the real tool-capable Codex request", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "qwen3.8:27b", contextWindow: 200_000 }],
+  });
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    if (calls.length === 1) {
+      return new Response(JSON.stringify({
+        id: "chat_bootstrap",
+        model: "qwen3.8:27b",
+        choices: [{ message: { role: "assistant", content: "BOOTSTRAP_READY" }, finish_reason: "stop" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      id: "chat_tool",
+      model: "qwen3.8:27b",
+      choices: [{
+        message: {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_warm", type: "function", function: { name: "exec_command", arguments: "{\"cmd\":\"echo WARM_KV\"}" } }],
+        },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 5_180, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 5_154 } },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const model = "qwen3.8:27b@llamacpp";
+    const services = {
+      ...compactServices(),
+      mainModel: model,
+      config: { ...configStub(), mainModel: model, profileId: "llamacpp" },
+      knownModels: new Set([model]),
+      incomingHeaders: { "x-codex-session-id": "session-warm" },
+      requestUrl: "/v1/responses",
+      localHostRuntime: {
+        async run({ sessionId, warmBase, run }) {
+          assert.equal(sessionId, "session-warm");
+          assert.ok(warmBase, "managed Chat routing derives a cache-safe warm base");
+          assert.equal(await warmBase.create({ slot: 0 }), true);
+          return run({ slot: 0, cache: { tier: "warm" }, warmBase });
+        },
+      },
+    };
+    const result = await relayResponses({
+      model,
+      stream: false,
+      instructions: "You are the local coding assistant.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "run the warm check" }] }],
+      tools: [{
+        type: "function",
+        name: "exec_command",
+        description: "Run a command.",
+        parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"], additionalProperties: false },
+      }],
+    }, res, services);
+
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].id_slot, 0);
+    assert.deepEqual(calls[0].messages.map((message) => message.role), ["system", "user"]);
+    assert.equal(calls[0].messages[1].content, "Reply with exactly BOOTSTRAP_READY. Do not call a tool.");
+    assert.equal(calls[0].tools[0].function.name, "exec_command");
+    assert.equal(calls[1].id_slot, 0);
+    assert.deepEqual(calls[1].messages.map((message) => message.role), ["system", "user", "assistant", "user"]);
+    assert.equal(calls[1].messages[1].content, calls[0].messages[1].content);
+    assert.equal(calls[1].messages[2].content, "BOOTSTRAP_READY");
+    assert.equal(calls[1].messages[3].content, "run the warm check");
+    assert.equal(calls[1].tools[0].function.name, "exec_command", "the injected prefix keeps the real tool schema");
+    const bridged = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(bridged.output[0].type, "function_call");
+    assert.equal(bridged.output[0].name, "exec_command");
+    assert.equal(bridged.usage.input_tokens_details.cached_tokens, 5_154);
   } finally {
     globalThis.fetch = originalFetch;
     applyLocalEngineProfile("llamacpp", null);

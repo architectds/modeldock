@@ -46,6 +46,9 @@ export class LocalHostKvCoordinator {
   #residency;
   #mutation = Promise.resolve();
   #validatedFingerprint = false;
+  // The active lane is in memory, so its static bootstrap key lives here until
+  // it is checkpointed. Checkpoints persist the same digest in their manifest.
+  #warmBaseKeys = new Map();
   // Lifetime tallies for the local dashboard: what the SSD cache is actually
   // doing, counted where the actions happen instead of re-derived from logs.
   #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0 };
@@ -179,7 +182,7 @@ export class LocalHostKvCoordinator {
     }
   }
 
-  async #prepare(sessionKey, signal) {
+  async #prepare(sessionKey, signal, warmBase = null) {
     return this.#exclusive(async () => {
       if (!this.#validatedFingerprint) {
         try {
@@ -197,16 +200,31 @@ export class LocalHostKvCoordinator {
         }
         this.#validatedFingerprint = true;
       }
-      let hasSsdState = false;
+      let sessionState = null;
       try {
-        hasSsdState = await this.store.has({ sessionKey, fingerprint: this.fingerprint });
+        sessionState = typeof this.store.lookup === "function"
+          ? await this.store.lookup({ sessionKey, fingerprint: this.fingerprint })
+          : (await this.store.has({ sessionKey, fingerprint: this.fingerprint }) ? {} : null);
       } catch (error) {
         await this.#diagnose("state_lookup_failed", error);
+      }
+      let hasSsdState = Boolean(sessionState);
+      const residentWarmBaseKey = this.#warmBaseKeys.get(sessionKey) || sessionState?.warmBaseKey || "";
+      const warmBaseChanged = Boolean(warmBase?.sessionKey && residentWarmBaseKey !== warmBase.sessionKey && (residentWarmBaseKey || hasSsdState));
+      if (warmBaseChanged && hasSsdState) {
+        try {
+          if (typeof this.store.remove === "function") await this.store.remove({ sessionKey, fingerprint: this.fingerprint });
+        } catch (error) {
+          await this.#diagnose("warm_base_discard_failed", error);
+        }
+        hasSsdState = false;
+        this.#warmBaseKeys.delete(sessionKey);
       }
       const lease = leaseLocalHostResidency(this.#residency, {
         sessionKey,
         fingerprint: this.fingerprint,
         hasSsdState,
+        forceCold: warmBaseChanged,
       });
       if (lease.kind === "queue") throw new Error("No local host lane became available after admission.");
       this.#residency = lease.residency;
@@ -230,7 +248,14 @@ export class LocalHostKvCoordinator {
         if (action.type === "save_lru_to_ssd") {
           this.#recordEvent("switching", { slot: action.slot });
           try {
-            const saved = await this.store.save({ sessionKey: action.sessionKey, fingerprint: action.fingerprint, slot: action.slot, signal });
+            const warmBaseKey = this.#warmBaseKeys.get(action.sessionKey);
+            const saved = await this.store.save({
+              sessionKey: action.sessionKey,
+              fingerprint: action.fingerprint,
+              ...(warmBaseKey ? { warmBaseKey } : {}),
+              slot: action.slot,
+              signal,
+            });
             if (saved?.saved) {
               this.#counters.saves += 1;
               this.#recordEvent("checkpointed", { slot: action.slot });
@@ -251,6 +276,7 @@ export class LocalHostKvCoordinator {
             } else {
               this.#counters.restores += 1;
               restoreMs = Number(restored.restoreMs) || 0;
+              if (sessionState?.warmBaseKey) this.#warmBaseKeys.set(sessionKey, sessionState.warmBaseKey);
               this.#recordEvent("restored", { slot: action.slot, durationMs: restoreMs });
             }
           } catch (error) {
@@ -266,12 +292,55 @@ export class LocalHostKvCoordinator {
           await this.#erase(action.slot);
         }
       }
+      let activeWarmBase = null;
+      if (warmBase?.sessionKey && typeof warmBase.create === "function") {
+        let baseReady = false;
+        try {
+          baseReady = await this.store.has({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint });
+        } catch (error) {
+          await this.#diagnose("warm_base_lookup_failed", error);
+        }
+        if (!hasSsdState && baseReady) {
+          this.#recordEvent("restoring", { slot: lease.slot });
+          try {
+            const restored = await this.store.restore({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint, slot: lease.slot, signal });
+            if (restored.restored) {
+              this.#counters.restores += 1;
+              restoreMs = Number(restored.restoreMs) || 0;
+              tier = "warm";
+              this.#recordEvent("restored", { slot: lease.slot, durationMs: restoreMs });
+            } else {
+              baseReady = false;
+            }
+          } catch (error) {
+            baseReady = false;
+            await this.#diagnose("warm_base_restore_failed", error);
+            await this.#erase(lease.slot);
+          }
+        }
+        if (!hasSsdState && !baseReady) {
+          try {
+            const created = await warmBase.create({ slot: lease.slot, signal });
+            if (created) {
+              const saved = await this.store.save({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint, slot: lease.slot, signal });
+              if (saved?.saved) this.#counters.saves += 1;
+              tier = "warm";
+              baseReady = true;
+              this.#recordEvent("checkpointed", { slot: lease.slot });
+            }
+          } catch (error) {
+            await this.#diagnose("warm_base_create_failed", error);
+            await this.#erase(lease.slot);
+          }
+        }
+        if (baseReady || hasSsdState) activeWarmBase = warmBase;
+      }
       if (tier === "gpu") this.#recordEvent("running", { slot: lease.slot });
-      return { slot: lease.slot, tier, restoreMs };
+      return { slot: lease.slot, tier, restoreMs, warmBase: activeWarmBase, warmBaseKey: activeWarmBase?.sessionKey || "" };
     });
   }
 
-  async #complete({ slot, sessionKey, success }) {
+  async #complete({ slot, sessionKey, success, warmBaseKey = "" }) {
     if (!this.assignSlots) return;
     await this.#exclusive(async () => {
       this.#residency = completeLocalHostResidency(this.#residency, {
@@ -281,9 +350,12 @@ export class LocalHostKvCoordinator {
         success,
       });
       if (!success) {
+        this.#warmBaseKeys.delete(sessionKey);
         this.#recordEvent("failed", { slot });
         await this.#erase(slot);
       } else {
+        if (warmBaseKey) this.#warmBaseKeys.set(sessionKey, warmBaseKey);
+        else this.#warmBaseKeys.delete(sessionKey);
         this.#recordEvent("hot", { slot });
       }
     });
@@ -314,9 +386,11 @@ export class LocalHostKvCoordinator {
       for (const lane of this.#residency.lanes) {
         if (lane.state !== "hot") continue;
         try {
+          const warmBaseKey = this.#warmBaseKeys.get(lane.sessionKey);
           const result = await this.store.save({
             sessionKey: lane.sessionKey,
             fingerprint: lane.fingerprint,
+            ...(warmBaseKey ? { warmBaseKey } : {}),
             slot: lane.slot,
           });
           if (result?.saved) {
@@ -340,7 +414,7 @@ export class LocalHostKvCoordinator {
     });
   }
 
-  async run({ principalId = "local", conversationId, signal, run } = {}) {
+  async run({ principalId = "local", conversationId, signal, warmBase = null, run } = {}) {
     if (typeof run !== "function") throw new TypeError("A KV coordinator request needs a run function.");
     const normalizedPrincipalId = text(principalId, "A local principal id");
     const normalizedConversationId = text(conversationId, "A local conversation id");
@@ -357,14 +431,15 @@ export class LocalHostKvCoordinator {
         // N and then letting the server choose another slot would corrupt the
         // cache mapping; fair admission and complete Codex history remain safe.
         if (!this.assignSlots) return run({ cache: { tier: "llama_auto" }, slot: null });
-        const prepared = await this.#prepare(sessionKey, signal);
+        const prepared = await this.#prepare(sessionKey, signal, warmBase);
         try {
           const result = await run({
             cache: { tier: prepared.tier, ...(prepared.restoreMs ? { restoreMs: prepared.restoreMs } : {}) },
             slot: prepared.slot,
+            warmBase: prepared.warmBase,
           });
           const savedMs = this.#recordUsage(result, prepared);
-          await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false });
+          await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false, warmBaseKey: prepared.warmBaseKey });
           if (savedMs) this.#recordEvent("time_saved", { slot: prepared.slot, savedMs });
           return result;
         } catch (error) {

@@ -211,7 +211,7 @@ export class LocalHostKvStateStore {
     return Object.freeze({ removed: Object.freeze(removed), failures: Object.freeze(failures) });
   }
 
-  async save({ sessionKey, fingerprint, slot = 0, signal, at = new Date().toISOString() } = {}) {
+  async save({ sessionKey, fingerprint, warmBaseKey, slot = 0, signal, at = new Date().toISOString() } = {}) {
     const filename = stateFilename(this.filePrefix, this.makeId());
     // The managed launch receives this same directory as --slot-save-path.
     // Create it before asking the adapter to write, rather than relying on a
@@ -233,6 +233,7 @@ export class LocalHostKvStateStore {
     const plan = planLocalHostKvStateWrite(current, {
       sessionKey,
       fingerprint,
+      ...(warmBaseKey ? { warmBaseKey } : {}),
       filename,
       bytes: actual.size,
       promptTokens: saved.promptTokens,
@@ -279,6 +280,27 @@ export class LocalHostKvStateStore {
   async has({ sessionKey, fingerprint } = {}) {
     const manifest = await this.load();
     return Boolean(findLocalHostKvState(manifest, { sessionKey, fingerprint }));
+  }
+
+  // Metadata only: the coordinator needs the previous immutable bootstrap key
+  // before it decides whether a restored conversation can keep using its slot.
+  // It is a SHA-256 digest, never prompt or conversation content.
+  async lookup({ sessionKey, fingerprint } = {}) {
+    const manifest = await this.load();
+    return findLocalHostKvState(manifest, { sessionKey, fingerprint });
+  }
+
+  // A changed static prefix makes an old session checkpoint incompatible with
+  // its next Chat request. Remove it before cold-rebuilding, rather than leave
+  // a stale multi-GB state until TTL or LRU happens to notice it.
+  async remove({ sessionKey, fingerprint } = {}) {
+    const current = await this.load();
+    const state = findLocalHostKvState(current, { sessionKey, fingerprint });
+    if (!state) return Object.freeze({ removed: false, removalFailures: Object.freeze([]) });
+    const result = removeLocalHostKvState(current, { filename: state.filename });
+    await this.#write(result.manifest);
+    const removalFailures = await this.#removeEvicted(result.evicted);
+    return Object.freeze({ removed: true, removalFailures: Object.freeze(removalFailures) });
   }
 
   async invalidateExcept({ fingerprint } = {}) {

@@ -8,12 +8,18 @@ const FINGERPRINT = "llama-b10549:qwen-q4:262144:q4_0:q4_0";
 function fixture({ laneCount = 1, assignSlots = true } = {}) {
   const calls = [];
   const stored = new Map();
+  const warmBaseKeys = new Map();
   const store = {
     async has({ sessionKey, fingerprint }) { return stored.get(sessionKey) === fingerprint; },
+    async lookup({ sessionKey, fingerprint }) {
+      return stored.get(sessionKey) === fingerprint ? { warmBaseKey: warmBaseKeys.get(sessionKey) || "" } : null;
+    },
     async invalidateExcept({ fingerprint }) { calls.push({ action: "invalidate", fingerprint }); return { invalidated: [] }; },
-    async save({ sessionKey, fingerprint }) {
-      calls.push({ action: "save", sessionKey, fingerprint });
+    async save({ sessionKey, fingerprint, warmBaseKey }) {
+      calls.push({ action: "save", sessionKey, fingerprint, ...(warmBaseKey ? { warmBaseKey } : {}) });
       stored.set(sessionKey, fingerprint);
+      if (warmBaseKey) warmBaseKeys.set(sessionKey, warmBaseKey);
+      else warmBaseKeys.delete(sessionKey);
       return { saved: true };
     },
     async restore({ sessionKey, fingerprint }) {
@@ -21,6 +27,13 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
       return stored.get(sessionKey) === fingerprint
         ? { restored: true, restoreMs: 4 }
         : { restored: false, reason: "not_found" };
+    },
+    async remove({ sessionKey, fingerprint }) {
+      calls.push({ action: "remove", sessionKey, fingerprint });
+      if (stored.get(sessionKey) !== fingerprint) return { removed: false, removalFailures: [] };
+      stored.delete(sessionKey);
+      warmBaseKeys.delete(sessionKey);
+      return { removed: true, removalFailures: [] };
     },
   };
   const slotClient = { async erase() { calls.push({ action: "erase" }); return { erasedTokens: 1 }; } };
@@ -34,7 +47,7 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
     assignSlots,
     onDiagnostic: (value) => diagnostics.push(value),
   });
-  return { calls, stored, diagnostics, coordinator, store, slotClient };
+  return { calls, stored, warmBaseKeys, diagnostics, coordinator, store, slotClient };
 }
 
 test("single-slot coordinator keeps the current conversation hot and restores an exact inactive conversation from SSD", async () => {
@@ -63,6 +76,88 @@ test("single-slot coordinator keeps the current conversation hot and restores an
   assert.equal(coordinator.snapshot().activeCount, 0);
   assert.equal(coordinator.snapshot().pendingCount, 0);
   assert.equal(coordinator.snapshot().hotCount, 1);
+});
+
+test("a new conversation can seed and reuse an immutable completed warm base without exposing its identity", async () => {
+  const { coordinator, calls } = fixture();
+  const warmBase = {
+    sessionKey: "warm-base-fingerprint",
+    async create({ slot }) {
+      calls.push({ action: "create_warm_base", slot });
+      return true;
+    },
+  };
+  const seen = [];
+
+  await coordinator.run({
+    conversationId: "new-a",
+    warmBase,
+    run: async ({ cache, slot, warmBase: activeWarmBase }) => {
+      seen.push({ cache, slot, activeWarmBase });
+      return { ok: true };
+    },
+  });
+  await coordinator.run({
+    conversationId: "new-b",
+    warmBase,
+    run: async ({ cache, slot, warmBase: activeWarmBase }) => {
+      seen.push({ cache, slot, activeWarmBase });
+      return { ok: true };
+    },
+  });
+
+  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 1);
+  assert.ok(calls.some((call) => call.action === "save" && call.sessionKey === warmBase.sessionKey));
+  assert.ok(calls.some((call) => call.action === "restore" && call.sessionKey === warmBase.sessionKey));
+  assert.deepEqual(seen.map(({ cache, slot }) => ({ cache, slot })), [
+    { cache: { tier: "warm" }, slot: 0 },
+    { cache: { tier: "warm", restoreMs: 4 }, slot: 0 },
+  ]);
+  assert.equal(seen.every(({ activeWarmBase }) => activeWarmBase === warmBase), true);
+  assert.equal(coordinator.snapshot().telemetry.events.some((event) => "sessionKey" in event || "conversationId" in event), false);
+});
+
+test("a rejected warm-base bootstrap degrades to an ordinary cold request", async () => {
+  const { coordinator, calls } = fixture();
+  const warmBase = {
+    sessionKey: "warm-base-unavailable",
+    async create() {
+      calls.push({ action: "create_warm_base" });
+      return false;
+    },
+  };
+  const result = await coordinator.run({
+    conversationId: "cold-safe",
+    warmBase,
+    run: async ({ cache, warmBase: activeWarmBase }) => ({ ok: true, cache, activeWarmBase }),
+  });
+  assert.deepEqual(result, { ok: true, cache: { tier: "cold" }, activeWarmBase: null });
+  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 1);
+  assert.equal(calls.some((call) => call.action === "save" && call.sessionKey === warmBase.sessionKey), false);
+});
+
+test("a changed bootstrap key invalidates a hot conversation before it can reuse a divergent prefix", async () => {
+  const { coordinator, calls } = fixture();
+  const baseA = { sessionKey: "a".repeat(64), async create() { calls.push({ action: "create_a" }); return true; } };
+  const baseB = { sessionKey: "b".repeat(64), async create() { calls.push({ action: "create_b" }); return true; } };
+  const seen = [];
+
+  await coordinator.run({
+    conversationId: "same-session",
+    warmBase: baseA,
+    run: async ({ cache, warmBase }) => { seen.push({ cache, warmBase }); return { ok: true }; },
+  });
+  await coordinator.run({
+    conversationId: "same-session",
+    warmBase: baseB,
+    run: async ({ cache, warmBase }) => { seen.push({ cache, warmBase }); return { ok: true }; },
+  });
+
+  assert.equal(calls.some((call) => call.action === "create_a"), true);
+  assert.equal(calls.some((call) => call.action === "create_b"), true);
+  assert.equal(calls.filter((call) => call.action === "erase").length >= 2, true, "the initial cold lane and the divergent hot lane are erased");
+  assert.equal(seen[1].cache.tier, "warm");
+  assert.equal(seen[1].warmBase, baseB);
 });
 
 test("coordinator exposes bounded content-free lane events and measures cached-work savings from a cold baseline", async () => {
@@ -111,6 +206,7 @@ test("coordinator caps the five-minute swimlane event stream under repeated sess
 test("restore and save faults degrade only the cache tier, never the user request", async () => {
   const { coordinator, store, diagnostics } = fixture();
   store.has = async () => true;
+  store.lookup = async () => ({});
   store.restore = async () => { throw new Error("slot restore unavailable"); };
   store.save = async () => { throw new Error("slot save unavailable"); };
   const result = await coordinator.run({

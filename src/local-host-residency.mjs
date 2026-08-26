@@ -123,6 +123,7 @@ export function leaseLocalHostResidency(residency, {
   sessionKey: requestedSessionKey,
   fingerprint,
   hasSsdState = false,
+  forceCold = false,
   at = new Date().toISOString(),
 } = {}) {
   const current = createLocalHostResidency(residency);
@@ -130,10 +131,22 @@ export function leaseLocalHostResidency(residency, {
   const wantedFingerprint = text(fingerprint, "A local host fingerprint");
   const accessedAt = timestamp(at, "A local host lease timestamp");
   if (typeof hasSsdState !== "boolean") throw new TypeError("hasSsdState must be a boolean.");
+  if (typeof forceCold !== "boolean") throw new TypeError("Local host forceCold must be a boolean.");
   const reset = resetForFingerprint(current, wantedFingerprint);
   const base = reset.residency;
   const inheritedActions = reset.actions;
   const matching = base.lanes.find((lane) => lane.sessionKey === key && lane.fingerprint === wantedFingerprint);
+  if (matching?.state === "hot" && forceCold) {
+    const next = withLane(base, matching.slot, activeLane(matching.slot, key, wantedFingerprint, accessedAt));
+    return Object.freeze({
+      kind: "cold",
+      slot: matching.slot,
+      // cold_prefill already erases the slot in the coordinator. Do it once:
+      // another slot call would add latency without making the reset safer.
+      actions: Object.freeze([...inheritedActions, action("cold_prefill", { slot: matching.slot, sessionKey: key, fingerprint: wantedFingerprint })]),
+      residency: next,
+    });
+  }
   if (matching?.state === "hot") {
     const next = withLane(base, matching.slot, activeLane(matching.slot, key, wantedFingerprint, accessedAt));
     return Object.freeze({
