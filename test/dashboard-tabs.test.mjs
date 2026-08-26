@@ -21,6 +21,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
 import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
+import {
+  beginHostApply,
+  createObservedHost,
+  markHostApplying,
+  markHostVerified,
+  markHostVerifying,
+  takeOverHost,
+} from "../src/local-hosts.mjs";
+import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -76,7 +85,7 @@ function managedHostSnapshot() {
   };
 }
 
-async function startDashboard(t, { managed = false } = {}) {
+async function startDashboard(t, { managed = false, managedDrawer = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const services = createServices({
     host: "127.0.0.1",
@@ -99,6 +108,7 @@ async function startDashboard(t, { managed = false } = {}) {
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
   });
   services.localEnginesFile = path.join(dir, "local-engines.json");
+  services.localHostRegistryFile = path.join(dir, "local-hosts.json");
   // One configured endpoint, so the API tab renders a row with a Remove
   // button. Without it that tab has nothing to check and the escaped-element
   // assertion below walks an empty page - which is exactly how the button came
@@ -146,6 +156,33 @@ async function startDashboard(t, { managed = false } = {}) {
     launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
   }];
   services.probeGpus = async () => [];
+  if (managedDrawer) {
+    const endpoint = "http://127.0.0.1:11435/v1";
+    const launch = {
+      binary: "D:/llama-cpp/llama-server.exe",
+      args: ["-m", "D:/models/managed-model.gguf", "--mmproj", "D:/models/managed-projector.gguf", "-c", "215040"],
+    };
+    let record = takeOverHost(createObservedHost({
+      id: "llamacpp-drawer-test",
+      adapterId: "llamacpp-nvidia",
+      endpoint,
+      launch,
+    }), { kvState: { directory: "D:/managed-kv", budgetBytes: 32 * 1024 ** 3 } });
+    record = markHostVerified(record);
+    const profile = {
+      adapterId: "llamacpp-nvidia",
+      modelId: "managed-model",
+      profileId: "drawer-p1",
+      laneCount: 1,
+      laneContextTokens: 215_040,
+      totalContextTokens: 215_040,
+    };
+    record = beginHostApply(record, { desiredSpec: launch, desiredProfile: profile });
+    record = markHostApplying(record);
+    record = markHostVerifying(record);
+    record = markHostVerified(record);
+    await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(createLocalHostRegistry(), record));
+  }
   if (managed) {
     // This is deliberately a server-authoritative fake runtime, not a DOM
     // fixture. The dashboard only opens this tab after /api/status reports an
@@ -172,7 +209,13 @@ async function startDashboard(t, { managed = false } = {}) {
 async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceScaleFactor = 1, instance = "default" } = {}) {
   // Top-level node:test cases can overlap. Each dashboard scenario therefore
   // needs its own CDP port, not merely a "default versus other" split.
-  const instanceOffset = { default: 0, hostmonitor: 300, narrow: 600 }[instance] ?? 900;
+  const instanceOffset = {
+    default: 0,
+    hostmonitor: 300,
+    narrow: 600,
+    "hostmonitor-narrow": 900,
+    "managed-drawer": 1200,
+  }[instance] ?? 1500;
   const port = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
   const chrome = spawn(chromePath, [
@@ -558,6 +601,56 @@ test("the narrow local drawer is an opaque configuration surface", { timeout: 12
     cardBorder: "rgb(35, 55, 71)",
     cardVisible: true,
   }, "the narrow drawer must cover the engine list with an opaque card");
+});
+
+test("a managed llama drawer keeps its persisted paths visible after takeover", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const { base } = await startDashboard(t, { managedDrawer: true });
+  const { evaluate } = await openBrowser(t, chromePath, { instance: "managed-drawer" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#llamacpp-configure')`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    document.getElementById('llamacpp-configure').click();
+    return true;
+  })()`);
+  await sleep(400);
+  const drawer = JSON.parse(await evaluate(`JSON.stringify({
+    visible: document.getElementById('local-drawer').offsetParent !== null,
+    formVisible: document.getElementById('local-host-management-form').offsetParent !== null,
+    model: document.getElementById('local-host-model-file').value,
+    projector: document.getElementById('local-host-vision-projector').value,
+    cacheDirectory: document.getElementById('local-host-kv-directory').value,
+    budget: document.getElementById('local-host-kv-budget').value,
+    vision: document.getElementById('local-host-vision-enabled').checked,
+    modelReadonly: document.getElementById('local-host-model-file').readOnly,
+    cacheReadonly: document.getElementById('local-host-kv-directory').readOnly,
+    visionDisabled: document.getElementById('local-host-vision-enabled').disabled,
+    budgetDisabled: document.getElementById('local-host-kv-budget').disabled,
+    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+  })`));
+  assert.deepEqual(drawer, {
+    visible: true,
+    formVisible: true,
+    model: "D:/models/managed-model.gguf",
+    projector: "D:/models/managed-projector.gguf",
+    cacheDirectory: "D:/managed-kv",
+    budget: "32",
+    vision: true,
+    modelReadonly: true,
+    cacheReadonly: true,
+    visionDisabled: true,
+    budgetDisabled: true,
+    leaveVisible: true,
+  });
 });
 
 // A canvas is sized from its CSS box, and from nothing else.

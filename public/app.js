@@ -2668,7 +2668,12 @@ function renderLocalHostControl(engine, found) {
         : t("host.userOwned"));
   }
   const form = $("local-host-management-form");
-  if (form) form.hidden = Boolean(management) || !connected;
+  // A managed host still needs to show the exact model, projector, and SSD KV
+  // paths that ModelDock will reuse after a restart. Hiding this form made a
+  // successful takeover look like a blank drawer and forced users to wonder
+  // whether their choices had been retained. The values are read-only while
+  // managed; Leave management returns the form to its editable setup state.
+  if (form) form.hidden = !connected;
   // The drawer's bottom primary is contextual: before the gateway route exists
   // it connects ("Connect and Save" - the manual-port path); once connected
   // and unmanaged it performs the takeover ("Save and Manage"); once managed
@@ -2707,9 +2712,18 @@ function renderLocalHostControl(engine, found) {
   }
   const projectorRow = $("local-host-vision-projector-row");
   if (projectorRow) projectorRow.hidden = !Boolean(visionToggle?.checked);
+  const managedReadonly = Boolean(management);
+  for (const field of [model, projector, directory]) {
+    if (field) field.readOnly = managedReadonly;
+  }
+  if (budget) budget.disabled = managedReadonly;
+  if (visionToggle) visionToggle.disabled = managedReadonly;
   for (const id of ["local-host-model-browse", "local-host-vision-browse", "local-host-kv-browse"]) {
     const browse = $(id);
-    if (browse) browse.hidden = !localNativeHostPicker;
+    if (browse) {
+      browse.hidden = !localNativeHostPicker;
+      browse.disabled = managedReadonly;
+    }
   }
   // Translate GiB into sessions: the default budget is deliberately small, and
   // whether it is enough depends entirely on this model's full-context state
