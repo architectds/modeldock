@@ -667,13 +667,18 @@ defineRouting(OLLAMA_PROFILE, {
 function localWireTarget(providerId) {
   return (config, model) => {
     const transport = profileById(providerId).transport || "responses";
+    const entry = modelEntryFor(config, model);
     return {
       provider: providerId,
-      model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
+      model: entry?.upstreamId || bareModelId(model),
       url: `${trimBase(profileById(providerId).baseUrl)}/${transport === "chat" ? "chat/completions" : "responses"}`,
       transport,
       token: "",
       tokenRequired: false,
+      // llama.cpp exposes this per-template capability on /props. Qwen's
+      // template rejects a non-empty JSON string here and requires the decoded
+      // mapping, while older templates keep the ordinary OpenAI string shape.
+      toolArgumentsAsObjects: Boolean(entry?.chatTemplateSupportsObjectArguments),
     };
   };
 }
@@ -899,6 +904,7 @@ export function applyLocalEngineProfile(engineId, snapshot) {
           label: model.label || model.id,
           endpoint: "responses",
           supportsVision: Boolean(model.supportsVision),
+          chatTemplateSupportsObjectArguments: Boolean(model.chatTemplateSupportsObjectArguments),
           contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
           autoCompactTokenLimit: Number(model.autoCompactTokenLimit) || 0,
           ownerQualified: true,

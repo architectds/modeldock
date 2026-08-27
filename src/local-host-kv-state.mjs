@@ -50,6 +50,29 @@ function assertSessionKey(value) {
   return key.toLowerCase();
 }
 
+// This is not conversation content. It is the fixed, hidden assistant reply
+// emitted while creating a reusable local Chat prefix. Preserve it byte-for-
+// byte: llama.cpp's template cache must see the same completed turn after an
+// SSD restore. The bounded record is deliberately separate from user history.
+function normalizeWarmBaseTranscript(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("A warm base transcript must be an object.");
+  }
+  const assistantContent = value.assistantContent;
+  if (typeof assistantContent !== "string" || !assistantContent || assistantContent.length > 4096) {
+    throw new TypeError("A warm base transcript needs bounded assistant content.");
+  }
+  const assistantReasoningContent = value.assistantReasoningContent;
+  if (assistantReasoningContent !== undefined && (typeof assistantReasoningContent !== "string" || assistantReasoningContent.length > 16384)) {
+    throw new TypeError("A warm base transcript has invalid assistant reasoning.");
+  }
+  return Object.freeze({
+    assistantContent,
+    ...(assistantReasoningContent ? { assistantReasoningContent } : {}),
+  });
+}
+
 function copy(value) {
   return structuredClone(value);
 }
@@ -64,6 +87,7 @@ function compareOldest(a, b) {
 
 function normalizeState(value) {
   const warmBaseKey = value?.warmBaseKey ? assertSessionKey(value.warmBaseKey) : "";
+  const warmBaseTranscript = normalizeWarmBaseTranscript(value?.warmBaseTranscript);
   return Object.freeze({
     sessionKey: assertSessionKey(value?.sessionKey),
     fingerprint: text(value?.fingerprint, "A KV state host fingerprint"),
@@ -73,6 +97,7 @@ function normalizeState(value) {
     savedAt: timestamp(value?.savedAt, "A KV state saved timestamp"),
     lastAccessedAt: timestamp(value?.lastAccessedAt || value?.savedAt, "A KV state access timestamp"),
     ...(warmBaseKey ? { warmBaseKey } : {}),
+    ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
   });
 }
 
@@ -158,6 +183,7 @@ export function planLocalHostKvStateWrite(manifest, {
   sessionKey,
   fingerprint,
   warmBaseKey,
+  warmBaseTranscript,
   filename,
   bytes,
   promptTokens,
@@ -168,6 +194,7 @@ export function planLocalHostKvStateWrite(manifest, {
     sessionKey: assertSessionKey(sessionKey),
     fingerprint,
     ...(warmBaseKey ? { warmBaseKey: assertSessionKey(warmBaseKey) } : {}),
+    ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
     filename,
     bytes,
     promptTokens,

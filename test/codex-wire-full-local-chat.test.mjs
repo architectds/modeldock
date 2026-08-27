@@ -163,7 +163,7 @@ test("built bundle bridges the complete original Codex package to strict local C
   assert.match(text, /cached_tokens":8304/);
 });
 
-test("built bundle restores a full-Codex bootstrap KV after gateway restart and retains tool use", async (t) => {
+test("built bundle preserves full-Codex tools across a mock KV restore after gateway restart", async (t) => {
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.request.tools.length, 164);
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-wire-warm-base-"));
@@ -211,13 +211,17 @@ test("built bundle restores a full-Codex bootstrap KV after gateway restart and 
       assert.equal(body.id_slot, 0);
       assert.ok(Array.isArray(body.tools) && body.tools.length > 0, "bootstrap carries the real Codex-derived tool schema");
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ id: "chat_warm_bootstrap", model: "Qwen3.8-27B", choices: [{ message: { role: "assistant", content: "BOOTSTRAP_READY" }, finish_reason: "stop" }] }));
+      res.end(JSON.stringify({ id: "chat_warm_bootstrap", model: "Qwen3.8-27B", choices: [{
+        message: { role: "assistant", content: "BOOTSTRAP_READY", reasoning_content: "I should return the required fixed response." },
+        finish_reason: "stop",
+      }] }));
       return;
     }
     assert.equal(body.stream, true);
     assert.deepEqual(body.messages.slice(0, 3).map((message) => message.role), ["system", "user", "assistant"]);
     assert.equal(body.messages[1].content, "Reply with exactly BOOTSTRAP_READY. Do not call a tool.");
     assert.equal(body.messages[2].content, "BOOTSTRAP_READY");
+    assert.equal(body.messages[2].reasoning_content, "I should return the required fixed response.");
     assert.equal(body.id_slot, 0);
     assert.ok(Array.isArray(body.tools) && body.tools.length > 0);
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -288,6 +292,6 @@ test("built bundle restores a full-Codex bootstrap KV after gateway restart and 
   const second = await startGateway();
   await send(second.port, "warm-second-session");
   assert.equal(calls.filter((call) => call.url.includes("action=save")).length, 1, "the completed bootstrap state is saved once");
-  assert.equal(calls.filter((call) => call.url.includes("action=restore")).length, 1, "a new session restores that immutable base after the gateway restart");
+  assert.equal(calls.filter((call) => call.url.includes("action=restore")).length, 1, "the strict mock receives the configured base restore after the gateway restart");
   assert.equal(calls.filter((call) => call.url === "/v1/chat/completions" && call.body.stream === false).length, 1, "restart reuses the saved base instead of rebuilding it");
 });

@@ -42,6 +42,24 @@ function median(values) {
   return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
 }
 
+function warmBaseWithTranscript(warmBase, transcript) {
+  if (!warmBase?.requiresTranscript) return warmBase;
+  if (!transcript || typeof transcript !== "object") return null;
+  const prefix = Array.isArray(warmBase.messages) ? warmBase.messages : [];
+  if (prefix.length !== 1 || prefix[0]?.role !== "user") return null;
+  const content = transcript.assistantContent;
+  if (typeof content !== "string" || !content) return null;
+  const reasoning = transcript.assistantReasoningContent;
+  if (reasoning !== undefined && typeof reasoning !== "string") return null;
+  return Object.freeze({
+    ...warmBase,
+    messages: Object.freeze([
+      prefix[0],
+      Object.freeze({ role: "assistant", content, ...(reasoning ? { reasoning_content: reasoning } : {}) }),
+    ]),
+  });
+}
+
 export class LocalHostKvCoordinator {
   #residency;
   #mutation = Promise.resolve();
@@ -210,7 +228,29 @@ export class LocalHostKvCoordinator {
       }
       let hasSsdState = Boolean(sessionState);
       const residentWarmBaseKey = this.#warmBaseKeys.get(sessionKey) || sessionState?.warmBaseKey || "";
+      let baseState = null;
+      let resolvedWarmBase = null;
+      if (warmBase?.sessionKey && typeof warmBase.create === "function") {
+        try {
+          baseState = typeof this.store.lookup === "function"
+            ? await this.store.lookup({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint })
+            : (await this.store.has({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint }) ? {} : null);
+          resolvedWarmBase = warmBaseWithTranscript(warmBase, baseState?.warmBaseTranscript);
+          if (baseState && !resolvedWarmBase) {
+            if (typeof this.store.remove === "function") await this.store.remove({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint });
+            baseState = null;
+          }
+        } catch (error) {
+          await this.#diagnose("warm_base_lookup_failed", error);
+          baseState = null;
+        }
+      }
       const warmBaseChanged = Boolean(warmBase?.sessionKey && residentWarmBaseKey !== warmBase.sessionKey && (residentWarmBaseKey || hasSsdState));
+      const warmBaseUnavailable = Boolean(
+        warmBase?.requiresTranscript
+        && residentWarmBaseKey === warmBase.sessionKey
+        && !resolvedWarmBase,
+      );
       if (warmBaseChanged && hasSsdState) {
         try {
           if (typeof this.store.remove === "function") await this.store.remove({ sessionKey, fingerprint: this.fingerprint });
@@ -220,11 +260,20 @@ export class LocalHostKvCoordinator {
         hasSsdState = false;
         this.#warmBaseKeys.delete(sessionKey);
       }
+      if (warmBaseUnavailable && hasSsdState) {
+        try {
+          if (typeof this.store.remove === "function") await this.store.remove({ sessionKey, fingerprint: this.fingerprint });
+        } catch (error) {
+          await this.#diagnose("warm_base_session_discard_failed", error);
+        }
+        hasSsdState = false;
+        this.#warmBaseKeys.delete(sessionKey);
+      }
       const lease = leaseLocalHostResidency(this.#residency, {
         sessionKey,
         fingerprint: this.fingerprint,
         hasSsdState,
-        forceCold: warmBaseChanged,
+        forceCold: warmBaseChanged || warmBaseUnavailable,
       });
       if (lease.kind === "queue") throw new Error("No local host lane became available after admission.");
       this.#residency = lease.residency;
@@ -292,14 +341,9 @@ export class LocalHostKvCoordinator {
           await this.#erase(action.slot);
         }
       }
-      let activeWarmBase = null;
+      let activeWarmBase = hasSsdState ? resolvedWarmBase : null;
       if (warmBase?.sessionKey && typeof warmBase.create === "function") {
-        let baseReady = false;
-        try {
-          baseReady = await this.store.has({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint });
-        } catch (error) {
-          await this.#diagnose("warm_base_lookup_failed", error);
-        }
+        let baseReady = Boolean(baseState) && Boolean(resolvedWarmBase);
         if (!hasSsdState && baseReady) {
           this.#recordEvent("restoring", { slot: lease.slot });
           try {
@@ -308,6 +352,7 @@ export class LocalHostKvCoordinator {
               this.#counters.restores += 1;
               restoreMs = Number(restored.restoreMs) || 0;
               tier = "warm";
+              activeWarmBase = resolvedWarmBase;
               this.#recordEvent("restored", { slot: lease.slot, durationMs: restoreMs });
             } else {
               baseReady = false;
@@ -321,11 +366,20 @@ export class LocalHostKvCoordinator {
         if (!hasSsdState && !baseReady) {
           try {
             const created = await warmBase.create({ slot: lease.slot, signal });
-            if (created) {
-              const saved = await this.store.save({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint, slot: lease.slot, signal });
+            const createdWarmBase = warmBaseWithTranscript(warmBase, created);
+            if (created && createdWarmBase) {
+              const saved = await this.store.save({
+                sessionKey: warmBase.sessionKey,
+                fingerprint: this.fingerprint,
+                warmBaseTranscript: created,
+                slot: lease.slot,
+                signal,
+              });
               if (saved?.saved) this.#counters.saves += 1;
               tier = "warm";
               baseReady = true;
+              resolvedWarmBase = createdWarmBase;
+              activeWarmBase = createdWarmBase;
               this.#recordEvent("checkpointed", { slot: lease.slot });
             }
           } catch (error) {
@@ -333,7 +387,7 @@ export class LocalHostKvCoordinator {
             await this.#erase(lease.slot);
           }
         }
-        if (baseReady || hasSsdState) activeWarmBase = warmBase;
+        if ((baseReady || hasSsdState) && !activeWarmBase && !warmBase.requiresTranscript) activeWarmBase = warmBase;
       }
       if (tier === "gpu") this.#recordEvent("running", { slot: lease.slot });
       return { slot: lease.slot, tier, restoreMs, warmBase: activeWarmBase, warmBaseKey: activeWarmBase?.sessionKey || "" };

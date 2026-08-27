@@ -70,9 +70,10 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
     discoverEngines: async () => [{
       engine: "llamacpp",
       baseUrl: "http://127.0.0.1:11435",
-      models: [model],
-      supportsVision: false,
-      modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
+    models: [model],
+    supportsVision: false,
+    chatTemplateSupportsObjectArguments: true,
+    modelFacts: { modelName: "Qwen3.8-27B", modelSlug: "Qwen3.8-27B" },
     }],
     configSwitcher: { markRestartRequired: async () => { restartMarks += 1; } },
     writeCatalogFile: () => { catalogWrites += 1; },
@@ -81,6 +82,8 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
 
   const snapshot = readLocalEnginesSnapshot(enginesFile);
   assert.equal(snapshot.llamacpp.models[0].supportsVision, false);
+  assert.equal(snapshot.llamacpp.models[0].chatTemplateSupportsObjectArguments, true,
+    "the next local tool continuation uses the live Qwen template contract after a gateway restart");
   assert.equal(snapshot.llamacpp.models[0].autoCompactTokenLimit, 183_500,
     "a managed local lane compacts early enough to avoid Codex's first-token timeout");
   assert.equal(catalogWrites, 1);

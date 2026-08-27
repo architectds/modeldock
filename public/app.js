@@ -2746,10 +2746,15 @@ function renderLocalHostControl(engine, found) {
   }
 }
 
-function openLocalConfig(engine) {
+async function openLocalConfig(engine) {
   localConfigEngine = engine;
   const drawer = $("local-drawer");
   if (!drawer) return;
+  // Configuration buttons render before the asynchronous first discovery
+  // completes. A managed host must not open as a blank editable form merely
+  // because that scan is still in flight: finish the one read, then show its
+  // durable paths read-only.
+  if (engine === "llamacpp" && !localDiscovery.has(engine)) await renderLocalEngines();
   const found = localDiscovery.get(engine);
   if (engine === "llamacpp") {
     const model = $("local-host-model-file");

@@ -46,6 +46,25 @@ test("KV manifests retain only hashed session identity", () => {
   assert.equal(findLocalHostKvState(result.manifest, { sessionKey: key, fingerprint: FINGERPRINT })?.filename, "a.bin");
 });
 
+test("a warm base state retains only its fixed hidden assistant transcript", () => {
+  const transcript = { assistantContent: "BOOTSTRAP_READY", assistantReasoningContent: "I should provide the fixed response." };
+  const result = planLocalHostKvStateWrite(emptyManifest(), {
+    sessionKey: "a".repeat(64),
+    fingerprint: FINGERPRINT,
+    filename: "base.bin",
+    bytes: 400,
+    promptTokens: 100,
+    warmBaseTranscript: transcript,
+    at: "2026-08-23T01:00:00.000Z",
+  });
+  assert.equal(result.accepted, true);
+  assert.deepEqual(result.manifest.states[0].warmBaseTranscript, transcript);
+  assert.throws(() => planLocalHostKvStateWrite(emptyManifest(), {
+    sessionKey: "b".repeat(64), fingerprint: FINGERPRINT, filename: "bad.bin", bytes: 400, promptTokens: 100,
+    warmBaseTranscript: { assistantContent: "" }, at: "2026-08-23T01:00:00.000Z",
+  }), /assistant content/);
+});
+
 test("KV state LRU eviction honors an explicit user disk budget", () => {
   let manifest = plan(emptyManifest(), A, "a.bin", 400, "2026-08-23T01:00:00.000Z").manifest;
   manifest = plan(manifest, B, "b.bin", 400, "2026-08-23T01:01:00.000Z").manifest;

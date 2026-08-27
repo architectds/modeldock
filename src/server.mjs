@@ -283,6 +283,9 @@ async function publishManagedLocalEngine(services, record, running) {
     ...(facts?.modelName ? { label: facts.modelName } : {}),
     ...(endpointModel ? { upstreamId: endpointModel } : {}),
     supportsVision,
+    ...(typeof running?.chatTemplateSupportsObjectArguments === "boolean"
+      ? { chatTemplateSupportsObjectArguments: running.chatTemplateSupportsObjectArguments }
+      : {}),
   }));
   const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
@@ -473,6 +476,9 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
     // removed is worse than showing no visual option at all.
     ...(engine?.engine === "llamacpp" && typeof engine.supportsVision === "boolean"
       ? { supportsVision: engine.supportsVision }
+      : {}),
+    ...(engine?.engine === "llamacpp" && typeof engine.chatTemplateSupportsObjectArguments === "boolean"
+      ? { chatTemplateSupportsObjectArguments: engine.chatTemplateSupportsObjectArguments }
       : {}),
   };
   if (JSON.stringify(current) === JSON.stringify(next)) return null;
@@ -1947,6 +1953,9 @@ export function createApp(services = createServices()) {
         modelPath: discovered?.launch?.model || llamaLaunchArgument(launch, ["-m", "--model"]),
         visionProjectorPath: discovered?.launch?.visionProjectorPath || llamaLaunchArgument(launch, ["--mmproj"]),
         supportsVision,
+        ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
+          ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
+          : {}),
         observedAt: new Date().toISOString(),
       };
       const snapshot = {
@@ -1982,6 +1991,9 @@ export function createApp(services = createServices()) {
             upstreamId: model.id,
             label: friendly || model.label || model.id,
             supportsVision,
+            ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
+              ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
+              : {}),
             contextWindow: model.contextWindow,
           };
         }),

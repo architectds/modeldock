@@ -119,13 +119,14 @@ test("applyLocalEngineProfile publishes vision and context, and nothing else", a
 
   const profile = applyLocalEngineProfile("llamacpp", {
     baseUrl: "http://127.0.0.1:8080",
-    models: [{ id: "qwen3-27b", supportsVision: true, contextWindow: 32768 }],
+    models: [{ id: "qwen3-27b", supportsVision: true, chatTemplateSupportsObjectArguments: true, contextWindow: 32768 }],
   });
   assert.equal(profile.id, "llamacpp");
   assert.equal(profile.baseUrl, "http://127.0.0.1:8080");
   const [model] = profile.availableModels;
   assert.equal(model.id, "qwen3-27b");
   assert.equal(model.supportsVision, true);
+  assert.equal(model.chatTemplateSupportsObjectArguments, true);
   assert.ok(model.contextWindow > 0, "the advertised window survives");
   assert.equal(model.ownerQualified, true, "local ids always carry their provider");
 
@@ -201,7 +202,7 @@ test("a connected local engine is routed to itself, keyless", async () => {
 
   applyLocalEngineProfile("llamacpp", {
     baseUrl: "http://127.0.0.1:8080/v1",
-    models: [{ id: "qwen3-30b.gguf", upstreamId: "qwen3-30b.gguf" }],
+    models: [{ id: "qwen3-30b.gguf", upstreamId: "qwen3-30b.gguf", chatTemplateSupportsObjectArguments: true }],
   });
   applyLocalEngineProfile("vllm", {
     baseUrl: "http://127.0.0.1:8000/v1",
@@ -219,6 +220,7 @@ test("a connected local engine is routed to itself, keyless", async () => {
     assert.equal(target.provider, provider);
     assert.equal(target.token, "", "no credential is sent to a loopback engine");
     assert.equal(target.tokenRequired, false, "and the tokenless gate must not 503 it");
+    assert.equal(target.toolArgumentsAsObjects, provider === "llamacpp", "only the advertised llama template gets object arguments");
     assert.equal(tokenFor(config, model), "local", "a connected engine reads as ready");
     assert.equal(isLocalBackend(config, model), true, "local accommodations apply");
   }

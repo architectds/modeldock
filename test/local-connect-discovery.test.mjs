@@ -41,13 +41,17 @@ function fakeEngine({ models = [{ id: "qwen3.8:27b" }] } = {}) {
 
 test("llama.cpp discovery reads live vision capability from props", async () => {
   const fetchImpl = async (url) => {
-    if (url.endsWith("/props")) return { ok: true, json: async () => ({ modalities: { vision: false } }) };
+    if (url.endsWith("/props")) return { ok: true, json: async () => ({
+      modalities: { vision: false },
+      chat_template_caps: { supports_object_arguments: true },
+    }) };
     if (url.endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "qwen" }] }) };
     return { ok: false, json: async () => ({}) };
   };
   const found = await probeLocalEngine(11435, { fetchImpl, timeoutMs: 50 });
   assert.equal(found.engine, "llamacpp");
   assert.equal(found.supportsVision, false, "a server without --mmproj cannot remain a visual Catalog model");
+  assert.equal(found.chatTemplateSupportsObjectArguments, true, "Qwen's live template contract reaches the local bridge");
 });
 
 async function startApp(t, { discoverEngines }) {

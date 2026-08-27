@@ -1446,8 +1446,13 @@ test("managed llama creates a completed bootstrap turn, then appends the real to
         async run({ sessionId, warmBase, run }) {
           assert.equal(sessionId, "session-warm");
           assert.ok(warmBase, "managed Chat routing derives a cache-safe warm base");
-          assert.equal(await warmBase.create({ slot: 0 }), true);
-          return run({ slot: 0, cache: { tier: "warm" }, warmBase });
+          const transcript = await warmBase.create({ slot: 0 });
+          assert.deepEqual(transcript, { assistantContent: "BOOTSTRAP_READY" });
+          const activeWarmBase = {
+            ...warmBase,
+            messages: [...warmBase.messages, { role: "assistant", content: transcript.assistantContent }],
+          };
+          return run({ slot: 0, cache: { tier: "warm" }, warmBase: activeWarmBase });
         },
       },
     };
@@ -1480,6 +1485,54 @@ test("managed llama creates a completed bootstrap turn, then appends the real to
     assert.equal(bridged.output[0].type, "function_call");
     assert.equal(bridged.output[0].name, "exec_command");
     assert.equal(bridged.usage.input_tokens_details.cached_tokens, 5_154);
+  } finally {
+    globalThis.fetch = originalFetch;
+    applyLocalEngineProfile("llamacpp", null);
+  }
+});
+
+test("a llama.cpp wire-id rescan does not create a second otherwise-identical warm base", async () => {
+  const originalFetch = globalThis.fetch;
+  const keys = [];
+  const model = "qwen3.8:27b@llamacpp";
+  globalThis.fetch = async () => summaryResponse("ok");
+  const services = {
+    ...compactServices(),
+    mainModel: model,
+    config: { ...configStub(), mainModel: model, profileId: "llamacpp" },
+    knownModels: new Set([model]),
+    incomingHeaders: { "x-codex-session-id": "stable-warm-base" },
+    requestUrl: "/v1/responses",
+    localHostRuntime: {
+      async run({ warmBase, run }) {
+        keys.push(warmBase?.sessionKey || "");
+        return run({ slot: 0, cache: { tier: "cold" } });
+      },
+    },
+  };
+  const payload = {
+    model,
+    stream: false,
+    instructions: "You are the local coding assistant.",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+    tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } } } }],
+  };
+  try {
+    applyLocalEngineProfile("llamacpp", {
+      baseUrl: "http://127.0.0.1:11435/v1",
+      models: [{ id: "qwen3.8:27b", upstreamId: "qwen3.8:27b", contextWindow: 200_000 }],
+    });
+    await relayResponses(payload, responseStub(collectStream()), services);
+    // The current llama.cpp build advertises the GGUF path after a rescan.
+    // That is a wire spelling change, not a new loaded model.
+    applyLocalEngineProfile("llamacpp", {
+      baseUrl: "http://127.0.0.1:11435/v1",
+      models: [{ id: "qwen3.8:27b", upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", contextWindow: 200_000 }],
+    });
+    await relayResponses(payload, responseStub(collectStream()), services);
+    assert.equal(keys.length, 2);
+    assert.ok(keys[0]);
+    assert.equal(keys[1], keys[0]);
   } finally {
     globalThis.fetch = originalFetch;
     applyLocalEngineProfile("llamacpp", null);

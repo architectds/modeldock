@@ -9,17 +9,23 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
   const calls = [];
   const stored = new Map();
   const warmBaseKeys = new Map();
+  const warmBaseTranscripts = new Map();
   const store = {
     async has({ sessionKey, fingerprint }) { return stored.get(sessionKey) === fingerprint; },
     async lookup({ sessionKey, fingerprint }) {
-      return stored.get(sessionKey) === fingerprint ? { warmBaseKey: warmBaseKeys.get(sessionKey) || "" } : null;
+      return stored.get(sessionKey) === fingerprint ? {
+        warmBaseKey: warmBaseKeys.get(sessionKey) || "",
+        ...(warmBaseTranscripts.has(sessionKey) ? { warmBaseTranscript: warmBaseTranscripts.get(sessionKey) } : {}),
+      } : null;
     },
     async invalidateExcept({ fingerprint }) { calls.push({ action: "invalidate", fingerprint }); return { invalidated: [] }; },
-    async save({ sessionKey, fingerprint, warmBaseKey }) {
-      calls.push({ action: "save", sessionKey, fingerprint, ...(warmBaseKey ? { warmBaseKey } : {}) });
+    async save({ sessionKey, fingerprint, warmBaseKey, warmBaseTranscript }) {
+      calls.push({ action: "save", sessionKey, fingerprint, ...(warmBaseKey ? { warmBaseKey } : {}), ...(warmBaseTranscript ? { warmBaseTranscript } : {}) });
       stored.set(sessionKey, fingerprint);
       if (warmBaseKey) warmBaseKeys.set(sessionKey, warmBaseKey);
       else warmBaseKeys.delete(sessionKey);
+      if (warmBaseTranscript) warmBaseTranscripts.set(sessionKey, warmBaseTranscript);
+      else warmBaseTranscripts.delete(sessionKey);
       return { saved: true };
     },
     async restore({ sessionKey, fingerprint }) {
@@ -33,6 +39,7 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
       if (stored.get(sessionKey) !== fingerprint) return { removed: false, removalFailures: [] };
       stored.delete(sessionKey);
       warmBaseKeys.delete(sessionKey);
+      warmBaseTranscripts.delete(sessionKey);
       return { removed: true, removalFailures: [] };
     },
   };
@@ -47,7 +54,7 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
     assignSlots,
     onDiagnostic: (value) => diagnostics.push(value),
   });
-  return { calls, stored, warmBaseKeys, diagnostics, coordinator, store, slotClient };
+  return { calls, stored, warmBaseKeys, warmBaseTranscripts, diagnostics, coordinator, store, slotClient };
 }
 
 test("single-slot coordinator keeps the current conversation hot and restores an exact inactive conversation from SSD", async () => {
@@ -115,6 +122,44 @@ test("a new conversation can seed and reuse an immutable completed warm base wit
   ]);
   assert.equal(seen.every(({ activeWarmBase }) => activeWarmBase === warmBase), true);
   assert.equal(coordinator.snapshot().telemetry.events.some((event) => "sessionKey" in event || "conversationId" in event), false);
+});
+
+test("a Qwen completed bootstrap retains its exact reasoning across a coordinator restart", async () => {
+  const first = fixture();
+  const warmBase = {
+    sessionKey: "c".repeat(64),
+    requiresTranscript: true,
+    messages: [{ role: "user", content: "Reply with exactly BOOTSTRAP_READY. Do not call a tool." }],
+    async create() {
+      return { assistantContent: "BOOTSTRAP_READY", assistantReasoningContent: "I should provide the fixed response." };
+    },
+  };
+  let initial;
+  await first.coordinator.run({
+    conversationId: "first",
+    warmBase,
+    run: async ({ cache, warmBase: active }) => { initial = { cache, active }; return { ok: true }; },
+  });
+  assert.equal(initial.cache.tier, "warm");
+  assert.equal(initial.active.messages[1].reasoning_content, "I should provide the fixed response.");
+  assert.deepEqual(first.warmBaseTranscripts.get(warmBase.sessionKey), {
+    assistantContent: "BOOTSTRAP_READY",
+    assistantReasoningContent: "I should provide the fixed response.",
+  });
+
+  const restarted = new LocalHostKvCoordinator({
+    hostId: "host-qwen", laneCount: 1, fingerprint: FINGERPRINT,
+    store: first.store, slotClient: first.slotClient, assignSlots: true,
+  });
+  let restored;
+  await restarted.run({
+    conversationId: "second",
+    warmBase,
+    run: async ({ cache, warmBase: active }) => { restored = { cache, active }; return { ok: true }; },
+  });
+  assert.equal(restored.cache.tier, "warm");
+  assert.equal(restored.active.messages[1].content, "BOOTSTRAP_READY");
+  assert.equal(restored.active.messages[1].reasoning_content, "I should provide the fixed response.");
 });
 
 test("a rejected warm-base bootstrap degrades to an ordinary cold request", async () => {

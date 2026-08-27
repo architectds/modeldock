@@ -211,7 +211,7 @@ export class LocalHostKvStateStore {
     return Object.freeze({ removed: Object.freeze(removed), failures: Object.freeze(failures) });
   }
 
-  async save({ sessionKey, fingerprint, warmBaseKey, slot = 0, signal, at = new Date().toISOString() } = {}) {
+  async save({ sessionKey, fingerprint, warmBaseKey, warmBaseTranscript, slot = 0, signal, at = new Date().toISOString() } = {}) {
     const filename = stateFilename(this.filePrefix, this.makeId());
     // The managed launch receives this same directory as --slot-save-path.
     // Create it before asking the adapter to write, rather than relying on a
@@ -234,6 +234,7 @@ export class LocalHostKvStateStore {
       sessionKey,
       fingerprint,
       ...(warmBaseKey ? { warmBaseKey } : {}),
+      ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
       filename,
       bytes: actual.size,
       promptTokens: saved.promptTokens,

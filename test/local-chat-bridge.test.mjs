@@ -61,6 +61,20 @@ test("Responses payload becomes a cacheable Chat request without dropping tool h
   assert.equal(bridged.customToolNames.has("apply_patch"), true);
 });
 
+test("a Qwen Chat template receives historical tool arguments as an object", () => {
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Run it." }] },
+      { type: "function_call", call_id: "call_qwen", name: "exec_command", arguments: "{\"cmd\":\"dir\"}" },
+      { type: "function_call_output", call_id: "call_qwen", output: "ok" },
+    ],
+    tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } } } }],
+  }, { toolArgumentsAsObjects: true });
+  assert.deepEqual(bridged.payload.messages[1].tool_calls[0].function.arguments, { cmd: "dir" });
+  assert.equal(bridged.payload.messages[2].role, "tool");
+});
+
 test("Chat completion becomes a Codex Responses completion with cached-token usage", () => {
   const response = chatCompletionToResponse({
     id: "chatcmpl_1",

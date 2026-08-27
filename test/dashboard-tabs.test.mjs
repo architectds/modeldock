@@ -614,7 +614,7 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
   await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
   for (let i = 0; i < 40; i += 1) {
     await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#llamacpp-configure')`)) break;
+    if (await evaluate(`document.readyState === 'complete' && document.querySelector('#local-engine-list')?.textContent.includes('Managed profile')`)) break;
   }
   await evaluate(`(() => {
     const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));

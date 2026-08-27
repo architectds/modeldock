@@ -92,7 +92,21 @@ function chatToolChoice(value) {
   return undefined;
 }
 
-function toolCallItem(item) {
+function objectToolArguments(value) {
+  const source = typeof value === "string" ? value : textValue(value);
+  let parsed;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    throw new LocalChatBridgeError("tool_arguments", "The local Chat template requires function arguments to be a JSON object.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new LocalChatBridgeError("tool_arguments", "The local Chat template requires function arguments to be a JSON object.");
+  }
+  return parsed;
+}
+
+function toolCallItem(item, { toolArgumentsAsObjects = false } = {}) {
   const callId = item.call_id || item.id;
   if (typeof callId !== "string" || !callId) {
     throw new LocalChatBridgeError("tool_call_id", "Local Chat bridge needs a call_id for every function call.");
@@ -100,8 +114,16 @@ function toolCallItem(item) {
   if (typeof item.name !== "string" || !item.name) {
     throw new LocalChatBridgeError("tool_call_name", "Local Chat bridge needs a name for every function call.");
   }
-  const argumentsText = typeof item.arguments === "string" ? item.arguments : textValue(item.arguments ?? item.input ?? {});
-  return { id: callId, type: "function", function: { name: item.name, arguments: argumentsText } };
+  const argumentsValue = item.arguments ?? item.input ?? {};
+  const argumentsText = typeof argumentsValue === "string" ? argumentsValue : textValue(argumentsValue);
+  return {
+    id: callId,
+    type: "function",
+    function: {
+      name: item.name,
+      arguments: toolArgumentsAsObjects ? objectToolArguments(argumentsValue) : argumentsText,
+    },
+  };
 }
 
 function reasoningContent(item) {
@@ -113,7 +135,7 @@ function reasoningContent(item) {
   return text || summary;
 }
 
-export function responsesToChat(payload) {
+export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}) {
   if (!payload || !Array.isArray(payload.input)) {
     throw new LocalChatBridgeError("input", "Local Chat bridge needs a Responses input array.");
   }
@@ -137,7 +159,7 @@ export function responsesToChat(payload) {
     if (item.type === "function_call") {
       const next = assistant();
       if (!next.tool_calls) next.tool_calls = [];
-      next.tool_calls.push(toolCallItem(item));
+      next.tool_calls.push(toolCallItem(item, { toolArgumentsAsObjects }));
       continue;
     }
     if (item.type === "function_call_output") {
