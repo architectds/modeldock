@@ -556,34 +556,14 @@ test("a published native slug routes to the native leg despite being in the cata
   }
 });
 
-test("catalogFor never publishes chat-dialect models even if marked available", () => {
-  const profile = {
-    ...OPENCODE_GO_PROFILE,
-    availableModels: [
-      ...OPENCODE_GO_PROFILE.availableModels.filter((m) => m.id !== "qwen3.8-max"),
-      { id: "qwen3.8-max", label: "Qwen 3.8 Max", endpoint: "chat", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 160, speedTier: "medium", status: "available" },
-    ],
-  };
-  const catalog = catalogFor({ ...configStub(), profile });
-  assert.ok(!catalog.models.some((entry) => entry.slug === "qwen3.8-max"), "chat vision model must not be published");
+test("catalogFor publishes a verified chat-dialect model", () => {
+  const catalog = catalogFor(configStub());
+  assert.ok(catalog.models.some((entry) => entry.slug === "qwen3.8-flash@opencode-go"), "verified chat model must be published");
 });
 
-// The convention that keeps the Models page honest: a model that only speaks
-// chat/completions can never reach the picker, because the relay Codex talks to
-// speaks Responses and nothing converts between them. Marking such a model
-// `status: "unavailable"` is how that is expressed today, and it is what stops
-// the roster from listing a row whose switch would do nothing - the roster
-// filters on status alone. Nothing enforced the pairing, so this does.
-test("a chat-only model is also marked unavailable, so it never reaches a picker", () => {
-  for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
-    const chatOnly = (profile.availableModels || []).filter((model) => model.endpoint === "chat");
-    const published = chatOnly.filter((model) => model.status !== "unavailable");
-    assert.deepEqual(
-      published.map((model) => model.id),
-      [],
-      `${profile.id}: a chat-only model must carry status "unavailable" as well`,
-    );
-  }
+test("an unavailable chat-dialect model remains out of the picker", () => {
+  const catalog = catalogFor(configStub());
+  assert.ok(!catalog.models.some((entry) => entry.slug === "qwen3.8-max@opencode-go"));
 });
 
 test("the native section keeps Codex's own order, not ours", async (t) => {

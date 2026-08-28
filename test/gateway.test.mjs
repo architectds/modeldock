@@ -1590,6 +1590,13 @@ test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint"
   assert.equal(paid.free, false, "paid models keep the generic error hints");
 });
 
+test("upstreamTargetFor routes a verified OpenCode chat model through the Chat bridge", () => {
+  const target = upstreamTargetFor(configStub(), "qwen3.8-flash@opencode-go");
+  assert.equal(target.transport, "chat");
+  assert.equal(target.url, "https://opencode.ai/zen/go/v1/chat/completions");
+  assert.equal(target.cachePrompt, undefined, "remote Chat must not inherit llama KV cache settings");
+});
+
 test("freeResponseFailure classifies silent zen free 200 bodies", () => {
   assert.equal(freeResponseFailure({ id: "r", output: [], stop_reason: "max_output_tokens" }), "empty_output");
   assert.equal(

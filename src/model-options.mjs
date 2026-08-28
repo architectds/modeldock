@@ -75,7 +75,7 @@ export function modelOptions(config, profileId) {
   for (const entry of enabledProviders(config)) {
     const profile = profileById(entry.id);
     for (const model of profile?.availableModels || []) {
-      if (model.status === "unavailable" || model.endpoint === "chat") continue;
+      if (model.status === "unavailable") continue;
       const id = publishedSlugFor(entry.id, model);
       if (all.some((existing) => existing.id === id)) continue;
       all.push({ ...withTierLabel(model), id, provider: entry.id });
@@ -90,7 +90,7 @@ export function modelOptions(config, profileId) {
     const owner = providerForModel(config, id);
     if (!enabledProviders(config).some((provider) => provider.id === owner)) continue;
     const known = profileById(owner)?.availableModels?.find((model) => model.id === bareModelId(id));
-    if (!known || known.status === "unavailable" || known.endpoint === "chat") continue;
+    if (!known || known.status === "unavailable") continue;
     const resolved = publishedSlugFor(owner, known);
     if (all.some((existing) => existing.id === resolved)) continue;
     all.push({ ...withTierLabel(known), id: resolved, provider: owner });
@@ -165,7 +165,7 @@ export function enabledProviders(config) {
 
 export function providerModels(providerId) {
   return (profileById(providerId)?.availableModels || [])
-    .filter((model) => model.status !== "unavailable" && model.endpoint !== "chat");
+    .filter((model) => model.status !== "unavailable");
 }
 
 export function providerRouteConfigured(config, providerId) {

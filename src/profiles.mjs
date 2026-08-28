@@ -262,15 +262,21 @@ const OPENCODE_GO_PROFILE = {
     { id: "nemotron-3-ultra-free", label: "Nemotron 3 Ultra Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "laguna-s-2.1-free", label: "Laguna S 2.1 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
+    { id: "longcat-2.0", label: "Longcat 2.0", endpoint: "chat", supportsVision: false, contextWindow: 1048756, contextSource: "vendor", status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", inputNormalizer: "opencode-pro", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
+    // OpenCode's live /models response names these models but does not expose a
+    // window. Publish the explicit conservative fallback, never a guessed one.
+    { id: "glm-5.3-flash", label: "GLM 5.3 Flash", endpoint: "chat", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
+    { id: "glm-5.3", label: "GLM 5.3", endpoint: "chat", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
     // The bare id gpt-5.6-luna is also a native GPT picker slot, so our Luna is
     // published under the @opencode-go suffix and the bare id stays reserved for
     // the native backend's GPT-5.6-Luna.
     { id: "gpt-5.6-luna", label: "Luna", endpoint: "responses", supportsVision: true, visionScore: 7, visionMaxScore: 9, visionTier: "medium", quota5h: 2050, speedTier: "fast", ownerQualified: true, contextWindow: 272000, contextSource: "vendor", status: "available" },
     { id: "grok-4.5", label: "Grok 4.5", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 120, speedTier: "fast", contextWindow: 500000, contextSource: "vendor", status: "available" },
+    { id: "grok-4.6", label: "Grok 4.6", endpoint: "responses", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
     { id: "hy3", label: "Hy3", endpoint: "responses", supportsVision: false, contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "hy3-preview", label: "Hy3 Preview", endpoint: "responses", supportsVision: false, status: "unavailable" },
     { id: "kimi-k2.5", label: "Kimi K2.5", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1150, speedTier: "fast", contextWindow: 262144, contextSource: "vendor", status: "available" },
@@ -282,11 +288,8 @@ const OPENCODE_GO_PROFILE = {
     { id: "mimo-v2.5-pro", label: "MiMo V2.5 Pro", endpoint: "responses", supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
     { id: "mimo-v2-omni", label: "MiMo V2 Omni", endpoint: "responses", supportsVision: false, status: "unavailable" },
     { id: "mimo-v2-pro", label: "MiMo V2 Pro", endpoint: "responses", supportsVision: false, status: "unavailable" },
-    // Chat-completions dialect is not supported by the passthrough gateway yet.
-    // These models stay published-unavailable so the picker never offers a model
-    // that would 400. Note several of them are vision-capable (minimax-m3, qwen3.5/
-    // 3.6/3.7-plus, qwen3.8-max); they become candidates for the vision picker
-    // once a chat adapter exists.
+    // These older Chat candidates have not completed the same full-wire checks
+    // as the available Chat entries, so they remain hidden for now.
     { id: "minimax-m2.5", label: "MiniMax M2.5", endpoint: "chat", supportsVision: false, status: "unavailable" },
     { id: "minimax-m2.7", label: "MiniMax M2.7", endpoint: "responses", supportsVision: false, contextWindow: 204800, contextSource: "vendor", status: "available" },
     { id: "minimax-m3", label: "MiniMax M3", endpoint: "chat", supportsVision: true, visionScore: 8, visionMaxScore: 9, visionTier: "strong", quota5h: 3200, speedTier: "fast", status: "unavailable" },
@@ -295,6 +298,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "qwen3.7-max", label: "Qwen 3.7 Max", endpoint: "chat", supportsVision: false, status: "unavailable" },
     { id: "qwen3.7-plus", label: "Qwen 3.7 Plus", endpoint: "chat", supportsVision: true, visionScore: 8, visionMaxScore: 9, visionTier: "strong", quota5h: 4300, speedTier: "medium", status: "unavailable" },
     { id: "qwen3.8-max", label: "Qwen 3.8 Max", endpoint: "chat", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 160, speedTier: "medium", status: "unavailable" },
+    { id: "qwen3.8-flash", label: "Qwen 3.8 Flash", endpoint: "chat", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
   ],
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {
@@ -591,10 +595,12 @@ defineRouting(OPENCODE_GO_PROFILE, {
   target(config, model) {
     const upstream = bareModelId(model);
     const entry = modelEntryFor(config, upstream);
+    const transport = entry?.endpoint === "chat" ? "chat" : "responses";
     return {
       provider: "opencode-go",
       model: upstream,
-      url: `${OPENCODE_GO_PROFILE.baseUrlFor(config, model)}/responses`,
+      url: `${OPENCODE_GO_PROFILE.baseUrlFor(config, model)}/${transport === "chat" ? "chat/completions" : "responses"}`,
+      transport,
       token: config?.tokens?.["opencode-go"] || "",
       // Zen free tier: failure copy should carry free-tier guidance instead of
       // the generic hint (see error-translation.mjs FREE_HINTS).
@@ -679,6 +685,7 @@ function localWireTarget(providerId) {
       // template rejects a non-empty JSON string here and requires the decoded
       // mapping, while older templates keep the ordinary OpenAI string shape.
       toolArgumentsAsObjects: Boolean(entry?.chatTemplateSupportsObjectArguments),
+      cachePrompt: transport === "chat",
       // llama.cpp can expose an internal multimodal sentinel. Literal copies
       // in tool output must be escaped before its Chat template sees text.
       mediaMarker: typeof entry?.mediaMarker === "string" ? entry.mediaMarker : "",

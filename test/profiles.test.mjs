@@ -239,7 +239,10 @@ test("every published model carries a window and says where it came from", async
   for (const profile of [OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE]) {
     for (const model of profile.availableModels.filter((m) => (m.status || "available") === "available")) {
       assert.ok(model.contextWindow > 0, `${model.id} publishes no context window`);
-      assert.ok(["vendor", "measured"].includes(model.contextSource), `${model.id} does not say where its window came from`);
+      assert.ok(["vendor", "measured", "fallback"].includes(model.contextSource), `${model.id} does not say where its window came from`);
+      if (model.contextSource === "fallback") {
+        assert.equal(model.contextWindow, 250_000, `${model.id} must use the explicit conservative fallback`);
+      }
     }
   }
 });

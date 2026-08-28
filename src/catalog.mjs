@@ -124,8 +124,7 @@ export function catalogFor(config) {
     // stronger statement, and withholding it would leave Codex unable to name
     // the model it is currently talking to.
     if (!isModelPublished(toggles, entry.slug) && !selected.has(entry.slug)) return false;
-    return enabledProviderIds.has(owner)
-      && !(modelEntry?.endpoint === "chat" || modelEntry?.status === "unavailable");
+    return enabledProviderIds.has(owner) && modelEntry?.status !== "unavailable";
   });
   // Wizard-managed opt-out: without a GPT subscription the native GPT models are
   // "see it, can't use it" noise (every request 401s), so subscribers keep the

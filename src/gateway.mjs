@@ -3473,7 +3473,14 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     if (config.debug?.dumpAll && config.debug?.dumpDir) {
       dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
     }
-    const upstreamRequest = serializedBody({ ...upstreamSummarizeBody, model: upstreamModel });
+    const chatSummary = target.transport === "chat"
+      ? responsesToChat(upstreamSummarizeBody, {
+        toolArgumentsAsObjects: target.toolArgumentsAsObjects,
+        mediaMarker: target.mediaMarker,
+        cachePrompt: Boolean(target.cachePrompt),
+      }).payload
+      : null;
+    const upstreamRequest = serializedBody({ ...(chatSummary || upstreamSummarizeBody), model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
@@ -3526,8 +3533,9 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       recordUsage({ ...compactRoute, status: 502 });
       return { ok: false, httpStatus: 502, route, error: translated.body.error.message.slice(0, 400), upstreamBytes: bytes.length };
     }
-    usage = extractResponseUsage(parsed);
-    const summary = `${extractResponseText(parsed)}${imageHandoff}`;
+    const normalizedSummary = chatSummary ? chatCompletionToResponse(parsed) : parsed;
+    usage = extractResponseUsage(normalizedSummary);
+    const summary = `${extractResponseText(normalizedSummary)}${imageHandoff}`;
     let clientBytes;
     if (v2) {
       if (payload.stream === false) {
@@ -3708,6 +3716,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // strict upstreams (Go) would reject the request again.
   delete normalizedPayload.previous_response_id;
   normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
+  const target = upstreamTargetFor(config, normalizedPayload.model);
 
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
   const imageTransfer = {
@@ -3728,10 +3737,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     blockedToolTypes: routedProfile.blockedToolTypes,
     hostedToolTypes: routedProfile.hostedToolTypes,
     customToolsAsFunctions: routedProfile.customToolsAsFunctions,
-    // Chat Completions has no namespace descriptor. Flatten only for a profile
-    // that explicitly selects that transport; Responses routes keep their
-    // existing declaration shape unchanged.
-    flattenAllNamespaces: routedProfile.flattenAllNamespaces || routedProfile.transport === "chat",
+    // Chat Completions has no namespace descriptor. A Go profile can mix
+    // Responses and Chat models, so this follows the chosen model's target,
+    // never a provider-wide transport flag.
+    flattenAllNamespaces: routedProfile.flattenAllNamespaces || target.transport === "chat",
     safeNamespaceFunctionNames: routedProfile.safeNamespaceFunctionNames,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
@@ -3759,7 +3768,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     imageTransfer,
   });
 
-  const target = upstreamTargetFor(config, normalizedPayload.model);
   // The upstream sees the bare model id; the route model (possibly owner-suffixed)
   // stays in the response and affinity so provider resolution keeps working on
   // continuation requests.
@@ -3851,6 +3859,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       ? responsesToChat(normalizedPayload, {
         toolArgumentsAsObjects: target.toolArgumentsAsObjects,
         mediaMarker: target.mediaMarker,
+        cachePrompt: Boolean(target.cachePrompt),
       })
       : null;
     const localChatPayload = chatBridge ? injectLocalWarmBase(chatBridge.payload, warmBase) : null;

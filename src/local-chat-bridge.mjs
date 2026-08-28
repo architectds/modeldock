@@ -153,7 +153,7 @@ function reasoningContent(item, mediaMarker = "") {
   return text || summary;
 }
 
-export function responsesToChat(payload, { toolArgumentsAsObjects = false, mediaMarker = "" } = {}) {
+export function responsesToChat(payload, { toolArgumentsAsObjects = false, mediaMarker = "", cachePrompt = true } = {}) {
   if (!payload || !Array.isArray(payload.input)) {
     throw new LocalChatBridgeError("input", "Local Chat bridge needs a Responses input array.");
   }
@@ -234,7 +234,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
     ...(Number.isFinite(payload.seed) ? { seed: payload.seed } : {}),
     ...(payload.stop !== undefined ? { stop: payload.stop } : {}),
     ...(payload.chat_template_kwargs && typeof payload.chat_template_kwargs === "object" ? { chat_template_kwargs: payload.chat_template_kwargs } : {}),
-    cache_prompt: true,
+    ...(cachePrompt ? { cache_prompt: true } : {}),
     ...(payload.stream === true ? { stream_options: { include_usage: true } } : {}),
   };
   return { payload: chat, customToolNames: convertedTools.customToolNames };

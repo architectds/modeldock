@@ -61,6 +61,14 @@ test("Responses payload becomes a cacheable Chat request without dropping tool h
   assert.equal(bridged.customToolNames.has("apply_patch"), true);
 });
 
+test("a remote Chat bridge does not send llama-specific cache_prompt", () => {
+  const bridged = responsesToChat({
+    model: "qwen3.8-flash",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+  }, { cachePrompt: false });
+  assert.equal(bridged.payload.cache_prompt, undefined);
+});
+
 test("a Qwen Chat template receives historical tool arguments as an object", () => {
   const bridged = responsesToChat({
     model: "Qwen3.8-27B",
