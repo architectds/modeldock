@@ -130,7 +130,9 @@ function toolCallItem(item, { toolArgumentsAsObjects = false, mediaMarker = "" }
   if (typeof item.name !== "string" || !item.name) {
     throw new LocalChatBridgeError("tool_call_name", "Local Chat bridge needs a name for every function call.");
   }
-  const argumentsValue = item.arguments ?? item.input ?? {};
+  const argumentsValue = item.type === "custom_tool_call"
+    ? { input: typeof item.input === "string" ? item.input : textValue(item.input ?? "") }
+    : item.arguments ?? item.input ?? {};
   const argumentsText = typeof argumentsValue === "string" ? argumentsValue : textValue(argumentsValue, mediaMarker);
   return {
     id: callId,
@@ -174,13 +176,13 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
   };
   for (const item of payload.input) {
     if (!item || typeof item !== "object") continue;
-    if (item.type === "function_call") {
+    if (["function_call", "custom_tool_call"].includes(item.type)) {
       const next = assistant();
       if (!next.tool_calls) next.tool_calls = [];
       next.tool_calls.push(toolCallItem(item, { toolArgumentsAsObjects, mediaMarker }));
       continue;
     }
-    if (item.type === "function_call_output") {
+    if (["function_call_output", "custom_tool_call_output"].includes(item.type)) {
       flushAssistant();
       const callId = item.call_id || item.id;
       if (typeof callId !== "string" || !callId) {
@@ -246,11 +248,35 @@ function responseUsage(usage) {
   const output = Number(usage.completion_tokens ?? usage.output_tokens);
   if (!Number.isFinite(input) && !Number.isFinite(output)) return undefined;
   const cached = Number(usage.prompt_tokens_details?.cached_tokens ?? usage.input_tokens_details?.cached_tokens);
+  const reasoning = Number(usage.completion_tokens_details?.reasoning_tokens ?? usage.output_tokens_details?.reasoning_tokens);
   return {
     ...(Number.isFinite(input) ? { input_tokens: input } : {}),
     ...(Number.isFinite(output) ? { output_tokens: output } : {}),
     ...(Number.isFinite(input) && Number.isFinite(output) ? { total_tokens: input + output } : {}),
     ...(Number.isFinite(cached) ? { input_tokens_details: { cached_tokens: cached } } : {}),
+    ...(Number.isFinite(reasoning) ? { output_tokens_details: { reasoning_tokens: reasoning } } : {}),
+  };
+}
+
+function chatReasoningText(message) {
+  if (!message || typeof message !== "object") return "";
+  for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
+    if (typeof message[field] === "string" && message[field]) return message[field];
+  }
+  return "";
+}
+
+function responseReasoningItem(id, content, status = "completed") {
+  return {
+    id,
+    type: "reasoning",
+    status,
+    summary: [],
+    content: content ? [{ type: "reasoning_text", text: String(content) }] : [],
+    // Codex has already proven that it persists and replays this local
+    // Responses shape. The reasoning itself stays in content; the empty field
+    // only preserves the standard reasoning-item contract used by Codex.
+    encrypted_content: "",
   };
 }
 
@@ -300,9 +326,8 @@ export function chatCompletionToResponse(chat, { restoreCall = (item) => item } 
   const message = chat.choices?.[0]?.message || {};
   const id = typeof chat.id === "string" && chat.id ? chat.id : `resp_local_${Date.now()}`;
   const output = [];
-  if (typeof message.reasoning_content === "string" && message.reasoning_content) {
-    output.push({ id: `${id}-reasoning`, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: message.reasoning_content }] });
-  }
+  const reasoning = chatReasoningText(message);
+  if (reasoning) output.push(responseReasoningItem(`${id}-reasoning`, reasoning));
   if (typeof message.content === "string" && message.content) output.push(responseMessageItem(`${id}-message`, message.content));
   for (let index = 0; index < (message.tool_calls || []).length; index += 1) {
     output.push(restoreCall(responseFunctionItem(`${id}-call-${index}`, message.tool_calls[index])));
@@ -364,7 +389,7 @@ class ChatResponseAssembler {
     const id = `${this.id}-reasoning`;
     this.reasoning = { id, text: "", index: this.nextOutputIndex++ };
     return [
-      { type: "response.output_item.added", response_id: this.id, output_index: this.reasoning.index, item: { id, type: "reasoning", status: "in_progress", summary: [] } },
+      { type: "response.output_item.added", response_id: this.id, output_index: this.reasoning.index, item: responseReasoningItem(id, "", "in_progress") },
       { type: "response.content_part.added", response_id: this.id, item_id: id, output_index: this.reasoning.index, content_index: 0, part: { type: "reasoning_text", text: "" } },
     ];
   }
@@ -397,15 +422,16 @@ class ChatResponseAssembler {
     for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
       if (typeof choice?.finish_reason === "string" && choice.finish_reason) this.finishReason = choice.finish_reason;
       const delta = choice?.delta || {};
-      if (typeof delta.reasoning_content === "string" && delta.reasoning_content) {
+      const reasoningDelta = chatReasoningText(delta);
+      if (reasoningDelta) {
         events.push(...this.openReasoning());
-        this.reasoning.text += delta.reasoning_content;
-        events.push({ type: "response.reasoning_text.delta", response_id: this.id, item_id: this.reasoning.id, output_index: 0, content_index: 0, delta: delta.reasoning_content });
+        this.reasoning.text += reasoningDelta;
+        events.push({ type: "response.reasoning_text.delta", response_id: this.id, item_id: this.reasoning.id, output_index: this.reasoning.index, content_index: 0, delta: reasoningDelta });
       }
       if (typeof delta.content === "string" && delta.content) {
         events.push(...this.openMessage());
         this.message.text += delta.content;
-        events.push({ type: "response.output_text.delta", response_id: this.id, item_id: this.message.id, output_index: 0, content_index: 0, delta: delta.content });
+        events.push({ type: "response.output_text.delta", response_id: this.id, item_id: this.message.id, output_index: this.message.index, content_index: 0, delta: delta.content });
       }
       for (const toolCall of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
         events.push(...this.openCall(toolCall.index, toolCall));
@@ -417,28 +443,29 @@ class ChatResponseAssembler {
   finish() {
     if (!this.started) return [];
     const events = [];
-    const output = [];
+    const indexedOutput = [];
     if (this.reasoning) {
-      const item = { id: this.reasoning.id, type: "reasoning", status: "completed", content: [{ type: "reasoning_text", text: this.reasoning.text }] };
+      const item = responseReasoningItem(this.reasoning.id, this.reasoning.text);
       events.push({ type: "response.reasoning_text.done", response_id: this.id, item_id: this.reasoning.id, output_index: this.reasoning.index, content_index: 0, text: this.reasoning.text });
       events.push({ type: "response.content_part.done", response_id: this.id, item_id: this.reasoning.id, output_index: this.reasoning.index, content_index: 0, part: item.content[0] });
       events.push({ type: "response.output_item.done", response_id: this.id, output_index: this.reasoning.index, item });
-      output.push(item);
+      indexedOutput.push({ index: this.reasoning.index, item });
     }
     if (this.message) {
       const item = responseMessageItem(this.message.id, this.message.text);
       events.push({ type: "response.output_text.done", response_id: this.id, item_id: this.message.id, output_index: this.message.index, content_index: 0, text: this.message.text });
       events.push({ type: "response.content_part.done", response_id: this.id, item_id: this.message.id, output_index: this.message.index, content_index: 0, part: item.content[0] });
       events.push({ type: "response.output_item.done", response_id: this.id, output_index: this.message.index, item });
-      output.push(item);
+      indexedOutput.push({ index: this.message.index, item });
     }
     for (const entry of this.calls.values()) {
       if (!entry.emitted || !entry.name) continue;
       const item = this.restoreCall({ id: entry.id, type: "function_call", status: "completed", call_id: entry.id, name: entry.name, arguments: entry.arguments });
       events.push({ type: "response.function_call_arguments.done", response_id: this.id, item_id: entry.id, call_id: entry.id, output_index: entry.index, arguments: entry.arguments });
       events.push({ type: "response.output_item.done", response_id: this.id, output_index: entry.index, item });
-      output.push(item);
+      indexedOutput.push({ index: entry.index, item });
     }
+    const output = indexedOutput.sort((a, b) => a.index - b.index).map((entry) => entry.item);
     const response = terminalResponse({
       id: this.id,
       created: this.created,

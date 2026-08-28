@@ -83,6 +83,25 @@ test("a Qwen Chat template receives historical tool arguments as an object", () 
   assert.equal(bridged.payload.messages[2].role, "tool");
 });
 
+test("Codex custom tool history becomes the same Chat function contract in both dialects", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Apply it." }] },
+    { type: "reasoning", content: [{ type: "reasoning_text", text: "I should apply the patch." }] },
+    { type: "custom_tool_call", call_id: "call_patch", name: "apply_patch", input: "*** Begin Patch\n*** End Patch" },
+    { type: "custom_tool_call_output", call_id: "call_patch", output: "Done!" },
+  ];
+  const tools = [{ type: "custom", name: "apply_patch", description: "Apply a patch." }];
+  const remote = responsesToChat({ model: "qwen3.8-flash", input, tools }, { cachePrompt: false });
+  assert.equal(remote.payload.messages[1].reasoning_content, "I should apply the patch.");
+  assert.deepEqual(JSON.parse(remote.payload.messages[1].tool_calls[0].function.arguments), { input: "*** Begin Patch\n*** End Patch" });
+  assert.equal(remote.payload.messages[2].role, "tool");
+  assert.equal(remote.payload.messages[2].tool_call_id, "call_patch");
+  assert.equal(remote.payload.messages[2].content, "Done!");
+
+  const local = responsesToChat({ model: "Qwen3.8-27B", input, tools }, { toolArgumentsAsObjects: true });
+  assert.deepEqual(local.payload.messages[1].tool_calls[0].function.arguments, { input: "*** Begin Patch\n*** End Patch" });
+});
+
 test("llama media sentinels in text history are escaped without touching real images", () => {
   const marker = "<__media_runtime_marker__>";
   const escaped = "<\u200b__media_runtime_marker__>";
@@ -231,6 +250,23 @@ test("Chat completion becomes a Codex Responses completion with cached-token usa
   assert.equal(response.usage.input_tokens_details.cached_tokens, 8304);
 });
 
+test("non-stream Chat reasoning dialects become replayable Responses items", () => {
+  for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
+    const response = chatCompletionToResponse({
+      id: `chatcmpl_${field}`,
+      model: "Qwen3.8-27B",
+      choices: [{ message: { [field]: `think:${field}`, content: "Done." }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 12, completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 5 } },
+    });
+    assert.equal(response.output[0].type, "reasoning");
+    assert.equal(response.output[0].content[0].text, `think:${field}`);
+    assert.deepEqual(response.output[0].summary, []);
+    assert.equal(response.output[0].encrypted_content, "");
+    assert.equal(response.output[1].content[0].text, "Done.");
+    assert.equal(response.usage.output_tokens_details.reasoning_tokens, 5);
+  }
+});
+
 test("a Chat length stop remains incomplete instead of masquerading as a completed response", () => {
   const response = chatCompletionToResponse({
     id: "chatcmpl_limited",
@@ -263,6 +299,54 @@ test("Chat stream produces complete Responses function-call lifecycle with cache
   assert.equal(done.arguments, "{\"value\":\"second\"}");
   assert.equal(completed.response.output[0].name, "echo");
   assert.equal(completed.response.usage.input_tokens_details.cached_tokens, 8304);
+});
+
+test("streamed Chat reasoning survives a complete Responses tool round trip", () => {
+  const events = chatChunksToResponseEvents([
+    {
+      id: "chatcmpl_reasoning_tool",
+      created: 19,
+      model: "Qwen3.8-27B",
+      choices: [{ index: 0, delta: { role: "assistant", reasoning: "Inspect " } }],
+    },
+    {
+      id: "chatcmpl_reasoning_tool",
+      model: "Qwen3.8-27B",
+      choices: [{ index: 0, delta: {
+        reasoning_text: "the file.",
+        content: "Checking.",
+        tool_calls: [{ index: 0, id: "call_reasoning", type: "function", function: { name: "exec_command", arguments: "{\"cmd\":\"dir\"}" } }],
+      }, finish_reason: "tool_calls" }],
+      usage: {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        prompt_tokens_details: { cached_tokens: 80 },
+        completion_tokens_details: { reasoning_tokens: 12 },
+      },
+    },
+  ]);
+  const reasoningDelta = events.find((event) => event.type === "response.reasoning_text.delta");
+  const textDelta = events.find((event) => event.type === "response.output_text.delta");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(reasoningDelta.output_index, 0);
+  assert.equal(textDelta.output_index, 1, "visible text follows the reasoning item instead of colliding at output index zero");
+  assert.deepEqual(completed.response.output.map((item) => item.type), ["reasoning", "message", "function_call"]);
+  assert.equal(completed.response.output[0].content[0].text, "Inspect the file.");
+  assert.equal(completed.response.output[0].encrypted_content, "");
+  assert.equal(completed.response.usage.output_tokens_details.reasoning_tokens, 12);
+
+  const replay = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      ...completed.response.output,
+      { type: "function_call_output", call_id: "call_reasoning", output: "file.txt" },
+    ],
+  });
+  assert.equal(replay.payload.messages[0].role, "assistant");
+  assert.equal(replay.payload.messages[0].reasoning_content, "Inspect the file.");
+  assert.equal(replay.payload.messages[0].content, "Checking.");
+  assert.equal(replay.payload.messages[0].tool_calls[0].id, "call_reasoning");
+  assert.equal(replay.payload.messages[1].role, "tool");
 });
 
 test("a streamed Chat length stop emits a Responses incomplete terminal event", () => {

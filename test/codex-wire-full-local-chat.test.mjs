@@ -68,6 +68,15 @@ async function closeServer(server) {
   }));
 }
 
+function completedResponse(text) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+    const event = JSON.parse(line.slice(6));
+    if (event.type === "response.completed") return event.response;
+  }
+  throw new Error("Responses stream had no completed response");
+}
+
 test("built bundle bridges the complete original Codex package to strict local Chat", async (t) => {
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.request.tools.length, 164);
@@ -79,10 +88,12 @@ test("built bundle bridges the complete original Codex package to strict local C
   const autostartName = `ModelDockFullLocalChat${process.pid}`;
   await mkdir(stateDir, { recursive: true });
   await mkdir(codexHome, { recursive: true });
+  const requests = [];
   const upstream = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    requests.push(body);
     if (req.url !== "/v1/chat/completions") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "expected Chat Completions endpoint" }));
@@ -103,10 +114,19 @@ test("built bundle bridges the complete original Codex package to strict local C
       res.end(JSON.stringify({ error: "cache or stream usage request missing" }));
       return;
     }
+    const toolIds = new Set(body.messages.filter((message) => message.role === "tool").map((message) => message.tool_call_id));
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (toolIds.has("call_local_fixture")) {
+      res.end([
+        'data: {"id":"chatcmpl_full_fixture_done","created":22,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","reasoning_text":"The command completed successfully.","content":"LOCAL_FIXTURE_DONE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8340,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":8304},"completion_tokens_details":{"reasoning_tokens":8}}}',
+        "data: [DONE]",
+        "",
+      ].join("\n\n"));
+      return;
+    }
     res.end([
-      'data: {"id":"chatcmpl_full_fixture","created":21,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_local_fixture","type":"function","function":{"name":"exec_command","arguments":"{\\"cmd\\":\\""}}]}}]}',
-      'data: {"id":"chatcmpl_full_fixture","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo LOCAL_FIXTURE\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8308,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":8304}}}',
+      'data: {"id":"chatcmpl_full_fixture","created":21,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Run the requested command and inspect its result.","tool_calls":[{"index":0,"id":"call_local_fixture","type":"function","function":{"name":"exec_command","arguments":"{\\"cmd\\":\\""}}]}}]}',
+      'data: {"id":"chatcmpl_full_fixture","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo LOCAL_FIXTURE\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8308,"completion_tokens":19,"prompt_tokens_details":{"cached_tokens":8304},"completion_tokens_details":{"reasoning_tokens":10}}}',
       "data: [DONE]",
       "",
     ].join("\n\n"));
@@ -151,16 +171,31 @@ test("built bundle bridges the complete original Codex package to strict local C
   });
   await waitForStatus(gatewayPort);
   const selectedModel = "Qwen3.8-27B@llamacpp";
-  const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-codex-session-id": "full-local-fixture" },
-    body: JSON.stringify({ ...fixture.request, model: selectedModel }),
-  });
-  const text = await response.text();
-  assert.equal(response.status, 200, `built bundle rejected the full package: ${text}\n${stderr}`);
-  assert.match(text, /response\.function_call_arguments\.done/);
-  assert.match(text, /exec_command/);
-  assert.match(text, /cached_tokens":8304/);
+  const send = async (input) => {
+    const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-codex-session-id": "full-local-fixture" },
+      body: JSON.stringify({ ...fixture.request, model: selectedModel, input }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, `built bundle rejected the full package: ${text}\n${stderr}`);
+    return text;
+  };
+  const first = await send(fixture.request.input);
+  assert.match(first, /response\.function_call_arguments\.done/);
+  assert.match(first, /response\.reasoning_text\.done/);
+  assert.match(first, /exec_command/);
+  assert.match(first, /cached_tokens":8304/);
+  const firstOutput = completedResponse(first).output;
+  assert.deepEqual(firstOutput.map((item) => item.type), ["reasoning", "function_call"]);
+  const second = await send([
+    ...fixture.request.input,
+    ...firstOutput,
+    { type: "function_call_output", call_id: "call_local_fixture", output: "LOCAL_FIXTURE" },
+  ]);
+  assert.match(second, /LOCAL_FIXTURE_DONE/);
+  const replayedAssistant = requests[1].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_local_fixture"));
+  assert.equal(replayedAssistant?.reasoning_content, "Run the requested command and inspect its result.");
 });
 
 test("built bundle preserves full-Codex tools across a mock KV restore after gateway restart", async (t) => {

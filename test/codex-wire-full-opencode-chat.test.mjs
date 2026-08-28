@@ -63,18 +63,32 @@ function sse(events) {
   return [...events.map((event) => `data: ${JSON.stringify(event)}`), "data: [DONE]", ""].join("\n\n");
 }
 
-function toolStream(calls) {
+function completedResponse(text) {
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+    const event = JSON.parse(line.slice(6));
+    if (event.type === "response.completed") return event.response;
+  }
+  throw new Error("Responses stream had no completed response");
+}
+
+function toolStream(calls, { reasoningField = "reasoning", reasoningText = "" } = {}) {
+  const firstDelta = {
+    role: "assistant",
+    ...(reasoningText ? { [reasoningField]: reasoningText } : {}),
+    tool_calls: calls.map((call, index) => ({
+      index,
+      id: call.id,
+      type: "function",
+      function: { name: call.name, arguments: call.arguments.slice(0, Math.ceil(call.arguments.length / 2)) },
+    })),
+  };
   return sse([
     {
       id: "chatcmpl_go_fixture",
       created: 21,
       model: "qwen3.8-flash",
-      choices: [{ index: 0, delta: { role: "assistant", tool_calls: calls.map((call, index) => ({
-        index,
-        id: call.id,
-        type: "function",
-        function: { name: call.name, arguments: call.arguments.slice(0, Math.ceil(call.arguments.length / 2)) },
-      })) } }],
+      choices: [{ index: 0, delta: firstDelta }],
     },
     {
       id: "chatcmpl_go_fixture",
@@ -83,7 +97,7 @@ function toolStream(calls) {
         index,
         function: { arguments: call.arguments.slice(Math.ceil(call.arguments.length / 2)) },
       })) }, finish_reason: "tool_calls" }],
-      usage: { prompt_tokens: 8308, completion_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } },
+      usage: { prompt_tokens: 8308, completion_tokens: 19, prompt_tokens_details: { cached_tokens: 0 }, completion_tokens_details: { reasoning_tokens: 10 } },
     },
   ]);
 }
@@ -158,12 +172,18 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     } else if (toolIds.has("call_go_c")) {
       res.end(textStream("GO_TOOL_LOOP_COMPLETE"));
     } else if (toolIds.has("call_go_a") && toolIds.has("call_go_b")) {
-      res.end(toolStream([{ id: "call_go_c", name: "write_stdin", arguments: "{\"session_id\":0,\"chars\":\"continue\"}" }]));
+      res.end(toolStream(
+        [{ id: "call_go_c", name: "write_stdin", arguments: "{\"session_id\":0,\"chars\":\"continue\"}" }],
+        { reasoningField: "reasoning_text", reasoningText: "The first tools completed; continue the same task." },
+      ));
     } else {
-      res.end(toolStream([
-        { id: "call_go_a", name: "exec_command", arguments: "{\"cmd\":\"echo GO_A\"}" },
-        { id: "call_go_b", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
-      ]));
+      res.end(toolStream(
+        [
+          { id: "call_go_a", name: "exec_command", arguments: "{\"cmd\":\"echo GO_A\"}" },
+          { id: "call_go_b", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
+        ],
+        { reasoningField: "reasoning", reasoningText: "Inspect both sources before continuing." },
+      ));
     }
   });
   const upstreamPort = await listen(upstream);
@@ -217,23 +237,27 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   assert.match(first, /response\.function_call_arguments\.done/);
   assert.match(first, /call_go_a/);
   assert.match(first, /call_go_b/);
+  assert.match(first, /response\.reasoning_text\.done/);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].tools.length, 162, "only the two universally unsupported hosted tools are removed before the generic Chat bridge");
+  const firstOutput = completedResponse(first).output;
+  assert.deepEqual(firstOutput.map((item) => item.type), ["reasoning", "function_call", "function_call"]);
   const firstTurn = [
-    { type: "function_call", call_id: "call_go_a", name: "exec_command", arguments: "{\"cmd\":\"echo GO_A\"}" },
-    { type: "function_call", call_id: "call_go_b", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
+    ...firstOutput,
     { type: "function_call_output", call_id: "call_go_a", output: "GO_A" },
     { type: "function_call_output", call_id: "call_go_b", output: "# ModelDock" },
   ];
   const second = await send([...fixture.request.input, ...firstTurn], "full-go-chat-fixture");
   assert.match(second, /call_go_c/);
+  assert.equal(requests[1].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_go_a"))?.reasoning_content, "Inspect both sources before continuing.");
   assert.ok(requests[1].messages.some((message) => message.role === "tool" && message.tool_call_id === "call_go_a"));
   assert.ok(requests[1].messages.some((message) => message.role === "tool" && message.tool_call_id === "call_go_b"));
-  const third = await send([...fixture.request.input, ...firstTurn,
-    { type: "function_call", call_id: "call_go_c", name: "write_stdin", arguments: "{\"session_id\":0,\"chars\":\"continue\"}" },
+  const secondOutput = completedResponse(second).output;
+  const third = await send([...fixture.request.input, ...firstTurn, ...secondOutput,
     { type: "function_call_output", call_id: "call_go_c", output: "done" },
   ], "full-go-chat-fixture");
   assert.match(third, /GO_TOOL_LOOP_COMPLETE/);
+  assert.equal(requests[2].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_go_c"))?.reasoning_content, "The first tools completed; continue the same task.");
   const compact = await send([...fixture.request.input,
     { type: "message", role: "user", content: [{ type: "input_text", text: "Summarize the completed work." }] },
     { type: "compaction_trigger" },
