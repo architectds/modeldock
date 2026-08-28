@@ -21,13 +21,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5-8 4.5-8-4.5zM4 12l8 4.5 8-4.5M4 16.5 12 21l8-4.5" /></svg>
         <span class="rail-label" data-i18n="nav.models"></span>
       </a>
-      <a class="rail-link" href="#subscriptions" data-rail="subscriptions" data-i18n-title="nav.subscriptions">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v10H3zM3 11h18M7 15h4" /></svg>
-        <span class="rail-label" data-i18n="nav.subscriptions"></span>
-      </a>
-      <a class="rail-link" href="#api" data-rail="api" data-i18n-title="nav.api">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M15 7l5 5-5 5" /></svg>
-        <span class="rail-label" data-i18n="nav.api"></span>
+      <a class="rail-link" href="#cloud" data-rail="cloud" data-i18n-title="nav.cloud">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h10a4 4 0 0 0 .5-8A6 6 0 0 0 6 8.5 4.5 4.5 0 0 0 7 18z" /></svg>
+        <span class="rail-label" data-i18n="nav.cloud"></span>
       </a>
       <a class="rail-link" href="#local" data-rail="local" data-i18n-title="nav.local">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01" /></svg>
@@ -197,101 +193,103 @@
       </section>
       </div>
 
-      <div class="view" data-view="subscriptions">
-        <section class="panel page-panel">
-          <p class="eyebrow" data-i18n="nav.subscriptions">Provider tokens</p>
-          <h2 data-i18n="page.subscriptionsTitle">Provider tokens</h2>
-      <label class="field">
-        <div class="field-head">
-          <span data-i18n="settings.goLabel">OpenCode Go token</span>
-          <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-        </div>
-        <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-      </label>
-      <div class="field" id="xai-section">
-        <div class="field-head">
-          <span data-i18n="xai.title">xAI (Grok) subscription</span>
-          <a href="https://grok.com" target="_blank" rel="noopener noreferrer" data-i18n="xai.about">No subscription?</a>
-        </div>
-        <div class="settings-row">
-          <button id="xai-signin" type="button" class="custom-action primary" data-i18n="xai.signIn" data-i18n-title="xai.hint">Sign in with Grok</button>
-          <button id="xai-disconnect" type="button" class="custom-action" data-i18n="xai.disconnect" hidden>Disconnect</button>
-          <span id="xai-status" class="custom-status" aria-live="polite" hidden></span>
-        </div>
-        <div id="xai-device" class="xai-device" hidden>
-          <p data-i18n="xai.deviceHint">Open this on any device and approve:</p>
-          <a id="xai-device-url" href="#" target="_blank" rel="noopener noreferrer"></a>
-          <p class="xai-code" id="xai-device-code"></p>
-        </div>
-        <p id="xai-error" class="custom-error" aria-live="polite" hidden></p>
-      </div>
-        <div class="settings-actions">
-          <span id="settings-status" class="save-status" aria-live="polite"></span>
-          <button id="settings-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
-        </div>
-        </section>
-      </div>
+      <div class="view" data-view="cloud">
+        <section class="panel page-panel cloud-page">
+          <p class="eyebrow" data-i18n="nav.cloud">Cloud</p>
+          <h2 data-i18n="page.cloudTitle">Cloud</h2>
 
-      <div class="view" data-view="api">
-        <section class="panel page-panel">
-          <p class="eyebrow" data-i18n="nav.api">Custom endpoint</p>
-          <h2 data-i18n="page.apiTitle">Custom endpoint</h2>
-      <div class="field-head" id="endpoint-list-head">
-        <span data-i18n="endpoints.title">Configured endpoints</span>
-        <span id="endpoint-list-note" class="custom-hint" aria-live="polite"></span>
-      </div>
-      <label class="field" id="deepseek-field">
-        <div class="field-head">
-          <span data-i18n="settings.dsLabel">DeepSeek API key</span>
-          <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
-        </div>
-        <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-      </label>
-      <div id="endpoint-list" class="endpoint-list"></div>
-      <details id="custom-add" class="custom-add">
-        <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
-        <div class="custom-add-body">
-          <label class="field">
-            <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
-            <div class="custom-row">
-              <div class="endpoint-combo">
-                <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" aria-label="Endpoint (base URL)" />
-                <button id="custom-endpoint-presets" type="button" class="combo-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="Preset endpoints" title="Preset endpoints">&#9662;</button>
-                <ul id="custom-endpoint-menu" class="combo-menu" role="listbox" aria-label="Preset endpoints" hidden></ul>
+          <section class="cloud-section">
+            <h3 data-i18n="cloud.providersTitle">Providers</h3>
+            <div class="cloud-credentials">
+              <div class="field cloud-wide" id="xai-section">
+                <div class="field-head">
+                  <span data-i18n="xai.title">xAI (Grok) subscription</span>
+                  <a href="https://grok.com" target="_blank" rel="noopener noreferrer" data-i18n="xai.about">No subscription?</a>
+                </div>
+                <div class="settings-row">
+                  <button id="xai-signin" type="button" class="custom-action primary" data-i18n="xai.signIn" data-i18n-title="xai.hint">Sign in with Grok</button>
+                  <button id="xai-disconnect" type="button" class="custom-action" data-i18n="xai.disconnect" hidden>Disconnect</button>
+                  <span id="xai-status" class="custom-status" aria-live="polite" hidden></span>
+                </div>
+                <div id="xai-device" class="xai-device" hidden>
+                  <p data-i18n="xai.deviceHint">Open this on any device and approve:</p>
+                  <a id="xai-device-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+                  <p class="xai-code" id="xai-device-code"></p>
+                </div>
+                <p id="xai-error" class="custom-error" aria-live="polite" hidden></p>
               </div>
-              <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
+              <label class="field">
+                <div class="field-head">
+                  <span data-i18n="settings.goLabel">OpenCode Go token</span>
+                  <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+                </div>
+                <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="field" id="deepseek-field">
+                <div class="field-head">
+                  <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+                  <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
+                </div>
+                <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+              </label>
             </div>
-            <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
-          </label>
-          <label class="field">
-            <div class="field-head"><span data-i18n="custom.model">Model</span></div>
-            <div class="custom-row">
-              <select id="custom-model-select" class="custom-model-select" aria-label="Model" disabled></select>
-              <div class="custom-toggles" role="group" aria-label="Custom model roles">
-                <label class="chip-toggle"><input id="custom-as-vision" type="checkbox" /><span data-i18n="custom.vision">Vision model</span></label>
+            <div class="settings-actions">
+              <span id="settings-status" class="save-status" aria-live="polite"></span>
+              <button id="settings-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
+            </div>
+          </section>
+
+          <section class="cloud-section">
+            <div class="field-head" id="endpoint-list-head">
+              <h3 data-i18n="endpoints.title">Configured endpoints</h3>
+              <span id="endpoint-list-note" class="custom-hint" aria-live="polite"></span>
+            </div>
+            <div id="endpoint-list" class="endpoint-list"></div>
+            <details id="custom-add" class="custom-add">
+              <summary class="custom-add-summary" data-i18n="settings.customTitle">Custom model</summary>
+              <div class="custom-add-body">
+                <label class="field">
+                  <div class="field-head"><span data-i18n="custom.endpoint">Endpoint (base URL)</span></div>
+                  <div class="custom-row">
+                    <div class="endpoint-combo">
+                      <input id="custom-endpoint" type="url" placeholder="https://host/v1" autocomplete="off" spellcheck="false" aria-label="Endpoint (base URL)" />
+                      <button id="custom-endpoint-presets" type="button" class="combo-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="Preset endpoints" title="Preset endpoints">&#9662;</button>
+                      <ul id="custom-endpoint-menu" class="combo-menu" role="listbox" aria-label="Preset endpoints" hidden></ul>
+                    </div>
+                    <button id="custom-list-models" type="button" class="custom-action" data-i18n="custom.listModels">List Models</button>
+                  </div>
+                  <p id="custom-endpoint-hint" class="custom-hint" aria-live="polite" hidden></p>
+                </label>
+                <label class="field">
+                  <div class="field-head"><span data-i18n="custom.model">Model</span></div>
+                  <div class="custom-row">
+                    <select id="custom-model-select" class="custom-model-select" aria-label="Model" disabled></select>
+                    <div class="custom-toggles" role="group" aria-label="Custom model roles">
+                      <label class="chip-toggle"><input id="custom-as-vision" type="checkbox" /><span data-i18n="custom.vision">Vision model</span></label>
+                    </div>
+                  </div>
+                </label>
+                <label class="field">
+                  <div class="field-head"><span data-i18n="custom.provider">Provider name</span></div>
+                  <input id="custom-provider" type="text" placeholder="together" autocomplete="off" spellcheck="false" maxlength="32" />
+                  <p class="custom-hint" data-i18n="custom.providerHint">Groups this endpoint in the model picker and becomes the model's @suffix. Leave blank for "custom".</p>
+                </label>
+                <label class="field">
+                  <div class="field-head"><span data-i18n="custom.apiKey">API key</span></div>
+                  <div class="custom-row">
+                    <input id="custom-api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                    <button id="custom-add-btn" type="button" class="custom-action primary" data-i18n="custom.add">Add</button>
+                  </div>
+                </label>
+                <p id="custom-status" class="custom-status" aria-live="polite" hidden></p>
+                <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
               </div>
+            </details>
+            <div class="settings-actions">
+              <span id="endpoint-save-status" class="save-status" aria-live="polite"></span>
+              <button id="endpoint-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
             </div>
-          </label>
-          <label class="field">
-            <div class="field-head"><span data-i18n="custom.provider">Provider name</span></div>
-            <input id="custom-provider" type="text" placeholder="together" autocomplete="off" spellcheck="false" maxlength="32" />
-            <p class="custom-hint" data-i18n="custom.providerHint">Groups this endpoint in the model picker and becomes the model's @suffix. Leave blank for "custom".</p>
-          </label>
-          <label class="field">
-            <div class="field-head"><span data-i18n="custom.apiKey">API key</span></div>
-            <div class="custom-row">
-              <input id="custom-api-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-              <button id="custom-add-btn" type="button" class="custom-action primary" data-i18n="custom.add">Add</button>
-            </div>
-          </label>
-          <p id="custom-status" class="custom-status" aria-live="polite" hidden></p>
-          <p id="custom-error" class="custom-error" aria-live="polite" hidden></p>
-        </div>
-      </details>
-      <div class="settings-actions">
-        <span id="endpoint-save-status" class="save-status" aria-live="polite"></span>
-        <button id="endpoint-save" type="button" class="save-action" data-i18n="settings.save">Save</button>
-      </div>
+          </section>
         </section>
       </div>
 

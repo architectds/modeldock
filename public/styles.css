@@ -446,11 +446,9 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
   width: auto;
 }
 
-/* Keyed to the role, not to one element's id. The same row exists on the
-   subscriptions page and the API page; styling it as #settings-save meant the
-   second one rendered as an unstyled native button, which is what it did.
-   A button here that is not the primary action carries its own class and is
-   unaffected. */
+/* Keyed to the role, not to one element's id. Cloud has one save row for
+   provider access and another for custom endpoint keys; both use the same
+   action treatment. */
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: -2px; }
 .settings-actions .save-action {
   appearance: none;
@@ -672,12 +670,10 @@ body { padding-left: 88px; }
 .rail { position: fixed; left: 0; top: 0; bottom: 0; width: 88px; z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 18px 0; background: var(--panel); border-right: 1px solid var(--line); }
 .rail-brand { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 14px; border-radius: 12px; }
 .rail-brand img { width: 26px; height: 26px; }
-/* Icon over label: API, Local Hosts, and Models are semantically adjacent,
+/* Icon over label: Cloud, Local Hosts, and Models are semantically adjacent,
    and no glyph tells them apart - the label is what disambiguates them. */
 .rail-link { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 72px; padding: 9px 4px 8px; border-radius: 11px; color: var(--muted); text-decoration: none; text-align: center; transition: color .15s, background .15s; }
-/* Reserve two lines in every language: Japanese wraps where English does not
-   (サブスクリプション vs Subscriptions), and a rail whose items change
-   height when the language changes reads as broken. */
+/* Reserve two lines so translated labels never change the rail rhythm. */
 .rail-label { min-height: 2.5em; font-size: 10px; line-height: 1.25; letter-spacing: .01em; }
 .rail-link svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .rail-link:hover { color: var(--text); background: var(--panel-2); }
@@ -706,6 +702,24 @@ body { padding-left: 88px; }
    on the list. There is no list now. */
 .page-panel > * + * { margin-top: 16px; }
 .page-panel .settings-actions { margin-top: 20px; }
+
+/* Cloud owns every remote connection shape. Provider credentials are compact
+   and comparable, while custom endpoints keep their richer list/add flow in a
+   separate contained section. The two-column credential grid collapses before
+   a field can narrow enough to clip its link or control. */
+.cloud-page { max-width: 920px; }
+.cloud-section { padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: rgba(19,35,49,.48); }
+.cloud-section > h3,
+.cloud-section #endpoint-list-head h3 { margin: 0; color: var(--text); font-size: 14px; }
+.cloud-section > * + * { margin-top: 16px; }
+.cloud-credentials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.cloud-credentials .cloud-wide { grid-column: 1 / -1; }
+.cloud-section .settings-actions { margin-top: 18px; }
+
+@media (max-width: 1180px) {
+  .cloud-credentials { grid-template-columns: minmax(0, 1fr); }
+  .cloud-credentials .cloud-wide { grid-column: auto; }
+}
 
 /* Discovered local engines. */
 .local-engine-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }

@@ -33,7 +33,7 @@ import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
-const TABS = ["dashboard", "subscriptions", "api", "local", "models", "hostmonitor"];
+const TABS = ["dashboard", "cloud", "local", "models", "hostmonitor"];
 
 const CHROME_CANDIDATES = {
   win32: [
@@ -109,8 +109,8 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
   });
   services.localEnginesFile = path.join(dir, "local-engines.json");
   services.localHostRegistryFile = path.join(dir, "local-hosts.json");
-  // One configured endpoint, so the API tab renders a row with a Remove
-  // button. Without it that tab has nothing to check and the escaped-element
+  // One configured endpoint, so the Cloud tab renders a row with a Remove
+  // button. Without it that section has nothing to check and the escaped-element
   // assertion below walks an empty page - which is exactly how the button came
   // to be rendering in the corner of the window with the suite green.
   services.customEndpointsFile = path.join(dir, "custom-endpoints.json");
@@ -392,6 +392,26 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       .map((b) => b.id || b.className))`));
     assert.deepEqual(nameless, [], `#${tab} has controls with no accessible name`);
   }
+
+  // Installed bookmarks and older installer links still point at these two
+  // hashes. They now converge on Cloud instead of falling back to Dashboard.
+  for (const legacy of ["subscriptions", "api"]) {
+    await evaluate(`location.hash = '#${legacy}'`);
+    await sleep(200);
+    const shown = JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('.view')]
+      .filter((view) => getComputedStyle(view).display !== 'none')
+      .map((view) => view.dataset.view))`));
+    assert.deepEqual(shown, ["cloud"], `#${legacy} must route to the combined Cloud view`);
+  }
+
+  await evaluate(`location.hash = '#cloud'`);
+  await sleep(200);
+  const providerOrder = JSON.parse(await evaluate(`JSON.stringify(
+    [...document.querySelectorAll('.cloud-credentials > .field')]
+      .map((field) => field.id || field.querySelector('input')?.id)
+  )`));
+  assert.deepEqual(providerOrder, ["xai-section", "settings-go-token", "deepseek-field"],
+    "account sign-in providers stay ahead of providers that require API keys");
 
   // A connection publishes models to the gateway but must not silently grant
   // lifecycle control. This opens the actual drawer and reads rendered text,

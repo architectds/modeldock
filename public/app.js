@@ -1452,17 +1452,17 @@ function maybePromptSettings(config) {
   if (settingsPrompted) return;
   settingsPrompted = true;
   // ?settings=1 is hardcoded into every installer already shipped, so it has
-  // to keep landing where the token goes - which is the Subscriptions page
-  // now, not the dialog.
+  // to keep landing where provider access lives - the Cloud page, not the
+  // small preferences dialog.
   const openRequested = new URLSearchParams(location.search).get("settings") === "1";
   if (openRequested || (config && !config.tokenConfigured)) {
-    location.hash = "#subscriptions";
+    location.hash = "#cloud";
   }
 }
 
-// Tokens, the custom endpoint, and the local engines live on their own pages
-// now, so their fields have to be filled whether or not the settings dialog is
-// ever opened. Autostart is the only part of it left.
+// Cloud access and local engines live on full pages, so their fields have to be
+// filled whether or not the preferences dialog is ever opened. Autostart is
+// the only connection setting left in that dialog.
 let lastSettings = null;
 
 async function loadSettings() {
@@ -2095,17 +2095,6 @@ $("endpoint-save")?.addEventListener("click", async () => {
   button.disabled = true;
   if (status) status.textContent = t("settings.saving");
   try {
-    const deepseek = $("settings-deepseek-token")?.value.trim();
-    if (deepseek) {
-      const reply = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ deepseekApiKey: deepseek }),
-      });
-      const body = await reply.json();
-      if (!reply.ok) throw new Error(body.error?.message || `Save ${reply.status}`);
-      $("settings-deepseek-token").value = "";
-    }
     // A user-set endpoint keeps its own key, so each changed one is its own
     // write rather than a single payload the server would have to unpick.
     for (const field of document.querySelectorAll("#endpoint-list .field")) {
@@ -3233,9 +3222,9 @@ async function saveSettings() {
   try {
     const body = {};
     const go = $("settings-go-token").value.trim();
-    // DeepSeek moved to the API page and saves there; this button keeps the
-    // providers that are still on this page.
+    const deepseek = $("settings-deepseek-token").value.trim();
     if (go) body.opencodeGoToken = go;
+    if (deepseek) body.deepseekApiKey = deepseek;
     if (!Object.keys(body).length) {
       closeSettings();
       return;
@@ -3247,6 +3236,8 @@ async function saveSettings() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Save ${response.status}`);
+    $("settings-go-token").value = "";
+    $("settings-deepseek-token").value = "";
     status.textContent = t("settings.saved");
     closeSettings();
     poll().catch(() => {});
@@ -3335,10 +3326,12 @@ function redrawWaves() {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "subscriptions", "api", "local", "models", "hostmonitor"];
+const VIEWS = ["dashboard", "cloud", "local", "models", "hostmonitor"];
+const LEGACY_VIEWS = { subscriptions: "cloud", api: "cloud" };
 
 function routeToView(name) {
-  const view = VIEWS.includes(name) ? name : VIEWS[0];
+  const requested = LEGACY_VIEWS[name] || name;
+  const view = VIEWS.includes(requested) ? requested : VIEWS[0];
   for (const node of document.querySelectorAll("[data-view]")) {
     node.classList.toggle("is-active", node.dataset.view === view);
   }
