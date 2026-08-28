@@ -172,6 +172,22 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
   const codexHome = path.join(root, "codex-home");
   const kvDirectory = path.join(root, "kv");
   await Promise.all([mkdir(stateDir, { recursive: true }), mkdir(codexHome, { recursive: true }), mkdir(kvDirectory, { recursive: true })]);
+  const openingInstructions = typeof fixture.request.instructions === "string"
+    ? fixture.request.instructions
+    : (fixture.request.instructions || []).map((part) => part?.text || "").join("\n");
+  const openingMessages = [];
+  for (const item of fixture.request.input || []) {
+    if (item?.type === "message" && item.role === "user") break;
+    if (item?.type === "message" && (item.role === "developer" || item.role === "system")) openingMessages.push(item);
+  }
+  const sessionDirectory = path.join(codexHome, "sessions", "2026", "08");
+  await mkdir(sessionDirectory, { recursive: true });
+  await writeFile(path.join(sessionDirectory, "managed-warm-source.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { session_id: "managed-warm-source", base_instructions: { text: openingInstructions }, dynamic_tools: fixture.request.tools } }),
+    ...openingMessages.map((payload) => JSON.stringify({ type: "response_item", payload })),
+    JSON.stringify({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "not part of the base" }] } }),
+    "",
+  ].join("\n"), "utf8");
   const savedSlots = new Set();
   const calls = [];
   const upstream = http.createServer(async (req, res) => {
@@ -276,6 +292,10 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
     }
   });
   const first = await startGateway();
+  for (let attempt = 0; attempt < 100 && !calls.some((call) => call.url === "/v1/chat/completions" && call.body.stream === false); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(calls.filter((call) => call.url === "/v1/chat/completions" && call.body.stream === false).length, 1, "managed boot prewarms the exact Codex opening before any user request");
   const send = async (port, sessionId) => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
       method: "POST",
@@ -291,7 +311,7 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
   await stop(first.child);
   const second = await startGateway();
   await send(second.port, "warm-second-session");
-  assert.equal(calls.filter((call) => call.url.includes("action=save")).length, 1, "the completed bootstrap state is saved once");
-  assert.equal(calls.filter((call) => call.url.includes("action=restore")).length, 1, "the strict mock receives the configured base restore after the gateway restart");
+  assert.equal(calls.filter((call) => call.url.includes("action=save")).length, 1, "managed setup saves the completed bootstrap state once");
+  assert.equal(calls.filter((call) => call.url.includes("action=restore")).length, 2, "each fresh session restores the configured base, including after gateway restart");
   assert.equal(calls.filter((call) => call.url === "/v1/chat/completions" && call.body.stream === false).length, 1, "restart reuses the saved base instead of rebuilding it");
 });

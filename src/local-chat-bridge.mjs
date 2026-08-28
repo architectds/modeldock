@@ -9,20 +9,36 @@ export class LocalChatBridgeError extends Error {
   }
 }
 
-function textValue(value) {
-  if (typeof value === "string") return value;
+function escapeMediaMarkerText(value, mediaMarker = "") {
+  if (typeof value !== "string" || !mediaMarker || !value.includes(mediaMarker)) return value;
+  // llama.cpp's multimodal tokenizer scans ordinary prompt text for this
+  // runtime-specific sentinel. Keep literal diagnostic/tool text readable to
+  // the model while breaking that out-of-band media control sequence.
+  return value.split(mediaMarker).join(`<\u200b${mediaMarker.slice(1)}`);
+}
+
+function escapeMediaMarkerValue(value, mediaMarker = "") {
+  if (typeof value === "string") return escapeMediaMarkerText(value, mediaMarker);
+  if (Array.isArray(value)) return value.map((part) => escapeMediaMarkerValue(part, mediaMarker));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, part]) => [key, escapeMediaMarkerValue(part, mediaMarker)]));
+}
+
+function textValue(value, mediaMarker = "") {
+  if (typeof value === "string") return escapeMediaMarkerText(value, mediaMarker);
   if (value === null || value === undefined) return "";
-  return JSON.stringify(value);
+  return escapeMediaMarkerText(JSON.stringify(value), mediaMarker);
 }
 
-function instructionText(instructions) {
-  if (typeof instructions === "string") return instructions;
+function instructionText(instructions, mediaMarker = "") {
+  if (typeof instructions === "string") return escapeMediaMarkerText(instructions, mediaMarker);
   if (!Array.isArray(instructions)) return "";
-  return instructions.map((part) => typeof part?.text === "string" ? part.text : "").filter(Boolean).join("\n");
+  return instructions.map((part) => typeof part?.text === "string" ? escapeMediaMarkerText(part.text, mediaMarker) : "").filter(Boolean).join("\n");
 }
 
-function chatContent(content, itemType = "message") {
-  if (typeof content === "string" || content === null || content === undefined) return content ?? "";
+function chatContent(content, itemType = "message", mediaMarker = "") {
+  if (typeof content === "string") return escapeMediaMarkerText(content, mediaMarker);
+  if (content === null || content === undefined) return "";
   if (!Array.isArray(content)) {
     throw new LocalChatBridgeError("unsupported_content", `Local Chat bridge cannot encode ${itemType} content.`);
   }
@@ -30,7 +46,7 @@ function chatContent(content, itemType = "message") {
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
     if (["input_text", "output_text", "text", "reasoning_text"].includes(part.type) && typeof part.text === "string") {
-      parts.push({ type: "text", text: part.text });
+      parts.push({ type: "text", text: escapeMediaMarkerText(part.text, mediaMarker) });
       continue;
     }
     if (part.type === "input_image" && typeof part.image_url === "string") {
@@ -43,7 +59,7 @@ function chatContent(content, itemType = "message") {
   return parts;
 }
 
-function chatTools(tools) {
+function chatTools(tools, mediaMarker = "") {
   if (!Array.isArray(tools)) return { tools: [], customToolNames: new Set() };
   const customToolNames = new Set();
   const converted = [];
@@ -54,8 +70,8 @@ function chatTools(tools) {
         type: "function",
         function: {
           name: tool.name,
-          ...(typeof tool.description === "string" && tool.description ? { description: tool.description } : {}),
-          parameters: tool.parameters || tool.inputSchema || { type: "object", properties: {}, additionalProperties: false },
+          ...(typeof tool.description === "string" && tool.description ? { description: escapeMediaMarkerText(tool.description, mediaMarker) } : {}),
+          parameters: escapeMediaMarkerValue(tool.parameters || tool.inputSchema || { type: "object", properties: {}, additionalProperties: false }, mediaMarker),
           ...(tool.strict === true ? { strict: true } : {}),
         },
       });
@@ -67,7 +83,7 @@ function chatTools(tools) {
         type: "function",
         function: {
           name: tool.name,
-          description: tool.description || `Run the ${tool.name} tool using its exact input.`,
+          description: escapeMediaMarkerText(tool.description || `Run the ${tool.name} tool using its exact input.`, mediaMarker),
           parameters: {
             type: "object",
             properties: { input: { type: "string", description: "Exact input for the original custom tool." } },
@@ -106,7 +122,7 @@ function objectToolArguments(value) {
   return parsed;
 }
 
-function toolCallItem(item, { toolArgumentsAsObjects = false } = {}) {
+function toolCallItem(item, { toolArgumentsAsObjects = false, mediaMarker = "" } = {}) {
   const callId = item.call_id || item.id;
   if (typeof callId !== "string" || !callId) {
     throw new LocalChatBridgeError("tool_call_id", "Local Chat bridge needs a call_id for every function call.");
@@ -115,32 +131,34 @@ function toolCallItem(item, { toolArgumentsAsObjects = false } = {}) {
     throw new LocalChatBridgeError("tool_call_name", "Local Chat bridge needs a name for every function call.");
   }
   const argumentsValue = item.arguments ?? item.input ?? {};
-  const argumentsText = typeof argumentsValue === "string" ? argumentsValue : textValue(argumentsValue);
+  const argumentsText = typeof argumentsValue === "string" ? argumentsValue : textValue(argumentsValue, mediaMarker);
   return {
     id: callId,
     type: "function",
     function: {
       name: item.name,
-      arguments: toolArgumentsAsObjects ? objectToolArguments(argumentsValue) : argumentsText,
+      arguments: toolArgumentsAsObjects
+        ? escapeMediaMarkerValue(objectToolArguments(argumentsValue), mediaMarker)
+        : escapeMediaMarkerText(argumentsText, mediaMarker),
     },
   };
 }
 
-function reasoningContent(item) {
+function reasoningContent(item, mediaMarker = "") {
   const summary = Array.isArray(item.summary)
-    ? item.summary.map((part) => typeof part?.text === "string" ? part.text : "").filter(Boolean).join("\n")
+    ? item.summary.map((part) => typeof part?.text === "string" ? escapeMediaMarkerText(part.text, mediaMarker) : "").filter(Boolean).join("\n")
     : "";
-  const content = chatContent(item.content || [], "reasoning");
+  const content = chatContent(item.content || [], "reasoning", mediaMarker);
   const text = typeof content === "string" ? content : "";
   return text || summary;
 }
 
-export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}) {
+export function responsesToChat(payload, { toolArgumentsAsObjects = false, mediaMarker = "" } = {}) {
   if (!payload || !Array.isArray(payload.input)) {
     throw new LocalChatBridgeError("input", "Local Chat bridge needs a Responses input array.");
   }
   const messages = [];
-  const instructions = instructionText(payload.instructions);
+  const instructions = instructionText(payload.instructions, mediaMarker);
   if (instructions) messages.push({ role: "system", content: instructions });
   let pendingAssistant = null;
   const assistant = () => {
@@ -159,7 +177,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}
     if (item.type === "function_call") {
       const next = assistant();
       if (!next.tool_calls) next.tool_calls = [];
-      next.tool_calls.push(toolCallItem(item, { toolArgumentsAsObjects }));
+      next.tool_calls.push(toolCallItem(item, { toolArgumentsAsObjects, mediaMarker }));
       continue;
     }
     if (item.type === "function_call_output") {
@@ -168,7 +186,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}
       if (typeof callId !== "string" || !callId) {
         throw new LocalChatBridgeError("tool_output_id", "Local Chat bridge needs a call_id for every function output.");
       }
-      messages.push({ role: "tool", tool_call_id: callId, content: textValue(item.output) });
+      messages.push({ role: "tool", tool_call_id: callId, content: textValue(item.output, mediaMarker) });
       continue;
     }
     if (item.type === "message") {
@@ -176,7 +194,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}
       if (!["system", "user", "assistant"].includes(role)) {
         throw new LocalChatBridgeError("message_role", `Local Chat bridge cannot encode message role ${String(item.role || "unknown")}.`);
       }
-      const content = chatContent(item.content, "message");
+      const content = chatContent(item.content, "message", mediaMarker);
       if (role === "assistant") {
         const next = assistant();
         next.content = next.content === null || next.content === undefined
@@ -191,7 +209,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}
       continue;
     }
     if (item.type === "reasoning") {
-      const reasoning = reasoningContent(item);
+      const reasoning = reasoningContent(item, mediaMarker);
       if (reasoning) {
         const next = assistant();
         next.reasoning_content = next.reasoning_content ? `${next.reasoning_content}\n${reasoning}` : reasoning;
@@ -201,7 +219,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false } = {}
     throw new LocalChatBridgeError("input_item", `Local Chat bridge cannot encode input item ${String(item.type || "unknown")}.`);
   }
   flushAssistant();
-  const convertedTools = chatTools(payload.tools);
+  const convertedTools = chatTools(payload.tools, mediaMarker);
   const chat = {
     model: payload.model,
     messages,

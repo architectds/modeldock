@@ -127,6 +127,7 @@ export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 80
     ...(engine === "llamacpp" ? {
       supportsVision: Boolean(props?.modalities?.vision),
       chatTemplateSupportsObjectArguments: Boolean(props?.chat_template_caps?.supports_object_arguments),
+      mediaMarker: typeof props?.media_marker === "string" ? props.media_marker : "",
     } : {}),
     // A bare OpenAI-compatible server is discovered but not connectable here:
     // it has no profile to attach to, and the API page already takes an

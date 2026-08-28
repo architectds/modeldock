@@ -162,6 +162,14 @@ export class LocalHostRuntime {
     return this.#coordinator.checkpointHotStates();
   }
 
+  async primeWarmBase(warmBase, { signal } = {}) {
+    if (!this.#loaded) await this.refresh();
+    if (!this.#coordinator || typeof this.#coordinator.primeWarmBase !== "function") {
+      return { primed: false, reason: "unmanaged" };
+    }
+    return this.#coordinator.primeWarmBase(warmBase, { signal });
+  }
+
   // The outer gateway restart script cannot safely infer which Codex session
   // owns which llama.cpp slot. It asks the live runtime to close admission,
   // drain the already admitted turn, then checkpoint every hot lane while

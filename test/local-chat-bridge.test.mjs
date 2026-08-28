@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { Writable } from "node:stream";
 import { gunzipSync } from "node:zlib";
 import { chatChunksToResponseEvents, chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "../src/local-chat-bridge.mjs";
-import { relayResponses } from "../src/gateway.mjs";
+import { localWarmBaseFromSessionOpening, relayResponses } from "../src/gateway.mjs";
 import { applyLocalEngineProfile } from "../src/profiles.mjs";
 
 const fullCodexFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
@@ -73,6 +73,137 @@ test("a Qwen Chat template receives historical tool arguments as an object", () 
   }, { toolArgumentsAsObjects: true });
   assert.deepEqual(bridged.payload.messages[1].tool_calls[0].function.arguments, { cmd: "dir" });
   assert.equal(bridged.payload.messages[2].role, "tool");
+});
+
+test("llama media sentinels in text history are escaped without touching real images", () => {
+  const marker = "<__media_runtime_marker__>";
+  const escaped = "<\u200b__media_runtime_marker__>";
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    instructions: `Inspect ${marker} as plain text.`,
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: `Literal ${marker}` },
+          { type: "input_image", image_url: "data:image/png;base64,AA==" },
+        ],
+      },
+      { type: "function_call", call_id: "call_marker", name: "exec_command", arguments: JSON.stringify({ cmd: `echo ${marker}` }) },
+      { type: "function_call_output", call_id: "call_marker", output: `props media_marker=${marker}` },
+    ],
+    tools: [{ type: "function", name: "exec_command", description: `Run ${marker}.`, parameters: { type: "object", properties: { cmd: { type: "string", description: marker } } } }],
+  }, { toolArgumentsAsObjects: true, mediaMarker: marker });
+  const [system, user, assistant, tool] = bridged.payload.messages;
+  assert.equal(system.content.includes(marker), false);
+  assert.equal(user.content[0].text, `Literal ${escaped}`);
+  assert.equal(user.content[1].image_url.url, "data:image/png;base64,AA==", "real image data is untouched");
+  assert.equal(assistant.tool_calls[0].function.arguments.cmd, `echo ${escaped}`);
+  assert.equal(tool.content, `props media_marker=${escaped}`);
+  assert.equal(bridged.payload.tools[0].function.description.includes(marker), false);
+  assert.equal(bridged.payload.tools[0].function.parameters.properties.cmd.description, escaped);
+});
+
+test("the local Chat relay uses the active llama media sentinel for tool output", async (t) => {
+  const marker = "<__media_runtime_marker__>";
+  const escaped = "<\u200b__media_runtime_marker__>";
+  const id = "Qwen3.8-27B";
+  const selectedModel = `${id}@llamacpp`;
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11436/v1",
+    models: [{ id, upstreamId: id, label: id, supportsVision: true, mediaMarker: marker, contextWindow: 16_384 }],
+  });
+  t.after(() => applyLocalEngineProfile("llamacpp", null));
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    seen.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({
+      id: "chatcmpl_marker",
+      model: id,
+      choices: [{ message: { content: "OK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 8, completion_tokens: 1, prompt_tokens_details: { cached_tokens: 0 } },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const res = gatewayResponse();
+    const result = await relayResponses({
+      model: selectedModel,
+      stream: false,
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect llama props." }] },
+        { type: "function_call", call_id: "call_props", name: "exec_command", arguments: "{\"cmd\":\"props\"}" },
+        { type: "function_call_output", call_id: "call_props", output: `media_marker=${marker}` },
+      ],
+      tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } } } }],
+    }, res, {
+      config: { mainModel: selectedModel, profileId: "llamacpp", tokens: {} },
+      mainModel: selectedModel,
+      visionModel: "",
+      knownModels: new Set([selectedModel]),
+      incomingHeaders: { "x-codex-session-id": "marker-relay-session" },
+      requestUrl: "/v1/responses",
+    });
+    assert.equal(result.ok, true);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].messages.find((message) => message.role === "tool")?.content, `media_marker=${escaped}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("managed-session opening derives the identical warm-base key as the first local Codex request", async (t) => {
+  const id = "Qwen3.8-27B";
+  const selectedModel = `${id}@llamacpp`;
+  const opening = {
+    instructions: "GLOBAL CODEx INSTRUCTIONS",
+    developerMessages: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "WORKSPACE RULE" }] }],
+    tools: [{
+      type: "namespace",
+      name: "codex_app",
+      tools: [{ type: "function", name: "exec_command", description: "Run a command.", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }],
+    }],
+  };
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11436/v1",
+    models: [{ id, upstreamId: id, label: id, supportsVision: false, contextWindow: 16_384 }],
+  });
+  t.after(() => applyLocalEngineProfile("llamacpp", null));
+  const config = { mainModel: selectedModel, profileId: "llamacpp", tokens: {} };
+  const expected = localWarmBaseFromSessionOpening({ config, model: selectedModel, opening });
+  assert.ok(expected, "the active opening has a local warm-base representation");
+  const originalFetch = globalThis.fetch;
+  let actual = null;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    id: "chatcmpl_prefix", model: id, choices: [{ message: { content: "OK" }, finish_reason: "stop" }],
+  }), { status: 200, headers: { "content-type": "application/json" } });
+  try {
+    const result = await relayResponses({
+      model: selectedModel,
+      stream: false,
+      instructions: opening.instructions,
+      input: [...opening.developerMessages, { type: "message", role: "user", content: [{ type: "input_text", text: "REAL USER MESSAGE" }] }],
+      tools: opening.tools,
+    }, gatewayResponse(), {
+      config,
+      mainModel: selectedModel,
+      visionModel: "",
+      knownModels: new Set([selectedModel]),
+      incomingHeaders: { "x-codex-session-id": "opening-match" },
+      requestUrl: "/v1/responses",
+      localHostRuntime: {
+        async run({ warmBase, run }) {
+          actual = warmBase;
+          return run({ slot: 0, cache: { tier: "cold" } });
+        },
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(actual?.sessionKey, expected.sessionKey);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Chat completion becomes a Codex Responses completion with cached-token usage", () => {

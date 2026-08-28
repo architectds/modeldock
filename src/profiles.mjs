@@ -679,6 +679,9 @@ function localWireTarget(providerId) {
       // template rejects a non-empty JSON string here and requires the decoded
       // mapping, while older templates keep the ordinary OpenAI string shape.
       toolArgumentsAsObjects: Boolean(entry?.chatTemplateSupportsObjectArguments),
+      // llama.cpp can expose an internal multimodal sentinel. Literal copies
+      // in tool output must be escaped before its Chat template sees text.
+      mediaMarker: typeof entry?.mediaMarker === "string" ? entry.mediaMarker : "",
     };
   };
 }
@@ -905,6 +908,7 @@ export function applyLocalEngineProfile(engineId, snapshot) {
           endpoint: "responses",
           supportsVision: Boolean(model.supportsVision),
           chatTemplateSupportsObjectArguments: Boolean(model.chatTemplateSupportsObjectArguments),
+          mediaMarker: typeof model.mediaMarker === "string" ? model.mediaMarker : "",
           contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
           autoCompactTokenLimit: Number(model.autoCompactTokenLimit) || 0,
           ownerQualified: true,

@@ -43,6 +43,7 @@ test("llama.cpp discovery reads live vision capability from props", async () => 
   const fetchImpl = async (url) => {
     if (url.endsWith("/props")) return { ok: true, json: async () => ({
       modalities: { vision: false },
+      media_marker: "<__media_test_marker__>",
       chat_template_caps: { supports_object_arguments: true },
     }) };
     if (url.endsWith("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "qwen" }] }) };
@@ -52,6 +53,7 @@ test("llama.cpp discovery reads live vision capability from props", async () => 
   assert.equal(found.engine, "llamacpp");
   assert.equal(found.supportsVision, false, "a server without --mmproj cannot remain a visual Catalog model");
   assert.equal(found.chatTemplateSupportsObjectArguments, true, "Qwen's live template contract reaches the local bridge");
+  assert.equal(found.mediaMarker, "<__media_test_marker__>", "the local bridge receives llama.cpp's runtime media sentinel");
 });
 
 async function startApp(t, { discoverEngines }) {
@@ -384,6 +386,16 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     },
     async verify() { return true; },
   });
+  let primedWarmBase = null;
+  services.latestCodexSessionOpening = async () => ({
+    instructions: "Current Codex base instructions.",
+    developerMessages: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "Current workspace instructions." }] }],
+    tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }],
+  });
+  services.localHostRuntime.primeWarmBase = async (warmBase) => {
+    primedWarmBase = warmBase;
+    return { primed: true, reused: false };
+  };
 
   assert.equal((await fetch(`${base}/api/local/connect`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
@@ -405,6 +417,8 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
   assert.equal(body.management.visionProjectorPath, projector);
   assert.equal(discovered.launch.model, selectedModel);
   assert.equal(discovered.launch.visionProjectorPath, projector);
+  assert.ok(primedWarmBase?.sessionKey, "managed setup derives a base from the current Codex opening before any local user turn");
+  assert.deepEqual(body.warmBase, { primed: true, reused: false });
 
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.deepEqual(snapshot.llamacpp.models, [{

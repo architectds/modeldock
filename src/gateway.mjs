@@ -1375,7 +1375,10 @@ function appendLocalHostSafety(instructions) {
 function localWarmBaseFor({ payload, target, upstreamModel }) {
   let chat;
   try {
-    chat = responsesToChat(payload, { toolArgumentsAsObjects: target.toolArgumentsAsObjects }).payload;
+    chat = responsesToChat(payload, {
+      toolArgumentsAsObjects: target.toolArgumentsAsObjects,
+      mediaMarker: target.mediaMarker,
+    }).payload;
   } catch {
     return null;
   }
@@ -1393,6 +1396,7 @@ function localWarmBaseFor({ payload, target, upstreamModel }) {
     tools: chat.tools || [],
     chatTemplateKwargs: chat.chat_template_kwargs || null,
     toolArgumentsAsObjects: Boolean(target.toolArgumentsAsObjects),
+    mediaMarker: target.mediaMarker || "",
     user: LOCAL_WARM_BOOTSTRAP_USER,
     assistant: LOCAL_WARM_BOOTSTRAP_ASSISTANT,
   })).digest("hex");
@@ -1432,6 +1436,47 @@ function localWarmBaseFor({ payload, target, upstreamModel }) {
       });
     },
   });
+}
+
+// Managed setup has no incoming Responses request of its own, but Codex keeps
+// each task's opening envelope locally. Reapply the exact local normalizations
+// to that envelope so its KV is byte-identical to a later fresh local task in
+// the same Codex/workspace/tool environment. The raw envelope never enters the
+// KV manifest; it exists only long enough to create the upstream checkpoint.
+export function localWarmBaseFromSessionOpening({ config, model, opening } = {}) {
+  if (!opening || typeof opening.instructions !== "string" || !Array.isArray(opening.tools) || !Array.isArray(opening.developerMessages)) return null;
+  const target = upstreamTargetFor(config, model);
+  if (target.provider !== "llamacpp" || target.transport !== "chat") return null;
+  let payload = normalizeLocalPayload({
+    model,
+    instructions: opening.instructions,
+    input: opening.developerMessages,
+    tools: opening.tools,
+  });
+  payload = {
+    ...payload,
+    model,
+    reasoning: normalizeLocalReasoning(payload).reasoning,
+  };
+  payload = normalizePayloadForRoute(config, model, payload);
+  const profile = profileById(target.provider);
+  const policy = applyToolPolicy(payload.tools, {
+    allowToolNames: LOCAL_TOOL_ALLOWLIST,
+    hiddenToolNames: profile.hiddenToolNames,
+    blockedToolTypes: profile.blockedToolTypes,
+    hostedToolTypes: profile.hostedToolTypes,
+    customToolsAsFunctions: profile.customToolsAsFunctions,
+    flattenAllNamespaces: true,
+    safeNamespaceFunctionNames: profile.safeNamespaceFunctionNames,
+  });
+  payload = {
+    ...payload,
+    tools: policy.tools,
+    input: flattenNamespaceCalls(payload.input, policy.namespaces),
+    instructions: appendLocalHostSafety(stripLocalInstructions(payload.instructions)),
+  };
+  payload = normalizePayloadForRoute(config, model, payload);
+  return localWarmBaseFor({ payload, target, upstreamModel: target.model });
 }
 
 function injectLocalWarmBase(chatPayload, warmBase) {
@@ -3803,7 +3848,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // engine-owned template and function-call parser. This is selected by the
     // local profile only; every other provider keeps the exact Responses wire.
     const chatBridge = target.transport === "chat"
-      ? responsesToChat(normalizedPayload, { toolArgumentsAsObjects: target.toolArgumentsAsObjects })
+      ? responsesToChat(normalizedPayload, {
+        toolArgumentsAsObjects: target.toolArgumentsAsObjects,
+        mediaMarker: target.mediaMarker,
+      })
       : null;
     const localChatPayload = chatBridge ? injectLocalWarmBase(chatBridge.payload, warmBase) : null;
     const localCustomToolNames = chatBridge

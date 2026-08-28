@@ -85,7 +85,7 @@ test("single-slot coordinator keeps the current conversation hot and restores an
   assert.equal(coordinator.snapshot().hotCount, 1);
 });
 
-test("a new conversation can seed and reuse an immutable completed warm base without exposing its identity", async () => {
+test("managed setup seeds an immutable completed warm base before any user conversation", async () => {
   const { coordinator, calls } = fixture();
   const warmBase = {
     sessionKey: "warm-base-fingerprint",
@@ -95,6 +95,9 @@ test("a new conversation can seed and reuse an immutable completed warm base wit
     },
   };
   const seen = [];
+
+  const primed = await coordinator.primeWarmBase(warmBase);
+  assert.deepEqual(primed, { primed: true, reused: false });
 
   await coordinator.run({
     conversationId: "new-a",
@@ -113,11 +116,11 @@ test("a new conversation can seed and reuse an immutable completed warm base wit
     },
   });
 
-  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 1);
+  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 1, "only managed setup creates the base");
   assert.ok(calls.some((call) => call.action === "save" && call.sessionKey === warmBase.sessionKey));
   assert.ok(calls.some((call) => call.action === "restore" && call.sessionKey === warmBase.sessionKey));
   assert.deepEqual(seen.map(({ cache, slot }) => ({ cache, slot })), [
-    { cache: { tier: "warm" }, slot: 0 },
+    { cache: { tier: "warm", restoreMs: 4 }, slot: 0 },
     { cache: { tier: "warm", restoreMs: 4 }, slot: 0 },
   ]);
   assert.equal(seen.every(({ activeWarmBase }) => activeWarmBase === warmBase), true);
@@ -134,6 +137,7 @@ test("a Qwen completed bootstrap retains its exact reasoning across a coordinato
       return { assistantContent: "BOOTSTRAP_READY", assistantReasoningContent: "I should provide the fixed response." };
     },
   };
+  await first.coordinator.primeWarmBase(warmBase);
   let initial;
   await first.coordinator.run({
     conversationId: "first",
@@ -162,7 +166,7 @@ test("a Qwen completed bootstrap retains its exact reasoning across a coordinato
   assert.equal(restored.active.messages[1].reasoning_content, "I should provide the fixed response.");
 });
 
-test("a rejected warm-base bootstrap degrades to an ordinary cold request", async () => {
+test("a missing warm base never turns a user's request into a bootstrap job", async () => {
   const { coordinator, calls } = fixture();
   const warmBase = {
     sessionKey: "warm-base-unavailable",
@@ -177,7 +181,7 @@ test("a rejected warm-base bootstrap degrades to an ordinary cold request", asyn
     run: async ({ cache, warmBase: activeWarmBase }) => ({ ok: true, cache, activeWarmBase }),
   });
   assert.deepEqual(result, { ok: true, cache: { tier: "cold" }, activeWarmBase: null });
-  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 1);
+  assert.equal(calls.filter((call) => call.action === "create_warm_base").length, 0);
   assert.equal(calls.some((call) => call.action === "save" && call.sessionKey === warmBase.sessionKey), false);
 });
 
@@ -186,6 +190,9 @@ test("a changed bootstrap key invalidates a hot conversation before it can reuse
   const baseA = { sessionKey: "a".repeat(64), async create() { calls.push({ action: "create_a" }); return true; } };
   const baseB = { sessionKey: "b".repeat(64), async create() { calls.push({ action: "create_b" }); return true; } };
   const seen = [];
+
+  await coordinator.primeWarmBase(baseA);
+  await coordinator.primeWarmBase(baseB);
 
   await coordinator.run({
     conversationId: "same-session",

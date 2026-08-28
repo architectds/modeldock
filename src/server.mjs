@@ -13,7 +13,7 @@ import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./nat
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
-import { NATIVE_IMAGE_PATHS, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
+import { NATIVE_IMAGE_PATHS, localWarmBaseFromSessionOpening, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
@@ -25,6 +25,7 @@ import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instanc
 import { runGatewayVerifierCli } from "../scripts/gateway-verifier.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
+import { latestCodexSessionOpening } from "./codex-session-prefix.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { applyXaiProfile, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
@@ -286,6 +287,7 @@ async function publishManagedLocalEngine(services, record, running) {
     ...(typeof running?.chatTemplateSupportsObjectArguments === "boolean"
       ? { chatTemplateSupportsObjectArguments: running.chatTemplateSupportsObjectArguments }
       : {}),
+    ...(typeof running?.mediaMarker === "string" ? { mediaMarker: running.mediaMarker } : {}),
   }));
   const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
@@ -294,6 +296,25 @@ async function publishManagedLocalEngine(services, record, running) {
   services.writeCatalogFile?.();
   if (changed) await services.configSwitcher.markRestartRequired();
   return changed;
+}
+
+// A managed host is prewarmed from Codex's real opening envelope, not from a
+// hand-written calibration prompt. The envelope is read into memory only; the
+// durable KV manifest keeps just the resulting fingerprint and bootstrap
+// transcript. A miss is non-fatal: the host is still fully usable cold.
+async function primeManagedLocalWarmBase(services, record) {
+  if (!record?.activeSpec || !services.localHostRuntime?.primeWarmBase) return { primed: false, reason: "unavailable" };
+  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
+  const localModel = snapshot?.models?.[0]?.id;
+  if (!localModel) return { primed: false, reason: "model_unavailable" };
+  const opening = await (services.latestCodexSessionOpening || latestCodexSessionOpening)({
+    sessionsRoot: path.join(services.config.codexHome, "sessions"),
+  });
+  if (!opening) return { primed: false, reason: "opening_unavailable" };
+  const model = publishedSlugFor("llamacpp", localModel);
+  const warmBase = localWarmBaseFromSessionOpening({ config: services.config, model, opening });
+  if (!warmBase) return { primed: false, reason: "prefix_unavailable" };
+  return services.localHostRuntime.primeWarmBase(warmBase);
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
@@ -479,6 +500,9 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
       : {}),
     ...(engine?.engine === "llamacpp" && typeof engine.chatTemplateSupportsObjectArguments === "boolean"
       ? { chatTemplateSupportsObjectArguments: engine.chatTemplateSupportsObjectArguments }
+      : {}),
+    ...(engine?.engine === "llamacpp" && typeof engine.mediaMarker === "string"
+      ? { mediaMarker: engine.mediaMarker }
       : {}),
   };
   if (JSON.stringify(current) === JSON.stringify(next)) return null;
@@ -1956,6 +1980,9 @@ export function createApp(services = createServices()) {
         ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
           ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
           : {}),
+        ...(engine === "llamacpp" && typeof discovered?.mediaMarker === "string"
+          ? { mediaMarker: discovered.mediaMarker }
+          : {}),
         observedAt: new Date().toISOString(),
       };
       const snapshot = {
@@ -1993,6 +2020,9 @@ export function createApp(services = createServices()) {
             supportsVision,
             ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
               ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
+              : {}),
+            ...(engine === "llamacpp" && typeof discovered?.mediaMarker === "string"
+              ? { mediaMarker: discovered.mediaMarker }
               : {}),
             contextWindow: model.contextWindow,
           };
@@ -2302,8 +2332,10 @@ export function createApp(services = createServices()) {
         await publishManagedLocalEngine(services, result.record, current);
         const ok = result.outcome === "applied";
         const restored = result.outcome === "recovered";
+        let warmBase = null;
         if (ok) {
           await services.localHostRuntime?.refresh?.(result.record);
+          warmBase = await primeManagedLocalWarmBase(services, result.record);
         } else if (restored) {
           // A failed first takeover has already restored the immutable original
           // command. Revoke the unused authority too, so the user is left in
@@ -2321,6 +2353,7 @@ export function createApp(services = createServices()) {
           outcome: result.outcome,
           lanes: result.record.activeProfile?.laneCount || 0,
           contextWindow: result.record.activeProfile?.laneContextTokens || 0,
+          warmBasePrimed: Boolean(warmBase?.primed),
         });
         return res.status(ok ? 200 : 502).json({
           outcome: result.outcome,
@@ -2330,6 +2363,7 @@ export function createApp(services = createServices()) {
             : restored
               ? `The managed profile did not verify. ModelDock restored the exact pre-takeover command line. ${result.failure || ""}`.trim()
               : `Neither the managed profile nor the pre-takeover command verified. Host control remains in degraded recovery state. ${result.recoveryFailure || result.failure || ""}`.trim(),
+          ...(ok ? { warmBase } : {}),
         });
       } finally {
         releaseTransition();
@@ -2936,12 +2970,28 @@ export async function reconcileLocalHostsOnBoot(services) {
   for (const record of Object.values(registry.hosts)) {
     if (record.state === "ready") {
       try {
-        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
-        if (!current) continue;
-        const changed = await publishManagedLocalEngine(services, record, current);
+        // The durable ready record is sufficient to rebuild the KV runtime and
+        // prepare its opening cache. Do that before optional discovery probes:
+        // an unreachable stale endpoint must not put a known-good managed host
+        // behind a multi-second scan before its base KV can be restored.
         await services.localHostRuntime?.refresh?.(record);
-        if (changed) console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
+        void primeManagedLocalWarmBase(services, record).catch((error) => {
+          console.log(`[gate] local host ${record.id} warm base preparation failed: ${error.message}`);
+        });
+        // Capability discovery is auxiliary to the cache/runtime recovery.
+        // A just-restarted llama.cpp can answer Chat before its probe does, so
+        // only publish live capability details when the probe is available.
+        void (async () => {
+          try {
+            const current = (await (services.discoverEngines || discoverLocalEngines)({}))
+              .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
+            if (current && await publishManagedLocalEngine(services, record, current)) {
+              console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
+            }
+          } catch (error) {
+            console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
+          }
+        })();
       } catch (error) {
         console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
       }

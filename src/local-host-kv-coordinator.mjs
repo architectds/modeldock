@@ -200,24 +200,92 @@ export class LocalHostKvCoordinator {
     }
   }
 
+  async #ensureStoreReady() {
+    if (this.#validatedFingerprint) return;
+    try {
+      if (typeof this.store.gcOrphans === "function") await this.store.gcOrphans();
+      // Time-bounding runs at the same once-per-boot moment as the other
+      // hygiene: space is already hard-capped by the budget, so the TTL's
+      // only job is to stop dead conversations squatting in it for months.
+      if (typeof this.store.expireStale === "function") {
+        const expired = await this.store.expireStale();
+        this.#counters.expired += expired?.expired?.length || 0;
+      }
+      await this.store.invalidateExcept({ fingerprint: this.fingerprint });
+    } catch (error) {
+      await this.#diagnose("state_startup_cleanup_failed", error);
+    }
+    this.#validatedFingerprint = true;
+  }
+
+  // A base KV is created by managed setup, never by a user's first request.
+  // It contains only the exact static local prefix plus the hidden completed
+  // bootstrap turn; prompt content stays inside llama.cpp's SSD state, while
+  // the manifest retains only the fingerprint and fixed transcript.
+  async primeWarmBase(warmBase, { signal } = {}) {
+    if (!warmBase?.sessionKey || typeof warmBase.create !== "function") return { primed: false, reason: "invalid_base" };
+    return this.#exclusive(async () => {
+      await this.#ensureStoreReady();
+      let existing = null;
+      try {
+        existing = typeof this.store.lookup === "function"
+          ? await this.store.lookup({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint })
+          : (await this.store.has({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint }) ? {} : null);
+      } catch (error) {
+        await this.#diagnose("warm_base_lookup_failed", error);
+      }
+      if (existing && warmBaseWithTranscript(warmBase, existing.warmBaseTranscript)) {
+        return { primed: true, reused: true };
+      }
+      if (existing && typeof this.store.remove === "function") {
+        try {
+          await this.store.remove({ sessionKey: warmBase.sessionKey, fingerprint: this.fingerprint });
+        } catch (error) {
+          await this.#diagnose("warm_base_remove_failed", error);
+          return { primed: false, reason: "remove_failed" };
+        }
+      }
+      // Do not evict an active or hot user conversation merely to rebuild a
+      // reusable base. A future managed setup/restart can retry it safely.
+      const lane = this.#residency.lanes.find((candidate) => candidate.state === "empty");
+      if (!lane) return { primed: false, reason: "busy" };
+      this.#recordEvent("cold_prefill", { slot: lane.slot });
+      if (!await this.#erase(lane.slot)) return { primed: false, reason: "erase_failed" };
+      try {
+        const transcript = await warmBase.create({ slot: lane.slot, signal });
+        if (!warmBaseWithTranscript(warmBase, transcript)) {
+          await this.#erase(lane.slot);
+          return { primed: false, reason: "bootstrap_rejected" };
+        }
+        const saved = await this.store.save({
+          sessionKey: warmBase.sessionKey,
+          fingerprint: this.fingerprint,
+          warmBaseTranscript: transcript,
+          slot: lane.slot,
+          signal,
+        });
+        if (!saved?.saved) {
+          await this.#erase(lane.slot);
+          return { primed: false, reason: "save_rejected" };
+        }
+        this.#counters.saves += 1;
+        this.#counters.evictions += saved.evicted?.length || 0;
+        this.#recordEvent("checkpointed", { slot: lane.slot });
+        // The first actual conversation must demonstrate a real SSD restore;
+        // leave no hidden hot slot that the scheduler cannot attribute.
+        await this.#erase(lane.slot);
+        return { primed: true, reused: false };
+      } catch (error) {
+        await this.#diagnose("warm_base_prime_failed", error);
+        await this.#erase(lane.slot);
+        return { primed: false, reason: "create_failed" };
+      }
+    });
+  }
+
   async #prepare(sessionKey, signal, warmBase = null) {
     return this.#exclusive(async () => {
-      if (!this.#validatedFingerprint) {
-        try {
-          if (typeof this.store.gcOrphans === "function") await this.store.gcOrphans();
-          // Time-bounding runs at the same once-per-boot moment as the other
-          // hygiene: space is already hard-capped by the budget, so the TTL's
-          // only job is to stop dead conversations squatting in it for months.
-          if (typeof this.store.expireStale === "function") {
-            const expired = await this.store.expireStale();
-            this.#counters.expired += expired?.expired?.length || 0;
-          }
-          await this.store.invalidateExcept({ fingerprint: this.fingerprint });
-        } catch (error) {
-          await this.#diagnose("state_startup_cleanup_failed", error);
-        }
-        this.#validatedFingerprint = true;
-      }
+      await this.#ensureStoreReady();
       let sessionState = null;
       try {
         sessionState = typeof this.store.lookup === "function"
@@ -363,30 +431,9 @@ export class LocalHostKvCoordinator {
             await this.#erase(lease.slot);
           }
         }
-        if (!hasSsdState && !baseReady) {
-          try {
-            const created = await warmBase.create({ slot: lease.slot, signal });
-            const createdWarmBase = warmBaseWithTranscript(warmBase, created);
-            if (created && createdWarmBase) {
-              const saved = await this.store.save({
-                sessionKey: warmBase.sessionKey,
-                fingerprint: this.fingerprint,
-                warmBaseTranscript: created,
-                slot: lease.slot,
-                signal,
-              });
-              if (saved?.saved) this.#counters.saves += 1;
-              tier = "warm";
-              baseReady = true;
-              resolvedWarmBase = createdWarmBase;
-              activeWarmBase = createdWarmBase;
-              this.#recordEvent("checkpointed", { slot: lease.slot });
-            }
-          } catch (error) {
-            await this.#diagnose("warm_base_create_failed", error);
-            await this.#erase(lease.slot);
-          }
-        }
+        // A missing base is an ordinary cold request. Never make the user
+        // wait while their first message creates a reusable cache; managed
+        // setup owns that one-time prefill.
         if ((baseReady || hasSsdState) && !activeWarmBase && !warmBase.requiresTranscript) activeWarmBase = warmBase;
       }
       if (tier === "gpu") this.#recordEvent("running", { slot: lease.slot });
