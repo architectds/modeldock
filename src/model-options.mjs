@@ -6,7 +6,7 @@
 // one subject - the enabled providers, the models they publish, and the
 // native GPT catalog merge - so they moved here as-is. server.mjs owns HTTP;
 // this module owns the model set.
-import { bareModelId, profileById, profileOptions, providerForModel, publishedSlugFor } from "./profiles.mjs";
+import { bareModelId, openCodeTransportForModel, profileById, profileOptions, providerForModel, publishedSlugFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { catalogFor } from "./catalog.mjs";
@@ -208,11 +208,9 @@ export function labelForModelId(id) {
     .join(" ");
 }
 
-// Endpoint capability from live probing (2026-08-04): most models accept BOTH responses and
-// chat/completions; minimax-m2.5/m3 and qwen* only accept chat (responses returns 401);
-// grok-4.5 only accepts responses (chat returns 500). Prefer responses (native Codex dialect).
+// Kept as the historical public helper for callers outside the provider
+// registry. The registry owns the actual OpenCode protocol contract.
 export function modelEndpoint(modelId) {
-  if (/^(minimax-m2\.5|minimax-m3|qwen)/.test(modelId)) return "chat";
-  return "responses";
+  return openCodeTransportForModel(modelId);
 }
 

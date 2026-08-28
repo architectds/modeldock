@@ -132,7 +132,7 @@ test("built bundle bridges the complete original Codex package to strict local C
       MODELDOCK_CODEX_HOME: codexHome,
       MODELDOCK_REQUIRE_CALLER_KEY: "0",
       MODELDOCK_MEMORY: "0",
-      MODELDOCK_MODEL_PROBE_ENABLED: "0",
+      MODELDOCK_MODEL_DISCOVERY: "0",
       MODELDOCK_NATIVE_MERGE: "0",
       MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
       MODELDOCK_AUTOSTART_KEY: autostartKey,
@@ -276,7 +276,7 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
       env: {
         ...process.env,
         MODELDOCK_PORT: String(port), MODELDOCK_PROFILE: "llamacpp", MODELDOCK_STATE_DIR: stateDir, MODELDOCK_CODEX_HOME: codexHome,
-        MODELDOCK_REQUIRE_CALLER_KEY: "0", MODELDOCK_MEMORY: "0", MODELDOCK_MODEL_PROBE_ENABLED: "0", MODELDOCK_NATIVE_MERGE: "0", MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
+        MODELDOCK_REQUIRE_CALLER_KEY: "0", MODELDOCK_MEMORY: "0", MODELDOCK_MODEL_DISCOVERY: "0", MODELDOCK_NATIVE_MERGE: "0", MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
         MODELDOCK_AUTOSTART_KEY: autostartKey, MODELDOCK_AUTOSTART_NAME: autostartName,
       },
       stdio: ["ignore", "pipe", "pipe"], windowsHide: true,

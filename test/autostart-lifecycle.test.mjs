@@ -95,7 +95,7 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
     ...process.env,
     MODELDOCK_PORT: String(port),
     MODELDOCK_STATE_DIR: stateDir,
-    MODELDOCK_MODEL_PROBE_ENABLED: "0",
+    MODELDOCK_MODEL_DISCOVERY: "0",
   };
 
   function launch() {

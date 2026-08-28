@@ -723,17 +723,6 @@ function settingsPayload(services) {
   };
 }
 
-// Verify a newly entered provider token with the same near-free Responses probe
-// the custom-endpoint Add flow uses. The token is only persisted when its own
-// upstream accepts it, so a well-formed but wrong key cannot be written and then
-// surface as a 401 wall after the next restart.
-async function probeSettingsToken(config, provider, token) {
-  const profile = profileById(provider);
-  const baseUrl = profile.baseUrlFor(config, profile.availableModels?.[0]?.id || "");
-  const model = profile.availableModels?.[0]?.id || config.mainModel;
-  return probeCustomResponses({ baseUrl, apiKey: token, modelId: model });
-}
-
 function configMutationGuard(config, callerKey) {
   const allowedOrigins = new Set([
     `http://${urlHost(config.host)}:${config.port}`,
@@ -1399,7 +1388,6 @@ export function createApp(services = createServices()) {
     const body = req.body || {};
     const updates = {};
     const providers = [];
-    let failedProvider = null;
     try {
       // Config objects built by tests (and any future non-loadConfig wiring)
       // may lack the tokens map; the settings write must still work.
@@ -1429,27 +1417,12 @@ export function createApp(services = createServices()) {
       if (body.exaApiKey) {
         const checked = validateProviderToken("exa", body.exaApiKey);
         if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_exa_api_key" });
-        // Deferred into the shared updates write: EXA_API_KEY must land in the
-        // same atomic writeEnvFile call as the provider tokens, so a rejected
-        // provider probe never leaves a partially-updated .env behind.
+        // Keep the update atomic with the provider credentials: syntactically
+        // valid keys are saved together and no hidden model request decides
+        // whether one of them is worthy of persistence.
         updates.EXA_API_KEY = checked.value;
       }
       if (Object.keys(updates).length) {
-        for (const [envKey, provider, label] of [
-          ["OPENCODE_GO_TOKEN", "opencode-go", "OpenCode Go"],
-          ["DEEPSEEK_API_KEY", "deepseek-official", "DeepSeek"],
-        ]) {
-          if (!updates[envKey]) continue;
-          try {
-            await probeSettingsToken(config, provider, updates[envKey]);
-          } catch (error) {
-            const detail = error instanceof CustomEndpointError ? error.message : String(error.message || error);
-            const wrapped = new Error(`${label} rejected this token: ${detail}`);
-            wrapped.code = `token_rejected_${provider}`;
-            failedProvider = provider;
-            throw wrapped;
-          }
-        }
         writeEnvFile(updates, config.envFile);
         config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
         if (updates.OPENCODE_GO_TOKEN) {
@@ -1459,15 +1432,18 @@ export function createApp(services = createServices()) {
         }
         config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
         if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
+        // Directory discovery is only GET /models and stays out of the
+        // settings critical path. Auth, quota, and model-protocol failures are
+        // reported by the user's real selected-model request instead.
+        services.refreshModelCatalog?.().catch(() => {});
       }
       recordSettingsEvent({ providers, ok: true, filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: true });
       return res.json(settingsPayload(services));
     } catch (error) {
-      const errorProviders = failedProvider ? [failedProvider] : providers;
-      recordSettingsEvent({ providers: errorProviders, ok: false, error: error.code || "settings_failed", filePath: config.settingsEventsFile });
+      recordSettingsEvent({ providers, ok: false, error: error.code || "settings_failed", filePath: config.settingsEventsFile });
       recordConfigAction(metrics, "settings_update", { ok: false, error: error.message });
-      const status = error.code?.startsWith("invalid_") || error.code?.startsWith("token_rejected_") ? 400 : 500;
+      const status = error.code?.startsWith("invalid_") ? 400 : 500;
       return res.status(status).json({ error: { type: error.code || "settings_failed", message: error.message } });
     }
   });
@@ -2632,6 +2608,10 @@ export function createApp(services = createServices()) {
     if (auth?.accessToken) config.tokens.xai = auth.accessToken;
     else delete config.tokens.xai;
     services.writeCatalogFile?.();
+    // The cached subscription list makes the picker correct immediately. A
+    // background directory read then picks up later xAI additions without ever
+    // sending a capability-test prompt to the provider.
+    if (auth?.accessToken) services.refreshModelCatalog?.().catch(() => {});
   };
 
   app.post("/api/xai/start", mutateConfig, async (req, res) => {

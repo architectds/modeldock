@@ -66,6 +66,14 @@ async function startApp(configOverrides = {}) {
     owned.push(dir);
     config.summariesFile = path.join(dir, "summaries.json");
   }
+  // API mutations write .env (vision selection and direct-provider token
+  // saves). Keep that file beside this test's other state instead of touching
+  // the checkout's live gateway configuration.
+  if (!config.envFile) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-env-"));
+    owned.push(dir);
+    config.envFile = path.join(dir, ".env");
+  }
   // Isolate the catalog file and native capture: tests must never read or write
   // the real ~/.modeldock state (a test run was polluting the live gate's files).
   if (!config.codexCatalogFile || !config.nativeCatalogFile) {
@@ -1357,7 +1365,7 @@ test("custom endpoint add rejects a failing probe with a classified error", asyn
   }
 });
 
-test("settings save probes the upstream and persists only a working token", async (t) => {
+test("settings save persists well-formed direct-provider tokens without an inference probe", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-save-"));
   const envFile = path.join(dir, ".env");
   const eventsFile = path.join(dir, "settings-events.jsonl");
@@ -1365,6 +1373,7 @@ test("settings save probes the upstream and persists only a working token", asyn
     envFile,
     settingsEventsFile: eventsFile,
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    modelDiscoveryEnabled: false,
   });
   t.after(async () => {
     await instance.stop();
@@ -1373,11 +1382,9 @@ test("settings save probes the upstream and persists only a working token", asyn
 
   const originalFetch = globalThis.fetch;
   try {
+    let completionProbe = false;
     globalThis.fetch = async (url, options) => {
-      const value = String(url);
-      if (value === "https://go.example.com/v1/responses" || value === "https://api.deepseek.com/v1/responses") {
-        return { ok: true, status: 200, json: async () => ({ id: "resp_probe", usage: { input_tokens: 5, output_tokens: 1 } }) };
-      }
+      if (String(url).endsWith("/responses") && options?.method === "POST") completionProbe = true;
       return originalFetch(url, options);
     };
 
@@ -1396,6 +1403,7 @@ test("settings save probes the upstream and persists only a working token", asyn
 
     const env = await readFile(envFile, "utf8");
     assert.match(env, /^OPENCODE_GO_TOKEN=/m);
+    assert.equal(completionProbe, false, "saving a token must not consume a model request");
     assert.match(env, /^DEEPSEEK_API_KEY=/m);
     const events = (await readFile(eventsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(events[events.length - 1].ok, true);
@@ -1405,7 +1413,7 @@ test("settings save probes the upstream and persists only a working token", asyn
   }
 });
 
-test("settings save rejects a token the upstream rejects without writing", async (t) => {
+test("settings save retains a well-formed token even when a later upstream request would reject it", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-reject-"));
   const envFile = path.join(dir, ".env");
   const eventsFile = path.join(dir, "settings-events.jsonl");
@@ -1413,6 +1421,7 @@ test("settings save rejects a token the upstream rejects without writing", async
     envFile,
     settingsEventsFile: eventsFile,
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    modelDiscoveryEnabled: false,
   });
   t.after(async () => {
     await instance.stop();
@@ -1421,34 +1430,23 @@ test("settings save rejects a token the upstream rejects without writing", async
 
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, options) => {
-      if (String(url) === "https://go.example.com/v1/responses") {
-        return { ok: false, status: 401, json: async () => ({}) };
-      }
-      return originalFetch(url, options);
-    };
-
     const response = await fetch(`${instance.base}/api/settings`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ opencodeGoToken: "sk-wrong-but-well-formed-123456" }),
     });
-    assert.equal(response.status, 400);
-    const body = await response.json();
-    assert.equal(body.error.type, "token_rejected_opencode-go");
-    assert.ok(body.error.message.includes("401"));
+    assert.equal(response.status, 200);
 
-    const env = await readFile(envFile, "utf8").catch(() => "");
-    assert.doesNotMatch(env, /OPENCODE_GO_TOKEN=/);
+    const env = await readFile(envFile, "utf8");
+    assert.match(env, /OPENCODE_GO_TOKEN=/);
     const events = (await readFile(eventsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-    assert.equal(events[events.length - 1].ok, false);
-    assert.equal(events[events.length - 1].error, "token_rejected_opencode-go");
+    assert.equal(events[events.length - 1].ok, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("settings save rejects a failed provider probe without persisting exa", async (t) => {
+test("settings save persists independently validated keys without a provider probe", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-exa-atomic-"));
   const envFile = path.join(dir, ".env");
   const eventsFile = path.join(dir, "settings-events.jsonl");
@@ -1456,6 +1454,7 @@ test("settings save rejects a failed provider probe without persisting exa", asy
     envFile,
     settingsEventsFile: eventsFile,
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+    modelDiscoveryEnabled: false,
   });
   t.after(async () => {
     await instance.stop();
@@ -1464,13 +1463,6 @@ test("settings save rejects a failed provider probe without persisting exa", asy
 
   const originalFetch = globalThis.fetch;
   try {
-    globalThis.fetch = async (url, options) => {
-      if (String(url) === "https://api.deepseek.com/v1/responses") {
-        return { ok: false, status: 401, json: async () => ({}) };
-      }
-      return originalFetch(url, options);
-    };
-
     const response = await fetch(`${instance.base}/api/settings`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1479,22 +1471,17 @@ test("settings save rejects a failed provider probe without persisting exa", asy
         deepseekApiKey: "sk-well-formed-but-rejected-123456",
       }),
     });
-    assert.equal(response.status, 400);
-    const body = await response.json();
-    assert.equal(body.error.type, "token_rejected_deepseek-official");
+    assert.equal(response.status, 200);
 
-    // A rejected provider probe must leave the .env byte-clean: the exa key
-    // that passed validation is deferred into the same atomic write and must
-    // not have been persisted on its own.
-    const env = await readFile(envFile, "utf8").catch(() => "");
-    assert.doesNotMatch(env, /EXA_API_KEY=/);
-    assert.doesNotMatch(env, /DEEPSEEK_API_KEY=/);
+    const env = await readFile(envFile, "utf8");
+    assert.match(env, /EXA_API_KEY=/);
+    assert.match(env, /DEEPSEEK_API_KEY=/);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("settings save rejects placeholder tokens before any upstream probe", async (t) => {
+test("settings save rejects placeholder tokens before any upstream request", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-settings-placeholder-"));
   const instance = await startApp({
     envFile: path.join(dir, ".env"),

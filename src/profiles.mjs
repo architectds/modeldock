@@ -53,6 +53,13 @@ const LOCAL_REASONING_LEVELS = [
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
 ];
 
+// OpenCode Go's public OpenAI-compatible surface accepts most models on
+// Responses, while its Qwen and MiniMax families use Chat Completions. This is
+// provider contract metadata, not a runtime test made during discovery.
+export function openCodeTransportForModel(modelId) {
+  return /^(minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
+}
+
 // Codex estimates the session history with its own (GPT) tokenizer, which runs
 // ~25-30% under what qwen's tokenizer actually produces. For small local
 // backends (<= LOCAL_CONTEXT_MAX) the advertised window is scaled by
@@ -245,6 +252,9 @@ const OPENCODE_GO_PROFILE = {
   label: "OpenCode Go",
   baseUrl: "https://opencode.ai/zen/go/v1",
   tokenEnvName: "OPENCODE_GO_TOKEN",
+  modelDiscovery: true,
+  discoveryTransports: new Set(["responses", "chat"]),
+  discoveryTransportFor: openCodeTransportForModel,
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   // inputNormalizer names a per-model input adaptation the gateway keeps in
@@ -325,6 +335,8 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   label: "DeepSeek",
   baseUrl: "https://api.deepseek.com",
   tokenEnvName: "DEEPSEEK_API_KEY",
+  modelDiscovery: true,
+  discoveryTransports: new Set(["responses"]),
 
   blockedToolTypes: new Set([]),
   // The official DeepSeek API accepts every Codex local tool as type "function", so
@@ -479,6 +491,8 @@ const XAI_PROFILE = {
   id: "xai",
   label: "xAI (Grok)",
   baseUrl: "https://api.x.ai/v1",
+  modelDiscovery: true,
+  discoveryTransports: new Set(["responses"]),
   // No environment variable: this credential cannot be pasted, only signed in
   // for, so an .env entry would be a place for a stale token to hide.
   tokenEnvName: "",
@@ -510,6 +524,17 @@ const XAI_PROFILE = {
   // the profile - they no longer match `provider === "xai"` by hand.
   inputNormalizer: "xai",
   payloadNormalizer: "xai",
+  discoveryModel(id) {
+    if (!xaiResponsesModel(id)) return null;
+    return {
+      id,
+      label: id,
+      endpoint: "responses",
+      supportsVision: xaiModelSeesImages(id),
+      ownerQualified: true,
+      status: "available",
+    };
+  },
   availableModels: [],
   modelCatalog({ mainModel, baseInstructions }) {
     return modelCatalogDefaults({

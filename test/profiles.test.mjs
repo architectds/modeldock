@@ -11,6 +11,7 @@ import {
   applyOllamaProfile,
   applyXaiProfile,
   XAI_PROFILE,
+  openCodeTransportForModel,
   CONTEXT_WINDOW,
   AUTO_COMPACT_PERCENT,
   AUTO_COMPACT_TOKEN_LIMIT,
@@ -35,6 +36,14 @@ test("exposes every registered profile through the registry", () => {
   assert.equal(profileById("deepseek-official"), DEEPSEEK_OFFICIAL_PROFILE);
   assert.equal(profileById("ollama"), OLLAMA_PROFILE);
   assert.equal(profileById("unknown-profile"), OPENCODE_GO_PROFILE, "unknown ids fall back to opencode-go");
+});
+
+test("provider discovery publishes only transports the gateway implements", () => {
+  assert.deepEqual([...OPENCODE_GO_PROFILE.discoveryTransports].sort(), ["chat", "responses"]);
+  assert.equal(openCodeTransportForModel("qwen3.8-flash"), "chat");
+  assert.equal(openCodeTransportForModel("deepseek-v4-flash"), "responses");
+  assert.deepEqual([...DEEPSEEK_OFFICIAL_PROFILE.discoveryTransports], ["responses"]);
+  assert.deepEqual([...XAI_PROFILE.discoveryTransports], ["responses"]);
 });
 
 test("lists all profiles as selectable options", () => {

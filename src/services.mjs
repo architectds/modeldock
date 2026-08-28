@@ -22,7 +22,7 @@ import { createDerivedFallback } from "./derived-fallback.mjs";
 import { callerBasePath, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyOllamaProfile } from "./profiles.mjs";
+import { allProfiles, applyOllamaProfile } from "./profiles.mjs";
 import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
@@ -30,52 +30,67 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { urlHost } from "./loopback.mjs";
-import { codexModelCatalog, labelForModelId, modelEndpoint, modelOptions } from "./model-options.mjs";
+import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
 import { readSubagentModel } from "./subagent-config.mjs";
 import { LocalHostRuntime } from "./local-host-runtime.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export async function refreshProfileModels(profile, config) {
-  if (!profile || profile.id !== "opencode-go") return;
-  const opencodeToken = config.tokens?.["opencode-go"];
-  if (!opencodeToken) return;
-  if (!config.goBaseUrl.includes("opencode.ai")) return;
-  // Model catalog refresh, opt-in via MODELDOCK_MODEL_PROBE_ENABLED=1. The shipped
-  // curated catalog (profiles.mjs) is the primary model source and ships with the
-  // release; users do not need to re-probe. This only does a light GET /models merge
-  // so newly added upstream ids appear alongside the curated ones. (The old
-  // dev-only vision probing/evaluation chain that used to sit above this
-  // function was never wired in and has been deleted; git history has it.)
-  // Opt-in, as the comment above says: a config that simply omits the key (a test
-  // fixture, an embedder) must not start probing upstreams. `=== false` only
-  // behaved that way because loadConfig always fills a boolean in.
-  if (!config.modelProbeEnabled) return;
+export async function refreshProfileModels(profile, config, { fetchImpl = fetch } = {}) {
+  // Discovery is deliberately just GET /models. It must not become an implicit
+  // capability test: listing a model is sufficient to publish it, and an
+  // unsupported request is the provider's error to return to the user.
+  if (!profile?.modelDiscovery || !config?.modelDiscoveryEnabled) return { changed: false, discovered: 0 };
+  const token = config.tokens?.[profile.id];
+  if (!token) return { changed: false, discovered: 0 };
   try {
-    const base = config.goBaseUrl.replace(/\/$/, "");
-    const headers = { Authorization: `Bearer ${opencodeToken}` };
-    const goRes = await fetch(`${base}/models`, { headers, signal: AbortSignal.timeout(10_000) });
-    const goIds = goRes.ok ? ((await goRes.json())?.data || []).map((entry) => entry?.id).filter((id) => typeof id === "string" && id) : [];
-    const fetchedIds = [...new Set(goIds)];
-    if (!fetchedIds.length) return;
+    const base = profile.baseUrlFor(config).replace(/\/$/, "");
+    const response = await fetchImpl(`${base}/models`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const fetchedIds = response.ok
+      ? [...new Set(((await response.json())?.data || [])
+        .map((entry) => entry?.id)
+        .filter((id) => typeof id === "string" && id))]
+      : [];
+    if (!fetchedIds.length) return { changed: false, discovered: 0 };
     const existing = profile.availableModels || [];
     const existingById = new Map(existing.map((model) => [model.id, model]));
-    const unknown = fetchedIds.filter((id) => !existingById.has(id)).sort((a, b) => a.localeCompare(b));
+    const unknown = fetchedIds
+      .filter((id) => !existingById.has(id))
+      .sort((a, b) => a.localeCompare(b))
+      .map((id) => {
+        const endpoint = profile.discoveryTransportFor?.(id) || "responses";
+        const candidate = profile.discoveryModel
+          ? profile.discoveryModel(id)
+          : {
+              id,
+              label: labelForModelId(id),
+              endpoint,
+              supportsVision: false,
+              visionStatus: "unknown",
+              status: "available",
+            };
+        // A provider can list models for several dialects. Directory discovery
+        // is not permission to publish an Anthropic /messages model through an
+        // OpenAI bridge we do not implement. The provider declares the endpoint
+        // families the gateway actually supports; no model request is made.
+        const transport = candidate?.endpoint || endpoint;
+        return candidate && profile.discoveryTransports?.has(transport) ? candidate : null;
+      })
+      .filter(Boolean);
+    if (!unknown.length) return { changed: false, discovered: 0 };
     const models = [
       ...existing,
-      ...unknown.map((id) => ({
-        id,
-        label: labelForModelId(id),
-        endpoint: modelEndpoint(id),
-        supportsVision: false,
-        visionStatus: "unknown",
-        status: "available",
-      })),
+      ...unknown,
     ];
     profile.availableModels = models;
-    console.log(`[gate] refreshed opencode-go model catalog: ${models.length} models (${existing.length} curated, ${unknown.length} new)`);
+    console.log(`[gate] discovered ${unknown.length} ${profile.id} model(s): ${models.length} total`);
+    return { changed: true, discovered: unknown.length };
   } catch (error) {
-    console.log(`[gate] model catalog refresh failed: ${error.message}`);
+    console.log(`[gate] ${profile.id} model discovery failed: ${error.message}`);
+    return { changed: false, discovered: 0, error };
   }
 }
 export function createServices(config = loadConfig()) {
@@ -241,7 +256,7 @@ export function createServices(config = loadConfig()) {
     }
   };
   const refreshModelCatalog = () => Promise.all([
-    refreshProfileModels(mutableConfig.profile, mutableConfig),
+    ...allProfiles().map((profile) => refreshProfileModels(profile, mutableConfig)),
     // Opt-out keeps the desktop-app refresh out of unit tests; production turns
     // it on by default so the picker keeps showing native GPT models.
     mutableConfig.refreshNativeCatalog === false
@@ -256,9 +271,12 @@ export function createServices(config = loadConfig()) {
           return models;
         }),
   ]).then(
-    ([, nativeModels]) => {
+    (results) => {
+      const nativeModels = results.at(-1);
       const written = writeCatalogFile();
-      console.log(`[gate] model refresh done, availableModels=${(mutableConfig.profile?.availableModels || []).length}, native=${nativeModels?.length || 0}, catalog file=${written} models`);
+      const discovered = results.slice(0, -1).reduce((total, result) => total + (result?.discovered || 0), 0);
+      if (discovered) configSwitcher.markRestartRequired().catch(() => {});
+      console.log(`[gate] model refresh done, discovered=${discovered}, native=${nativeModels?.length || 0}, catalog file=${written} models`);
     },
     (error) => console.log(`[gate] model refresh error: ${error.message}`),
   );

@@ -534,12 +534,13 @@ export function loadConfig() {
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 200, { min: 10, max: 500 }),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
-    // Model catalog refresh. Off by default: the shipped curated catalog in catalog.mjs
-    // is the primary source and is published with the release. When enabled it only does a
-    // light GET /models merge (new ids appended, vision metadata untouched). The heavier
-    // vision probe/evaluation code in server.mjs is dev-only test tooling and is never
-    // triggered here or at startup.
-    modelProbeEnabled: envOn("MODELDOCK_MODEL_PROBE_ENABLED"),
+    // Catalog discovery is a read-only GET /models. It never sends a prompt,
+    // image, tool declaration, or capability probe to an upstream. A provider's
+    // directory is enough to publish a newly available model; an incompatible
+    // model reports its own upstream error when the user selects it. The old
+    // MODELDOCK_MODEL_PROBE_ENABLED=0 spelling remains an opt-out for isolated
+    // test harnesses only; normal installs discover at startup and every 24h.
+    modelDiscoveryEnabled: !envOff("MODELDOCK_MODEL_DISCOVERY") && !envOff("MODELDOCK_MODEL_PROBE_ENABLED"),
     // Native GPT models captured from the Codex desktop CLI, merged into the
     // published catalog so they stay selectable in the App picker. The cache
     // lives at ~/.modeldock/native-catalog.json by default.
