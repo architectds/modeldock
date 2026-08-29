@@ -177,7 +177,7 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   t.after(instance.stop);
   const initial = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
-  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["deepseek-v4-flash-vision-exp@opencode-go", "gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go"]);
+  assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["deepseek-v4-flash-vision-exp@opencode-go", "gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go", "qwen3.8-flash@opencode-go"]);
   const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }) });
   assert.equal(changed.status, 200);
   assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" });

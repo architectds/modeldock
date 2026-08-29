@@ -308,7 +308,7 @@ const OPENCODE_GO_PROFILE = {
     { id: "qwen3.7-max", label: "Qwen 3.7 Max", endpoint: "chat", supportsVision: false, status: "unavailable" },
     { id: "qwen3.7-plus", label: "Qwen 3.7 Plus", endpoint: "chat", supportsVision: true, visionScore: 8, visionMaxScore: 9, visionTier: "strong", quota5h: 4300, speedTier: "medium", status: "unavailable" },
     { id: "qwen3.8-max", label: "Qwen 3.8 Max", endpoint: "chat", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 160, speedTier: "medium", status: "unavailable" },
-    { id: "qwen3.8-flash", label: "Qwen 3.8 Flash", endpoint: "chat", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
+    { id: "qwen3.8-flash", label: "Qwen 3.8 Flash", endpoint: "chat", supportsVision: true, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
   ],
 
   modelCatalog({ mainModel, visionModel, baseInstructions }) {

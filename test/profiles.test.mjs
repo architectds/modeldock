@@ -42,6 +42,11 @@ test("provider discovery publishes only transports the gateway implements", () =
   assert.deepEqual([...OPENCODE_GO_PROFILE.discoveryTransports].sort(), ["chat", "responses"]);
   assert.equal(openCodeTransportForModel("qwen3.8-flash"), "chat");
   assert.equal(openCodeTransportForModel("deepseek-v4-flash"), "responses");
+  assert.equal(
+    OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "qwen3.8-flash")?.supportsVision,
+    true,
+    "Qwen 3.8 Flash accepts image input on the OpenCode Go Chat endpoint",
+  );
   assert.deepEqual([...DEEPSEEK_OFFICIAL_PROFILE.discoveryTransports], ["responses"]);
   assert.deepEqual([...XAI_PROFILE.discoveryTransports], ["responses"]);
 });
