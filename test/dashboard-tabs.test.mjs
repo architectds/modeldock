@@ -33,7 +33,7 @@ import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
-const TABS = ["dashboard", "cloud", "local", "models", "hostmonitor"];
+const TABS = ["dashboard", "cloud", "local", "stats", "models", "hostmonitor"];
 
 const CHROME_CANDIDATES = {
   win32: [
@@ -106,7 +106,25 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
     summariesFile: path.join(dir, "summaries.json"),
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
+    usageRollupFile: path.join(dir, "usage-rollup.json"),
   });
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const yesterdayDate = new Date(now);
+  yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+  const yesterday = yesterdayDate.toISOString().slice(0, 10);
+  writeFileSync(services.usageRollupFile, JSON.stringify({
+    version: 2,
+    lastFoldedAt: now.toISOString(),
+    days: {
+      [yesterday]: {
+        "deepseek-v4-flash@opencode-go": { requests: 3, ok: 3, in: 9000, out: 900, cached: 6000, ms: 9000, okOut: 900, okMs: 9000 },
+      },
+      [today]: {
+        "qwen3.8-flash@opencode-go": { requests: 2, ok: 2, in: 8000, out: 600, cached: 5000, ms: 6000, okOut: 600, okMs: 6000 },
+      },
+    },
+  }), "utf8");
   services.localEnginesFile = path.join(dir, "local-engines.json");
   services.localHostRegistryFile = path.join(dir, "local-hosts.json");
   // One configured endpoint, so the Cloud tab renders a row with a Remove
@@ -346,6 +364,15 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     const shown = JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('.view')]
       .filter((v) => getComputedStyle(v).display !== 'none').map((v) => v.dataset.view))`));
     assert.deepEqual(shown, [tab], `#${tab} shows ${JSON.stringify(shown)} - a view is displayed while it is not the active one`);
+    if (tab === "stats") {
+      const bounded = JSON.parse(await evaluate(`JSON.stringify({
+        tokenDays: document.querySelectorAll('#stats-token-chart .stats-day').length,
+        requestDays: document.querySelectorAll('#stats-request-chart .stats-day').length,
+        tpsDays: document.querySelectorAll('#stats-tps-chart .stats-day').length,
+        models: document.querySelectorAll('#stats-model-chart .stats-share-row').length,
+      })`));
+      assert.deepEqual(bounded, { tokenDays: 30, requestDays: 30, tpsDays: 30, models: 2 }, "Stats replaces one bounded 30-day snapshot instead of growing with polls");
+    }
 
     // 2. Nothing is on screen that is a translation key rather than a
     //    translation. t() falls back to the key itself and applyStaticI18n

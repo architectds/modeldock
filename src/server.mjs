@@ -48,7 +48,7 @@ import { applyContextOverrides, contextOverridesPath, readContextOverrides, vali
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
-import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, writeRollup } from "./usage-rollup.mjs";
+import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
 import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
@@ -1872,6 +1872,10 @@ export function createApp(services = createServices()) {
         locked: selected.has(entry.id),
       }));
     return res.json({ windowDays: 30, models });
+  });
+  app.get("/api/stats", (req, res) => {
+    const rollup = readRollup(services.usageRollupFile || usageRollupPath());
+    return res.json(usageStats(rollup));
   });
   app.get("/api/local/discover", async (req, res) => {
     try {

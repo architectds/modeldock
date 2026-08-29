@@ -1041,3 +1041,54 @@ body { padding-left: 88px; }
 /* The managed-host tab exists only while a takeover is active; rail links are
    flex, so the hidden attribute needs an explicit override to actually hide. */
 .rail-link[hidden] { display: none; }
+
+/* --- Stats: one bounded 30-day snapshot, never an append-only dashboard. --- */
+.stats-panel { max-width: none; }
+.stats-head { min-width: 0; }
+.stats-updated { margin: 0; color: var(--muted); font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
+.stats-periods { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.stats-period { min-width: 0; padding: 15px 17px; border: 1px solid var(--line); border-radius: 12px; background: rgba(19,35,49,.65); }
+.stats-period span, .stats-period small { display: block; overflow: hidden; color: var(--muted); font-size: 10px; letter-spacing: .06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.stats-period strong { display: block; margin: 8px 0 5px; overflow: hidden; color: var(--text); font: 650 28px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.05em; text-overflow: ellipsis; white-space: nowrap; }
+.stats-summary { margin: 0 0 14px; }
+.stats-summary .metric-card { min-width: 0; min-height: 150px; }
+.stats-summary .metric-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.stats-chart-card { display: flex; min-width: 0; min-height: 260px; flex-direction: column; }
+.stats-chart-body { display: flex; min-width: 0; min-height: 170px; margin-top: 16px; flex: 1 1 auto; flex-direction: column; justify-content: center; }
+.stats-daily-bars { display: grid; height: 148px; min-width: 0; grid-template-columns: repeat(30, minmax(2px, 1fr)); align-items: end; gap: 3px; border-bottom: 1px solid var(--line); background: repeating-linear-gradient(to bottom, transparent 0, transparent 36px, rgba(137,160,175,.08) 37px); }
+.stats-day { display: flex; min-width: 0; height: 100%; align-items: flex-end; }
+.stats-bar, .stats-stack { display: flex; width: 100%; min-height: 2px; overflow: hidden; border-radius: 3px 3px 0 0; background: var(--accent); }
+.stats-stack { flex-direction: column-reverse; background: transparent; }
+.stats-segment { min-height: 1px; }
+.stats-segment.new-input { background: var(--blue); }
+.stats-segment.cached-input { background: var(--violet); }
+.stats-segment.output { background: var(--green); }
+.stats-axis { display: flex; min-width: 0; margin-top: 7px; justify-content: space-between; color: var(--muted); font: 9px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.stats-empty { margin: auto !important; color: var(--muted); font-size: 12px !important; text-align: center; }
+.stats-legend { display: flex; min-width: 0; margin-top: 10px; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 10px; }
+.stats-legend span { display: inline-flex; min-width: 0; align-items: center; gap: 5px; }
+.stats-legend b { overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.stats-dot { width: 7px; height: 7px; border-radius: 2px; flex: none; }
+.stats-dot.new-input { background: var(--blue); }
+.stats-dot.cached-input { background: var(--violet); }
+.stats-dot.output { background: var(--green); }
+.stats-share-list { justify-content: flex-start; gap: 11px; }
+.stats-share-row { display: grid; min-width: 0; grid-template-columns: minmax(90px, .9fr) minmax(80px, 1.6fr) 64px; align-items: center; gap: 10px; }
+.stats-share-name { min-width: 0; overflow: hidden; color: var(--text); font: 10px/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.stats-share-track { height: 7px; overflow: hidden; border-radius: 99px; background: #22323f; }
+.stats-share-track i { display: block; height: 100%; border-radius: inherit; background: var(--violet); }
+.stats-share-value { overflow: hidden; color: var(--muted); font: 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.stats-privacy { margin-top: 14px; }
+
+@media (max-width: 900px) {
+  .stats-grid { grid-template-columns: minmax(0, 1fr); }
+  .stats-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .stats-periods { gap: 7px; }
+  .stats-period { padding: 11px 9px; }
+  .stats-period strong { font-size: 21px; }
+  .stats-daily-bars { gap: 2px; }
+  .stats-share-row { grid-template-columns: minmax(72px, .9fr) minmax(60px, 1.4fr) 52px; gap: 7px; }
+}

@@ -182,6 +182,111 @@ export function rollupTotals(rollup, now = new Date().toISOString()) {
   return totals;
 }
 
+function emptyStatsRow() {
+  return { in: 0, out: 0, cached: 0, ok: 0, okOut: 0, okMs: 0 };
+}
+
+function addStatsRow(target, source = {}) {
+  target.in += Number(source.in) || 0;
+  target.out += Number(source.out) || 0;
+  target.cached += Number(source.cached) || 0;
+  target.ok += Number(source.ok) || 0;
+  target.okOut += Number(source.okOut) || 0;
+  target.okMs += Number(source.okMs) || 0;
+  return target;
+}
+
+function finishStatsRow(source = {}) {
+  const inputTokens = Math.max(0, Number(source.in) || 0);
+  const outputTokens = Math.max(0, Number(source.out) || 0);
+  const cachedTokens = Math.max(0, Math.min(inputTokens, Number(source.cached) || 0));
+  const outputMs = Math.max(0, Number(source.okMs) || 0);
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: inputTokens + outputTokens,
+    cachedTokens,
+    newInputTokens: Math.max(0, inputTokens - cachedTokens),
+    completedRequests: Math.max(0, Number(source.ok) || 0),
+    cacheRate: inputTokens > 0 ? cachedTokens / inputTokens : 0,
+    outputTps: outputMs > 0 ? (Math.max(0, Number(source.okOut) || 0) / (outputMs / 1000)) : 0,
+  };
+}
+
+function validUtcDay(value) {
+  const day = dayOf(value);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) && Number.isFinite(Date.parse(`${day}T00:00:00Z`))
+    ? day
+    : "";
+}
+
+function shiftedUtcDay(day, offset) {
+  const value = new Date(`${day}T00:00:00Z`);
+  value.setUTCDate(value.getUTCDate() + offset);
+  return value.toISOString().slice(0, 10);
+}
+
+function modelParts(key) {
+  const split = String(key || "unknown@unknown").lastIndexOf("@");
+  return split > 0
+    ? { model: key.slice(0, split), provider: key.slice(split + 1) }
+    : { model: String(key || "unknown"), provider: "unknown" };
+}
+
+// Aggregate-only dashboard data. The response is deliberately derived from the
+// bounded daily rollup rather than the raw event log, so session/thread ids and
+// every other per-request detail stay on disk and never reach the browser.
+// `completedRequests` uses the durable success count; incomplete failure
+// metering therefore cannot turn into a misleading success-rate claim.
+export function usageStats(rollup, now = new Date().toISOString()) {
+  const today = validUtcDay(now) || validUtcDay(new Date().toISOString());
+  const rawDays = [];
+  const days = [];
+  for (let offset = -(ROLLUP_DAYS - 1); offset <= 0; offset += 1) {
+    const day = shiftedUtcDay(today, offset);
+    const raw = emptyStatsRow();
+    for (const entry of Object.values(rollup?.days?.[day] || {})) addStatsRow(raw, entry);
+    rawDays.push(raw);
+    days.push({ day, ...finishStatsRow(raw) });
+  }
+
+  const period = (count) => {
+    const raw = emptyStatsRow();
+    for (const row of rawDays.slice(-count)) addStatsRow(raw, row);
+    return finishStatsRow(raw);
+  };
+
+  const byModel = new Map();
+  const retainedDays = new Set(days.map((entry) => entry.day));
+  for (const [day, bucket] of Object.entries(rollup?.days || {})) {
+    if (!retainedDays.has(day)) continue;
+    for (const [key, entry] of Object.entries(bucket || {})) {
+      const raw = byModel.get(key) || emptyStatsRow();
+      addStatsRow(raw, entry);
+      byModel.set(key, raw);
+    }
+  }
+  const rankedModels = [...byModel.entries()]
+    .map(([id, raw]) => ({ id, raw, ...modelParts(id), ...finishStatsRow(raw) }))
+    .sort((a, b) => b.totalTokens - a.totalTokens || b.completedRequests - a.completedRequests || a.id.localeCompare(b.id));
+  const models = rankedModels.slice(0, 6).map(({ raw, ...entry }) => entry);
+  if (rankedModels.length > 6) {
+    const raw = emptyStatsRow();
+    for (const entry of rankedModels.slice(6)) addStatsRow(raw, entry.raw);
+    models.push({ id: "__other__", model: "", provider: "", ...finishStatsRow(raw) });
+  }
+
+  return {
+    timezone: "UTC",
+    windowDays: ROLLUP_DAYS,
+    updatedAt: String(rollup?.lastFoldedAt || ""),
+    periods: { today: period(1), days7: period(7), days30: period(ROLLUP_DAYS) },
+    days,
+    models,
+    modelCount: rankedModels.length,
+  };
+}
+
 function readLines(file) {
   if (!existsSync(file)) return [];
   try {

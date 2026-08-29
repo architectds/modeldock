@@ -430,6 +430,36 @@ test("api/status returns expected shape", async (t) => {
   assert.equal(body.runtime.migrationRequired, Number(process.versions.node.split(".", 1)[0]) < 24);
 });
 
+test("api/stats returns bounded aggregate usage without request identity", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-stats-api-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const usageRollupFile = path.join(dir, "usage-rollup.json");
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  await writeFile(usageRollupFile, JSON.stringify({
+    version: 2,
+    lastFoldedAt: now.toISOString(),
+    days: {
+      [day]: {
+        "qwen3.8-flash@opencode-go": {
+          requests: 2, ok: 2, in: 1200, out: 300, cached: 900, ms: 5000, okOut: 300, okMs: 5000,
+        },
+      },
+    },
+  }), "utf8");
+  const instance = await startApp({ usageRollupFile });
+  t.after(instance.stop);
+
+  const response = await fetch(`${instance.base}/api/stats`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.days.length, 30);
+  assert.equal(body.periods.today.totalTokens, 1500);
+  assert.equal(body.periods.days30.completedRequests, 2);
+  assert.equal(body.models[0].id, "qwen3.8-flash@opencode-go");
+  assert.doesNotMatch(JSON.stringify(body), /sessionId|threadId|prompt|outputText/);
+});
+
 test("api endpoints reject cross-origin browser reads", async (t) => {
   const instance = await startApp();
   t.after(instance.stop);

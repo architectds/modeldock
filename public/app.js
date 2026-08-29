@@ -1913,6 +1913,154 @@ async function renderModelRoster() {
     if (note) note.textContent = error.message;
   }
 }
+
+// --- Stats: one server-bounded 30-day aggregate snapshot. ---
+// No browser history is accumulated here. Entering the tab replaces at most
+// thirty daily bars and seven model rows from /api/stats.
+let lastStats = null;
+let statsLoadedAt = 0;
+
+function statsDayLabel(day) {
+  const date = new Date(`${day}T00:00:00Z`);
+  return new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
+}
+
+function statsEmpty(host) {
+  const empty = document.createElement("p");
+  empty.className = "stats-empty";
+  empty.textContent = t("stats.noData");
+  host.replaceChildren(empty);
+}
+
+function renderDailyStats(hostId, days, { valueFor, titleFor, segmentsFor } = {}) {
+  const host = $(hostId);
+  if (!host) return;
+  const values = days.map((day) => Math.max(0, Number(valueFor(day)) || 0));
+  const max = Math.max(0, ...values);
+  if (!max) return statsEmpty(host);
+
+  const plot = document.createElement("div");
+  plot.className = "stats-daily-bars";
+  days.forEach((day, index) => {
+    const holder = document.createElement("span");
+    holder.className = "stats-day";
+    holder.title = titleFor(day);
+    holder.setAttribute("aria-label", holder.title);
+    const height = Math.max(2, (values[index] / max) * 100);
+    if (segmentsFor) {
+      const stack = document.createElement("span");
+      stack.className = "stats-stack";
+      stack.style.height = `${height}%`;
+      for (const segment of segmentsFor(day)) {
+        if (!(segment.value > 0)) continue;
+        const part = document.createElement("i");
+        part.className = `stats-segment ${segment.className}`;
+        part.style.flexGrow = String(segment.value);
+        stack.append(part);
+      }
+      holder.append(stack);
+    } else {
+      const bar = document.createElement("i");
+      bar.className = "stats-bar";
+      bar.style.height = `${height}%`;
+      holder.append(bar);
+    }
+    plot.append(holder);
+  });
+  const axis = document.createElement("div");
+  axis.className = "stats-axis";
+  axis.append(document.createTextNode(statsDayLabel(days[0].day)), document.createTextNode(statsDayLabel(days.at(-1).day)));
+  host.replaceChildren(plot, axis);
+}
+
+function renderModelShare(models = [], modelCount = 0) {
+  const host = $("stats-model-chart");
+  if (!host) return;
+  const used = models.filter((entry) => Number(entry.totalTokens) > 0);
+  set("stats-model-count", t("stats.modelCount", { count: number(modelCount) }));
+  if (!used.length) return statsEmpty(host);
+  const max = Math.max(1, ...used.map((entry) => Number(entry.totalTokens) || 0));
+  host.replaceChildren(...used.map((entry) => {
+    const row = document.createElement("div");
+    row.className = "stats-share-row";
+    const name = document.createElement("span");
+    name.className = "stats-share-name";
+    name.textContent = entry.id === "__other__" ? t("stats.other") : entry.model;
+    name.title = entry.id === "__other__" ? name.textContent : entry.id;
+    const track = document.createElement("span");
+    track.className = "stats-share-track";
+    const fill = document.createElement("i");
+    fill.style.width = `${Math.max(1, (entry.totalTokens / max) * 100)}%`;
+    track.append(fill);
+    const value = document.createElement("strong");
+    value.className = "stats-share-value";
+    value.textContent = number(entry.totalTokens);
+    row.append(name, track, value);
+    return row;
+  }));
+}
+
+function renderStats(data) {
+  if (!data) return;
+  lastStats = data;
+  const month = data.periods?.days30 || {};
+  set("stats-today-tokens", number(data.periods?.today?.totalTokens));
+  set("stats-week-tokens", number(data.periods?.days7?.totalTokens));
+  set("stats-month-tokens", number(month.totalTokens));
+  set("stats-input", number(month.inputTokens));
+  set("stats-output", number(month.outputTokens));
+  set("stats-cache", percent(month.cacheRate || 0));
+  set("stats-cache-detail", t("stats.cachedDetail", { tokens: number(month.cachedTokens), rate: percent(month.cacheRate || 0) }));
+  set("stats-requests", number(month.completedRequests));
+  const updated = Date.parse(data.updatedAt || "");
+  set("stats-updated", Number.isFinite(updated)
+    ? t("stats.updated", { time: new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }).format(new Date(updated)) })
+    : t("stats.notUpdated"));
+
+  const days = [...(data.days || [])].slice(-30);
+  renderDailyStats("stats-token-chart", days, {
+    valueFor: (day) => day.totalTokens,
+    titleFor: (day) => t("stats.dayTokens", {
+      day: statsDayLabel(day.day), newInput: number(day.newInputTokens), cached: number(day.cachedTokens), output: number(day.outputTokens),
+    }),
+    segmentsFor: (day) => [
+      { className: "new-input", value: day.newInputTokens },
+      { className: "cached-input", value: day.cachedTokens },
+      { className: "output", value: day.outputTokens },
+    ],
+  });
+  renderDailyStats("stats-request-chart", days, {
+    valueFor: (day) => day.completedRequests,
+    titleFor: (day) => t("stats.dayRequests", { day: statsDayLabel(day.day), value: number(day.completedRequests) }),
+  });
+  renderDailyStats("stats-tps-chart", days, {
+    valueFor: (day) => day.outputTps,
+    titleFor: (day) => t("stats.dayTps", { day: statsDayLabel(day.day), value: Number(day.outputTps || 0).toFixed(1) }),
+  });
+  renderModelShare(data.models, data.modelCount);
+  const error = $("stats-error");
+  if (error) error.hidden = true;
+}
+
+async function loadStats({ force = false } = {}) {
+  if (!force && lastStats && Date.now() - statsLoadedAt < 10 * 60_000) {
+    renderStats(lastStats);
+    return;
+  }
+  const error = $("stats-error");
+  try {
+    const response = await fetch("/api/stats", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error?.message || `Stats ${response.status}`);
+    statsLoadedAt = Date.now();
+    renderStats(data);
+  } catch (reason) {
+    if (error) {
+      error.textContent = reason.message;
+      error.hidden = false;
+    }
+  }
+}
 // --- Local engine discovery (Local Hosts) ---
 //
 // Read-only: it reports what is already listening so the user does not have to
@@ -3283,6 +3431,7 @@ function refreshDynamicText() {
     () => pollConfig().catch(() => {}),
     () => renderEndpointList().catch(() => {}),
     () => renderModelRoster().catch(() => {}),
+    () => { if (lastStats) renderStats(lastStats); },
     () => renderLocalEngines().catch(() => {}),
     () => {
       if (!lastSettings) return;
@@ -3326,7 +3475,7 @@ function redrawWaves() {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "cloud", "local", "models", "hostmonitor"];
+const VIEWS = ["dashboard", "cloud", "local", "stats", "models", "hostmonitor"];
 const LEGACY_VIEWS = { subscriptions: "cloud", api: "cloud" };
 
 function routeToView(name) {
@@ -3350,6 +3499,7 @@ function currentView() {
   // it has to repaint rather than wait for the next datum to arrive.
   if (view === "dashboard") redrawWaves();
   if (view === "hostmonitor" && lastData) renderLocalHostDashboard(lastData);
+  if (view === "stats") loadStats().catch(() => {});
   return view;
 }
 

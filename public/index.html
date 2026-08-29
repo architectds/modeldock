@@ -29,6 +29,10 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01" /></svg>
         <span class="rail-label" data-i18n="nav.local"></span>
       </a>
+      <a class="rail-link" href="#stats" data-rail="stats" data-i18n-title="nav.stats">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V10M10 19V5M16 19v-7M3 19h18" /></svg>
+        <span class="rail-label" data-i18n="nav.stats"></span>
+      </a>
       <a class="rail-link" href="#hostmonitor" data-rail="hostmonitor" id="rail-hostmonitor" hidden data-i18n-title="nav.hostmonitor">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
         <span class="rail-label" data-i18n="nav.hostmonitor"></span>
@@ -427,6 +431,53 @@
         </div>
       </div>
         </aside>
+      </div>
+
+      <div class="view" data-view="stats">
+        <section class="panel page-panel stats-panel">
+          <div class="panel-head stats-head">
+            <div>
+              <p class="eyebrow" data-i18n="stats.eyebrow">USAGE</p>
+              <h2 data-i18n="stats.title">Stats</h2>
+            </div>
+            <p id="stats-updated" class="stats-updated" data-i18n="stats.notUpdated">Waiting for the first usage rollup</p>
+          </div>
+
+          <section class="stats-periods" aria-label="Token usage windows">
+            <article class="stats-period"><span data-i18n="stats.today">Today</span><strong id="stats-today-tokens">&mdash;</strong><small data-i18n="stats.totalTokens">total tokens</small></article>
+            <article class="stats-period"><span data-i18n="stats.days7">7 days</span><strong id="stats-week-tokens">&mdash;</strong><small data-i18n="stats.totalTokens">total tokens</small></article>
+            <article class="stats-period"><span data-i18n="stats.days30">30 days</span><strong id="stats-month-tokens">&mdash;</strong><small data-i18n="stats.totalTokens">total tokens</small></article>
+          </section>
+
+          <section class="metric-grid stats-summary">
+            <article class="metric-card accent-blue"><div class="metric-head"><span data-i18n="stats.input">Tokens read</span><b>30D</b></div><strong id="stats-input" class="metric-value">&mdash;</strong><p data-i18n="stats.inputHint">Input tokens over 30 days</p></article>
+            <article class="metric-card accent-green"><div class="metric-head"><span data-i18n="stats.output">Generated</span><b>30D</b></div><strong id="stats-output" class="metric-value">&mdash;</strong><p data-i18n="stats.outputHint">Output tokens over 30 days</p></article>
+            <article class="metric-card accent-violet"><div class="metric-head"><span data-i18n="stats.cached">Cache reused</span><b>30D</b></div><strong id="stats-cache" class="metric-value">&mdash;</strong><p id="stats-cache-detail">&mdash;</p></article>
+            <article class="metric-card accent-amber"><div class="metric-head"><span data-i18n="stats.completed">Completed requests</span><b>30D</b></div><strong id="stats-requests" class="metric-value">&mdash;</strong><p data-i18n="stats.completedHint">Completed model calls only</p></article>
+          </section>
+
+          <section class="stats-grid">
+            <article class="metric-card accent-blue stats-chart-card">
+              <div class="metric-head"><span data-i18n="stats.tokenFlow">Token flow</span><b>30D</b></div>
+              <div id="stats-token-chart" class="stats-chart-body"></div>
+              <div class="stats-legend"><span><i class="stats-dot new-input"></i><b data-i18n="stats.newInput">New input</b></span><span><i class="stats-dot cached-input"></i><b data-i18n="stats.cachedInput">Cached input</b></span><span><i class="stats-dot output"></i><b data-i18n="stats.output">Generated</b></span></div>
+            </article>
+            <article class="metric-card accent-amber stats-chart-card">
+              <div class="metric-head"><span data-i18n="stats.requestVolume">Completed requests</span><b>30D</b></div>
+              <div id="stats-request-chart" class="stats-chart-body"></div>
+            </article>
+            <article class="metric-card accent-violet stats-chart-card">
+              <div class="metric-head"><span data-i18n="stats.modelShare">Model share</span><b id="stats-model-count">&mdash;</b></div>
+              <div id="stats-model-chart" class="stats-chart-body stats-share-list"></div>
+            </article>
+            <article class="metric-card accent-green stats-chart-card">
+              <div class="metric-head"><span data-i18n="stats.outputRate">Effective output rate</span><b>30D</b></div>
+              <div id="stats-tps-chart" class="stats-chart-body"></div>
+            </article>
+          </section>
+          <p id="stats-error" class="custom-error" aria-live="polite" hidden></p>
+          <div class="security-note stats-privacy"><span data-i18n="security.local">LOCAL ONLY</span><p data-i18n="stats.privacy">Aggregated counters only. Prompts, responses, files, credentials, and session identifiers are never shown here.</p></div>
+        </section>
       </div>
 
       <div class="view" data-view="models">

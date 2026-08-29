@@ -9,6 +9,7 @@ import {
   pruneRollup,
   rollupKey,
   rollupTotals,
+  usageStats,
 } from "../src/usage-rollup.mjs";
 
 const event = (at, over = {}) => JSON.stringify({
@@ -188,4 +189,41 @@ test("a slow request is never mistaken for an implausible one", () => {
     event("2026-08-18T01:00:00.000Z", { outputTokens: 800, durationMs: 4000 }),
   ], { now: "2026-08-18T02:00:00.000Z" });
   assert.equal(rollupTotals(rollup)["deepseek-v4-flash@opencode-go"].tps, 200);
+});
+
+test("stats expose bounded today, seven-day, and thirty-day completed usage", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-12T01:00:00.000Z", { inputTokens: 300, cachedTokens: 100, outputTokens: 30 }),
+    event("2026-08-18T01:00:00.000Z", { inputTokens: 500, cachedTokens: 400, outputTokens: 50, durationMs: 2000 }),
+    event("2026-08-18T02:00:00.000Z", { status: 500, inputTokens: 0, cachedTokens: 0, outputTokens: 0 }),
+  ], { now: "2026-08-18T03:00:00.000Z" });
+  const stats = usageStats(rollup, "2026-08-18T12:00:00.000Z");
+
+  assert.equal(stats.timezone, "UTC");
+  assert.equal(stats.days.length, ROLLUP_DAYS);
+  assert.equal(stats.days.at(-1).day, "2026-08-18");
+  assert.equal(stats.periods.today.totalTokens, 550);
+  assert.equal(stats.periods.today.completedRequests, 1, "failed traffic is not presented as completed work");
+  assert.equal(stats.periods.days7.totalTokens, 880);
+  assert.equal(stats.periods.days30.cachedTokens, 500);
+  assert.equal(stats.periods.days30.newInputTokens, 300);
+  assert.equal(stats.periods.days30.outputTps, 80 / 3);
+});
+
+test("stats keep model share bounded and aggregate the tail", () => {
+  const rollup = emptyRollup();
+  const day = "2026-08-18";
+  rollup.days[day] = {};
+  for (let index = 1; index <= 8; index += 1) {
+    rollup.days[day][`model-${index}@provider-${index}`] = {
+      requests: 1, ok: 1, in: index * 100, out: 0, cached: 0, ms: 1000, okOut: 0, okMs: 0,
+    };
+  }
+  const stats = usageStats(rollup, `${day}T12:00:00.000Z`);
+
+  assert.equal(stats.modelCount, 8);
+  assert.equal(stats.models.length, 7, "six named models plus one bounded Other row");
+  assert.equal(stats.models[0].id, "model-8@provider-8");
+  assert.equal(stats.models.at(-1).id, "__other__");
+  assert.equal(stats.models.at(-1).totalTokens, 300, "the two smallest models are preserved in Other");
 });
