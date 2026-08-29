@@ -11,9 +11,43 @@
 
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "./mcp.mjs";
-import { callMcpTool, gatewayBaseUrl } from "./mcp-client.mjs";
+import { callMcpTool, callMcpToolResult, gatewayBaseUrl } from "./mcp-client.mjs";
 import { loadConfig } from "./config.mjs";
+import {
+  createScreenshotPreview,
+  SCREENSHOT_PREVIEW_WORKER_INPUT_MAX_BYTES,
+} from "./image-transport.mjs";
 import { readXaiAuth } from "./xai-auth.mjs";
+
+async function runImagePreviewWorker() {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    bytes += chunk.byteLength;
+    if (bytes > SCREENSHOT_PREVIEW_WORKER_INPUT_MAX_BYTES) {
+      throw new Error(`Image preview worker input exceeds ${SCREENSHOT_PREVIEW_WORKER_INPUT_MAX_BYTES} bytes`);
+    }
+    chunks.push(chunk);
+  }
+  const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  const result = createScreenshotPreview(request.imageUrl, {
+    targetBytes: request.targetBytes,
+    hardMaxBytes: request.hardMaxBytes,
+  });
+  await new Promise((resolve, reject) => {
+    process.stdout.write(JSON.stringify(result), (error) => (error ? reject(error) : resolve()));
+  });
+}
+
+if (process.argv[2] === "--image-preview-worker") {
+  try {
+    await runImagePreviewWorker();
+    process.exit(0);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
 
 const baseUrl = gatewayBaseUrl();
 const config = loadConfig();
@@ -42,6 +76,7 @@ const recallScope = (args) => {
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
   inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
+  previewImages: (args) => callMcpToolResult("preview_images", args, baseUrl),
   ...(grokImageAvailable
     ? {
         hasXaiImageGeneration: () => true,

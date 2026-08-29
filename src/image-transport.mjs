@@ -97,6 +97,115 @@ function resizeRgba(image, width, height) {
 
 export const MIN_IMAGE_TRANSPORT_WIRE_BYTES = 32 * 1024;
 
+export const SCREENSHOT_PREVIEW_PREFERRED_MIN_BYTES = 200 * 1024;
+export const SCREENSHOT_PREVIEW_TARGET_BYTES = 600 * 1024;
+export const SCREENSHOT_PREVIEW_HARD_MAX_BYTES = 1024 * 1024;
+export const SCREENSHOT_PREVIEW_SOURCE_MAX_BYTES = 10 * 1024 * 1024;
+export const SCREENSHOT_PREVIEW_WORKER_INPUT_MAX_BYTES = 16 * 1024 * 1024;
+
+function encodeScreenshotJpeg(image, maxBytes) {
+  let working = image;
+  let highQuality = 94;
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    let encoded = jpeg.encode(working, highQuality).data;
+    if (encoded.byteLength <= maxBytes) {
+      return { encoded, image: working, quality: highQuality };
+    }
+
+    // Prefer keeping screenshot dimensions and reducing JPEG quality before
+    // resizing. Text and thin UI lines survive this substantially better than
+    // an early spatial downscale.
+    const floorQuality = 72;
+    const floorEncoded = jpeg.encode(working, floorQuality).data;
+    if (floorEncoded.byteLength <= maxBytes) {
+      let low = floorQuality;
+      let high = highQuality;
+      let best = { encoded: floorEncoded, quality: floorQuality };
+      while (low <= high) {
+        const quality = Math.floor((low + high) / 2);
+        encoded = jpeg.encode(working, quality).data;
+        if (encoded.byteLength <= maxBytes) {
+          best = { encoded, quality };
+          low = quality + 1;
+        } else {
+          high = quality - 1;
+        }
+      }
+      return { ...best, image: working };
+    }
+
+    // At the quality floor the only remaining lever is resolution. Preserve
+    // the aspect ratio exactly; unlike the provider transport path, very thin
+    // screenshots must not be stretched merely to enforce a minimum edge.
+    const scale = Math.min(0.9, Math.sqrt(maxBytes / floorEncoded.byteLength) * 0.94);
+    const width = Math.max(1, Math.floor(working.width * scale));
+    const height = Math.max(1, Math.floor(working.height * scale));
+    if (width === working.width && height === working.height) break;
+    working = resizeRgba(working, width, height);
+    highQuality = 92;
+  }
+
+  // The 600 KiB preferred target is intentionally stricter than the absolute
+  // 1 MiB contract. If a pathological image cannot reach the preferred target,
+  // one final lower-quality pass still has to respect the hard limit.
+  for (const quality of [64, 56, 48, 40]) {
+    const encoded = jpeg.encode(working, quality).data;
+    if (encoded.byteLength <= maxBytes) return { encoded, image: working, quality };
+  }
+  throw new Error(`Screenshot preview could not be reduced below ${maxBytes} bytes`);
+}
+
+export function createScreenshotPreview(imageUrl, {
+  targetBytes = SCREENSHOT_PREVIEW_TARGET_BYTES,
+  hardMaxBytes = SCREENSHOT_PREVIEW_HARD_MAX_BYTES,
+} = {}) {
+  const target = Math.floor(Number(targetBytes));
+  const hardMax = Math.floor(Number(hardMaxBytes));
+  if (!Number.isSafeInteger(target) || target < SCREENSHOT_PREVIEW_PREFERRED_MIN_BYTES) {
+    throw new Error(`Screenshot preview target must be at least ${SCREENSHOT_PREVIEW_PREFERRED_MIN_BYTES} bytes`);
+  }
+  if (!Number.isSafeInteger(hardMax) || hardMax < target) {
+    throw new Error("Screenshot preview hard limit must be at least the preferred target");
+  }
+
+  const match = DATA_URL.exec(String(imageUrl || ""));
+  if (!match) throw new Error("Screenshot preview requires a PNG or JPEG data URL");
+  const mime = match[1].toLowerCase();
+  const original = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (original.byteLength <= target) {
+    return {
+      imageUrl,
+      mime,
+      transformed: false,
+      originalBytes: original.byteLength,
+      previewBytes: original.byteLength,
+    };
+  }
+
+  const image = decodedRgba(mime, original);
+  let converted;
+  try {
+    converted = encodeScreenshotJpeg(image, target);
+  } catch (error) {
+    if (hardMax === target) throw error;
+    converted = encodeScreenshotJpeg(image, hardMax);
+  }
+  if (converted.encoded.byteLength > hardMax) {
+    throw new Error(`Screenshot preview exceeds the ${hardMax}-byte hard limit`);
+  }
+  return {
+    imageUrl: dataUrl("image/jpeg", converted.encoded),
+    mime: "image/jpeg",
+    transformed: true,
+    originalBytes: original.byteLength,
+    previewBytes: converted.encoded.byteLength,
+    width: converted.image.width,
+    height: converted.image.height,
+    quality: converted.quality,
+  };
+}
+
 export function createTransportImage(imageUrl, { maxWireBytes }) {
   const limit = Math.floor(Number(maxWireBytes));
   if (!Number.isSafeInteger(limit) || limit < MIN_IMAGE_TRANSPORT_WIRE_BYTES) {

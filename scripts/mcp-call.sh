@@ -8,6 +8,7 @@
 #   sh scripts/mcp-call.sh list_mcp_tools
 #   sh scripts/mcp-call.sh search "query"
 #   sh scripts/mcp-call.sh vision <path> "question"
+#   sh scripts/mcp-call.sh preview <path> [path ...]
 #   sh scripts/mcp-call.sh image "prompt"
 #   sh scripts/mcp-call.sh recall "query" [scope_dir]
 #   sh scripts/mcp-call.sh store "content" [scope_dir] [kind]

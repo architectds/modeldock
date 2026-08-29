@@ -7,6 +7,7 @@ import { readCodexAuth } from "./codex-auth.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
 import { readXaiAuth } from "./xai-auth.mjs";
 import { forEachSseEvent, sseDataLines } from "./sse.mjs";
+import { previewLocalImages } from "./image-preview.mjs";
 import os from "node:os";
 import path from "node:path";
 function upstreamUrl(baseUrl, path) {
@@ -141,6 +142,10 @@ function videoResult(body, requestId = "") {
 }
 
 export function createUpstreams({ config, metrics, mediaStore, memoryStore = null, getVisionModel = () => config.visionModel, visionCache = visionEvidenceCache, getNativeSlugs = () => null }) {
+  function previewImages(args) {
+    return previewLocalImages(args, { mediaStore });
+  }
+
   function hasXaiSession() {
     return Boolean(xaiSessionToken(config));
   }
@@ -633,5 +638,5 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     return { model, mode, imageRefs: refs, answer, usage: result.usage, cached: false, ...note };
   }
 
-  return { searchWeb, inspectVision, generateImage, hasXaiSession, hasXaiImageGeneration, hasXaiVideoGeneration, generateXaiImage, generateXaiVideo, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
+  return { searchWeb, inspectVision, previewImages, generateImage, hasXaiSession, hasXaiImageGeneration, hasXaiVideoGeneration, generateXaiImage, generateXaiVideo, ...(memoryStore ? { recallMemory, storeMemory, learnMemory } : {}) };
 }

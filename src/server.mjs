@@ -73,6 +73,15 @@ import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
 import { kvBytesPerToken, readModelFacts } from "./gguf.mjs";
 import staticFiles from "./static-inline.mjs";
+import {
+  DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
+  WeightedByteBudget,
+  ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
+  ZSTD_DECODED_HARD_LIMIT_BYTES,
+  zstdParseChargeBytes,
+  zstdParsedBodyChargeBytes,
+  zstdReceiveChargeBytes,
+} from "./zstd-ingress-budget.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(dirname, "../public");
@@ -935,13 +944,37 @@ function sendPayloadTooLarge(res, metrics, diagnostics, message) {
   });
 }
 
-function zstdRequestDecoder({ callerKey, metrics }) {
-  // Codex sends its own compaction request as one zstd body. A 16 MiB wire cap
-  // rejected that very request before it could replace image-heavy history with
-  // a compact handoff. Keep a bounded 32 MiB ingress allowance; decompression
-  // remains capped at 64 MiB, so this is not an unbounded memory escape hatch.
-  const maxInput = 32 * 1024 * 1024;
-  const maxOutput = 64 * 1024 * 1024;
+function sendDecodeBudgetExhausted(res, metrics, memoryBudget, requestedBytes) {
+  const diagnostics = {
+    budgetBytes: memoryBudget.capacityBytes,
+    reservedBytes: memoryBudget.usedBytes,
+    requestedBytes,
+  };
+  const finish = metrics?.begin?.("responses", {
+    operation: "decode_budget_exhausted",
+    payloadDiagnostics: diagnostics,
+  });
+  finish?.({
+    ok: false,
+    httpStatus: 503,
+    error: "zstd ingress memory budget is busy.",
+  });
+  res.setHeader("Retry-After", "1");
+  return res.status(503).json({
+    error: {
+      type: "decode_budget_exhausted",
+      message: "zstd ingress memory budget is busy; retry shortly.",
+      diagnostics,
+    },
+  });
+}
+
+function zstdRequestDecoder({ callerKey, metrics, memoryBudget }) {
+  // Both one-request protocol limits are 64 MiB. Aggregate process exposure is
+  // bounded separately by memoryBudget, which follows each request from receive
+  // through response completion and shrinks after its real size is known.
+  const maxInput = ZSTD_COMPRESSED_HARD_LIMIT_BYTES;
+  const maxOutput = ZSTD_DECODED_HARD_LIMIT_BYTES;
   return (req, res, next) => {
     if (String(req.headers["content-encoding"] || "").toLowerCase() !== "zstd") return next();
     const pathname = String(req.url || "").split("?", 1)[0];
@@ -952,14 +985,45 @@ function zstdRequestDecoder({ callerKey, metrics }) {
     if (!keyMatch && protectedRelayPath(pathname) && isCallerKeyEnforced()) {
       return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL." } });
     }
+    const declaredWireBytes = Number(req.headers["content-length"]);
+    if (Number.isFinite(declaredWireBytes) && declaredWireBytes > maxInput) {
+      return sendPayloadTooLarge(
+        res,
+        metrics,
+        payloadTooLargeDiagnostics({
+          encoding: "zstd",
+          reason: "compressed_request",
+          wireBytes: declaredWireBytes,
+          wireLimitBytes: maxInput,
+          decodedLimitBytes: maxOutput,
+        }),
+        `zstd request body exceeds the ${maxInput}-byte limit`,
+      );
+    }
+    const initialWireBytes = Number.isSafeInteger(declaredWireBytes) && declaredWireBytes >= 0
+      ? declaredWireBytes
+      : 0;
+    const initialChargeBytes = zstdReceiveChargeBytes(initialWireBytes);
+    const reservation = memoryBudget.tryReserve(initialChargeBytes);
+    if (!reservation) {
+      return sendDecodeBudgetExhausted(res, metrics, memoryBudget, initialChargeBytes);
+    }
+    let reservationReleased = false;
+    const releaseReservation = () => {
+      if (reservationReleased) return;
+      reservationReleased = true;
+      reservation.release();
+    };
+    res.once("finish", releaseReservation);
+    res.once("close", releaseReservation);
     const chunks = [];
     let received = 0;
-    let tooLarge = false;
+    let rejected = false;
     req.on("data", (chunk) => {
-      if (tooLarge) return;
+      if (rejected || reservationReleased) return;
       received += chunk.length;
       if (received > maxInput) {
-        tooLarge = true;
+        rejected = true;
         sendPayloadTooLarge(
           res,
           metrics,
@@ -974,13 +1038,23 @@ function zstdRequestDecoder({ callerKey, metrics }) {
         );
         return;
       }
+      const receiveChargeBytes = zstdReceiveChargeBytes(received);
+      if (!reservation.resize(receiveChargeBytes)) {
+        rejected = true;
+        sendDecodeBudgetExhausted(res, metrics, memoryBudget, receiveChargeBytes);
+        return;
+      }
       chunks.push(chunk);
     });
-    req.on("error", next);
+    req.on("error", (error) => {
+      releaseReservation();
+      next(error);
+    });
     req.on("end", () => {
-      if (tooLarge) return;
+      if (rejected || reservationReleased) return;
       const compressed = Buffer.concat(chunks);
       const onDecoded = (error, body) => {
+        if (reservationReleased) return;
         if (error) {
           if (error.code === "ERR_BUFFER_TOO_LARGE") {
             return sendPayloadTooLarge(
@@ -1002,6 +1076,10 @@ function zstdRequestDecoder({ callerKey, metrics }) {
           return res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${error.message}` } });
         }
         try {
+          const parseChargeBytes = zstdParseChargeBytes(compressed.length, body.length);
+          if (!reservation.resize(parseChargeBytes)) {
+            return sendDecodeBudgetExhausted(res, metrics, memoryBudget, parseChargeBytes);
+          }
           req.headers["content-encoding"] = "identity";
           req.headers["content-length"] = String(body.length);
           // Preserve both measurements before exposing the decoded body to the
@@ -1009,6 +1087,10 @@ function zstdRequestDecoder({ callerKey, metrics }) {
           // they must not erase the compressed bytes Codex actually sent.
           req.modeldockIngressBytes = { wireBytes: compressed.length, logicalBytes: body.length };
           req.body = JSON.parse(body.toString("utf8"));
+          const parsedBodyChargeBytes = zstdParsedBodyChargeBytes(body.length);
+          if (!reservation.resize(parsedBodyChargeBytes)) {
+            return sendDecodeBudgetExhausted(res, metrics, memoryBudget, parsedBodyChargeBytes);
+          }
           next();
         } catch (decodeError) {
           res.status(400).json({ error: { type: "bad_request", message: `zstd request decode failed: ${decodeError.message}` } });
@@ -2847,7 +2929,14 @@ export function createApp(services = createServices()) {
   // (which is registered inside createMcpExpressApp and cannot be reordered).
   const outer = express();
   outer.disable("x-powered-by");
-  outer.use(zstdRequestDecoder({ callerKey: services.callerKey, metrics: services.metrics }));
+  const zstdMemoryBudget = services.zstdMemoryBudget || new WeightedByteBudget(
+    services.config?.zstdMemoryBudgetBytes || DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
+  );
+  outer.use(zstdRequestDecoder({
+    callerKey: services.callerKey,
+    metrics: services.metrics,
+    memoryBudget: zstdMemoryBudget,
+  }));
   outer.use(app);
   // createMcpExpressApp owns the JSON parser. Its 25 MB rejection is raised
   // after the inner app runs, so record the same anonymous diagnostics here.

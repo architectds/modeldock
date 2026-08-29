@@ -20,9 +20,14 @@ function startMockGateway() {
       calls.push(message);
       let result = {};
       if (message.method === "tools/call") {
-        result.content = [
-          { type: "text", text: JSON.stringify({ forwarded: message.params.name, args: message.params.arguments }) },
-        ];
+        result.content = message.params.name === "preview_images"
+          ? [
+              { type: "text", text: JSON.stringify({ forwarded: message.params.name, args: message.params.arguments }) },
+              { type: "image", data: Buffer.from("preview-bytes").toString("base64"), mimeType: "image/jpeg" },
+            ]
+          : [
+              { type: "text", text: JSON.stringify({ forwarded: message.params.name, args: message.params.arguments }) },
+            ];
       } else if (message.method === "tools/list") {
         result.tools = [];
       }
@@ -100,7 +105,7 @@ test("stdio bridge omits Grok media tools before a Grok session is connected", a
     notify(bridge, "notifications/initialized", {});
     const listed = await rpc(bridge, 2, "tools/list", {});
     const names = listed.result.tools.map((tool) => tool.name);
-    assert.deepEqual(names.sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
+    assert.deepEqual(names.sort(), ["hear", "image_gen", "preview_images", "speak", "vision_inspect", "web_search_exa"]);
     assert.equal(gateway.calls.some((m) => m.method === "tools/list"), false, "tools/list is served locally");
     const search = listed.result.tools.find((tool) => tool.name === "web_search_exa");
     assert.equal(
@@ -119,6 +124,13 @@ test("stdio bridge omits Grok media tools before a Grok session is connected", a
     );
     assert.equal(names.includes("grok_image_gen"), false);
     assert.equal(names.includes("grok_video_gen"), false);
+    const preview = await rpc(bridge, 3, "tools/call", {
+      name: "preview_images",
+      arguments: { paths: ["D:\\shots\\page.png"] },
+    });
+    assert.equal(preview.result.content[1].type, "image");
+    assert.equal(Buffer.from(preview.result.content[1].data, "base64").toString(), "preview-bytes");
+    assert.equal(gateway.calls.find((message) => message.params?.name === "preview_images")?.params.arguments.paths[0], "D:\\shots\\page.png");
   } finally {
     await stopBridge(bridge);
     await gateway.close();

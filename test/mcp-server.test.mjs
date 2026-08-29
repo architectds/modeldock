@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import os from "node:os";
 import path from "node:path";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { startMcpServer } from "../src/mcp-server.mjs";
 
 function configStub() {
@@ -54,12 +54,34 @@ test("MCP sidecar lists web, vision, and speech tools", async () => {
     const names = tools.map((tool) => tool.name);
     assert.ok(names.includes("web_search_exa"), `missing web_search_exa in ${names.join(",")}`);
     assert.ok(names.includes("vision_inspect"), `missing vision_inspect in ${names.join(",")}`);
+    assert.ok(names.includes("preview_images"), `missing preview_images in ${names.join(",")}`);
     assert.ok(names.includes("speak"), `missing speak in ${names.join(",")}`);
     assert.ok(names.includes("hear"), `missing hear in ${names.join(",")}`);
     assert.ok(!names.includes("recall_memory"), `recall_memory must be off by default in ${names.join(",")}`);
     assert.ok(!names.includes("store_memory"), `store_memory must be off by default in ${names.join(",")}`);
   } finally {
     await instance.stop();
+  }
+});
+
+test("MCP sidecar returns bounded local previews as image content", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-preview-"));
+  const source = path.join(dir, "pixel.png");
+  writeFileSync(source, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"));
+  const instance = await startMcpServer(configStub(), { port: 0 });
+  try {
+    const { status, parsed } = await rpc(instance.url, "tools/call", {
+      name: "preview_images",
+      arguments: { paths: [source] },
+    });
+    assert.equal(status, 200);
+    assert.equal(parsed.result?.content?.[0]?.type, "text");
+    assert.equal(parsed.result?.content?.[1]?.type, "image");
+    assert.equal(parsed.result?.content?.[1]?.mimeType, "image/png");
+    assert.ok(Buffer.from(parsed.result.content[1].data, "base64").byteLength > 0);
+  } finally {
+    await instance.stop();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

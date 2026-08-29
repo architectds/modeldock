@@ -54,7 +54,7 @@ test("serves both local MCP tools over Streamable HTTP", async (t) => {
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/c/${instance.services.callerKey}/mcp`)));
   t.after(() => client.close());
   const result = await client.listTools();
-  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["hear", "image_gen", "preview_images", "speak", "vision_inspect", "web_search_exa"]);
 });
 
 test("adds both Grok media tools only for a connected xAI subscription", async (t) => {
@@ -72,7 +72,7 @@ test("adds both Grok media tools only for a connected xAI subscription", async (
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/c/${instance.services.callerKey}/mcp`)));
   t.after(() => client.close());
   const result = await client.listTools();
-  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["grok_image_gen", "grok_video_gen", "hear", "image_gen", "speak", "vision_inspect", "web_search_exa"]);
+  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), ["grok_image_gen", "grok_video_gen", "hear", "image_gen", "preview_images", "speak", "vision_inspect", "web_search_exa"]);
 });
 
 test("serves the memory view when the vault is enabled", async (t) => {

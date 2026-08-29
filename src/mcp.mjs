@@ -79,6 +79,28 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
         },
       );
 
+      if (typeof upstreams.previewImages === "function") {
+        server.registerTool(
+          "preview_images",
+          {
+            title: "Preview Local Images",
+            description:
+              "Attach local PNG/JPEG screenshots as bounded conversation previews instead of emitting full-size pixels. Compressed previews prefer the 200-600 KiB range and never exceed 1 MiB; already-small images are not enlarged. The returned original_ref preserves access to the full image for vision_inspect. Use this for local screenshots and rendered UI frames that need to enter the conversation.",
+            inputSchema: z.object({
+              paths: z.array(z.string().min(1)).min(1).max(20).describe("Absolute local paths of PNG/JPEG screenshots, in display order"),
+            }),
+            annotations: { readOnlyHint: true, openWorldHint: false },
+          },
+          async (args) => {
+            try {
+              return await upstreams.previewImages(args);
+            } catch (error) {
+              return errorResult(error);
+            }
+          },
+        );
+      }
+
       server.registerTool(
         "image_gen",
         {

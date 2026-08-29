@@ -15,6 +15,10 @@ import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
+import {
+  DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
+  MIN_ZSTD_MEMORY_BUDGET_BYTES,
+} from "./zstd-ingress-budget.mjs";
 
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
@@ -537,6 +541,11 @@ export function loadConfig() {
     exaMcpUrl: normalizedBaseUrl(process.env.EXA_MCP_URL || "https://mcp.exa.ai/mcp"),
     exaApiKey: process.env.EXA_API_KEY || "",
     recentLimit: integer("MODELDOCK_RECENT_LIMIT", 200, { min: 10, max: 500 }),
+    zstdMemoryBudgetBytes: integer(
+      "MODELDOCK_ZSTD_MEMORY_BUDGET_BYTES",
+      DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
+      { min: MIN_ZSTD_MEMORY_BUDGET_BYTES },
+    ),
     modelRefreshHours: Number(process.env.MODELDOCK_MODEL_REFRESH_HOURS || 24),
     // Catalog discovery is a read-only GET /models. It never sends a prompt,
     // image, tool declaration, or capability probe to an upstream. A provider's

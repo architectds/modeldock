@@ -13,6 +13,7 @@ const read = (f) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8");
 const COMMAND_FOR_TOOL = {
   web_search_exa: "search",
   vision_inspect: "vision",
+  preview_images: "preview",
   image_gen: "image",
   grok_image_gen: "grok-image",
   grok_video_gen: "video",

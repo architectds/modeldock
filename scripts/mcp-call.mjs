@@ -9,6 +9,7 @@
 //   node scripts/mcp-call.mjs list_mcp_tools
 //   node scripts/mcp-call.mjs search <query> [numResults]
 //   node scripts/mcp-call.mjs vision <path> <question> [mode]
+//   node scripts/mcp-call.mjs preview <path> [path ...]
 //   node scripts/mcp-call.mjs image <prompt> [size] [model]
 //   node scripts/mcp-call.mjs grok-image <prompt>
 //   node scripts/mcp-call.mjs video <prompt> [duration] [aspect_ratio] [resolution] [wait_seconds]
@@ -26,7 +27,7 @@
 // client); keep them in lockstep when either changes.
 
 import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -109,13 +110,46 @@ async function listMcpTools(baseUrl = gatewayBaseUrl()) {
 // Returns the tool result text; when that text is itself JSON the parsed value
 // is returned so callers can work with the object directly.
 async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
-  const result = await requestMcp(baseUrl, "tools/call", { name, arguments: args });
+  const result = await callMcpToolResult(name, args, baseUrl);
   const text = (result.content || []).find((item) => item.type === "text")?.text ?? "";
   try {
     return JSON.parse(text);
   } catch {
     return text;
   }
+}
+
+function callMcpToolResult(name, args, baseUrl = gatewayBaseUrl()) {
+  return requestMcp(baseUrl, "tools/call", { name, arguments: args });
+}
+
+function savePreviewResult(result) {
+  const directory = path.join(os.tmpdir(), "modeldock-previews");
+  mkdirSync(directory, { recursive: true });
+  for (const entry of readdirSync(directory)) {
+    const file = path.join(directory, entry);
+    try {
+      if (Date.now() - statSync(file).mtimeMs > 24 * 60 * 60 * 1000) unlinkSync(file);
+    } catch {
+      // A concurrent fallback can remove the same disposable preview.
+    }
+  }
+  const files = [];
+  for (const [index, item] of (result.content || []).filter((entry) => entry.type === "image").entries()) {
+    const extension = item.mimeType === "image/png" ? "png" : "jpg";
+    const file = path.join(directory, `preview-${Date.now()}-${randomBytes(4).toString("hex")}-${index + 1}.${extension}`);
+    writeFileSync(file, Buffer.from(item.data, "base64"));
+    files.push(file);
+  }
+  const manifest = (result.content || []).find((item) => item.type === "text")?.text || "";
+  let parsedManifest = manifest;
+  try {
+    parsedManifest = manifest ? JSON.parse(manifest) : {};
+  } catch {
+    // Preserve a readable MCP error instead of hiding it behind a JSON parse
+    // failure in the shell fallback.
+  }
+  return { manifest: parsedManifest, preview_files: files };
 }
 
 const [command, ...rest] = process.argv.slice(2);
@@ -165,6 +199,9 @@ if (command === "tools") {
   const args = { path: rest[0], question: rest[1] };
   if (rest[2]) args.mode = rest[2];
   console.log(JSON.stringify(await callMcpTool("vision_inspect", args), null, 2));
+} else if (command === "preview") {
+  const result = await callMcpToolResult("preview_images", { paths: rest });
+  console.log(JSON.stringify(savePreviewResult(result), null, 2));
 } else if (command === "image") {
   // image_gen is a first-class tool but was missing here, so a stale MCP
   // connection took it away entirely while the instructions still called it
@@ -191,7 +228,7 @@ if (command === "tools") {
 } else if (command === "hear") {
   console.log(await callMcpTool("hear", { file: rest[0] }));
 } else {
-  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|image|grok-image|video|speak|hear|recall|store|learn> ...");
+  console.error("usage: node scripts/mcp-call.mjs <tools|list_mcp_tools|search|vision|preview|image|grok-image|video|speak|hear|recall|store|learn> ...");
   process.exitCode = 2;
 }
 
@@ -199,6 +236,7 @@ function exampleFor(toolName) {
   const examples = {
     web_search_exa: 'search "query"',
     vision_inspect: 'vision <path> "question"',
+    preview_images: "preview <path> [path ...]",
     image_gen: 'image "prompt" [size]',
     grok_image_gen: 'grok-image "prompt"',
     grok_video_gen: 'video "prompt" [duration] [aspect_ratio] [resolution] [wait_seconds=600]',

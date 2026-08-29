@@ -44,11 +44,15 @@ async function requestMcp(baseUrl, method, params) {
 // Returns the tool result text; when that text is itself JSON the parsed value
 // is returned so callers can work with the object directly.
 export async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
-  const result = await requestMcp(baseUrl, "tools/call", { name, arguments: args });
+  const result = await callMcpToolResult(name, args, baseUrl);
   const text = (result.content || []).find((item) => item.type === "text")?.text ?? "";
   try {
     return JSON.parse(text);
   } catch {
     return text;
   }
+}
+
+export function callMcpToolResult(name, args, baseUrl = gatewayBaseUrl()) {
+  return requestMcp(baseUrl, "tools/call", { name, arguments: args });
 }

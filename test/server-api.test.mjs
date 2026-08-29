@@ -10,6 +10,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile } from "../src/profiles.mjs";
 import { dpapiSupported } from "../src/secrets.mjs";
+import {
+  ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
+  ZSTD_DECODED_HARD_LIMIT_BYTES,
+} from "../src/zstd-ingress-budget.mjs";
 
 // Bare-path tests exercise the app wiring, not the caller-key guard. Enforcement
 // is ON by default since 0.1.10, so this file opts out explicitly; the default
@@ -915,34 +919,163 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
     inputImageBytes: null,
   });
 
-  // A body between the former 16 MiB cap and the new 32 MiB cap reaches the
+  // A body between the former 32 MiB cap and the 64 MiB hard cap reaches the
   // decoder. It is deliberately not JSON, so 400 proves it was not rejected by
   // the ingress-size guard before a Codex compaction could be parsed.
   const admitted = await fetch(`${instance.base}/healthz`, {
     method: "POST",
     headers: { "content-type": "application/json", "content-encoding": "zstd" },
-    body: zlib.zstdCompressSync(randomBytes(17 * 1024 * 1024)),
+    body: zlib.zstdCompressSync(randomBytes(33 * 1024 * 1024)),
   });
   assert.equal(admitted.status, 400);
   assert.match((await admitted.json()).error.message, /zstd request decode failed/);
 
-  // Incompressible stream that already exceeds the 32MB input cap.
-  const huge = zlib.zstdCompressSync(randomBytes(33 * 1024 * 1024));
-  const tooLong = await fetch(`${instance.base}/healthz`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "content-encoding": "zstd" },
-    body: huge,
+  // A request whose declared wire body exceeds 64 MiB is rejected before the
+  // gateway allocates or reads that body.
+  const port = new URL(instance.base).port;
+  const rawResponse = await new Promise((resolve, reject) => {
+    const socket = net.connect(Number(port), "127.0.0.1");
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.once("connect", () => {
+      socket.write([
+        "POST /healthz HTTP/1.1",
+        `Host: 127.0.0.1:${port}`,
+        "Content-Type: application/json",
+        "Content-Encoding: zstd",
+        `Content-Length: ${ZSTD_COMPRESSED_HARD_LIMIT_BYTES + 1}`,
+        "Connection: close",
+        "",
+        "",
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.once("error", reject);
+    socket.once("close", () => resolve(response));
   });
-  assert.equal(tooLong.status, 413);
-  const longBody = await tooLong.json();
+  assert.match(rawResponse, /^HTTP\/1\.1 413 /);
+  const longBody = JSON.parse(rawResponse.split("\r\n\r\n", 2)[1]);
   assert.equal(longBody.error.diagnostics.reason, "compressed_request");
-  assert.ok(longBody.error.diagnostics.wireBytes > 32 * 1024 * 1024);
-  assert.equal(longBody.error.diagnostics.wireLimitBytes, 32 * 1024 * 1024);
+  assert.equal(longBody.error.diagnostics.wireBytes, ZSTD_COMPRESSED_HARD_LIMIT_BYTES + 1);
+  assert.equal(longBody.error.diagnostics.wireLimitBytes, ZSTD_COMPRESSED_HARD_LIMIT_BYTES);
   assert.equal(longBody.error.diagnostics.inputItems, null);
   const rejected = instance.services.metrics.recent.filter((item) => item.operation === "payload_too_large");
   assert.equal(rejected.length, 2);
   assert.equal(rejected[0].payloadDiagnostics.reason, "compressed_request");
   assert.equal(rejected[1].payloadDiagnostics.reason, "decompressed_request");
+});
+
+test("zstd aggregate budget shrinks to parsed-body weight and releases after the response", async (t) => {
+  if (typeof zlib.zstdCompressSync !== "function") {
+    t.skip("zstd requires Node 23.8+");
+    return;
+  }
+  let releaseUpstream;
+  let markUpstreamReached;
+  const upstreamReached = new Promise((resolve) => { markUpstreamReached = resolve; });
+  const upstreamRelease = new Promise((resolve) => { releaseUpstream = resolve; });
+  const upstream = createServer(async (req, res) => {
+    await jsonBody(req);
+    markUpstreamReached();
+    await upstreamRelease;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
+  t.after(instance.stop);
+  const logical = Buffer.from(JSON.stringify({
+    model: "deepseek-v4-flash",
+    stream: false,
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "small held request" }] }],
+  }));
+  const compressed = zlib.zstdCompressSync(logical);
+  const pending = fetch(`${instance.base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: compressed,
+  });
+  await upstreamReached;
+  assert.ok(instance.services.zstdMemoryBudget.usedBytes >= 64 * 1024);
+  assert.ok(instance.services.zstdMemoryBudget.usedBytes < 1024 * 1024);
+  releaseUpstream();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  await response.arrayBuffer();
+  assert.equal(instance.services.zstdMemoryBudget.usedBytes, 0);
+});
+
+test("zstd aggregate budget fails fast, authenticates first, and recovers after release", async (t) => {
+  if (typeof zlib.zstdCompressSync !== "function") {
+    t.skip("zstd requires Node 23.8+");
+    return;
+  }
+  let requestCount = 0;
+  let releaseFirst;
+  let markFirstReached;
+  const firstReached = new Promise((resolve) => { markFirstReached = resolve; });
+  const firstRelease = new Promise((resolve) => { releaseFirst = resolve; });
+  const upstream = createServer(async (req, res) => {
+    requestCount += 1;
+    await jsonBody(req);
+    if (requestCount === 1) {
+      markFirstReached();
+      await firstRelease;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify(okResponse));
+  });
+  const upstreamPort = await listen(upstream);
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const instance = await startApp({
+    goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+    zstdMemoryBudgetBytes: 70 * 1024 * 1024,
+  });
+  t.after(instance.stop);
+  const logical = Buffer.from(JSON.stringify({
+    model: "deepseek-v4-flash",
+    stream: false,
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "x".repeat(4 * 1024 * 1024) }],
+    }],
+  }));
+  const compressed = zlib.zstdCompressSync(logical);
+  const requestOptions = {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd" },
+    body: compressed,
+  };
+  const first = fetch(`${instance.base}/v1/responses`, requestOptions);
+  await firstReached;
+  assert.ok(instance.services.zstdMemoryBudget.usedBytes > 12 * 1024 * 1024);
+  assert.ok(instance.services.zstdMemoryBudget.usedBytes < 13 * 1024 * 1024);
+
+  const badKey = await fetch(`${instance.base}/c/not-the-caller-key/v1/responses`, requestOptions);
+  assert.equal(badKey.status, 401);
+
+  const overloaded = await fetch(`${instance.base}/v1/responses`, requestOptions);
+  assert.equal(overloaded.status, 503);
+  assert.equal(overloaded.headers.get("retry-after"), "1");
+  const overloadedBody = await overloaded.json();
+  assert.equal(overloadedBody.error.type, "decode_budget_exhausted");
+  assert.equal(overloadedBody.error.diagnostics.budgetBytes, 70 * 1024 * 1024);
+  assert.ok(overloadedBody.error.diagnostics.reservedBytes > 12 * 1024 * 1024);
+  assert.equal(requestCount, 1);
+
+  releaseFirst();
+  const firstResponse = await first;
+  assert.equal(firstResponse.status, 200);
+  await firstResponse.arrayBuffer();
+  assert.equal(instance.services.zstdMemoryBudget.usedBytes, 0);
+
+  const recovered = await fetch(`${instance.base}/v1/responses`, requestOptions);
+  assert.equal(recovered.status, 200);
+  await recovered.arrayBuffer();
+  assert.equal(requestCount, 2);
+  assert.equal(instance.services.zstdMemoryBudget.usedBytes, 0);
 });
 
 test("JSON parser 413 exposes anonymous payload diagnostics", async (t) => {

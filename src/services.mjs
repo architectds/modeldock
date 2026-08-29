@@ -33,6 +33,7 @@ import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
 import { readSubagentModel } from "./subagent-config.mjs";
 import { LocalHostRuntime } from "./local-host-runtime.mjs";
+import { DEFAULT_ZSTD_MEMORY_BUDGET_BYTES, WeightedByteBudget } from "./zstd-ingress-budget.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -110,6 +111,9 @@ export function createServices(config = loadConfig()) {
   }
   delete mutableConfig.goToken;
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
+  const zstdMemoryBudget = new WeightedByteBudget(
+    mutableConfig.zstdMemoryBudgetBytes || DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
+  );
   const attachmentIndex = new CodexAttachmentIndex({ codexHome });
   const mediaStore = new MediaStore({
     ttlMs: mutableConfig.mediaTtlMs,
@@ -366,7 +370,7 @@ export function createServices(config = loadConfig()) {
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
   return Object.assign(services, {
-    config: mutableConfig, runtime, metrics, mediaStore, upstreams, configSwitcher,
+    config: mutableConfig, runtime, metrics, zstdMemoryBudget, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     // The configured subagent model (modeldock_subagent's `model`). It is the
     // user's explicit choice and can be a native bare slug (model_provider

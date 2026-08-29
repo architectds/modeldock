@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { isLoopbackHost } from "./loopback.mjs";
-import { createTransportImage } from "./image-transport.mjs";
+import {
+  createTransportImage,
+  SCREENSHOT_PREVIEW_HARD_MAX_BYTES,
+  SCREENSHOT_PREVIEW_TARGET_BYTES,
+} from "./image-transport.mjs";
 
 const DATA_URL = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i;
 const ACCESS_PERSIST_INTERVAL_MS = 60_000;
@@ -235,6 +239,104 @@ export class MediaStore {
         ...converted,
         ref,
         transportRef,
+        sourceRef: ref,
+        cached: false,
+      };
+    });
+  }
+
+  getCachedScreenshotPreview(ref, {
+    targetBytes = SCREENSHOT_PREVIEW_TARGET_BYTES,
+    hardMaxBytes = SCREENSHOT_PREVIEW_HARD_MAX_BYTES,
+  } = {}) {
+    return this.batch(() => {
+      const original = this.get(ref);
+      if (!original) return undefined;
+      const target = Math.floor(Number(targetBytes));
+      const hardMax = Math.floor(Number(hardMaxBytes));
+      if (original.size <= target) {
+        return {
+          ...original,
+          ref,
+          sourceRef: ref,
+          transformed: false,
+          originalBytes: original.size,
+          previewBytes: original.size,
+          cached: false,
+        };
+      }
+      const policy = `screenshot-preview-v1-${target}-${hardMax}`;
+      const source = this.#items.get(ref);
+      const cachedRef = source?.transportVariants?.[policy];
+      if (!cachedRef) return undefined;
+      const cached = this.get(cachedRef);
+      if (cached) {
+        const cachedImage = describeImageUrl(cached.imageUrl);
+        if (cachedImage.size <= hardMax) {
+          return {
+            ...cached,
+            ...(cached.previewMetadata || {}),
+            ref,
+            previewRef: cachedRef,
+            transformed: true,
+            sourceRef: ref,
+            originalBytes: original.size,
+            previewBytes: cachedImage.size,
+            cached: true,
+          };
+        }
+      }
+      delete source.transportVariants[policy];
+      this.#markDirty();
+      return undefined;
+    });
+  }
+
+  storeScreenshotPreview(ref, converted, {
+    targetBytes = SCREENSHOT_PREVIEW_TARGET_BYTES,
+    hardMaxBytes = SCREENSHOT_PREVIEW_HARD_MAX_BYTES,
+    sessionId,
+  } = {}) {
+    return this.batch(() => {
+      const original = this.get(ref);
+      if (!original) return undefined;
+      const target = Math.floor(Number(targetBytes));
+      const hardMax = Math.floor(Number(hardMaxBytes));
+      if (!converted?.transformed) {
+        return {
+          ...original,
+          ref,
+          sourceRef: ref,
+          transformed: false,
+          originalBytes: original.size,
+          previewBytes: original.size,
+          cached: false,
+        };
+      }
+      const described = describeImageUrl(converted.imageUrl);
+      if (!described.isDataUrl || described.size > hardMax || converted.originalBytes !== original.size) {
+        throw new Error("Screenshot preview does not match its canonical source or byte budget");
+      }
+      const policy = `screenshot-preview-v1-${target}-${hardMax}`;
+      const source = this.#items.get(ref);
+      const previewRef = this.put(converted.imageUrl, { sessionId });
+      const preview = this.#items.get(previewRef);
+      if (preview) {
+        preview.derivedFrom = ref;
+        preview.transportPolicy = policy;
+        preview.previewMetadata = {
+          ...(Number.isFinite(converted.width) ? { width: converted.width } : {}),
+          ...(Number.isFinite(converted.height) ? { height: converted.height } : {}),
+          ...(Number.isFinite(converted.quality) ? { quality: converted.quality } : {}),
+        };
+      }
+      source.transportVariants = { ...(source.transportVariants || {}), [policy]: previewRef };
+      this.#markDirty();
+      return {
+        ...this.get(previewRef),
+        ...converted,
+        ref,
+        previewRef,
         sourceRef: ref,
         cached: false,
       };
