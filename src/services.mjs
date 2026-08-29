@@ -369,18 +369,23 @@ export function createServices(config = loadConfig()) {
     ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
-  return Object.assign(services, {
+  Object.assign(services, {
     config: mutableConfig, runtime, metrics, zstdMemoryBudget, mediaStore, upstreams, configSwitcher,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
-    // The configured subagent model (modeldock_subagent's `model`). It is the
-    // user's explicit choice and can be a native bare slug (model_provider
-    // "openai"), which is exactly what the collaboration relay needs.
-    subagentModel: readSubagentModel(mutableConfig),
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
   });
+  // The configured subagent model (modeldock_subagent's `model`) is edited by
+  // the dashboard while the gateway stays running. Keep one source of truth:
+  // the managed agent file. The cached reader costs only a stat when unchanged
+  // and also notices an external edit or the switcher's disable-time removal.
+  Object.defineProperty(services, "subagentModel", {
+    enumerable: true,
+    get: () => readSubagentModel(mutableConfig),
+  });
+  return services;
 }
 

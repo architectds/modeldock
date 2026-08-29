@@ -1430,6 +1430,9 @@ export function createApp(services = createServices()) {
     }
     try {
       writeSubagentAgentFile(config, model);
+      // The running collaboration relay reads the managed role immediately;
+      // Codex still needs the advertised restart to reload its agent registry.
+      services.writeCatalogFile?.();
       await services.configSwitcher.markRestartRequired();
     } catch (error) {
       recordConfigAction(metrics, "subagent_update", { ok: false, error: error.message });

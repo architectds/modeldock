@@ -349,6 +349,8 @@ test("subagent API exposes routed + native options and persists the agent file",
   });
   assert.equal(changed.status, 200);
   assert.equal((await changed.json()).selected, "gpt-5.6-luna");
+  assert.equal(instance.services.subagentModel, "gpt-5.6-luna",
+    "the running collaboration relay sees the dashboard selection without a gateway restart");
   const agentFile = path.join(codexHome, "agents", "modeldock-subagent.toml");
   const written = await readFile(agentFile, "utf8");
   assert.match(written, /^name = "modeldock_subagent"$/m, "agent file exposes the role name");
@@ -370,6 +372,8 @@ test("subagent API exposes routed + native options and persists the agent file",
     body: JSON.stringify({ model: "deepseek-v4-flash@opencode-go" }),
   });
   assert.equal(routed.status, 200);
+  assert.equal(instance.services.subagentModel, "deepseek-v4-flash@opencode-go",
+    "the live subagent model follows subsequent dashboard changes too");
   assert.match(await readFile(agentFile, "utf8"), /^model = "deepseek-v4-flash@opencode-go"$/m,
     "routed models persist with the qualified provider slug");
 });

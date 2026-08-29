@@ -199,11 +199,14 @@ test("baseInstructionsFor matches Codex v2 spawn_agent args that text models can
   const text = baseInstructionsFor(configStub());
   const vision = baseInstructionsFor(configStub(), { supportsVision: true });
   for (const instructions of [text, vision]) {
+    assert.match(instructions, /agent_type="modeldock_subagent"/);
+    assert.match(instructions, /other named agent_type only when the user explicitly requests/i);
     assert.match(instructions, /spawn_agent's `message`/);
     assert.match(instructions, /followup_task/);
-    assert.match(instructions, /omit fork_turns or use "all"/i);
+    assert.match(instructions, /positive recent-turn count/i);
+    assert.match(instructions, /never omit fork_turns or use "all" with a named role/i);
     assert.doesNotMatch(instructions, /spawn_agent's prompt/);
-    assert.match(instructions, /fork_turns="none" delivers NEW_TASK/);
+    assert.match(instructions, /fork_turns="none" only when the message is fully self-contained/i);
   }
 });
 

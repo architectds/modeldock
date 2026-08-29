@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { promoteCollaborationNewTask, SUBAGENT_SPAWN_RULE, hasOpaqueCollaboration } from "../src/subagent-guidance.mjs";
 
-test("SUBAGENT_SPAWN_RULE names the real v2 args and forbids analysis-only none-forks", () => {
+test("SUBAGENT_SPAWN_RULE uses the managed role without an incompatible full-history fork", () => {
+  assert.match(SUBAGENT_SPAWN_RULE, /agent_type="modeldock_subagent"/);
+  assert.match(SUBAGENT_SPAWN_RULE, /other named agent_type only when the user explicitly requests/i);
   assert.match(SUBAGENT_SPAWN_RULE, /spawn_agent's `message`/);
   assert.match(SUBAGENT_SPAWN_RULE, /followup_task/);
-  assert.match(SUBAGENT_SPAWN_RULE, /omit fork_turns or use "all"/i);
+  assert.match(SUBAGENT_SPAWN_RULE, /positive recent-turn count/i);
+  assert.match(SUBAGENT_SPAWN_RULE, /never omit fork_turns or use "all" with a named role/i);
+  assert.match(SUBAGENT_SPAWN_RULE, /full-history forks inherit the parent role and model/i);
   assert.doesNotMatch(SUBAGENT_SPAWN_RULE, /spawn_agent's prompt/);
 });
 

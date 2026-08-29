@@ -73,7 +73,7 @@ export function writeSubagentAgentFile(config, model) {
   const content = [
     "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",
     'name = "modeldock_subagent"',
-    'description = "Subagent routed through the local ModelDock gate (managed by ModelDock)."',
+    'description = "Default ModelDock-managed role for ordinary delegation; use another named role only when the user explicitly requests it."',
     'model_provider = "openai"',
     `model = "${model}"`,
     'model_reasoning_effort = "high"',
