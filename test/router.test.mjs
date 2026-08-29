@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { RouteAffinity, routeResponsesRequest } from "../src/router.mjs";
+import { RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "../src/router.mjs";
 
 const models = { mainModel: "deepseek-v4-flash", visionModel: "gpt-5.6-luna" };
 
@@ -90,6 +90,18 @@ test("a tool-call-only assistant turn ends the turn; a stale image behind it doe
   assert.equal(route.model, "deepseek-v4-flash");
 });
 
+test("Codex turn ids keep an interrupted prior tool image out of the next user turn", () => {
+  const meta = (turn_id) => ({ internal_chat_message_metadata_passthrough: { turn_id } });
+  const input = [
+    { ...meta("turn_old"), type: "message", role: "user", content: [{ type: "input_text", text: "render" }] },
+    { ...meta("turn_old"), type: "function_call", call_id: "old", name: "node_repl", arguments: "{}" },
+    { ...meta("turn_old"), type: "function_call_output", call_id: "old", output: [{ type: "input_image", image_url: "data:image/png;base64,OLD" }] },
+    { ...meta("turn_new"), type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  assert.equal(currentTurnStartIndex(input), 3);
+  assert.equal(currentTurnHasImage(input), false);
+});
+
 test("a compaction item ends the turn; a stale image behind it does not re-trigger vision", () => {
   const route = routeResponsesRequest({
     model: "deepseek-v4-flash",
@@ -132,6 +144,19 @@ test("a new image during an agentic tool loop stays on the text model", () => {
   assert.notEqual(route.reason, "current_turn_image");
   assert.equal(route.model, "deepseek-v4-flash");
   assert.equal(route.directVision, false);
+});
+
+test("the router sees an image inside an unpromoted Codex tool output", () => {
+  const input = [
+    { role: "user", content: [{ type: "input_text", text: "render it" }] },
+    { type: "function_call", call_id: "c1", name: "node_repl", arguments: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "c1",
+      output: [{ type: "input_image", image_url: "data:image/png;base64,AA==" }],
+    },
+  ];
+  assert.equal(currentTurnHasImage(input), true);
 });
 
 test("does not treat Codex developer instructions about image support as user visual intent", () => {

@@ -42,13 +42,29 @@ test("provider discovery publishes only transports the gateway implements", () =
   assert.deepEqual([...OPENCODE_GO_PROFILE.discoveryTransports].sort(), ["chat", "responses"]);
   assert.equal(openCodeTransportForModel("qwen3.8-flash"), "chat");
   assert.equal(openCodeTransportForModel("deepseek-v4-flash"), "responses");
+  assert.equal(openCodeTransportForModel("hy4-preview"), "chat");
   const openCodeModels = new Map(OPENCODE_GO_PROFILE.availableModels.map((model) => [model.id, model]));
-  assert.equal(
-    openCodeModels.get("qwen3.8-flash")?.supportsVision,
-    true,
-    "Qwen 3.8 Flash accepts image input on OpenCode Go",
-  );
-  for (const id of ["longcat-2.0", "glm-5.3", "glm-5.3-flash", "grok-4.6"]) {
+  for (const id of ["qwen3.8-flash", "grok-4.6"]) {
+    assert.equal(openCodeModels.get(id)?.supportsVision, true, `${id} accepts image input on OpenCode Go`);
+    assert.equal(openCodeModels.get(id)?.imageTransportMaxWireBytes, 320 * 1024);
+  }
+  const grok46 = openCodeModels.get("grok-4.6");
+  assert.equal(grok46.inputNormalizer, "opencode-flash");
+  assert.deepEqual([...grok46.blockedToolTypes], ["custom"]);
+  assert.deepEqual([...grok46.customToolsAsFunctions], ["apply_patch"]);
+  assert.equal(grok46.flattenAllNamespaces, true);
+  assert.equal(grok46.safeNamespaceFunctionNames, undefined, "OpenCode Grok keeps qualified tool names; it does not alias them");
+  const hy4 = openCodeModels.get("hy4-preview");
+  assert.equal(hy4.endpoint, "chat");
+  assert.equal(hy4.contextSource, "fallback", "the sparse directory entry does not justify inheriting HY3's window");
+  assert.equal(hy4.supportsVision, true, "the live Codex image envelope proves HY4 reads pixels through Chat");
+  const hy4Target = OPENCODE_GO_PROFILE.target({
+    opencodeBaseUrl: "https://go.example.com/v1",
+    tokens: { "opencode-go": "test-key" },
+  }, "hy4-preview@opencode-go");
+  assert.equal(hy4Target.transport, "chat");
+  assert.equal(hy4Target.url, "https://go.example.com/v1/chat/completions");
+  for (const id of ["longcat-2.0", "glm-5.3", "glm-5.3-flash"]) {
     assert.equal(openCodeModels.get(id)?.supportsVision, false, `${id} remains text-only on OpenCode Go`);
   }
   assert.deepEqual([...DEEPSEEK_OFFICIAL_PROFILE.discoveryTransports], ["responses"]);

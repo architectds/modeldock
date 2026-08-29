@@ -16,6 +16,7 @@ import { customEndpointFor } from "./custom-endpoints.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
+import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 
 // Re-exported so the existing import path keeps working: the tee is SSE
 // machinery and lives with the rest of the framing rules in sse.mjs.
@@ -1686,10 +1687,14 @@ export function rewriteHistoricalImages(input, mediaStore, {
   for (const occurrence of occurrences) {
     if (occurrence.index < currentStart) lastOccurrence.set(occurrence.ref, occurrence.index);
   }
+  const recentLimit = Math.max(0, Number(keepRecentImages) || 0);
+  const recentEntries = [...lastOccurrence.entries()]
+    .sort((left, right) => left[1] - right[1]);
+  // `slice(-0)` is `slice(0)`, i.e. the entire history. A strict transport
+  // route deliberately passes zero here, so spell out the empty case rather
+  // than turning "no historical pixels" into "every historical pixel".
   const recentRefs = new Set(
-    [...lastOccurrence.entries()]
-      .sort((left, right) => left[1] - right[1])
-      .slice(-Math.max(0, Number(keepRecentImages) || 0))
+    (recentLimit > 0 ? recentEntries.slice(-recentLimit) : [])
       .map(([ref]) => ref),
   );
   const shouldKeepPixels = (ref, index) => preserveImages && (index >= currentStart || recentRefs.has(ref));
@@ -1810,33 +1815,86 @@ export function constrainImagesForTransport(input, mediaStore, {
   for (const item of input) {
     if (!Array.isArray(item?.content)) continue;
     for (const part of item.content) {
-      if (part?.type === "input_image" && typeof part.image_url === "string") images.push(part);
+      if (part?.type === "input_image" && typeof part.image_url === "string") {
+        images.push({ part, wireBytes: Buffer.byteLength(part.image_url) });
+      }
     }
   }
   if (!images.length) return input;
   if (!mediaStore?.put || !mediaStore?.getTransportVariant) {
     throw new Error("The media store is unavailable for image transport compression");
   }
-  const perImageLimit = Math.floor(totalLimit / images.length);
-  if (perImageLimit < 32 * 1024) {
-    throw new Error(`${images.length} images cannot fit in the ${totalLimit}-byte transport budget`);
+
+  // The history policy already changed old pixels into durable refs. This
+  // stage has one job: fit the current turn into the provider's total image
+  // budget. Keep the newest unique images at the encoder's existing quality
+  // floor and spill only the excess images back to their canonical refs. A
+  // crowded visual turn must not fail just because equal division falls below
+  // the useful per-image floor.
+  const refByUrl = new Map();
+  for (const image of images) {
+    let ref = refByUrl.get(image.part.image_url);
+    if (!ref) {
+      ref = mediaStore.put(image.part.image_url, { resolveExternalSource, sessionId });
+      if (ref) refByUrl.set(image.part.image_url, ref);
+    }
+    image.ref = ref;
   }
+  if (images.some((image) => !image.ref)) {
+    throw new Error("An image could not be preserved by reference for transport");
+  }
+
+  const newestByRef = new Map();
+  for (const image of images) {
+    newestByRef.delete(image.ref);
+    newestByRef.set(image.ref, image);
+  }
+  const selected = new Set();
+  let reservedBytes = 0;
+  for (const image of [...newestByRef.values()].reverse()) {
+    const minimumBytes = Math.min(image.wireBytes, MIN_IMAGE_TRANSPORT_WIRE_BYTES);
+    if (reservedBytes + minimumBytes > totalLimit) continue;
+    selected.add(image.part);
+    reservedBytes += minimumBytes;
+  }
+
+  const selectedImages = images.filter((image) => selected.has(image.part));
+  const fixedBytes = selectedImages
+    .filter((image) => image.wireBytes <= MIN_IMAGE_TRANSPORT_WIRE_BYTES)
+    .reduce((sum, image) => sum + image.wireBytes, 0);
+  const compressible = selectedImages.filter((image) => image.wireBytes > MIN_IMAGE_TRANSPORT_WIRE_BYTES);
+  const perImageLimit = compressible.length
+    ? Math.floor((totalLimit - fixedBytes) / compressible.length)
+    : totalLimit;
+
   const replacements = new Map();
-  for (const part of images) {
-    const ref = mediaStore.put(part.image_url, { resolveExternalSource, sessionId });
-    const variant = mediaStore.getTransportVariant(ref, { maxWireBytes: perImageLimit, sessionId });
-    if (!variant?.imageUrl) throw new Error(`Image ${ref} is unavailable for transport`);
-    if (variant.imageUrl !== part.image_url) replacements.set(part, variant.imageUrl);
+  for (const image of images) {
+    if (!selected.has(image.part)) {
+      replacements.set(image.part, { type: "input_text", text: historicalImageSpawnHint(image.ref) });
+      continue;
+    }
+    if (image.wireBytes <= perImageLimit) continue;
+    try {
+      const variant = mediaStore.getTransportVariant(image.ref, { maxWireBytes: perImageLimit, sessionId });
+      if (!variant?.imageUrl) throw new Error("transport variant is unavailable");
+      if (variant.imageUrl !== image.part.image_url) {
+        replacements.set(image.part, { ...image.part, image_url: variant.imageUrl });
+      }
+    } catch {
+      // The canonical original remains available. Losing one hard-to-compress
+      // image from this request is preferable to rejecting the entire turn.
+      replacements.set(image.part, { type: "input_text", text: historicalImageSpawnHint(image.ref) });
+    }
   }
   if (!replacements.size) return input;
   return input.map((item) => {
     if (!Array.isArray(item?.content)) return item;
     let changed = false;
     const content = item.content.map((part) => {
-      const imageUrl = replacements.get(part);
-      if (!imageUrl) return part;
+      const replacement = replacements.get(part);
+      if (!replacement) return part;
       changed = true;
-      return { ...part, image_url: imageUrl };
+      return replacement;
     });
     return changed ? { ...item, content } : item;
   });
@@ -3374,7 +3432,6 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   mediaStore?.touchSession?.(sessionId);
-  if (Array.isArray(payload.input)) payload = { ...payload, input: promoteToolOutputImages(payload.input) };
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
@@ -3413,7 +3470,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       console.error(`[modeldock] collaboration relay failed: ${error.message}`);
     }
   }
-  const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
+  const normalizedInput = promoteToolOutputImages(normalizeInputForRoute(config, route.model, routeInput, localPayload));
   const localBackend = isLocalBackend(config, route.model);
   const compactModelEntry = modelEntryFor(config, route.model);
   const targetSupportsVision = Boolean(compactModelEntry?.supportsVision);
@@ -3708,7 +3765,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
   }
-  if (Array.isArray(payload.input)) payload = { ...payload, input: promoteToolOutputImages(payload.input) };
   // An address of ours that no longer resolves. The model was published by this
   // gateway and picked from that catalog, so the endpoint behind it was removed
   // - a configuration fault to report, not a stale id to paper over. Falling
@@ -3788,7 +3844,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       console.error(`[modeldock] collaboration relay failed: ${error.message}`);
     }
   }
-  const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
+  const normalizedInput = promoteToolOutputImages(normalizeInputForRoute(config, route.model, routeInput, localPayload));
   const routedModelEntry = modelEntryFor(config, route.model);
   const imageTransportLimit = Number(routedModelEntry?.imageTransportMaxWireBytes) || 0;
   const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
@@ -3852,20 +3908,24 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
   const routedProfile = profileById(routedProvider);
+  // A mixed provider can expose models backed by different downstream APIs.
+  // Let a measured model narrow its tool dialect without weakening the other
+  // models on the same provider. Undefined fields inherit the provider policy.
+  const modelToolPolicy = routedModelEntry || {};
   const { tools, stripped, namespaces, customToolNames } = applyToolPolicy(normalizedPayload.tools, {
     allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
-    hiddenToolNames: routedProfile.hiddenToolNames,
-    blockedToolTypes: routedProfile.blockedToolTypes,
-    hostedToolTypes: routedProfile.hostedToolTypes,
-    customToolsAsFunctions: routedProfile.customToolsAsFunctions,
+    hiddenToolNames: modelToolPolicy.hiddenToolNames ?? routedProfile.hiddenToolNames,
+    blockedToolTypes: modelToolPolicy.blockedToolTypes ?? routedProfile.blockedToolTypes,
+    hostedToolTypes: modelToolPolicy.hostedToolTypes ?? routedProfile.hostedToolTypes,
+    customToolsAsFunctions: modelToolPolicy.customToolsAsFunctions ?? routedProfile.customToolsAsFunctions,
     // Chat Completions has no namespace descriptor. A Go profile can mix
     // Responses and Chat models, so this follows the chosen model's target,
     // never a provider-wide transport flag.
-    flattenAllNamespaces: routedProfile.flattenAllNamespaces || target.transport === "chat",
-    safeNamespaceFunctionNames: routedProfile.safeNamespaceFunctionNames,
+    flattenAllNamespaces: (modelToolPolicy.flattenAllNamespaces ?? routedProfile.flattenAllNamespaces) || target.transport === "chat",
+    safeNamespaceFunctionNames: modelToolPolicy.safeNamespaceFunctionNames ?? routedProfile.safeNamespaceFunctionNames,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
   // The declarations above were flattened; the replayed history has to use the

@@ -64,12 +64,15 @@ function textStream(text) {
   }]);
 }
 
-function toolStream(imagePath) {
+function toolStream(imagePaths, sequence) {
   const code = [
     'var fsVisionProbe = await import("node:fs");',
-    `var bytesVisionProbe = fsVisionProbe.readFileSync(${JSON.stringify(imagePath.replace(/\\/g, "/"))});`,
-    "await nodeRepl.emitImage(bytesVisionProbe);",
+    ...imagePaths.flatMap((imagePath, index) => [
+      `var bytesVisionProbe${index} = fsVisionProbe.readFileSync(${JSON.stringify(imagePath.replace(/\\/g, "/"))});`,
+      `await nodeRepl.emitImage(bytesVisionProbe${index});`,
+    ]),
   ].join("\n");
+  const callId = `call_current_codex_emit_image_${sequence}`;
   return stream([{
     id: "chatcmpl_vision_tool",
     created: 22,
@@ -80,7 +83,7 @@ function toolStream(imagePath) {
         role: "assistant",
         tool_calls: [{
           index: 0,
-          id: "call_current_codex_emit_image",
+          id: callId,
           type: "function",
           function: {
             name: "mcp__node_repl__js",
@@ -108,11 +111,22 @@ function imageUrls(body) {
   return urls;
 }
 
-function visionFixturePng() {
+function responseImageUrls(body) {
+  const urls = [];
+  for (const item of body.input || []) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "input_image" && typeof part.image_url === "string") urls.push(part.image_url);
+    }
+  }
+  return urls;
+}
+
+function visionFixturePng(seed = 0x76543210) {
   const width = 900;
   const height = 600;
   const pixels = new Uint8Array(width * height * 3);
-  let random = 0x76543210;
+  let random = seed;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       random = (random * 1664525 + 1013904223) >>> 0;
@@ -127,7 +141,7 @@ function visionFixturePng() {
   return Buffer.from(encodePng({ width, height, channels: 3, depth: 8, data: pixels }));
 }
 
-async function runCodex({ clientCodexHome, workspace, gatewayPort, catalogFile, model = "qwen3.8-flash@opencode-go", imagePath = "", prompt }) {
+async function runCodex({ clientCodexHome, workspace, gatewayPort, catalogFile, model = "qwen3.8-flash@opencode-go", imagePath = "", imagePaths = [], prompt }) {
   const args = [
     "exec",
     "--ephemeral",
@@ -153,7 +167,9 @@ async function runCodex({ clientCodexHome, workspace, gatewayPort, catalogFile, 
   // --image accepts multiple values, so the separate-argument form consumes
   // the trailing prompt as a second filename. The equals form terminates the
   // option unambiguously and leaves the real prompt positional.
-  if (imagePath) args.push(`--image=${imagePath}`);
+  for (const path of imagePaths.length ? imagePaths : imagePath ? [imagePath] : []) {
+    args.push(`--image=${path}`);
+  }
   args.push(prompt);
   const child = spawn("codex", args, {
     env: { ...process.env, CODEX_HOME: clientCodexHome, OPENAI_API_KEY: "fixture-token" },
@@ -187,6 +203,17 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
   const originalPng = visionFixturePng();
   await writeFile(imagePath, originalPng);
   assert.ok(originalPng.byteLength * 4 / 3 > IMAGE_LIMIT, "fixture must exceed the provider image budget");
+  const toolImagePaths = [];
+  for (let index = 0; index < 7; index += 1) {
+    const toolPath = path.join(workspace, `tool-image-${index}.png`);
+    await writeFile(toolPath, visionFixturePng(0x12340000 + index));
+    toolImagePaths.push(toolPath);
+  }
+  const toolImageBatches = [
+    toolImagePaths.slice(0, 1),
+    toolImagePaths.slice(1, 3),
+    toolImagePaths.slice(3, 7),
+  ];
 
   const live = process.env.MODELDOCK_LIVE_VISION === "1";
   let liveTarget = null;
@@ -198,7 +225,7 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
     liveTarget = { url: `${liveConfig.opencodeBaseUrl}/chat/completions`, token };
   }
   let scenario = "direct";
-  const requests = { direct: [], tool: [] };
+  const requests = { direct: [], crowded: [], tool: [] };
   const upstream = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -229,9 +256,18 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
       res.end(textStream("DIRECT_IMAGE_OK"));
       return;
     }
-    if (requests.tool.length === 1) {
+    if (scenario === "crowded") {
+      if (live) {
+        await forwardLive();
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
-      res.end(toolStream(imagePath));
+      res.end(textStream("CROWDED_IMAGE_OK"));
+      return;
+    }
+    if (scenario === "tool" && requests.tool.length <= toolImageBatches.length) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(toolStream(toolImageBatches[requests.tool.length - 1], requests.tool.length));
       return;
     }
     if (live) {
@@ -288,12 +324,47 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
   const direct = await runCodex({ clientCodexHome, workspace, gatewayPort, catalogFile, imagePath, prompt: directPrompt });
   assert.equal(direct.exitCode, 0, `${direct.stderr}\n${direct.stdout}\n${gatewayStderr}`);
   assert.match(direct.stdout, live ? /LEFT_RED_RIGHT_BLUE/ : /DIRECT_IMAGE_OK/);
-  assert.equal(requests.direct.length, 1);
+  assert.ok(requests.direct.length >= 1, "the direct Codex image turn must reach the upstream");
   assert.ok(requests.direct[0].tools.length > 100, `the live client sent only ${requests.direct[0].tools.length} tools`);
   const directImages = imageUrls(requests.direct[0]);
   assert.equal(directImages.length, 1);
   assert.match(directImages[0], /^data:image\/jpeg;base64,/);
   assert.ok(Buffer.byteLength(directImages[0]) <= IMAGE_LIMIT);
+  assert.ok(
+    requests.direct.every((request) => imageUrls(request).reduce((sum, url) => sum + Buffer.byteLength(url), 0) <= IMAGE_LIMIT),
+    "every direct-image continuation stays inside the total image budget",
+  );
+
+  const crowdedImagePaths = [];
+  for (let index = 0; index < 12; index += 1) {
+    const crowdedPath = path.join(workspace, `crowded-current-image-${index}.png`);
+    await writeFile(crowdedPath, visionFixturePng(0x76543210 + index));
+    crowdedImagePaths.push(crowdedPath);
+  }
+  scenario = "crowded";
+  const crowded = await runCodex({
+    clientCodexHome,
+    workspace,
+    gatewayPort,
+    catalogFile,
+    imagePaths: crowdedImagePaths,
+    prompt: live
+      ? "Inspect the attached images and reply with exactly CROWDED_IMAGE_OK."
+      : "Inspect the attached images, then finish.",
+  });
+  assert.equal(crowded.exitCode, 0, `${crowded.stderr}\n${crowded.stdout}\n${gatewayStderr}`);
+  assert.match(crowded.stdout, /CROWDED_IMAGE_OK/);
+  assert.ok(requests.crowded.length >= 1, "the crowded Codex turn must reach the upstream");
+  assert.equal(imageUrls(requests.crowded[0]).length, 10, "the useful transport floor keeps ten large current images inline");
+  assert.equal(
+    (JSON.stringify(requests.crowded[0]).match(/Image attachment img_/g) || []).length,
+    2,
+    "the two overflow images remain available through canonical refs",
+  );
+  assert.ok(
+    requests.crowded.every((request) => imageUrls(request).reduce((sum, url) => sum + Buffer.byteLength(url), 0) <= IMAGE_LIMIT),
+    "every model-driven continuation stays inside the same total image budget",
+  );
 
   scenario = "tool";
   const toolPrompt = live
@@ -302,19 +373,32 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
   const tool = await runCodex({ clientCodexHome, workspace, gatewayPort, catalogFile, prompt: toolPrompt });
   assert.equal(tool.exitCode, 0, `${tool.stderr}\n${tool.stdout}\n${gatewayStderr}`);
   assert.match(tool.stdout, live ? /LEFT_RED_RIGHT_BLUE/ : /TOOL_IMAGE_OK/);
-  assert.equal(requests.tool.length, 2, "Codex must send the image-tool continuation");
+  assert.ok(requests.tool.length >= 4, "Codex must continue through all three image-tool batches");
   assert.ok(
-    requests.tool[1].messages.some((message) => message.tool_calls?.some((call) => call.id === "call_current_codex_emit_image")),
-    "the complete continuation must replay the requested visual tool call",
+    requests.tool.some((request) => request.messages.some((message) => message.tool_calls?.some((call) => call.id === "call_current_codex_emit_image_3"))),
+    "the complete continuation must replay the latest requested visual tool call",
   );
-  const toolImages = imageUrls(requests.tool[1]);
-  assert.equal(toolImages.length, 1);
-  assert.match(toolImages[0], /^data:image\/jpeg;base64,/);
-  assert.ok(Buffer.byteLength(toolImages[0]) <= IMAGE_LIMIT);
+  assert.deepEqual(
+    requests.tool.slice(0, 4).map((request) => imageUrls(request).length),
+    [0, 1, 3, 7],
+    "images accumulate within one Codex user turn until the transport budget spills them to refs",
+  );
+  const finalToolImages = imageUrls(requests.tool[3]);
+  assert.ok(finalToolImages.every((url) => /^data:image\/jpeg;base64,/.test(url)));
+  assert.ok(finalToolImages.every((url) => Buffer.byteLength(url) <= IMAGE_LIMIT / finalToolImages.length));
+  assert.equal(
+    (JSON.stringify(requests.tool[3]).match(/Image attachment img_/g) || []).length,
+    0,
+    "seven large images still fit the 320 KiB floor and need no refs",
+  );
+  assert.ok(
+    requests.tool.every((request) => imageUrls(request).reduce((sum, url) => sum + Buffer.byteLength(url), 0) <= IMAGE_LIMIT),
+    "every tool continuation stays inside the same total image budget",
+  );
   assert.deepEqual(await readFile(imagePath), originalPng, "transport compression never rewrites the user's source image");
 });
 
-test("live current Codex image envelope works on new GLM and Grok vision candidates", { timeout: 180_000 }, async (t) => {
+test("live current Codex image envelope works on the Grok 4.6 vision route", { timeout: 180_000 }, async (t) => {
   if (process.env.MODELDOCK_LIVE_VISION_MATRIX !== "1") {
     t.skip("set MODELDOCK_LIVE_VISION_MATRIX=1 for subscribed provider coupling checks");
     return;
@@ -325,6 +409,37 @@ test("live current Codex image envelope works on new GLM and Grok vision candida
   const liveConfig = loadConfig();
   const token = liveConfig.tokens?.["opencode-go"];
   assert.ok(token, "live vision matrix requires a configured OpenCode Go token");
+
+  const upstreamDiagnostics = [];
+  const upstreamProxy = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const bytes = Buffer.concat(chunks);
+    const body = JSON.parse(bytes.toString("utf8"));
+    const upstreamResponse = await fetch(`${liveConfig.opencodeBaseUrl.replace(/\/$/, "")}/responses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: bytes,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const responseBytes = Buffer.from(await upstreamResponse.arrayBuffer());
+    const images = responseImageUrls(body);
+    upstreamDiagnostics.push({
+      status: upstreamResponse.status,
+      topLevelKeys: Object.keys(body).sort(),
+      toolTypes: [...new Set((body.tools || []).map((tool) => tool?.type || "missing"))].sort(),
+      toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+      inputTypes: Array.isArray(body.input) ? body.input.map((item) => item?.type || "missing") : [],
+      callNames: Array.isArray(body.input)
+        ? body.input.filter((item) => item?.type === "function_call").map((item) => item.name)
+        : [],
+      imageWireBytes: images.map((image) => Buffer.byteLength(image)),
+    });
+    res.writeHead(upstreamResponse.status, { "content-type": upstreamResponse.headers.get("content-type") || "application/json" });
+    res.end(responseBytes);
+  });
+  const upstreamProxyPort = await listen(upstreamProxy);
+  t.after(() => closeServer(upstreamProxy));
 
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-vision-matrix-"));
   const stateDir = path.join(root, "state");
@@ -346,7 +461,7 @@ test("live current Codex image envelope works on new GLM and Grok vision candida
       ...process.env,
       MODELDOCK_PORT: String(gatewayPort),
       MODELDOCK_PROFILE: "opencode-go",
-      MODELDOCK_UPSTREAM_BASE_URL: liveConfig.opencodeBaseUrl,
+      MODELDOCK_UPSTREAM_BASE_URL: `http://127.0.0.1:${upstreamProxyPort}/v1`,
       OPENCODE_GO_TOKEN: token,
       MODELDOCK_STATE_DIR: stateDir,
       MODELDOCK_CODEX_HOME: gatewayCodexHome,
@@ -372,22 +487,167 @@ test("live current Codex image envelope works on new GLM and Grok vision candida
   await access(catalogFile);
   const clientCodexHome = path.join(os.homedir(), ".codex");
 
-  for (const model of ["glm-5.3-flash@opencode-go", "grok-4.6@opencode-go"]) {
-    const result = await runCodex({
-      clientCodexHome,
-      workspace,
-      gatewayPort,
-      catalogFile,
-      model,
-      imagePath,
-      prompt: "Inspect the attached image. Reply with exactly LEFT_RED_RIGHT_BLUE.",
-    });
-    assert.equal(result.exitCode, 0, `${model}\n${result.stderr}\n${result.stdout}\n${gatewayStderr}`);
-    assert.match(result.stdout, /LEFT_RED_RIGHT_BLUE/, model);
-    const status = await fetch(`http://127.0.0.1:${gatewayPort}/api/status`).then((response) => response.json());
-    const trace = status.recent.find((entry) => entry.kind === "responses" && entry.model === model);
-    assert.equal(trace?.status, "ok", `${model}: ${trace?.error || "missing trace"}`);
-    assert.equal(trace.imageTransfer?.received?.images, 1);
-    assert.equal(trace.imageTransfer?.forwarded?.images, 1);
+  const model = "grok-4.6@opencode-go";
+  const direct = await runCodex({
+    clientCodexHome,
+    workspace,
+    gatewayPort,
+    catalogFile,
+    model,
+    imagePath,
+    prompt: "Inspect the attached image. Reply with exactly LEFT_RED_RIGHT_BLUE.",
+  });
+  let status = await fetch(`http://127.0.0.1:${gatewayPort}/api/status`).then((response) => response.json());
+  let trace = status.recent.find((entry) => entry.kind === "responses" && entry.model === model);
+  let failure = `${model}\n${direct.stderr}\n${direct.stdout}\n${gatewayStderr}\n${JSON.stringify({ trace, upstreamDiagnostics }, null, 2)}`;
+  assert.equal(direct.exitCode, 0, failure);
+  assert.match(direct.stdout, /LEFT_RED_RIGHT_BLUE/, model);
+  assert.equal(trace?.status, "ok", `${model}: ${trace?.error || "missing trace"}`);
+  assert.equal(trace.imageTransfer?.received?.images, 1);
+  assert.equal(trace.imageTransfer?.forwarded?.images, 1);
+  assert.ok(upstreamDiagnostics[0].toolCount > 100, "the complete Codex tool set must reach the model policy");
+  assert.deepEqual(upstreamDiagnostics[0].toolTypes, ["function"]);
+  assert.equal(upstreamDiagnostics[0].imageWireBytes.length, 1);
+  assert.ok(upstreamDiagnostics[0].imageWireBytes[0] <= IMAGE_LIMIT);
+
+  const continuationStart = upstreamDiagnostics.length;
+  const continuation = await runCodex({
+    clientCodexHome,
+    workspace,
+    gatewayPort,
+    catalogFile,
+    model,
+    imagePath,
+    prompt: "First call the node_repl JavaScript tool to evaluate and return the string GROK_TOOL_OK. After its result, inspect the attached image and reply with exactly GROK_TOOL_OK_LEFT_RED_RIGHT_BLUE.",
+  });
+  status = await fetch(`http://127.0.0.1:${gatewayPort}/api/status`).then((response) => response.json());
+  trace = status.recent.find((entry) => entry.kind === "responses" && entry.model === model);
+  const continuationWires = upstreamDiagnostics.slice(continuationStart);
+  failure = `${model} continuation\n${continuation.stderr}\n${continuation.stdout}\n${gatewayStderr}\n${JSON.stringify({ trace, continuationWires }, null, 2)}`;
+  assert.equal(continuation.exitCode, 0, failure);
+  assert.match(continuation.stdout, /GROK_TOOL_OK_LEFT_RED_RIGHT_BLUE/, model);
+  assert.ok(continuationWires.length >= 2, "Grok must continue after the namespace tool result");
+  assert.ok(continuationWires.some((wire) => wire.callNames.includes("mcp__node_repl__js")));
+  assert.ok(continuationWires.every((wire) => wire.toolTypes.length === 1 && wire.toolTypes[0] === "function"));
+});
+
+test("live current Codex tool continuation works on the HY4 Preview Chat route", { timeout: 180_000 }, async (t) => {
+  if (process.env.MODELDOCK_LIVE_HY4 !== "1") {
+    t.skip("set MODELDOCK_LIVE_HY4=1 for the subscribed HY4 coupling check");
+    return;
   }
+  const probe = spawnSync("codex", ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30_000 });
+  assert.equal(probe.status, 0, probe.stderr || probe.stdout);
+  const { loadConfig } = await import("../src/config.mjs");
+  const liveConfig = loadConfig();
+  const token = liveConfig.tokens?.["opencode-go"];
+  assert.ok(token, "live HY4 check requires a configured OpenCode Go token");
+
+  const upstreamDiagnostics = [];
+  const upstreamProxy = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const bytes = Buffer.concat(chunks);
+    const body = JSON.parse(bytes.toString("utf8"));
+    const upstreamResponse = await fetch(`${liveConfig.opencodeBaseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: bytes,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const responseBytes = Buffer.from(await upstreamResponse.arrayBuffer());
+    upstreamDiagnostics.push({
+      status: upstreamResponse.status,
+      responseText: upstreamResponse.ok ? "" : responseBytes.toString("utf8").slice(0, 2_000),
+      topLevelKeys: Object.keys(body).sort(),
+      toolTypes: [...new Set((body.tools || []).map((tool) => tool?.type || "missing"))].sort(),
+      toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
+      messageRoles: Array.isArray(body.messages) ? body.messages.map((message) => message?.role || "missing") : [],
+      callNames: Array.isArray(body.messages)
+        ? body.messages.flatMap((message) => (message?.tool_calls || []).map((call) => call?.function?.name).filter(Boolean))
+        : [],
+      imageWireBytes: imageUrls(body).map((image) => Buffer.byteLength(image)),
+    });
+    res.writeHead(upstreamResponse.status, { "content-type": upstreamResponse.headers.get("content-type") || "application/json" });
+    res.end(responseBytes);
+  });
+  const upstreamProxyPort = await listen(upstreamProxy);
+  t.after(() => closeServer(upstreamProxy));
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-hy4-"));
+  const stateDir = path.join(root, "state");
+  const gatewayCodexHome = path.join(root, "gateway-codex-home");
+  const workspace = path.join(root, "workspace");
+  await Promise.all([mkdir(stateDir, { recursive: true }), mkdir(gatewayCodexHome, { recursive: true }), mkdir(workspace, { recursive: true })]);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const imagePath = path.join(workspace, "hy4-vision.png");
+  const width = 320;
+  const height = 200;
+  const pixels = new Uint8Array(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const index = (y * width + x) * 3;
+      pixels[index] = x < width / 2 ? 255 : 0;
+      pixels[index + 1] = 0;
+      pixels[index + 2] = x < width / 2 ? 0 : 255;
+    }
+  }
+  await writeFile(imagePath, Buffer.from(encodePng({ width, height, channels: 3, depth: 8, data: pixels })));
+
+  const gatewayProbe = http.createServer();
+  const gatewayPort = await listen(gatewayProbe);
+  await closeServer(gatewayProbe);
+  const autostartKey = `HKCU\\Software\\ModelDockTests\\codex-hy4-${process.pid}`;
+  const autostartName = `ModelDockCodexHy4${process.pid}`;
+  const gateway = spawn(process.execPath, [bundle], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      MODELDOCK_PORT: String(gatewayPort),
+      MODELDOCK_PROFILE: "opencode-go",
+      MODELDOCK_UPSTREAM_BASE_URL: `http://127.0.0.1:${upstreamProxyPort}/v1`,
+      OPENCODE_GO_TOKEN: token,
+      MODELDOCK_STATE_DIR: stateDir,
+      MODELDOCK_CODEX_HOME: gatewayCodexHome,
+      MODELDOCK_REQUIRE_CALLER_KEY: "0",
+      MODELDOCK_MEMORY: "0",
+      MODELDOCK_MODEL_DISCOVERY: "0",
+      MODELDOCK_NATIVE_MERGE: "0",
+      MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
+      MODELDOCK_AUTOSTART_KEY: autostartKey,
+      MODELDOCK_AUTOSTART_NAME: autostartName,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let gatewayStderr = "";
+  gateway.stderr.on("data", (chunk) => { gatewayStderr += chunk; });
+  t.after(async () => {
+    await stop(gateway);
+    if (process.platform === "win32") spawnSync("reg.exe", ["delete", autostartKey, "/f"], { stdio: "ignore", windowsHide: true });
+  });
+  await waitForGateway(gatewayPort);
+  const catalogFile = path.join(stateDir, "codex-model-catalog.json");
+  await access(catalogFile);
+
+  const model = "hy4-preview@opencode-go";
+  const result = await runCodex({
+    clientCodexHome: path.join(os.homedir(), ".codex"),
+    workspace,
+    gatewayPort,
+    catalogFile,
+    model,
+    imagePath,
+    prompt: "First call the node_repl JavaScript tool to evaluate and return the string HY4_TOOL_OK. After its result, inspect the attached image and reply with exactly HY4_TOOL_OK_LEFT_RED_RIGHT_BLUE.",
+  });
+  const status = await fetch(`http://127.0.0.1:${gatewayPort}/api/status`).then((response) => response.json());
+  const trace = status.recent.find((entry) => entry.kind === "responses" && entry.model === model);
+  const failure = `${model}\n${result.stderr}\n${result.stdout}\n${gatewayStderr}\n${JSON.stringify({ trace, upstreamDiagnostics }, null, 2)}`;
+  assert.equal(result.exitCode, 0, failure);
+  assert.match(result.stdout, /HY4_TOOL_OK_LEFT_RED_RIGHT_BLUE/, model);
+  assert.equal(trace?.status, "ok", `${failure}\n${trace?.error || "missing trace"}`);
+  assert.ok(upstreamDiagnostics.length >= 2, "HY4 must continue after the real Codex namespace tool result");
+  assert.ok(upstreamDiagnostics[0].toolCount > 100, "the complete current Codex tool set must reach the model policy");
+  assert.ok(upstreamDiagnostics.some((wire) => wire.callNames.includes("mcp__node_repl__js")));
+  assert.ok(upstreamDiagnostics.some((wire) => wire.imageWireBytes.length === 1), "the complete Codex image envelope must reach HY4");
 });

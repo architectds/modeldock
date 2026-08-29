@@ -8,6 +8,7 @@ import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
 import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 import { baseInstructionsFor } from "../src/catalog.mjs";
 import { applyLocalEngineProfile } from "../src/profiles.mjs";
+import { currentTurnStartIndex } from "../src/router.mjs";
 import {
   RouteAffinity,
   adaptImageUrlShape,
@@ -973,9 +974,37 @@ test("promoteToolOutputImages keeps tool text and moves visual bytes into a real
   assert.doesNotMatch(JSON.stringify(promoted[0]), /data:image/, "the tool text no longer carries base64 pixels");
 });
 
+test("tool outputs are ordered before their images are promoted so old visual batches become refs", () => {
+  const oldImage = "data:image/png;base64,OLD";
+  const currentImage = "data:image/png;base64,CURRENT";
+  const meta = (turn_id) => ({ internal_chat_message_metadata_passthrough: { turn_id } });
+  const interleavedCodexOrder = [
+    { ...meta("turn_old"), type: "message", role: "user", content: [{ type: "input_text", text: "render" }] },
+    { ...meta("turn_old"), type: "function_call", call_id: "call_old", name: "node_repl", arguments: "{}" },
+    { ...meta("turn_current"), type: "message", role: "user", content: [{ type: "input_text", text: "iterate" }] },
+    { ...meta("turn_current"), type: "function_call", call_id: "call_current", name: "node_repl", arguments: "{}" },
+    { ...meta("turn_old"), type: "function_call_output", call_id: "call_old", output: [{ type: "input_image", image_url: oldImage }] },
+    { ...meta("turn_current"), type: "function_call_output", call_id: "call_current", output: [{ type: "input_image", image_url: currentImage }] },
+  ];
+  const normalized = promoteToolOutputImages(normalizeOpenCodeFlashInput(interleavedCodexOrder));
+  const rewritten = rewriteHistoricalImages(normalized, {
+    put: (url) => url === oldImage ? "img_old" : "img_current",
+    associateMany: () => {},
+  }, {
+    preserveImages: true,
+    keepRecentImages: 0,
+    keepCurrentImages: true,
+    currentStartIndex: currentTurnStartIndex(normalized),
+  });
+  const parts = rewritten.flatMap((item) => Array.isArray(item.content) ? item.content : []);
+  assert.equal(parts.filter((part) => part.type === "input_image").length, 1);
+  assert.equal(parts.find((part) => part.type === "input_image")?.image_url, currentImage);
+  assert.match(parts.find((part) => part.type === "input_text" && /img_old/.test(part.text))?.text || "", /img_old/);
+});
+
 test("constrainImagesForTransport shares one total wire budget without changing the source input", () => {
-  const first = "data:image/png;base64,AAAA";
-  const second = "data:image/png;base64,BBBB";
+  const first = `data:image/png;base64,${"A".repeat(80 * 1024)}`;
+  const second = `data:image/png;base64,${"B".repeat(80 * 1024)}`;
   const limits = [];
   const mediaStore = {
     put: (url) => url === first ? "img_first" : "img_second",
@@ -993,6 +1022,73 @@ test("constrainImagesForTransport shares one total wire budget without changing 
   assert.equal(constrained[0].content[0].detail, "high");
   assert.match(constrained[0].content[0].image_url, /^data:image\/jpeg/);
   assert.equal(input[0].content[0].image_url, first, "the incoming Codex envelope stays immutable");
+});
+
+test("constrainImagesForTransport keeps a crowded turn usable by spilling older images to refs", () => {
+  const urls = Array.from({ length: 12 }, (_, index) => `data:image/png;base64,${String(index).padStart(2, "0")}${"A".repeat(40 * 1024)}`);
+  const refs = new Map(urls.map((url, index) => [url, `img_${index}`]));
+  const limits = [];
+  const mediaStore = {
+    put: (url) => refs.get(url),
+    getTransportVariant: (ref, { maxWireBytes }) => {
+      limits.push(maxWireBytes);
+      return { imageUrl: `data:image/jpeg;base64,${ref}_${"B".repeat(100)}` };
+    },
+  };
+  const input = [{ type: "message", role: "user", content: urls.map((image_url) => ({ type: "input_image", image_url })) }];
+  const constrained = constrainImagesForTransport(input, mediaStore, { maxTotalWireBytes: 320 * 1024 });
+  const parts = constrained[0].content;
+
+  assert.equal(parts.filter((part) => part.type === "input_image").length, 10);
+  assert.equal(parts.filter((part) => part.type === "input_text").length, 2);
+  assert.deepEqual(limits, Array(10).fill(32 * 1024));
+  assert.match(parts[0].text, /img_0/);
+  assert.match(parts[1].text, /img_1/);
+  assert.equal(input[0].content.filter((part) => part.type === "input_image").length, 12, "the source envelope remains intact");
+});
+
+test("constrainImagesForTransport deduplicates pixels without hiding many small images", () => {
+  const smallUrls = Array.from({ length: 12 }, (_, index) => `data:image/png;base64,${index}_${"A".repeat(1024)}`);
+  const refs = new Map(smallUrls.map((url, index) => [url, `img_small_${index}`]));
+  const mediaStore = {
+    put: (url) => refs.get(url) || "img_duplicate",
+    getTransportVariant: () => { throw new Error("small images must not be recompressed"); },
+  };
+  const smallInput = [{ type: "message", role: "user", content: smallUrls.map((image_url) => ({ type: "input_image", image_url })) }];
+  assert.equal(
+    constrainImagesForTransport(smallInput, mediaStore, { maxTotalWireBytes: 320 * 1024 }),
+    smallInput,
+    "small images that already fit the total budget remain byte-identical",
+  );
+
+  const duplicate = `data:image/png;base64,${"C".repeat(40 * 1024)}`;
+  const duplicateInput = [{ type: "message", role: "user", content: [
+    { type: "input_image", image_url: duplicate },
+    { type: "input_image", image_url: duplicate },
+  ] }];
+  const deduplicated = constrainImagesForTransport(duplicateInput, mediaStore, { maxTotalWireBytes: 320 * 1024 });
+  assert.equal(deduplicated[0].content.filter((part) => part.type === "input_image").length, 1);
+  assert.equal(deduplicated[0].content.filter((part) => part.type === "input_text").length, 1);
+});
+
+test("constrainImagesForTransport spills one uncompressible image instead of rejecting the turn", () => {
+  const first = `data:image/png;base64,first_${"A".repeat(100 * 1024)}`;
+  const second = `data:image/png;base64,second_${"B".repeat(100 * 1024)}`;
+  const mediaStore = {
+    put: (url) => url === first ? "img_first" : "img_second",
+    getTransportVariant: (ref) => {
+      if (ref === "img_first") throw new Error("high entropy fixture");
+      return { imageUrl: "data:image/jpeg;base64,small" };
+    },
+  };
+  const input = [{ type: "message", role: "user", content: [
+    { type: "input_image", image_url: first },
+    { type: "input_image", image_url: second },
+  ] }];
+  const constrained = constrainImagesForTransport(input, mediaStore, { maxTotalWireBytes: 128 * 1024 });
+  assert.equal(constrained[0].content[0].type, "input_text");
+  assert.match(constrained[0].content[0].text, /img_first/);
+  assert.equal(constrained[0].content[1].type, "input_image");
 });
 
 test("applyToolPolicy maps MCP inputSchema onto a type:object parameters schema", () => {

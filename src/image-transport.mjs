@@ -95,9 +95,13 @@ function resizeRgba(image, width, height) {
   return { width, height, data: output };
 }
 
+export const MIN_IMAGE_TRANSPORT_WIRE_BYTES = 32 * 1024;
+
 export function createTransportImage(imageUrl, { maxWireBytes }) {
   const limit = Math.floor(Number(maxWireBytes));
-  if (!Number.isSafeInteger(limit) || limit < 32 * 1024) throw new Error("Image transport limit must be at least 32768 bytes");
+  if (!Number.isSafeInteger(limit) || limit < MIN_IMAGE_TRANSPORT_WIRE_BYTES) {
+    throw new Error(`Image transport limit must be at least ${MIN_IMAGE_TRANSPORT_WIRE_BYTES} bytes`);
+  }
   const originalWireBytes = Buffer.byteLength(imageUrl || "");
   if (originalWireBytes <= limit) {
     return { imageUrl, transformed: false, originalWireBytes, wireBytes: originalWireBytes };

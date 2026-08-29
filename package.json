@@ -1,6 +1,6 @@
 {
   "name": "modeldock-opencode-go-gate",
-  "version": "0.3.50",
+  "version": "0.3.51",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",

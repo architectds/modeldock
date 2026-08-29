@@ -28,8 +28,24 @@ export function isAssistantMarker(item) {
 // turn boundary without serializing a provider-visible field.
 export const CURRENT_TURN_MARKER = Symbol("modeldock.currentTurnMarker");
 
+function codexTurnId(item) {
+  const value = item?.internal_chat_message_metadata_passthrough?.turn_id;
+  return typeof value === "string" && value ? value : "";
+}
+
 export function currentTurnStartIndex(input) {
   const items = inputItems(input);
+  // Current Codex items already carry the owning turn. Prefer that durable
+  // boundary over reconstructing a turn from assistant/tool markers: an
+  // interrupted turn can end on a tool image with no final assistant message,
+  // and the next user turn must not inherit those pixels as current. Older
+  // clients and hand-authored API requests still use the marker fallback.
+  const currentTurnId = items.findLast(codexTurnId)
+    ?.internal_chat_message_metadata_passthrough?.turn_id;
+  if (currentTurnId) {
+    const firstCurrent = items.findIndex((item) => codexTurnId(item) === currentTurnId);
+    if (firstCurrent >= 0) return firstCurrent;
+  }
   let lastMarker = -1;
   for (let index = 0; index < items.length; index += 1) {
     if (isAssistantMarker(items[index])) lastMarker = index;
@@ -43,7 +59,15 @@ function currentTurnItems(input) {
 }
 
 function parts(item) {
-  return Array.isArray(item?.content) ? item.content : [];
+  if (Array.isArray(item?.content)) return item.content;
+  // Codex media tools keep image parts inside the tool output until the
+  // gateway has paired and ordered that output. The router must still see the
+  // image before gateway normalization; promoting it earlier would detach the
+  // pixels when the paired output is relocated beside its call.
+  if ((item?.type === "function_call_output" || item?.type === "custom_tool_call_output") && Array.isArray(item.output)) {
+    return item.output;
+  }
+  return [];
 }
 
 function hasImage(items) {

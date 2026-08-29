@@ -57,7 +57,7 @@ const LOCAL_REASONING_LEVELS = [
 // Responses, while its Qwen and MiniMax families use Chat Completions. This is
 // provider contract metadata, not a runtime test made during discovery.
 export function openCodeTransportForModel(modelId) {
-  return /^(minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
+  return /^(hy4-preview|minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
 }
 
 // Codex estimates the session history with its own (GPT) tokenizer, which runs
@@ -286,9 +286,21 @@ const OPENCODE_GO_PROFILE = {
     // the native backend's GPT-5.6-Luna.
     { id: "gpt-5.6-luna", label: "Luna", endpoint: "responses", supportsVision: true, visionScore: 7, visionMaxScore: 9, visionTier: "medium", quota5h: 2050, speedTier: "fast", ownerQualified: true, contextWindow: 272000, contextSource: "vendor", status: "available" },
     { id: "grok-4.5", label: "Grok 4.5", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 120, speedTier: "fast", contextWindow: 500000, contextSource: "vendor", status: "available" },
-    { id: "grok-4.6", label: "Grok 4.6", endpoint: "responses", supportsVision: false, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
+    // Console Go's Grok leg accepts ordinary function descriptors, not Codex's
+    // custom or namespace wrappers. Reuse the reversible conversion already
+    // used by the direct xAI route, but keep the original qualified names: the
+    // complete current Codex package passes without short aliases.
+    { id: "grok-4.6", label: "Grok 4.6", endpoint: "responses", inputNormalizer: "opencode-flash", supportsVision: true, imageTransportMaxWireBytes: 320 * 1024, blockedToolTypes: new Set(["custom"]), customToolsAsFunctions: new Set(["apply_patch"]), flattenAllNamespaces: true, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
     { id: "hy3", label: "Hy3", endpoint: "responses", supportsVision: false, contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "hy3-preview", label: "Hy3 Preview", endpoint: "responses", supportsVision: false, status: "unavailable" },
+    // The authenticated OpenCode Go directory first advertised this exact id on
+    // 2026-08-28. Its sparse /models entry carries no context or modality
+    // metadata. Its Responses route returned 500 for a complete current Codex
+    // package; Chat accepted the same package, called a namespace tool, and
+    // correctly read a controlled image after the continuation. Publish those
+    // measured transport and vision capabilities, but retain the conservative
+    // catalog window rather than inheriting HY3's unreported context claim.
+    { id: "hy4-preview", label: "HY4 Preview", endpoint: "chat", supportsVision: true, contextWindow: CONTEXT_WINDOW, contextSource: "fallback", status: "available" },
     { id: "kimi-k2.5", label: "Kimi K2.5", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1150, speedTier: "fast", contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "kimi-k2.6", label: "Kimi K2.6", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1150, speedTier: "fast", contextWindow: 262144, contextSource: "vendor", status: "available" },
     { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", endpoint: "responses", supportsVision: true, visionScore: 9, visionMaxScore: 9, visionTier: "strong", quota5h: 1350, speedTier: "fast", contextWindow: 262144, contextSource: "vendor", status: "available" },
