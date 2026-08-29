@@ -1069,7 +1069,7 @@ function Restore-Native {
     Write-Output "Gateway is unavailable; restoring from the local backup."
   }
 
-  $codexHome = if ($env:MODELDOCK_CODEX_HOME) { $env:MODELDOCK_CODEX_HOME } elseif ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+  $codexHome = if ($env:MODELDOCK_CODEX_HOME) { $env:MODELDOCK_CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
   $statePath = Join-Path $codexHome "modeldock\config-switch-state.json"
   if (-not (Test-Path -LiteralPath $statePath)) { throw "ModelDock switch state was not found: $statePath" }
   $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json

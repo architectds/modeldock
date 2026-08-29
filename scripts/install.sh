@@ -1412,7 +1412,7 @@ restore_native() {
     return
   fi
   echo "Gateway is unavailable; restoring from the local backup."
-  CODEX_HOME_VALUE="${MODELDOCK_CODEX_HOME:-${CODEX_HOME:-$HOME/.codex}}"
+  CODEX_HOME_VALUE="${MODELDOCK_CODEX_HOME:-$HOME/.codex}"
   STATE="$CODEX_HOME_VALUE/modeldock/config-switch-state.json"
   CONFIG="$CODEX_HOME_VALUE/config.toml"
   if [ ! -f "$STATE" ]; then

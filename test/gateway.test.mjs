@@ -14,6 +14,7 @@ import {
   applyToolPolicy,
   compactFailureReport,
   collaborationRelayCacheSnapshot,
+  constrainImagesForTransport,
   createUsageTee,
   decodeCompactionSummary,
   describeInputShape,
@@ -39,6 +40,7 @@ import {
   LOCAL_TOOL_ALLOWLIST,
   flattenNamespaceCalls,
   pipeNormalizedStream,
+  promoteToolOutputImages,
   RECENT_IMAGE_WINDOW,
   restoreNamespaceCall,
   redactBearer,
@@ -951,6 +953,46 @@ test("applyToolPolicy flattens MCP namespaces into qualified functions", () => {
   assert.deepEqual(kept[0].parameters, { type: "object", properties: {}, additionalProperties: false });
   assert.equal(stripped.namespaceChildren, 1);
   assert.equal(stripped.hidden, 1);
+});
+
+test("promoteToolOutputImages keeps tool text and moves visual bytes into a real image message", () => {
+  const dataUrl = "data:image/png;base64,AAAA";
+  const input = [{
+    type: "custom_tool_call_output",
+    call_id: "call_emit",
+    output: [
+      { type: "input_text", text: "rendered" },
+      { type: "input_image", image_url: dataUrl },
+    ],
+  }];
+  const promoted = promoteToolOutputImages(input);
+  assert.deepEqual(promoted.map((item) => item.type), ["custom_tool_call_output", "message"]);
+  assert.deepEqual(promoted[0].output, [{ type: "input_text", text: "rendered" }]);
+  assert.equal(promoted[1].role, "user");
+  assert.equal(promoted[1].content[1].image_url, dataUrl);
+  assert.doesNotMatch(JSON.stringify(promoted[0]), /data:image/, "the tool text no longer carries base64 pixels");
+});
+
+test("constrainImagesForTransport shares one total wire budget without changing the source input", () => {
+  const first = "data:image/png;base64,AAAA";
+  const second = "data:image/png;base64,BBBB";
+  const limits = [];
+  const mediaStore = {
+    put: (url) => url === first ? "img_first" : "img_second",
+    getTransportVariant: (ref, { maxWireBytes }) => {
+      limits.push(maxWireBytes);
+      return { imageUrl: `data:image/jpeg;base64,${ref === "img_first" ? "CCCC" : "DDDD"}` };
+    },
+  };
+  const input = [{ type: "message", role: "user", content: [
+    { type: "input_image", image_url: first, detail: "high" },
+    { type: "input_image", image_url: second },
+  ] }];
+  const constrained = constrainImagesForTransport(input, mediaStore, { maxTotalWireBytes: 128 * 1024 });
+  assert.deepEqual(limits, [64 * 1024, 64 * 1024]);
+  assert.equal(constrained[0].content[0].detail, "high");
+  assert.match(constrained[0].content[0].image_url, /^data:image\/jpeg/);
+  assert.equal(input[0].content[0].image_url, first, "the incoming Codex envelope stays immutable");
 });
 
 test("applyToolPolicy maps MCP inputSchema onto a type:object parameters schema", () => {

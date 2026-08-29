@@ -42,11 +42,15 @@ test("provider discovery publishes only transports the gateway implements", () =
   assert.deepEqual([...OPENCODE_GO_PROFILE.discoveryTransports].sort(), ["chat", "responses"]);
   assert.equal(openCodeTransportForModel("qwen3.8-flash"), "chat");
   assert.equal(openCodeTransportForModel("deepseek-v4-flash"), "responses");
+  const openCodeModels = new Map(OPENCODE_GO_PROFILE.availableModels.map((model) => [model.id, model]));
   assert.equal(
-    OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "qwen3.8-flash")?.supportsVision,
+    openCodeModels.get("qwen3.8-flash")?.supportsVision,
     true,
-    "Qwen 3.8 Flash accepts image input on the OpenCode Go Chat endpoint",
+    "Qwen 3.8 Flash accepts image input on OpenCode Go",
   );
+  for (const id of ["longcat-2.0", "glm-5.3", "glm-5.3-flash", "grok-4.6"]) {
+    assert.equal(openCodeModels.get(id)?.supportsVision, false, `${id} remains text-only on OpenCode Go`);
+  }
   assert.deepEqual([...DEEPSEEK_OFFICIAL_PROFILE.discoveryTransports], ["responses"]);
   assert.deepEqual([...XAI_PROFILE.discoveryTransports], ["responses"]);
 });

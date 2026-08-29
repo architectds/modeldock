@@ -367,7 +367,11 @@ export function loadConfig() {
   // the app without Host validation.
   const host = rawHost.trim().toLowerCase().replace(/^\[|\]$/g, "");
 
-  const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex"));
+  // ModelDock follows the Codex Desktop user store, which is always exposed at
+  // ~/.codex even when that directory is a junction to another drive. A global
+  // CODEX_HOME may point at a CLI runtime parent rather than the Desktop store;
+  // only ModelDock's explicit test/admin override may replace this path.
+  const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || path.join(os.homedir(), ".codex"));
   const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
   const profile = profileById(profileId);
 

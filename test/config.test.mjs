@@ -55,6 +55,21 @@ test("zenBaseUrl resolves from MODELDOCK_ZEN_BASE_URL with the trailing slash no
   }
 });
 
+test("ModelDock ignores a generic CODEX_HOME and uses the Desktop user store", () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousModelDockHome = process.env.MODELDOCK_CODEX_HOME;
+  try {
+    process.env.CODEX_HOME = path.join(os.tmpdir(), "codex-cli-runtime-parent");
+    delete process.env.MODELDOCK_CODEX_HOME;
+    assert.equal(loadConfig().codexHome, path.resolve(path.join(os.homedir(), ".codex")));
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (previousModelDockHome === undefined) delete process.env.MODELDOCK_CODEX_HOME;
+    else process.env.MODELDOCK_CODEX_HOME = previousModelDockHome;
+  }
+});
+
 test("a placeholder OPENCODE_GO_TOKEN falls back to the Codex backup and reports its real source", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-token-src-"));
   const previousHome = process.env.MODELDOCK_CODEX_HOME;

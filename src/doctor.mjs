@@ -15,7 +15,7 @@ export const DOCTOR_CHECKS = 10;
 export async function checkDoctor({
   port = Number(process.env.MODELDOCK_PORT || 4097),
   stateDir = resolveStateDir(),
-  codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex")),
+  codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || path.join(os.homedir(), ".codex")),
   envFile = process.env.MODELDOCK_ENV_FILE || envFileFor(),
   rootDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), ".."),
   fetchImpl = globalThis.fetch,

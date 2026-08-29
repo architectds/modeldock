@@ -289,7 +289,7 @@ export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], ca
 // the live config.
 //
 // Only the mismatch is refused. A throwaway gateway with a throwaway
-// CODEX_HOME is the normal test setup and is untouched, and an install that
+// MODELDOCK_CODEX_HOME is the normal test setup and is untouched, and an install that
 // genuinely wants a redirected state directory to drive the real Codex can
 // say so with MODELDOCK_ALLOW_FOREIGN_CODEX_HOME=1.
 function foreignCodexHome(codexHome) {

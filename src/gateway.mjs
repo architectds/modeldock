@@ -1756,6 +1756,92 @@ export function hydrateImageRefsForVision(input, mediaStore, { refs = null } = {
   return changed ? output : input;
 }
 
+// Codex media-capable custom tools return an array containing input_text and
+// input_image blocks inside custom_tool_call_output.output. Chat Completions
+// accepts a textual role:tool result plus visual user content; stringifying the
+// original array turns a multi-megabyte image into prompt text and can trip a
+// provider's input-length validator before the model sees any pixels. Promote
+// those images into an ordinary message so the existing ref, history-window,
+// and transport-budget machinery handles them exactly like pasted images.
+export function promoteToolOutputImages(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const output = [];
+  for (const item of input) {
+    const toolOutput = item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
+    if (!toolOutput || !Array.isArray(item.output)) {
+      output.push(item);
+      continue;
+    }
+    const images = item.output.filter((part) => part?.type === "input_image" && typeof part.image_url === "string");
+    if (!images.length) {
+      output.push(item);
+      continue;
+    }
+    const text = item.output.filter((part) => part?.type !== "input_image");
+    const callId = item.call_id || item.id || "unknown";
+    output.push({
+      ...item,
+      output: text.length
+        ? text
+        : [{ type: "input_text", text: `[Visual output from tool call ${callId} moved to the following image message.]` }],
+    });
+    output.push({
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: `[Visual output returned by tool call ${callId}.]` },
+        ...images,
+      ],
+    });
+    changed = true;
+  }
+  return changed ? output : input;
+}
+
+export function constrainImagesForTransport(input, mediaStore, {
+  maxTotalWireBytes,
+  resolveExternalSource,
+  sessionId,
+} = {}) {
+  const totalLimit = Math.floor(Number(maxTotalWireBytes));
+  if (!Array.isArray(input) || !Number.isSafeInteger(totalLimit) || totalLimit <= 0) return input;
+  const images = [];
+  for (const item of input) {
+    if (!Array.isArray(item?.content)) continue;
+    for (const part of item.content) {
+      if (part?.type === "input_image" && typeof part.image_url === "string") images.push(part);
+    }
+  }
+  if (!images.length) return input;
+  if (!mediaStore?.put || !mediaStore?.getTransportVariant) {
+    throw new Error("The media store is unavailable for image transport compression");
+  }
+  const perImageLimit = Math.floor(totalLimit / images.length);
+  if (perImageLimit < 32 * 1024) {
+    throw new Error(`${images.length} images cannot fit in the ${totalLimit}-byte transport budget`);
+  }
+  const replacements = new Map();
+  for (const part of images) {
+    const ref = mediaStore.put(part.image_url, { resolveExternalSource, sessionId });
+    const variant = mediaStore.getTransportVariant(ref, { maxWireBytes: perImageLimit, sessionId });
+    if (!variant?.imageUrl) throw new Error(`Image ${ref} is unavailable for transport`);
+    if (variant.imageUrl !== part.image_url) replacements.set(part, variant.imageUrl);
+  }
+  if (!replacements.size) return input;
+  return input.map((item) => {
+    if (!Array.isArray(item?.content)) return item;
+    let changed = false;
+    const content = item.content.map((part) => {
+      const imageUrl = replacements.get(part);
+      if (!imageUrl) return part;
+      changed = true;
+      return { ...part, image_url: imageUrl };
+    });
+    return changed ? { ...item, content } : item;
+  });
+}
+
 function imageReferenceHandoff(input, mediaStore, resolveExternalSource, sessionId, knownRefs = null) {
   const refs = new Set(knownRefs || []);
   if (!Array.isArray(input)) return "";
@@ -3288,6 +3374,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   mediaStore?.touchSession?.(sessionId);
+  if (Array.isArray(payload.input)) payload = { ...payload, input: promoteToolOutputImages(payload.input) };
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
@@ -3328,23 +3415,40 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   }
   const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
   const localBackend = isLocalBackend(config, route.model);
-  const targetSupportsVision = Boolean(modelEntryFor(config, route.model)?.supportsVision);
+  const compactModelEntry = modelEntryFor(config, route.model);
+  const targetSupportsVision = Boolean(compactModelEntry?.supportsVision);
+  const imageTransportLimit = Number(compactModelEntry?.imageTransportMaxWireBytes) || 0;
   // A compaction must carry image refs forward, not raw pixels. The selected
   // visual model can still see the 20 newest attachments while it summarizes;
   // every older image survives in the returned text handoff as an img_ref.
   const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
   const compactImageRefs = new Set();
-  const summarizeInput = rewriteHistoricalImages(
+  let summarizeInput = rewriteHistoricalImages(
     normalizedInput,
     mediaStore,
     {
       preserveImages: !localBackend && targetSupportsVision,
-      keepRecentImages: !localBackend && targetSupportsVision ? RECENT_IMAGE_WINDOW : 0,
+      keepRecentImages: !localBackend && targetSupportsVision
+        ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
+        : 0,
       resolveExternalSource,
       sessionId,
       onImageRef: (ref) => compactImageRefs.add(ref),
     },
   );
+  if (imageTransportLimit) {
+    try {
+      summarizeInput = constrainImagesForTransport(summarizeInput, mediaStore, {
+        maxTotalWireBytes: imageTransportLimit,
+        resolveExternalSource,
+        sessionId,
+      });
+    } catch (error) {
+      const body = { error: { type: "image_transport_error", message: error.message } };
+      sendJsonError(res, 413, body);
+      return { ok: false, httpStatus: 413, route, error: body };
+    }
+  }
   const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId, compactImageRefs);
   const summarizeBody = {
     ...(localPayload || payload),
@@ -3355,7 +3459,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     input: [
       ...adaptImageUrlShape(
         summarizeInput,
-        modelEntryFor(config, route.model)?.imageUrlShape,
+        compactModelEntry?.imageUrlShape,
       ),
       messageItem(COMPACT_PROMPT),
     ],
@@ -3604,6 +3708,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
   }
+  if (Array.isArray(payload.input)) payload = { ...payload, input: promoteToolOutputImages(payload.input) };
   // An address of ours that no longer resolves. The model was published by this
   // gateway and picked from that catalog, so the endpoint behind it was removed
   // - a configuration fault to report, not a stale id to paper over. Falling
@@ -3684,18 +3789,37 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
   }
   const normalizedInput = normalizeInputForRoute(config, route.model, routeInput, localPayload);
+  const routedModelEntry = modelEntryFor(config, route.model);
+  const imageTransportLimit = Number(routedModelEntry?.imageTransportMaxWireBytes) || 0;
+  const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
+  let routedInput = rewriteHistoricalImages(normalizedInput, mediaStore, {
+    preserveImages: modelSupportsVision(route.model),
+    keepRecentImages: modelSupportsVision(route.model)
+      ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
+      : 0,
+    keepCurrentImages: true,
+    currentStartIndex: currentTurnStartIndex(normalizedInput),
+    resolveExternalSource,
+    sessionId,
+  });
+  if (imageTransportLimit) {
+    try {
+      routedInput = constrainImagesForTransport(routedInput, mediaStore, {
+        maxTotalWireBytes: imageTransportLimit,
+        resolveExternalSource,
+        sessionId,
+      });
+    } catch (error) {
+      const body = { error: { type: "image_transport_error", message: error.message } };
+      sendJsonError(res, 413, body);
+      return { ok: false, httpStatus: 413, route, error: body };
+    }
+  }
   let normalizedPayload = {
     ...(localPayload || payload),
     input: adaptImageUrlShape(
-      rewriteHistoricalImages(normalizedInput, mediaStore, {
-        preserveImages: modelSupportsVision(route.model),
-        keepRecentImages: modelSupportsVision(route.model) ? RECENT_IMAGE_WINDOW : 0,
-        keepCurrentImages: true,
-        currentStartIndex: currentTurnStartIndex(normalizedInput),
-        resolveExternalSource: codexAttachmentResolver(attachmentIndex, sessionId, threadId),
-        sessionId,
-      }),
-      modelEntryFor(config, route.model)?.imageUrlShape,
+      routedInput,
+      routedModelEntry?.imageUrlShape,
     ),
     model: route.model,
   };

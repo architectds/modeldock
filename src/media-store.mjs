@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import { isLoopbackHost } from "./loopback.mjs";
+import { createTransportImage } from "./image-transport.mjs";
 
 const DATA_URL = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i;
 const ACCESS_PERSIST_INTERVAL_MS = 60_000;
@@ -201,6 +202,45 @@ export class MediaStore {
     return { ...item, imageUrl };
   }
 
+  getTransportVariant(ref, { maxWireBytes, sessionId } = {}) {
+    return this.batch(() => {
+      const original = this.get(ref);
+      if (!original) return undefined;
+      const limit = Math.floor(Number(maxWireBytes));
+      const policy = `jpeg-v1-${limit}`;
+      const source = this.#items.get(ref);
+      const cachedRef = source?.transportVariants?.[policy];
+      if (cachedRef) {
+        const cached = this.get(cachedRef);
+        if (cached && Buffer.byteLength(cached.imageUrl) <= limit) {
+          return { ...cached, ref, transportRef: cachedRef, transformed: true, sourceRef: ref, cached: true };
+        }
+        delete source.transportVariants[policy];
+        this.#markDirty();
+      }
+      const converted = createTransportImage(original.imageUrl, { maxWireBytes: limit });
+      if (!converted.transformed) {
+        return { ...original, ...converted, ref, sourceRef: ref, cached: true };
+      }
+      const transportRef = this.put(converted.imageUrl, { sessionId });
+      const transport = this.#items.get(transportRef);
+      if (transport) {
+        transport.derivedFrom = ref;
+        transport.transportPolicy = policy;
+      }
+      source.transportVariants = { ...(source.transportVariants || {}), [policy]: transportRef };
+      this.#markDirty();
+      return {
+        ...this.get(transportRef),
+        ...converted,
+        ref,
+        transportRef,
+        sourceRef: ref,
+        cached: false,
+      };
+    });
+  }
+
   cleanup(now = Date.now()) {
     let changed = false;
     for (const [sessionId, lastSeenAt] of this.#sessions) {
@@ -223,7 +263,10 @@ export class MediaStore {
       }
     }
     while (this.#items.size > this.maxEntries) {
-      const oldest = [...this.#items.values()].sort((a, b) => a.lastAccessAt - b.lastAccessAt)[0];
+      const oldest = [...this.#items.values()].sort((a, b) => {
+        if (Boolean(a.derivedFrom) !== Boolean(b.derivedFrom)) return a.derivedFrom ? -1 : 1;
+        return a.lastAccessAt - b.lastAccessAt;
+      })[0];
       if (!oldest) break;
       this.#items.delete(oldest.ref);
       this.#removeFile(oldest);
@@ -235,7 +278,10 @@ export class MediaStore {
     while (storedBytes > this.maxStoredBytes) {
       const oldest = [...this.#items.values()]
         .filter((item) => item.storage === "file")
-        .sort((left, right) => left.lastAccessAt - right.lastAccessAt)[0];
+        .sort((left, right) => {
+          if (Boolean(left.derivedFrom) !== Boolean(right.derivedFrom)) return left.derivedFrom ? -1 : 1;
+          return left.lastAccessAt - right.lastAccessAt;
+        })[0];
       if (!oldest) break;
       this.#items.delete(oldest.ref);
       this.#removeFile(oldest);
@@ -251,11 +297,17 @@ export class MediaStore {
     let storedBytes = 0;
     let externalEntries = 0;
     let residentImageBytes = 0;
+    let derivedEntries = 0;
+    let derivedStoredBytes = 0;
     for (const item of this.#items.values()) {
       bytes += item.size;
       if (item.storage === "file") storedBytes += item.size;
       if (item.storage === "external") externalEntries += 1;
       if (item.storage === "memory") residentImageBytes += item.size;
+      if (item.derivedFrom) {
+        derivedEntries += 1;
+        if (item.storage === "file") derivedStoredBytes += item.size;
+      }
     }
     return {
       entries: this.#items.size,
@@ -263,6 +315,8 @@ export class MediaStore {
       storedBytes,
       externalEntries,
       residentImageBytes,
+      derivedEntries,
+      derivedStoredBytes,
       directory: this.#stateDir,
       ttlMs: this.ttlMs,
       maxBytesPerImage: this.maxBytes,
