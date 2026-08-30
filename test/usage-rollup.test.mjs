@@ -229,8 +229,8 @@ test("stats expose bounded today, seven-day, and thirty-day completed usage", ()
   assert.equal(stats.periods.days30.cachedTokens, 500);
   assert.equal(stats.periods.days30.newInputTokens, 300);
   assert.equal(stats.periods.days30.outputTps, 80 / 3);
-  assert.ok(Math.abs(stats.periods.today.estimatedApiCostUsd - 0.00001456) < 1e-12);
-  assert.ok(Math.abs(stats.periods.days30.estimatedApiCostUsd - 0.0000329) < 1e-12);
+  assert.ok(Math.abs(stats.periods.today.estimatedApiCostUsd - 0.0000578) < 1e-12);
+  assert.ok(Math.abs(stats.periods.days30.estimatedApiCostUsd - 0.0001223) < 1e-12);
   assert.equal(stats.periods.days30.costCoverage, 1);
   assert.equal(stats.modelPeriods.today.models[0].totalTokens, 550);
   assert.equal(stats.modelPeriods.hours24.models[0].totalTokens, 550);

@@ -696,12 +696,14 @@ function hostDashAvg(history) {
 
 function usd(value, { compact = true } = {}) {
   const amount = Math.max(0, Number(value) || 0);
+  const compactAmount = compact && amount >= 1000;
+  const tinyAmount = amount > 0 && amount < 0.01;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    notation: compact && amount >= 1000 ? "compact" : "standard",
-    minimumFractionDigits: amount > 0 && amount < 0.01 ? 4 : 2,
-    maximumFractionDigits: amount >= 1000 ? 1 : amount < 0.01 ? 4 : 2,
+    notation: compactAmount ? "compact" : "standard",
+    minimumFractionDigits: tinyAmount ? 4 : compactAmount ? 0 : 2,
+    maximumFractionDigits: tinyAmount ? 4 : compactAmount ? 1 : 2,
   }).format(amount);
 }
 

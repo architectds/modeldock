@@ -122,10 +122,13 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
     lastFoldedAt: now.toISOString(),
     days: {
       [older]: {
-        "gpt-5.6-sol@openai": { requests: 4, ok: 4, in: 1_000_000, out: 100_000, cached: 0, ms: 10_000, okOut: 100_000, okMs: 10_000 },
+        // Deliberately exceeds $1K. The dashboard used to construct an invalid
+        // Intl.NumberFormat for four-digit compact costs, update only the range
+        // labels, then leave every aggregate and chart on the previous period.
+        "gpt-5.6-sol@openai": { requests: 4, ok: 4, in: 1_000_000_000, out: 100_000_000, cached: 0, ms: 10_000, okOut: 100_000_000, okMs: 10_000 },
       },
       [yesterday]: {
-        "deepseek-v4-flash@opencode-go": { requests: 3, ok: 3, in: 9_000_000, out: 900_000, cached: 6_000_000, ms: 9000, okOut: 900_000, okMs: 9000 },
+        "deepseek-v4-flash@opencode-go": { requests: 3, ok: 3, in: 30_000_000_000, out: 3_000_000_000, cached: 18_000_000_000, ms: 9000, okOut: 3_000_000_000, okMs: 9000 },
       },
       [today]: {
         "qwen3.8-flash@opencode-go": { requests: 2, ok: 2, in: 8000, out: 600, cached: 5000, ms: 6000, okOut: 600, okMs: 6000 },
