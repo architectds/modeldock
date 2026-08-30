@@ -208,6 +208,26 @@ test("stats expose bounded today, seven-day, and thirty-day completed usage", ()
   assert.equal(stats.periods.days30.cachedTokens, 500);
   assert.equal(stats.periods.days30.newInputTokens, 300);
   assert.equal(stats.periods.days30.outputTps, 80 / 3);
+  assert.ok(Math.abs(stats.periods.today.estimatedApiCostUsd - 0.00001456) < 1e-12);
+  assert.ok(Math.abs(stats.periods.days30.estimatedApiCostUsd - 0.0000329) < 1e-12);
+  assert.equal(stats.periods.days30.costCoverage, 1);
+  assert.equal(stats.modelPeriods.today.models[0].totalTokens, 550);
+  assert.equal(stats.modelPeriods.days7.models[0].totalTokens, 880);
+});
+
+test("stats keep unknown provider traffic visible without inventing a price", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-18T01:00:00.000Z", {
+      model: "private-model", provider: "custom", inputTokens: 800, cachedTokens: 400, outputTokens: 200,
+    }),
+  ], { now: "2026-08-18T02:00:00.000Z" });
+  const stats = usageStats(rollup, "2026-08-18T12:00:00.000Z");
+
+  assert.equal(stats.periods.today.totalTokens, 1000);
+  assert.equal(stats.periods.today.estimatedApiCostUsd, 0);
+  assert.equal(stats.periods.today.pricedTokens, 0);
+  assert.equal(stats.periods.today.unpricedTokens, 1000);
+  assert.equal(stats.periods.today.costCoverage, 0);
 });
 
 test("stats keep model share bounded and aggregate the tail", () => {

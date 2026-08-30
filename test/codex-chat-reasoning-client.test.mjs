@@ -188,6 +188,9 @@ test("installed Codex replays bridged Chat reasoning and a custom tool on the ne
   codex.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(() => stop(codex));
   const [exitCode] = await once(codex, "exit");
+  if (exitCode !== 0) {
+    console.error(`[codex-chat-reasoning] Codex exited ${exitCode}\nstderr:\n${stderr}\nstdout:\n${stdout}\ngateway:\n${gatewayStderr}`);
+  }
   assert.equal(exitCode, 0, `${stderr}\n${stdout}\n${gatewayStderr}`);
   assert.equal(protocolError, "");
   assert.ok(requests.length >= 2, "Codex must send a tool continuation request");

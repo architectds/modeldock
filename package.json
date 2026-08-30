@@ -1,6 +1,6 @@
 {
   "name": "modeldock-opencode-go-gate",
-  "version": "0.3.53",
+  "version": "0.3.54",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -12,7 +12,7 @@
     "start": "node scripts/build-if-stale.mjs && node dist/modeldock.mjs",
     "dev": "node --watch src/server.mjs",
     "pretest": "node scripts/cleanup-sandbox.mjs && node scripts/sync-installer-helpers.mjs --check && node scripts/check-internal-docs.mjs && node scripts/build.mjs",
-    "test": "node --import ./test/preload-env.mjs --test test/*.test.mjs",
+    "test": "node --import ./test/preload-env.mjs --test --test-concurrency=1 --test-reporter=tap test/*.test.mjs",
     "sandbox:clean": "node scripts/cleanup-sandbox.mjs",
     "test:install": "node --test test/install-mock.test.mjs test/install-macos-sim.test.mjs",
     "probe:live": "node scripts/live-probe.mjs",

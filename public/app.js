@@ -694,6 +694,17 @@ function hostDashAvg(history) {
   return history.reduce((sum, point) => sum + point.v, 0) / history.length;
 }
 
+function usd(value, { compact = true } = {}) {
+  const amount = Math.max(0, Number(value) || 0);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    notation: compact && amount >= 1000 ? "compact" : "standard",
+    minimumFractionDigits: amount > 0 && amount < 0.01 ? 4 : 2,
+    maximumFractionDigits: amount >= 1000 ? 1 : amount < 0.01 ? 4 : 2,
+  }).format(amount);
+}
+
 function compactTokens(value) {
   const count = Math.max(0, Number(value) || 0);
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(count >= 10_000_000 ? 0 : 1)}M`;
@@ -1919,6 +1930,7 @@ async function renderModelRoster() {
 // thirty daily bars and seven model rows from /api/stats.
 let lastStats = null;
 let statsLoadedAt = 0;
+let statsRangeDays = 30;
 
 function statsDayLabel(day) {
   const date = new Date(`${day}T00:00:00Z`);
@@ -1932,21 +1944,25 @@ function statsEmpty(host) {
   host.replaceChildren(empty);
 }
 
-function renderDailyStats(hostId, days, { valueFor, titleFor, segmentsFor } = {}) {
+function renderDailyStats(hostId, days, { valueFor, titleFor, segmentsFor, renderZero = false } = {}) {
   const host = $(hostId);
   if (!host) return;
   const values = days.map((day) => Math.max(0, Number(valueFor(day)) || 0));
   const max = Math.max(0, ...values);
-  if (!max) return statsEmpty(host);
+  if (!max && !renderZero) return statsEmpty(host);
 
   const plot = document.createElement("div");
   plot.className = "stats-daily-bars";
+  plot.dataset.days = String(days.length);
+  plot.style.gridTemplateColumns = days.length === 1
+    ? "minmax(18px, 38px)"
+    : `repeat(${days.length}, minmax(3px, 1fr))`;
   days.forEach((day, index) => {
     const holder = document.createElement("span");
     holder.className = "stats-day";
     holder.title = titleFor(day);
     holder.setAttribute("aria-label", holder.title);
-    const height = Math.max(2, (values[index] / max) * 100);
+    const height = max > 0 ? Math.max(2, (values[index] / max) * 100) : 2;
     if (segmentsFor) {
       const stack = document.createElement("span");
       stack.className = "stats-stack";
@@ -2000,24 +2016,33 @@ function renderModelShare(models = [], modelCount = 0) {
   }));
 }
 
+function paintStatsRange() {
+  for (const node of document.querySelectorAll("[data-stats-window]")) node.textContent = `${statsRangeDays}D`;
+  for (const button of document.querySelectorAll("[data-stats-range]")) {
+    const active = Number(button.dataset.statsRange) === statsRangeDays;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  }
+}
+
 function renderStats(data) {
   if (!data) return;
   lastStats = data;
-  const month = data.periods?.days30 || {};
-  set("stats-today-tokens", number(data.periods?.today?.totalTokens));
-  set("stats-week-tokens", number(data.periods?.days7?.totalTokens));
-  set("stats-month-tokens", number(month.totalTokens));
-  set("stats-input", number(month.inputTokens));
-  set("stats-output", number(month.outputTokens));
-  set("stats-cache", percent(month.cacheRate || 0));
-  set("stats-cache-detail", t("stats.cachedDetail", { tokens: number(month.cachedTokens), rate: percent(month.cacheRate || 0) }));
-  set("stats-requests", number(month.completedRequests));
+  const periodKey = statsRangeDays === 1 ? "today" : statsRangeDays === 7 ? "days7" : "days30";
+  const period = data.periods?.[periodKey] || {};
+  set("stats-input", number(period.inputTokens));
+  set("stats-output", number(period.outputTokens));
+  set("stats-cache", percent(period.cacheRate || 0));
+  set("stats-cache-detail", t("stats.cachedDetail", { tokens: number(period.cachedTokens), rate: percent(period.cacheRate || 0) }));
+  set("stats-cost", usd(period.estimatedApiCostUsd));
+  set("stats-cost-detail", t("stats.costDetail", { coverage: percent(period.costCoverage || 0) }));
+  paintStatsRange();
   const updated = Date.parse(data.updatedAt || "");
   set("stats-updated", Number.isFinite(updated)
     ? t("stats.updated", { time: new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }).format(new Date(updated)) })
     : t("stats.notUpdated"));
 
-  const days = [...(data.days || [])].slice(-30);
+  const days = [...(data.days || [])].slice(-statsRangeDays);
   renderDailyStats("stats-token-chart", days, {
     valueFor: (day) => day.totalTokens,
     titleFor: (day) => t("stats.dayTokens", {
@@ -2033,11 +2058,13 @@ function renderStats(data) {
     valueFor: (day) => day.completedRequests,
     titleFor: (day) => t("stats.dayRequests", { day: statsDayLabel(day.day), value: number(day.completedRequests) }),
   });
-  renderDailyStats("stats-tps-chart", days, {
-    valueFor: (day) => day.outputTps,
-    titleFor: (day) => t("stats.dayTps", { day: statsDayLabel(day.day), value: Number(day.outputTps || 0).toFixed(1) }),
+  renderDailyStats("stats-spend-chart", days, {
+    valueFor: (day) => day.estimatedApiCostUsd,
+    titleFor: (day) => t("stats.daySpend", { day: statsDayLabel(day.day), value: usd(day.estimatedApiCostUsd, { compact: false }) }),
+    renderZero: true,
   });
-  renderModelShare(data.models, data.modelCount);
+  const modelPeriod = data.modelPeriods?.[periodKey];
+  renderModelShare(modelPeriod?.models || data.models, modelPeriod?.modelCount ?? data.modelCount);
   const error = $("stats-error");
   if (error) error.hidden = true;
 }
@@ -2061,6 +2088,16 @@ async function loadStats({ force = false } = {}) {
     }
   }
 }
+
+document.addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-stats-range]") : null;
+  if (!button) return;
+  const next = Number(button.dataset.statsRange);
+  if (![1, 7, 30].includes(next) || next === statsRangeDays) return;
+  statsRangeDays = next;
+  paintStatsRange();
+  if (lastStats) renderStats(lastStats);
+});
 // --- Local engine discovery (Local Hosts) ---
 //
 // Read-only: it reports what is already listening so the user does not have to

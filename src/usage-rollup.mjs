@@ -13,6 +13,7 @@
 // which can be recovered from a stored average.
 import path from "node:path";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { estimateApiCost } from "./api-pricing.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 // No model decodes this fast. A request that claims to have produced tokens
@@ -183,7 +184,17 @@ export function rollupTotals(rollup, now = new Date().toISOString()) {
 }
 
 function emptyStatsRow() {
-  return { in: 0, out: 0, cached: 0, ok: 0, okOut: 0, okMs: 0 };
+  return {
+    in: 0,
+    out: 0,
+    cached: 0,
+    ok: 0,
+    okOut: 0,
+    okMs: 0,
+    estimatedApiCostUsd: 0,
+    pricedTokens: 0,
+    unpricedTokens: 0,
+  };
 }
 
 function addStatsRow(target, source = {}) {
@@ -193,6 +204,9 @@ function addStatsRow(target, source = {}) {
   target.ok += Number(source.ok) || 0;
   target.okOut += Number(source.okOut) || 0;
   target.okMs += Number(source.okMs) || 0;
+  target.estimatedApiCostUsd += Number(source.estimatedApiCostUsd) || 0;
+  target.pricedTokens += Number(source.pricedTokens) || 0;
+  target.unpricedTokens += Number(source.unpricedTokens) || 0;
   return target;
 }
 
@@ -201,6 +215,9 @@ function finishStatsRow(source = {}) {
   const outputTokens = Math.max(0, Number(source.out) || 0);
   const cachedTokens = Math.max(0, Math.min(inputTokens, Number(source.cached) || 0));
   const outputMs = Math.max(0, Number(source.okMs) || 0);
+  const pricedTokens = Math.max(0, Number(source.pricedTokens) || 0);
+  const unpricedTokens = Math.max(0, Number(source.unpricedTokens) || 0);
+  const costTokens = pricedTokens + unpricedTokens;
   return {
     inputTokens,
     outputTokens,
@@ -210,6 +227,10 @@ function finishStatsRow(source = {}) {
     completedRequests: Math.max(0, Number(source.ok) || 0),
     cacheRate: inputTokens > 0 ? cachedTokens / inputTokens : 0,
     outputTps: outputMs > 0 ? (Math.max(0, Number(source.okOut) || 0) / (outputMs / 1000)) : 0,
+    estimatedApiCostUsd: Math.max(0, Number(source.estimatedApiCostUsd) || 0),
+    pricedTokens,
+    unpricedTokens,
+    costCoverage: costTokens > 0 ? pricedTokens / costTokens : 0,
   };
 }
 
@@ -233,6 +254,44 @@ function modelParts(key) {
     : { model: String(key || "unknown"), provider: "unknown" };
 }
 
+function addPricedStatsRow(target, key, source = {}) {
+  addStatsRow(target, source);
+  const { model, provider } = modelParts(key);
+  const cost = estimateApiCost({
+    model,
+    provider,
+    inputTokens: source.in,
+    cachedTokens: source.cached,
+    outputTokens: source.out,
+  });
+  target.estimatedApiCostUsd += cost.usd;
+  target.pricedTokens += cost.pricedTokens;
+  target.unpricedTokens += cost.unpricedTokens;
+  return target;
+}
+
+function statsModelsForDays(rollup, retainedDays) {
+  const byModel = new Map();
+  for (const [day, bucket] of Object.entries(rollup?.days || {})) {
+    if (!retainedDays.has(day)) continue;
+    for (const [key, entry] of Object.entries(bucket || {})) {
+      const raw = byModel.get(key) || emptyStatsRow();
+      addPricedStatsRow(raw, key, entry);
+      byModel.set(key, raw);
+    }
+  }
+  const ranked = [...byModel.entries()]
+    .map(([id, raw]) => ({ id, raw, ...modelParts(id), ...finishStatsRow(raw) }))
+    .sort((a, b) => b.totalTokens - a.totalTokens || b.completedRequests - a.completedRequests || a.id.localeCompare(b.id));
+  const models = ranked.slice(0, 6).map(({ raw, ...entry }) => entry);
+  if (ranked.length > 6) {
+    const raw = emptyStatsRow();
+    for (const entry of ranked.slice(6)) addStatsRow(raw, entry.raw);
+    models.push({ id: "__other__", model: "", provider: "", ...finishStatsRow(raw) });
+  }
+  return { models, modelCount: ranked.length };
+}
+
 // Aggregate-only dashboard data. The response is deliberately derived from the
 // bounded daily rollup rather than the raw event log, so session/thread ids and
 // every other per-request detail stay on disk and never reach the browser.
@@ -245,7 +304,7 @@ export function usageStats(rollup, now = new Date().toISOString()) {
   for (let offset = -(ROLLUP_DAYS - 1); offset <= 0; offset += 1) {
     const day = shiftedUtcDay(today, offset);
     const raw = emptyStatsRow();
-    for (const entry of Object.values(rollup?.days?.[day] || {})) addStatsRow(raw, entry);
+    for (const [key, entry] of Object.entries(rollup?.days?.[day] || {})) addPricedStatsRow(raw, key, entry);
     rawDays.push(raw);
     days.push({ day, ...finishStatsRow(raw) });
   }
@@ -256,25 +315,11 @@ export function usageStats(rollup, now = new Date().toISOString()) {
     return finishStatsRow(raw);
   };
 
-  const byModel = new Map();
-  const retainedDays = new Set(days.map((entry) => entry.day));
-  for (const [day, bucket] of Object.entries(rollup?.days || {})) {
-    if (!retainedDays.has(day)) continue;
-    for (const [key, entry] of Object.entries(bucket || {})) {
-      const raw = byModel.get(key) || emptyStatsRow();
-      addStatsRow(raw, entry);
-      byModel.set(key, raw);
-    }
-  }
-  const rankedModels = [...byModel.entries()]
-    .map(([id, raw]) => ({ id, raw, ...modelParts(id), ...finishStatsRow(raw) }))
-    .sort((a, b) => b.totalTokens - a.totalTokens || b.completedRequests - a.completedRequests || a.id.localeCompare(b.id));
-  const models = rankedModels.slice(0, 6).map(({ raw, ...entry }) => entry);
-  if (rankedModels.length > 6) {
-    const raw = emptyStatsRow();
-    for (const entry of rankedModels.slice(6)) addStatsRow(raw, entry.raw);
-    models.push({ id: "__other__", model: "", provider: "", ...finishStatsRow(raw) });
-  }
+  const modelPeriods = {
+    today: statsModelsForDays(rollup, new Set(days.slice(-1).map((entry) => entry.day))),
+    days7: statsModelsForDays(rollup, new Set(days.slice(-7).map((entry) => entry.day))),
+    days30: statsModelsForDays(rollup, new Set(days.map((entry) => entry.day))),
+  };
 
   return {
     timezone: "UTC",
@@ -282,8 +327,11 @@ export function usageStats(rollup, now = new Date().toISOString()) {
     updatedAt: String(rollup?.lastFoldedAt || ""),
     periods: { today: period(1), days7: period(7), days30: period(ROLLUP_DAYS) },
     days,
-    models,
-    modelCount: rankedModels.length,
+    modelPeriods,
+    // Current clients read these as the thirty-day view. Keep the aliases while
+    // the range-aware dashboard rolls out; they carry no extra data.
+    models: modelPeriods.days30.models,
+    modelCount: modelPeriods.days30.modelCount,
   };
 }
 

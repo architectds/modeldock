@@ -368,10 +368,30 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       const bounded = JSON.parse(await evaluate(`JSON.stringify({
         tokenDays: document.querySelectorAll('#stats-token-chart .stats-day').length,
         requestDays: document.querySelectorAll('#stats-request-chart .stats-day').length,
-        tpsDays: document.querySelectorAll('#stats-tps-chart .stats-day').length,
+        spendDays: document.querySelectorAll('#stats-spend-chart .stats-day').length,
         models: document.querySelectorAll('#stats-model-chart .stats-share-row').length,
       })`));
-      assert.deepEqual(bounded, { tokenDays: 30, requestDays: 30, tpsDays: 30, models: 2 }, "Stats replaces one bounded 30-day snapshot instead of growing with polls");
+      assert.deepEqual(bounded, { tokenDays: 30, requestDays: 30, spendDays: 30, models: 2 }, "Stats replaces one bounded 30-day snapshot instead of growing with polls");
+      for (const range of [7, 1, 30]) {
+        await evaluate(`document.querySelector('[data-stats-range="${range}"]').click()`);
+        await sleep(50);
+        const filtered = JSON.parse(await evaluate(`JSON.stringify({
+          tokenDays: document.querySelectorAll('#stats-token-chart .stats-day').length,
+          requestDays: document.querySelectorAll('#stats-request-chart .stats-day').length,
+          spendDays: document.querySelectorAll('#stats-spend-chart .stats-day').length,
+          models: document.querySelectorAll('#stats-model-chart .stats-share-row').length,
+          windows: [...document.querySelectorAll('[data-stats-window]')].map((node) => node.textContent),
+          activeRange: document.querySelector('[data-stats-range].is-active')?.dataset.statsRange,
+        })`));
+        assert.deepEqual(filtered, {
+          tokenDays: range,
+          requestDays: range,
+          spendDays: range,
+          models: range === 1 ? 1 : 2,
+          windows: Array(filtered.windows.length).fill(`${range}D`),
+          activeRange: String(range),
+        }, `Stats ${range}D filter must update every aggregate and chart together`);
+      }
     }
 
     // 2. Nothing is on screen that is a translation key rather than a
@@ -521,6 +541,15 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
     return true;
   })()`);
   await sleep(300);
+
+  const localRail = JSON.parse(await evaluate(`JSON.stringify(
+    [...document.querySelectorAll('.rail-link')]
+      .filter((node) => !node.hidden)
+      .map((node) => node.dataset.rail)
+      .filter((name) => ['local', 'hostmonitor', 'stats'].includes(name))
+  )`));
+  assert.deepEqual(localRail, ["local", "hostmonitor", "stats"],
+    "the conditional host monitor stays beside Local Hosts instead of splitting Stats navigation");
 
   // This uses the same Metrics -> coalesced SSE -> browser render path as a
   // completed local response. The 100ms spacing intentionally lets every

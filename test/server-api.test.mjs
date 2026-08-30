@@ -456,7 +456,10 @@ test("api/stats returns bounded aggregate usage without request identity", async
   assert.equal(body.days.length, 30);
   assert.equal(body.periods.today.totalTokens, 1500);
   assert.equal(body.periods.days30.completedRequests, 2);
+  assert.equal(body.periods.days30.estimatedApiCostUsd, 0, "unknown prices remain explicit zero estimates");
+  assert.equal(body.periods.days30.costCoverage, 0);
   assert.equal(body.models[0].id, "qwen3.8-flash@opencode-go");
+  assert.equal(body.modelPeriods.today.models[0].id, "qwen3.8-flash@opencode-go");
   assert.doesNotMatch(JSON.stringify(body), /sessionId|threadId|prompt|outputText/);
 });
 
