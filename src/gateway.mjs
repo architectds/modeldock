@@ -40,9 +40,15 @@ const HOSTED_TOOL_TYPES = new Set([
   "image_generation",
 ]);
 
-// Tools that hand the model bytes it cannot interpret (text-only main models).
-// The vision path is vision_inspect or direct image escalation, not view_image.
+// Visual tools are complementary, not redundant. Text-only models delegate to
+// vision_inspect and cannot use view_image pixels. Vision-capable models inspect
+// pixels through view_image/preview_images and must not delegate the same work to
+// the configured fallback model.
 const TEXT_MODEL_HIDDEN_TOOLS = new Set(["view_image"]);
+const VISION_MODEL_HIDDEN_TOOLS = new Set([
+  "vision_inspect",
+  "mcp__modeldock__vision_inspect",
+]);
 
 // Local backends (llama.cpp / Ollama) run on a small context window; Codex
 // sends 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and,
@@ -83,9 +89,11 @@ export const LOCAL_TOOL_ALLOWLIST = new Set([
   "mcp__modeldock__store_memory",
   "mcp__modeldock__web_search_exa",
   "mcp__modeldock__vision_inspect",
+  "mcp__modeldock__preview_images",
   "mcp__modeldock__image_gen",
   "mcp__modeldock__speak",
   "mcp__modeldock__hear",
+  "view_image",
   // Let the model stop and ask the user when it is stuck; cheap and flat.
   "request_user_input",
   // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
@@ -1232,7 +1240,7 @@ const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating mem
 // ModelDock's own base instructions are shortened for small local models. The
 // long text-only vision preamble is disproportionate for a small context.
 const VERBOSE_VISION_GUIDANCE =
-  /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?view_image is only for showing the human the file\./g;
+  /Vision guidance \(MANDATORY\): you are a TEXT-ONLY model[\s\S]*?(?:view_image is only for showing the human the file\.|act only on the text finding returned by vision_inspect\.)/g;
 const VERBOSE_ACTION_RULE =
   /IMPORTANT: To perform any action[\s\S]*?re-emit the call\./g;
 const VERBOSE_RESTART =
@@ -1461,9 +1469,14 @@ export function localWarmBaseFromSessionOpening({ config, model, opening } = {})
   };
   payload = normalizePayloadForRoute(config, model, payload);
   const profile = profileById(target.provider);
+  const modelEntry = modelEntryFor(config, model) || {};
   const policy = applyToolPolicy(payload.tools, {
     allowToolNames: LOCAL_TOOL_ALLOWLIST,
-    hiddenToolNames: profile.hiddenToolNames,
+    hiddenToolNames: hiddenToolNamesForModel({
+      supportsVision: Boolean(modelEntry.supportsVision),
+      modelHiddenToolNames: modelEntry.hiddenToolNames,
+      profileHiddenToolNames: profile.hiddenToolNames,
+    }),
     blockedToolTypes: profile.blockedToolTypes,
     hostedToolTypes: profile.hostedToolTypes,
     customToolsAsFunctions: profile.customToolsAsFunctions,
@@ -2094,6 +2107,19 @@ export function applyToolPolicy(tools, {
     out.push(tool.type === "function" ? normalizeFunctionTool(tool) : tool);
   }
   return { tools: out, stripped, namespaces, customToolNames };
+}
+
+export function hiddenToolNamesForModel({ supportsVision = false, modelHiddenToolNames, profileHiddenToolNames } = {}) {
+  const configured = modelHiddenToolNames ?? profileHiddenToolNames;
+  const hidden = new Set(configured || (supportsVision ? VISION_MODEL_HIDDEN_TOOLS : TEXT_MODEL_HIDDEN_TOOLS));
+  if (supportsVision) {
+    hidden.delete("view_image");
+    hidden.add("vision_inspect");
+    hidden.add("mcp__modeldock__vision_inspect");
+  } else {
+    hidden.add("view_image");
+  }
+  return hidden;
 }
 
 // Codex splits an MCP tool call across two fields: `name` is the bare tool name
@@ -3917,7 +3943,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
-    hiddenToolNames: modelToolPolicy.hiddenToolNames ?? routedProfile.hiddenToolNames,
+    hiddenToolNames: hiddenToolNamesForModel({
+      supportsVision: modelSupportsVision(route.model),
+      modelHiddenToolNames: modelToolPolicy.hiddenToolNames,
+      profileHiddenToolNames: routedProfile.hiddenToolNames,
+    }),
     blockedToolTypes: modelToolPolicy.blockedToolTypes ?? routedProfile.blockedToolTypes,
     hostedToolTypes: modelToolPolicy.hostedToolTypes ?? routedProfile.hostedToolTypes,
     customToolsAsFunctions: modelToolPolicy.customToolsAsFunctions ?? routedProfile.customToolsAsFunctions,

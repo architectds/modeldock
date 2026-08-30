@@ -161,7 +161,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     }
     if (body.stream !== true || body.stream_options?.include_usage !== true || !Array.isArray(body.tools) || body.tools.length !== 162 || body.tools.some((tool) => tool?.type !== "function" || !tool.function?.name)) {
       res.writeHead(400, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: "missing Go Chat stream contract" }));
+      res.end(JSON.stringify({ error: "missing Go Chat stream contract", toolCount: body.tools?.length }));
       return;
     }
     const toolIds = new Set(body.messages.filter((message) => message.role === "tool").map((message) => message.tool_call_id));
@@ -230,7 +230,9 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       body: JSON.stringify({ ...fixture.request, model: "qwen3.8-flash@opencode-go", stream, input }),
     });
     const text = await response.text();
-    assert.equal(response.status, 200, `built bundle rejected the full package: ${text}\n${stderr}`);
+    const rejectedTools = requests.at(-1)?.tools || [];
+    const rejectedNames = rejectedTools.map((tool) => tool?.function?.name).filter(Boolean);
+    assert.equal(response.status, 200, `built bundle rejected the full package with ${rejectedTools.length} tools (view_image=${rejectedNames.includes("view_image")}, vision_inspect=${rejectedNames.some((name) => name.endsWith("vision_inspect"))}): ${text}\n${stderr}`);
     return text;
   };
   const first = await send(fixture.request.input, "full-go-chat-fixture");
@@ -239,7 +241,14 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   assert.match(first, /call_go_b/);
   assert.match(first, /response\.reasoning_text\.done/);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].tools.length, 162, "only the two universally unsupported hosted tools are removed before the generic Chat bridge");
+  assert.equal(requests[0].tools.length, 162, "the unsupported hosted tool and delegated vision tool are removed for a visual Chat model");
+  const firstToolNames = new Set(requests[0].tools.map((tool) => tool.function.name));
+  assert.ok(firstToolNames.has("view_image"), "the visual Chat model keeps direct image inspection");
+  assert.equal(
+    [...firstToolNames].some((name) => name === "vision_inspect" || name.endsWith("__vision_inspect")),
+    false,
+    "the visual Chat model never receives the delegated vision tool",
+  );
   const firstOutput = completedResponse(first).output;
   assert.deepEqual(firstOutput.map((item) => item.type), ["reasoning", "function_call", "function_call"]);
   const firstTurn = [

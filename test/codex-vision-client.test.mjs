@@ -326,6 +326,11 @@ test("current installed Codex sends bounded Qwen images directly and after nodeR
   assert.match(direct.stdout, live ? /LEFT_RED_RIGHT_BLUE/ : /DIRECT_IMAGE_OK/);
   assert.ok(requests.direct.length >= 1, "the direct Codex image turn must reach the upstream");
   assert.ok(requests.direct[0].tools.length > 100, `the live client sent only ${requests.direct[0].tools.length} tools`);
+  const directToolNames = new Set(requests.direct[0].tools.map((tool) => tool?.function?.name).filter(Boolean));
+  const hasDirectTool = (name) => [...directToolNames].some((toolName) => toolName === name || toolName.endsWith(`__${name}`));
+  assert.ok(hasDirectTool("view_image"), "a vision model receives Codex's direct image viewer");
+  assert.ok(hasDirectTool("preview_images"), "a vision model receives bounded local image previews");
+  assert.equal(hasDirectTool("vision_inspect"), false, "a vision model does not receive the delegated vision tool");
   const directImages = imageUrls(requests.direct[0]);
   assert.equal(directImages.length, 1);
   assert.match(directImages[0], /^data:image\/jpeg;base64,/);

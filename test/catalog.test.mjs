@@ -105,7 +105,13 @@ test("catalogFor writes per-model base instructions for vision capability", () =
   assert.ok(text && vision && flashVision, "both DeepSeek Flash variants and a vision-capable entry are published");
   assert.deepEqual(text.input_modalities, ["text", "image"], "Flash accepts attachments through the visual fallback");
   assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
+  assert.match(text.base_instructions, /view_image is intentionally unavailable/);
+  assert.match(text.base_instructions, /preview_images/);
   assert.ok(!vision.base_instructions.includes("TEXT-ONLY"), "vision-capable models are not told they are text-only");
+  assert.match(vision.base_instructions, /inspect image pixels directly/);
+  assert.match(vision.base_instructions, /view_image/);
+  assert.match(vision.base_instructions, /preview_images/);
+  assert.doesNotMatch(vision.base_instructions, /`vision <path> <question>`/);
   assert.deepEqual(flashVision.input_modalities, ["text", "image"], "OpenCode Go Flash Vision Exp declares image input");
   assert.ok(!flashVision.base_instructions.includes("TEXT-ONLY"), "OpenCode Go Flash Vision Exp receives direct-vision instructions");
 });
@@ -214,7 +220,11 @@ test("baseInstructionsFor takes the vision capability explicitly, not from mainM
   const text = baseInstructionsFor(configStub());
   const vision = baseInstructionsFor(configStub(), { supportsVision: true });
   assert.match(text, /TEXT-ONLY model and CANNOT see images/);
+  assert.match(text, /`vision <path> <question>`/);
   assert.doesNotMatch(vision, /TEXT-ONLY model and CANNOT see images/);
+  assert.match(vision, /inspect image pixels directly/);
+  assert.match(vision, /`preview <path> \[path \.\.\.\]`/);
+  assert.doesNotMatch(vision, /`vision <path> <question>`/);
 });
 
 test("baseInstructionsFor never prescribes image generation for frontend work", () => {

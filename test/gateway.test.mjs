@@ -22,6 +22,7 @@ import {
   dropUnpairedToolItems,
   encodeCompactionSummary,
   freeResponseFailure,
+  hiddenToolNamesForModel,
   hydrateImageRefsForVision,
   hoistLocalSystem,
   isCompactV1Request,
@@ -914,15 +915,37 @@ test("applyToolPolicy strips hosted tool schemas", () => {
   assert.equal(stripped.toolSearch + stripped.webSearch + stripped.otherHosted, 3);
 });
 
-test("applyToolPolicy hides view_image for text-only models", () => {
+test("visual tool policy separates direct inspection from delegated inspection", () => {
   const tools = [
     { type: "function", name: "view_image", parameters: {} },
-    { type: "function", name: "vision_inspect", parameters: {} },
+    { type: "function", name: "mcp__modeldock__vision_inspect", parameters: {} },
+    {
+      type: "namespace",
+      name: "mcp__modeldock__",
+      tools: [
+        { name: "preview_images", inputSchema: { type: "object" } },
+        { name: "vision_inspect", inputSchema: { type: "object" } },
+      ],
+    },
   ];
-  const { tools: kept, stripped } = applyToolPolicy(tools);
-  assert.equal(kept.length, 1);
-  assert.equal(kept[0].name, "vision_inspect");
-  assert.equal(stripped.hidden, 1);
+  const text = applyToolPolicy(tools, {
+    hiddenToolNames: hiddenToolNamesForModel({ supportsVision: false }),
+  });
+  assert.deepEqual(text.tools.map((tool) => tool.name), [
+    "mcp__modeldock__vision_inspect",
+    "mcp__modeldock__preview_images",
+    "mcp__modeldock__vision_inspect",
+  ]);
+  assert.equal(text.stripped.hidden, 1);
+
+  const vision = applyToolPolicy(tools, {
+    hiddenToolNames: hiddenToolNamesForModel({ supportsVision: true }),
+  });
+  assert.deepEqual(vision.tools.map((tool) => tool.name), [
+    "view_image",
+    "mcp__modeldock__preview_images",
+  ]);
+  assert.equal(vision.stripped.hidden, 2);
 });
 
 test("applyToolPolicy reuses an already-valid ordinary function descriptor", () => {

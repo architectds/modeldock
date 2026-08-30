@@ -60,7 +60,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
         {
           title: "Vision Inspect",
           description:
-            "Inspect an image attachment referenced by image_ref. Use this before making claims about screenshots, OCR, UI layout, charts, or image comparisons.",
+            "Delegate image inspection to the configured vision model. This is the visual path for text-only models; a model that can inspect image pixels itself should use view_image or preview_images instead.",
           inputSchema: z.object({
             image_ref: z.string().startsWith("img_").optional().describe("Image reference inserted into the conversation by the Responses gate"),
             compare_image_ref: z.string().startsWith("img_").optional().describe("Optional second image for compare mode"),
@@ -85,7 +85,7 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
           {
             title: "Preview Local Images",
             description:
-              "Attach local PNG/JPEG screenshots as bounded conversation previews instead of emitting full-size pixels. Compressed previews prefer the 200-600 KiB range and never exceed 1 MiB; already-small images are not enlarged. The returned original_ref preserves access to the full image for vision_inspect. Use this for local screenshots and rendered UI frames that need to enter the conversation.",
+              "Attach local PNG/JPEG screenshots as bounded conversation previews so a vision-capable model can inspect them directly. Compressed previews prefer the 200-600 KiB range and never exceed 1 MiB; already-small images are not enlarged. The returned original_ref preserves access to the full image when a later text-only route needs delegated inspection.",
             inputSchema: z.object({
               paths: z.array(z.string().min(1)).min(1).max(20).describe("Absolute local paths of PNG/JPEG screenshots, in display order"),
             }),
