@@ -186,11 +186,13 @@ globalThis.fetch = (input, init) => {
   const outbound = seen[0];
   assert.equal(outbound.model, "grok-4.5", "the provider sees the unqualified upstream id");
   assert.equal(outbound.include, undefined, "xAI must not receive Codex's encrypted-content include option");
-  assert.equal(outbound.tools.length, fixture.request.tools.length, "dialect cleanup must retain every compatible tool descriptor");
-  assert.deepEqual(
-    outbound.tools.map((tool) => tool.name),
-    fixture.request.tools.map((tool) => tool.name),
-    "the full Codex tool list must not be silently truncated",
+  assert.equal(outbound.tools.length, fixture.request.tools.length - 1, "a visual xAI model removes only the delegated vision tool");
+  const outboundToolNames = new Set(outbound.tools.map((tool) => tool.name).filter(Boolean));
+  assert.ok(outboundToolNames.has("view_image"), "the visual xAI model keeps direct image inspection");
+  assert.equal(
+    [...outboundToolNames].some((name) => name === "vision_inspect" || name.endsWith("__vision_inspect")),
+    false,
+    "the visual xAI model never receives the delegated vision tool",
   );
 
 });
