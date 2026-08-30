@@ -2,10 +2,15 @@
 // arithmetic and the retention both have to hold.
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   ROLLUP_DAYS,
+  ROLLUP_HOURS,
   emptyRollup,
   foldEvents,
+  foldUsageFile,
   pruneRollup,
   rollupKey,
   rollupTotals,
@@ -81,6 +86,19 @@ test("the window keeps exactly ROLLUP_DAYS days", () => {
   }
   pruneRollup(rollup, "2026-08-18T00:00:00.000Z");
   assert.equal(Object.keys(rollup.days).length, ROLLUP_DAYS);
+});
+
+test("the rolling view keeps exactly ROLLUP_HOURS hourly buckets", () => {
+  const now = new Date("2026-08-18T12:30:00.000Z");
+  const lines = [];
+  for (let index = 29; index >= 0; index -= 1) {
+    const at = new Date(now);
+    at.setUTCHours(at.getUTCHours() - index);
+    lines.push(event(at.toISOString()));
+  }
+  const { rollup } = foldEvents(emptyRollup(), lines, { now: now.toISOString() });
+  assert.equal(Object.keys(rollup.hours).length, ROLLUP_HOURS);
+  assert.equal(Object.keys(rollup.hours).sort()[0], "2026-08-17T13:00:00.000Z");
 });
 
 test("totals divide sums, never averaging an average", () => {
@@ -201,8 +219,11 @@ test("stats expose bounded today, seven-day, and thirty-day completed usage", ()
 
   assert.equal(stats.timezone, "UTC");
   assert.equal(stats.days.length, ROLLUP_DAYS);
+  assert.equal(stats.hours.length, ROLLUP_HOURS);
   assert.equal(stats.days.at(-1).day, "2026-08-18");
+  assert.equal(stats.hours.at(-1).hour, "2026-08-18T12:00:00.000Z");
   assert.equal(stats.periods.today.totalTokens, 550);
+  assert.equal(stats.periods.hours24.totalTokens, 550);
   assert.equal(stats.periods.today.completedRequests, 1, "failed traffic is not presented as completed work");
   assert.equal(stats.periods.days7.totalTokens, 880);
   assert.equal(stats.periods.days30.cachedTokens, 500);
@@ -212,7 +233,43 @@ test("stats expose bounded today, seven-day, and thirty-day completed usage", ()
   assert.ok(Math.abs(stats.periods.days30.estimatedApiCostUsd - 0.0000329) < 1e-12);
   assert.equal(stats.periods.days30.costCoverage, 1);
   assert.equal(stats.modelPeriods.today.models[0].totalTokens, 550);
+  assert.equal(stats.modelPeriods.hours24.models[0].totalTokens, 550);
   assert.equal(stats.modelPeriods.days7.models[0].totalTokens, 880);
+});
+
+test("the 1D stats window is twenty-four UTC hours rather than one daily bucket", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-17T12:59:59.999Z", { inputTokens: 1000, outputTokens: 0 }),
+    event("2026-08-17T13:00:00.000Z", { inputTokens: 200, outputTokens: 20 }),
+    event("2026-08-18T12:15:00.000Z", { inputTokens: 300, outputTokens: 30 }),
+  ], { now: "2026-08-18T12:30:00.000Z" });
+  const stats = usageStats(rollup, "2026-08-18T12:30:00.000Z");
+
+  assert.equal(stats.hours.length, 24);
+  assert.equal(stats.hours[0].hour, "2026-08-17T13:00:00.000Z");
+  assert.equal(stats.hours.at(-1).hour, "2026-08-18T12:00:00.000Z");
+  assert.equal(stats.periods.hours24.totalTokens, 550, "the hour before the rolling window is excluded");
+});
+
+test("an existing daily-only rollup backfills recent hours without recounting days", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-hour-backfill-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage-events.jsonl");
+  const lines = [
+    event("2026-08-18T10:05:00.000Z", { inputTokens: 200, outputTokens: 20 }),
+    event("2026-08-18T11:05:00.000Z", { inputTokens: 300, outputTokens: 30 }),
+  ];
+  writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
+  const existing = foldEvents(emptyRollup(), lines, { now: "2026-08-18T11:30:00.000Z" }).rollup;
+  const dailyTotal = existing.days["2026-08-18"]["deepseek-v4-flash@opencode-go"].in;
+  delete existing.hours;
+
+  const result = foldUsageFile(existing, file, { now: "2026-08-18T12:00:00.000Z" });
+  assert.equal(result.folded, 0, "already-folded daily events stay idempotent");
+  assert.equal(result.changed, true, "the migration writes the reconstructed hourly view");
+  assert.equal(result.rollup.days["2026-08-18"]["deepseek-v4-flash@opencode-go"].in, dailyTotal);
+  assert.equal(result.rollup.hours["2026-08-18T10:00:00.000Z"]["deepseek-v4-flash@opencode-go"].in, 200);
+  assert.equal(result.rollup.hours["2026-08-18T11:00:00.000Z"]["deepseek-v4-flash@opencode-go"].in, 300);
 });
 
 test("stats keep unknown provider traffic visible without inventing a price", () => {

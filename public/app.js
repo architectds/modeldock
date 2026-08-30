@@ -1927,7 +1927,8 @@ async function renderModelRoster() {
 
 // --- Stats: one server-bounded 30-day aggregate snapshot. ---
 // No browser history is accumulated here. Entering the tab replaces at most
-// thirty daily bars and seven model rows from /api/stats.
+// thirty daily bars (or twenty-four hourly bars) and seven model rows from
+// /api/stats.
 let lastStats = null;
 let statsLoadedAt = 0;
 let statsRangeDays = 30;
@@ -1937,6 +1938,12 @@ function statsDayLabel(day) {
   return new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
 }
 
+function statsHourLabel(hour) {
+  return new Intl.DateTimeFormat(getLang(), {
+    month: "short", day: "numeric", hour: "2-digit", hourCycle: "h23", timeZone: "UTC",
+  }).format(new Date(hour));
+}
+
 function statsEmpty(host) {
   const empty = document.createElement("p");
   empty.className = "stats-empty";
@@ -1944,7 +1951,9 @@ function statsEmpty(host) {
   host.replaceChildren(empty);
 }
 
-function renderDailyStats(hostId, days, { valueFor, titleFor, segmentsFor, renderZero = false } = {}) {
+function renderDailyStats(hostId, days, {
+  valueFor, titleFor, segmentsFor, labelFor = (day) => statsDayLabel(day.day), renderZero = false,
+} = {}) {
   const host = $(hostId);
   if (!host) return;
   const values = days.map((day) => Math.max(0, Number(valueFor(day)) || 0));
@@ -1985,7 +1994,11 @@ function renderDailyStats(hostId, days, { valueFor, titleFor, segmentsFor, rende
   });
   const axis = document.createElement("div");
   axis.className = "stats-axis";
-  axis.append(document.createTextNode(statsDayLabel(days[0].day)), document.createTextNode(statsDayLabel(days.at(-1).day)));
+  const first = document.createElement("span");
+  first.textContent = labelFor(days[0]);
+  const last = document.createElement("span");
+  last.textContent = labelFor(days.at(-1));
+  axis.append(first, last);
   host.replaceChildren(plot, axis);
 }
 
@@ -2028,7 +2041,7 @@ function paintStatsRange() {
 function renderStats(data) {
   if (!data) return;
   lastStats = data;
-  const periodKey = statsRangeDays === 1 ? "today" : statsRangeDays === 7 ? "days7" : "days30";
+  const periodKey = statsRangeDays === 1 ? "hours24" : statsRangeDays === 7 ? "days7" : "days30";
   const period = data.periods?.[periodKey] || {};
   set("stats-input", number(period.inputTokens));
   set("stats-output", number(period.outputTokens));
@@ -2042,25 +2055,30 @@ function renderStats(data) {
     ? t("stats.updated", { time: new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }).format(new Date(updated)) })
     : t("stats.notUpdated"));
 
-  const days = [...(data.days || [])].slice(-statsRangeDays);
+  const hourly = statsRangeDays === 1;
+  const days = hourly ? [...(data.hours || [])] : [...(data.days || [])].slice(-statsRangeDays);
+  const labelFor = hourly ? (entry) => statsHourLabel(entry.hour) : (entry) => statsDayLabel(entry.day);
   renderDailyStats("stats-token-chart", days, {
     valueFor: (day) => day.totalTokens,
     titleFor: (day) => t("stats.dayTokens", {
-      day: statsDayLabel(day.day), newInput: number(day.newInputTokens), cached: number(day.cachedTokens), output: number(day.outputTokens),
+      day: labelFor(day), newInput: number(day.newInputTokens), cached: number(day.cachedTokens), output: number(day.outputTokens),
     }),
     segmentsFor: (day) => [
       { className: "new-input", value: day.newInputTokens },
       { className: "cached-input", value: day.cachedTokens },
       { className: "output", value: day.outputTokens },
     ],
+    labelFor,
   });
   renderDailyStats("stats-request-chart", days, {
     valueFor: (day) => day.completedRequests,
-    titleFor: (day) => t("stats.dayRequests", { day: statsDayLabel(day.day), value: number(day.completedRequests) }),
+    titleFor: (day) => t("stats.dayRequests", { day: labelFor(day), value: number(day.completedRequests) }),
+    labelFor,
   });
   renderDailyStats("stats-spend-chart", days, {
     valueFor: (day) => day.estimatedApiCostUsd,
-    titleFor: (day) => t("stats.daySpend", { day: statsDayLabel(day.day), value: usd(day.estimatedApiCostUsd, { compact: false }) }),
+    titleFor: (day) => t("stats.daySpend", { day: labelFor(day), value: usd(day.estimatedApiCostUsd, { compact: false }) }),
+    labelFor,
     renderZero: true,
   });
   const modelPeriod = data.modelPeriods?.[periodKey];

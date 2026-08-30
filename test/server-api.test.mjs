@@ -436,16 +436,17 @@ test("api/stats returns bounded aggregate usage without request identity", async
   const usageRollupFile = path.join(dir, "usage-rollup.json");
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
+  const hour = `${now.toISOString().slice(0, 13)}:00:00.000Z`;
+  const usage = {
+    "qwen3.8-flash@opencode-go": {
+      requests: 2, ok: 2, in: 1200, out: 300, cached: 900, ms: 5000, okOut: 300, okMs: 5000,
+    },
+  };
   await writeFile(usageRollupFile, JSON.stringify({
     version: 2,
     lastFoldedAt: now.toISOString(),
-    days: {
-      [day]: {
-        "qwen3.8-flash@opencode-go": {
-          requests: 2, ok: 2, in: 1200, out: 300, cached: 900, ms: 5000, okOut: 300, okMs: 5000,
-        },
-      },
-    },
+    days: { [day]: usage },
+    hours: { [hour]: usage },
   }), "utf8");
   const instance = await startApp({ usageRollupFile });
   t.after(instance.stop);
@@ -454,12 +455,15 @@ test("api/stats returns bounded aggregate usage without request identity", async
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.days.length, 30);
+  assert.equal(body.hours.length, 24);
   assert.equal(body.periods.today.totalTokens, 1500);
+  assert.equal(body.periods.hours24.totalTokens, 1500);
   assert.equal(body.periods.days30.completedRequests, 2);
   assert.equal(body.periods.days30.estimatedApiCostUsd, 0, "unknown prices remain explicit zero estimates");
   assert.equal(body.periods.days30.costCoverage, 0);
   assert.equal(body.models[0].id, "qwen3.8-flash@opencode-go");
   assert.equal(body.modelPeriods.today.models[0].id, "qwen3.8-flash@opencode-go");
+  assert.equal(body.modelPeriods.hours24.models[0].id, "qwen3.8-flash@opencode-go");
   assert.doesNotMatch(JSON.stringify(body), /sessionId|threadId|prompt|outputText/);
 });
 

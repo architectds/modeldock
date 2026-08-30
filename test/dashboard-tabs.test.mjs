@@ -110,17 +110,29 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
   });
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
+  const currentHour = `${now.toISOString().slice(0, 13)}:00:00.000Z`;
   const yesterdayDate = new Date(now);
   yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
   const yesterday = yesterdayDate.toISOString().slice(0, 10);
+  const olderDate = new Date(now);
+  olderDate.setUTCDate(olderDate.getUTCDate() - 8);
+  const older = olderDate.toISOString().slice(0, 10);
   writeFileSync(services.usageRollupFile, JSON.stringify({
     version: 2,
     lastFoldedAt: now.toISOString(),
     days: {
+      [older]: {
+        "gpt-5.6-sol@openai": { requests: 4, ok: 4, in: 1_000_000, out: 100_000, cached: 0, ms: 10_000, okOut: 100_000, okMs: 10_000 },
+      },
       [yesterday]: {
-        "deepseek-v4-flash@opencode-go": { requests: 3, ok: 3, in: 9000, out: 900, cached: 6000, ms: 9000, okOut: 900, okMs: 9000 },
+        "deepseek-v4-flash@opencode-go": { requests: 3, ok: 3, in: 9_000_000, out: 900_000, cached: 6_000_000, ms: 9000, okOut: 900_000, okMs: 9000 },
       },
       [today]: {
+        "qwen3.8-flash@opencode-go": { requests: 2, ok: 2, in: 8000, out: 600, cached: 5000, ms: 6000, okOut: 600, okMs: 6000 },
+      },
+    },
+    hours: {
+      [currentHour]: {
         "qwen3.8-flash@opencode-go": { requests: 2, ok: 2, in: 8000, out: 600, cached: 5000, ms: 6000, okOut: 600, okMs: 6000 },
       },
     },
@@ -371,7 +383,8 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
         spendDays: document.querySelectorAll('#stats-spend-chart .stats-day').length,
         models: document.querySelectorAll('#stats-model-chart .stats-share-row').length,
       })`));
-      assert.deepEqual(bounded, { tokenDays: 30, requestDays: 30, spendDays: 30, models: 2 }, "Stats replaces one bounded 30-day snapshot instead of growing with polls");
+      assert.deepEqual(bounded, { tokenDays: 30, requestDays: 30, spendDays: 30, models: 3 }, "Stats replaces one bounded 30-day snapshot instead of growing with polls");
+      const costsByRange = new Map();
       for (const range of [7, 1, 30]) {
         await evaluate(`document.querySelector('[data-stats-range="${range}"]').click()`);
         await sleep(50);
@@ -382,16 +395,27 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
           models: document.querySelectorAll('#stats-model-chart .stats-share-row').length,
           windows: [...document.querySelectorAll('[data-stats-window]')].map((node) => node.textContent),
           activeRange: document.querySelector('[data-stats-range].is-active')?.dataset.statsRange,
+          cost: document.getElementById('stats-cost')?.textContent,
         })`));
+        costsByRange.set(range, filtered.cost);
+        const expectedPoints = range === 1 ? 24 : range;
         assert.deepEqual(filtered, {
-          tokenDays: range,
-          requestDays: range,
-          spendDays: range,
-          models: range === 1 ? 1 : 2,
+          tokenDays: expectedPoints,
+          requestDays: expectedPoints,
+          spendDays: expectedPoints,
+          models: range === 1 ? 1 : range === 7 ? 2 : 3,
           windows: Array(filtered.windows.length).fill(`${range}D`),
           activeRange: String(range),
+          cost: filtered.cost,
         }, `Stats ${range}D filter must update every aggregate and chart together`);
+        if (range === 1) {
+          const axisLabels = JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('#stats-token-chart .stats-axis span')].map((node) => node.textContent))`));
+          assert.equal(axisLabels.length, 2);
+          assert.notEqual(axisLabels[0], axisLabels[1], "the 1D axis spans twenty-four hours instead of repeating one date");
+        }
       }
+      assert.equal(new Set(costsByRange.values()).size, 3,
+        `Stats range must change the API-cost value, got ${JSON.stringify(Object.fromEntries(costsByRange))}`);
     }
 
     // 2. Nothing is on screen that is a translation key rather than a

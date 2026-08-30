@@ -1,4 +1,5 @@
-// Thirty-day usage per model, kept as daily sums.
+// Thirty-day usage per model, kept as daily sums, plus a bounded rolling
+// twenty-four-hour view for the dashboard's 1D chart.
 //
 // The Models page cannot read this off the event log: usage-events.jsonl
 // rotates at 5 MB keeping at most two files, which on a working machine is
@@ -25,6 +26,7 @@ import { stateFile } from "./state-dir.mjs";
 const MAX_PLAUSIBLE_TPS = 400;
 
 export const ROLLUP_DAYS = 30;
+export const ROLLUP_HOURS = 24;
 // Heat for picker ordering: each day's request total is weighted
 // down by how far back it sits, so a model you start using this week rises in
 // days instead of having to out-count a month of old traffic. Days use the same
@@ -40,14 +42,20 @@ export function usageRollupPath() {
 }
 
 export function emptyRollup() {
-  return { version: ROLLUP_VERSION, lastFoldedAt: "", days: {} };
+  return { version: ROLLUP_VERSION, lastFoldedAt: "", days: {}, hours: {} };
 }
 
 export function readRollup(file = usageRollupPath()) {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     if (parsed?.version !== ROLLUP_VERSION || !parsed.days) return emptyRollup();
-    return parsed;
+    return {
+      ...parsed,
+      // v2 initially carried only daily buckets. Keep those thirty days and
+      // let foldUsageFile backfill this optional bounded view from the event
+      // log instead of invalidating the whole rollup on upgrade.
+      hours: parsed.hours && typeof parsed.hours === "object" ? parsed.hours : {},
+    };
   } catch {
     return emptyRollup();
   }
@@ -62,6 +70,10 @@ export function writeRollup(file, rollup) {
 }
 
 const dayOf = (iso) => String(iso || "").slice(0, 10);
+const hourOf = (iso) => {
+  const value = String(iso || "");
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:/.test(value) ? `${value.slice(0, 13)}:00:00.000Z` : "";
+};
 
 // The key is the published slug: two providers can serve a model of the same
 // name (deepseek-v4-flash is on both opencode-go and deepseek-official) and
@@ -101,8 +113,9 @@ function addEvent(bucket, event) {
 // ten minutes that trade is not worth the bookkeeping. Correctness rests on a
 // timestamp filter, which is idempotent, plus the fact that two rotations
 // cannot happen inside one interval - 5 MB is about a week of traffic.
-export function foldEvents(rollup, lines, { now = "" } = {}) {
+export function foldEvents(rollup, lines, { now = "", recordHours = true } = {}) {
   const since = rollup.lastFoldedAt || "";
+  rollup.hours = rollup.hours && typeof rollup.hours === "object" ? rollup.hours : {};
   let latest = since;
   let folded = 0;
   for (const line of lines) {
@@ -117,6 +130,8 @@ export function foldEvents(rollup, lines, { now = "" } = {}) {
     if (!at || at <= since) continue;
     const day = dayOf(at);
     rollup.days[day] = addEvent(rollup.days[day] || {}, event);
+    const hour = hourOf(at);
+    if (recordHours && hour) rollup.hours[hour] = addEvent(rollup.hours[hour] || {}, event);
     if (at > latest) latest = at;
     folded += 1;
   }
@@ -127,12 +142,25 @@ export function foldEvents(rollup, lines, { now = "" } = {}) {
 
 export function pruneRollup(rollup, nowIso) {
   const days = Object.keys(rollup.days).sort();
-  if (!days.length) return rollup;
-  const newest = dayOf(nowIso) || days[days.length - 1];
-  const cutoff = new Date(`${newest}T00:00:00Z`);
-  cutoff.setUTCDate(cutoff.getUTCDate() - (ROLLUP_DAYS - 1));
-  const oldest = cutoff.toISOString().slice(0, 10);
-  for (const day of days) if (day < oldest) delete rollup.days[day];
+  if (days.length) {
+    const newest = dayOf(nowIso) || days[days.length - 1];
+    const cutoff = new Date(`${newest}T00:00:00Z`);
+    cutoff.setUTCDate(cutoff.getUTCDate() - (ROLLUP_DAYS - 1));
+    const oldest = cutoff.toISOString().slice(0, 10);
+    for (const day of days) if (day < oldest) delete rollup.days[day];
+  }
+
+  rollup.hours = rollup.hours && typeof rollup.hours === "object" ? rollup.hours : {};
+  const hours = Object.keys(rollup.hours).sort();
+  const newestHour = hourOf(nowIso) || hours.at(-1) || "";
+  const newestMs = Date.parse(newestHour);
+  if (Number.isFinite(newestMs)) {
+    const oldestMs = newestMs - ((ROLLUP_HOURS - 1) * 60 * 60 * 1000);
+    for (const hour of hours) {
+      const value = Date.parse(hour);
+      if (!Number.isFinite(value) || value < oldestMs || value > newestMs) delete rollup.hours[hour];
+    }
+  }
   return rollup;
 }
 
@@ -247,6 +275,13 @@ function shiftedUtcDay(day, offset) {
   return value.toISOString().slice(0, 10);
 }
 
+function shiftedUtcHour(now, offset) {
+  const value = new Date(now);
+  value.setUTCMinutes(0, 0, 0);
+  value.setUTCHours(value.getUTCHours() + offset);
+  return value.toISOString();
+}
+
 function modelParts(key) {
   const split = String(key || "unknown@unknown").lastIndexOf("@");
   return split > 0
@@ -270,10 +305,10 @@ function addPricedStatsRow(target, key, source = {}) {
   return target;
 }
 
-function statsModelsForDays(rollup, retainedDays) {
+function statsModelsForBuckets(buckets, retainedKeys) {
   const byModel = new Map();
-  for (const [day, bucket] of Object.entries(rollup?.days || {})) {
-    if (!retainedDays.has(day)) continue;
+  for (const [bucketKey, bucket] of Object.entries(buckets || {})) {
+    if (!retainedKeys.has(bucketKey)) continue;
     for (const [key, entry] of Object.entries(bucket || {})) {
       const raw = byModel.get(key) || emptyStatsRow();
       addPricedStatsRow(raw, key, entry);
@@ -293,8 +328,8 @@ function statsModelsForDays(rollup, retainedDays) {
 }
 
 // Aggregate-only dashboard data. The response is deliberately derived from the
-// bounded daily rollup rather than the raw event log, so session/thread ids and
-// every other per-request detail stay on disk and never reach the browser.
+// bounded daily/hourly rollup rather than the raw event log, so session/thread
+// ids and every other per-request detail stay on disk and never reach the browser.
 // `completedRequests` uses the durable success count; incomplete failure
 // metering therefore cannot turn into a misleading success-rate claim.
 export function usageStats(rollup, now = new Date().toISOString()) {
@@ -309,24 +344,39 @@ export function usageStats(rollup, now = new Date().toISOString()) {
     days.push({ day, ...finishStatsRow(raw) });
   }
 
+  const rawHours = [];
+  const hours = [];
+  for (let offset = -(ROLLUP_HOURS - 1); offset <= 0; offset += 1) {
+    const hour = shiftedUtcHour(now, offset);
+    const raw = emptyStatsRow();
+    for (const [key, entry] of Object.entries(rollup?.hours?.[hour] || {})) addPricedStatsRow(raw, key, entry);
+    rawHours.push(raw);
+    hours.push({ hour, ...finishStatsRow(raw) });
+  }
+
   const period = (count) => {
     const raw = emptyStatsRow();
     for (const row of rawDays.slice(-count)) addStatsRow(raw, row);
     return finishStatsRow(raw);
   };
 
+  const hours24 = emptyStatsRow();
+  for (const row of rawHours) addStatsRow(hours24, row);
+
   const modelPeriods = {
-    today: statsModelsForDays(rollup, new Set(days.slice(-1).map((entry) => entry.day))),
-    days7: statsModelsForDays(rollup, new Set(days.slice(-7).map((entry) => entry.day))),
-    days30: statsModelsForDays(rollup, new Set(days.map((entry) => entry.day))),
+    today: statsModelsForBuckets(rollup?.days, new Set(days.slice(-1).map((entry) => entry.day))),
+    hours24: statsModelsForBuckets(rollup?.hours, new Set(hours.map((entry) => entry.hour))),
+    days7: statsModelsForBuckets(rollup?.days, new Set(days.slice(-7).map((entry) => entry.day))),
+    days30: statsModelsForBuckets(rollup?.days, new Set(days.map((entry) => entry.day))),
   };
 
   return {
     timezone: "UTC",
     windowDays: ROLLUP_DAYS,
     updatedAt: String(rollup?.lastFoldedAt || ""),
-    periods: { today: period(1), days7: period(7), days30: period(ROLLUP_DAYS) },
+    periods: { today: period(1), hours24: finishStatsRow(hours24), days7: period(7), days30: period(ROLLUP_DAYS) },
     days,
+    hours,
     modelPeriods,
     // Current clients read these as the thirty-day view. Keep the aliases while
     // the range-aware dashboard rolls out; they carry no extra data.
@@ -344,9 +394,36 @@ function readLines(file) {
   }
 }
 
+function rebuildRecentHours(lines, now) {
+  const hours = {};
+  const newestHour = shiftedUtcHour(now, 0);
+  const newestMs = Date.parse(newestHour);
+  const oldestMs = newestMs - ((ROLLUP_HOURS - 1) * 60 * 60 * 1000);
+  for (const line of lines) {
+    if (!line) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const hour = hourOf(event?.at);
+    const value = Date.parse(hour);
+    if (!hour || !Number.isFinite(value) || value < oldestMs || value > newestMs) continue;
+    hours[hour] = addEvent(hours[hour] || {}, event);
+  }
+  return hours;
+}
+
 // The rotated half first: it holds the older events, and foldEvents only cares
 // that each line is newer than the last fold, not what order they arrive in.
 export function foldUsageFile(rollup, eventsFile, { now = new Date().toISOString() } = {}) {
   const lines = [...readLines(`${eventsFile}.1`), ...readLines(eventsFile)];
-  return foldEvents(rollup, lines, { now });
+  rollup.hours = rollup.hours && typeof rollup.hours === "object" ? rollup.hours : {};
+  const needsHourlyBackfill = Object.keys(rollup.hours).length === 0;
+  const rebuiltHours = needsHourlyBackfill ? rebuildRecentHours(lines, now) : null;
+  const backfilled = rebuiltHours && Object.keys(rebuiltHours).length > 0;
+  if (backfilled) rollup.hours = rebuiltHours;
+  const result = foldEvents(rollup, lines, { now, recordHours: !backfilled });
+  return { ...result, changed: result.folded > 0 || Boolean(backfilled) };
 }

@@ -3024,8 +3024,8 @@ export async function initAutostartDefault(autostart, {
 function foldUsageOnce(services) {
   try {
     const file = services.usageRollupFile || usageRollupPath();
-    const { rollup, folded } = foldUsageFile(readRollup(file), services.usageEventsFile || usageEventsPath());
-    if (folded) writeRollup(file, rollup);
+    const { rollup, folded, changed } = foldUsageFile(readRollup(file), services.usageEventsFile || usageEventsPath());
+    if (changed) writeRollup(file, rollup);
     return folded;
   } catch {
     // Reporting must never take the gateway down.

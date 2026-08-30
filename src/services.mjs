@@ -28,6 +28,7 @@ import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggl
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
+import { usageEventsPath } from "./usage-events.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
@@ -374,7 +375,9 @@ export function createServices(config = loadConfig()) {
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
-    usageRollupFile: rollupFile, modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
+    usageRollupFile: rollupFile,
+    usageEventsFile: mutableConfig.usageEventsFile || usageEventsPath(),
+    modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
   });

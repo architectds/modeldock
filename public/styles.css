@@ -1081,8 +1081,6 @@ body { padding-left: 88px; }
 .stats-share-track { height: 7px; overflow: hidden; border-radius: 99px; background: #22323f; }
 .stats-share-track i { display: block; height: 100%; border-radius: inherit; background: var(--violet); }
 .stats-share-value { overflow: hidden; color: var(--muted); font: 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
-.stats-privacy { margin-top: 14px; }
-
 @media (max-width: 900px) {
   .stats-grid { grid-template-columns: minmax(0, 1fr); }
   .stats-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
