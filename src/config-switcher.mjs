@@ -4,15 +4,11 @@ import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/pr
 import os from "node:os";
 import { defaultStateDir, stateDir } from "./state-dir.mjs";
 import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
-
-// The dashboard writes this agent file into <codexHome>/agents. Codex reads that
-// directory at startup, so it has to be removed on disable: the file pins
-// model_provider = "openai" to a ModelDock-published slug, and once the managed
-// openai_base_url is gone that provider means the real OpenAI backend, where the
-// slug does not exist. Codex then fails to start - "Off" leaving the app broken.
-// The name lives here rather than in server.mjs because disable() is what has to
-// clean it up, and one spelling is what keeps writer and remover in step.
-export const SUBAGENT_AGENT_FILE = "modeldock-subagent.toml";
+// The agent file that carries the Sub Agent pick. Read and written through the
+// module that owns its format; the switcher only removes it (Codex cannot start
+// with it present while unmanaged) and puts it back, so the pick is never a
+// second copy that can disagree - it is recovery material for a file it deleted.
+import { SUBAGENT_AGENT_FILE, readSubagentModel, writeSubagentAgentFile } from "./subagent-config.mjs";
 
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -524,6 +520,24 @@ export class CodexConfigSwitcher {
         originalHash: sha256(original),
         managedHash: sha256(managed),
       });
+      // Put back what the migration rewrite removed. enable() rewrites the managed
+      // config through disable() when the shape is old or the top-level model is a
+      // routed slug - which is every install that picked a routed main model - and
+      // that delete used to take the Sub Agent pick with it, silently, on the way
+      // to an upgrade. Only restore while nothing is there, so a pick the dashboard
+      // wrote in the meantime is never overwritten.
+      if (state.subagentModel && !readSubagentModel({ codexHome: this.codexHome })) {
+        try {
+          writeSubagentAgentFile({ codexHome: this.codexHome }, state.subagentModel);
+        } catch (error) {
+          // A lost pick is worth reporting but not worth rolling a working managed
+          // config back over: the route is what makes the gateway live.
+          await appendConfigManifest(this.stateDir, {
+            operation: "enable-subagent-restore-failed",
+            detail: error.message,
+          });
+        }
+      }
     } catch (error) {
       if (originalExisted) await atomicWrite(this.configPath, original);
       else await unlink(this.configPath).catch(() => {});
@@ -570,6 +584,10 @@ export class CodexConfigSwitcher {
       // model_provider = "openai", which resolves to the real OpenAI backend
       // once the managed base URL is gone. Leaving it there is what made Codex
       // fail to start after switching off.
+      // Read it first: this file is the only place the Sub Agent pick exists, so
+      // forgetting it here is what made the pick reset to the default after every
+      // upgrade-shaped rewrite. Only a file that was really there is remembered.
+      const subagentModel = readSubagentModel({ codexHome: this.codexHome });
       await unlink(path.join(this.codexHome, "agents", SUBAGENT_AGENT_FILE)).catch(() => {});
       await this.#writeState({
         version: 2,
@@ -579,6 +597,7 @@ export class CodexConfigSwitcher {
         changedAt: new Date().toISOString(),
         onboarded: state.onboarded,
         onboardedAt: state.onboardedAt,
+        subagentModel,
       });
       await appendConfigManifest(this.stateDir, {
         operation: "disable",

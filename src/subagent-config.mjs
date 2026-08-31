@@ -1,8 +1,16 @@
 import path from "node:path";
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { modelOptions, providerOptions } from "./model-options.mjs";
+
+// The pick is stored in this file and nowhere else. Codex reads <codexHome>/agents
+// at startup, so the switcher has to remove it on disable: the file pins
+// model_provider = "openai" to a ModelDock-published slug, and once the managed
+// openai_base_url is gone that provider means the real OpenAI backend, where the
+// slug does not exist - Codex then fails to start. The name is defined here,
+// beside the writer that fixes the format, and the remover imports it, because
+// one spelling is what keeps the two in step.
+export const SUBAGENT_AGENT_FILE = "modeldock-subagent.toml";
 
 // Sub Agent selector: the dashboard writes a ModelDock-managed Codex agent file
 // (~/.codex/agents/modeldock-subagent.toml) whose `model`/`model_provider` fields
@@ -13,8 +21,6 @@ import { modelOptions, providerOptions } from "./model-options.mjs";
 // gate in transparent mode); routed roles keep the published "@provider" slug,
 // which the gateway parses for upstream routing.
 export const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
-// One spelling, shared with the disable() path that has to remove it.
-export const SUBAGENT_FILE_NAME = SUBAGENT_AGENT_FILE;
 // The built-in native ChatGPT provider, shared by the subagent and vision
 // pickers: one spelling, one label, everywhere it is offered.
 export const NATIVE_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
@@ -33,7 +39,7 @@ export function subagentProviders(config) {
 
 export function subagentAgentFilePath(config) {
   if (!config.codexHome) return null;
-  return path.join(config.codexHome, "agents", SUBAGENT_FILE_NAME);
+  return path.join(config.codexHome, "agents", SUBAGENT_AGENT_FILE);
 }
 
 // Read on every dashboard broadcast (statusPayload -> subagentPayload), which
@@ -68,7 +74,7 @@ export function readSubagentModel(config) {
 export function writeSubagentAgentFile(config, model) {
   const agentsDir = path.join(config.codexHome, "agents");
   mkdirSync(agentsDir, { recursive: true });
-  const file = path.join(agentsDir, SUBAGENT_FILE_NAME);
+  const file = path.join(agentsDir, SUBAGENT_AGENT_FILE);
   subagentCache = { file: "", mtimeMs: -1, model: null };
   const content = [
     "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",

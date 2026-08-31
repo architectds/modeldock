@@ -17,7 +17,7 @@ import { NATIVE_IMAGE_PATHS, localWarmBaseFromSessionOpening, relayNativeImage, 
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
-import { CodexConfigSwitcher, SUBAGENT_AGENT_FILE } from "./config-switcher.mjs";
+import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
 import { createDerivedFallback } from "./derived-fallback.mjs";

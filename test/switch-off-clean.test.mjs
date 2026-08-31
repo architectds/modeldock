@@ -16,7 +16,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CodexConfigSwitcher, SUBAGENT_AGENT_FILE, buildManagedCodexConfig } from "../src/config-switcher.mjs";
+import { CodexConfigSwitcher, buildManagedCodexConfig } from "../src/config-switcher.mjs";
+import {
+  SUBAGENT_AGENT_FILE,
+  readSubagentModel,
+  writeSubagentAgentFile,
+} from "../src/subagent-config.mjs";
 
 const ORIGINAL = `model = "gpt-5.6-sol"
 approval_policy = "on-request"
@@ -53,6 +58,23 @@ function switcher(home, nativeModels = []) {
     catalogFile: path.join(home, "catalog.json"),
     mcpUrl: "http://127.0.0.1:4097/c/KEY/mcp",
   });
+}
+
+// The Sub Agent pick, and the state that forces enable() to rewrite the managed
+// config through disable(). Two facts make this the ordinary upgrade path rather
+// than an edge case: the pick has exactly one home (the agent file), and the
+// Codex App picker leaves a routed slug in the top-level model, which ModelDock
+// must repair. The repair used to delete the pick and never put it back, so every
+// upgrade silently reset the panel to the built-in default.
+const PICK = "gpt-5.6-luna";
+
+function routeTopLevelModel(home) {
+  const configPath = path.join(home, "config.toml");
+  writeFileSync(
+    configPath,
+    readFileSync(configPath, "utf8").replace(/^model = .*$/m, 'model = "qwen3.8-flash@opencode-go"'),
+    "utf8",
+  );
 }
 
 // The dashboard, not the switcher, writes this file - reproduce it exactly so the
@@ -107,6 +129,73 @@ test("Off is safe to run twice and without an agent file", async (t) => {
   await s.disable();
   await s.disable();
   assert.ok(existsSync(path.join(home, "config.toml")), "the config survives a second disable");
+});
+
+test("an upgrade-shaped re-enable keeps the Sub Agent pick", async (t) => {
+  const home = sandbox(t);
+  const s = switcher(home);
+  await s.enable();
+  writeSubagentAgentFile({ codexHome: home }, PICK);
+  assert.equal(readSubagentModel({ codexHome: home }), PICK, "the writer and the reader agree on the file");
+
+  routeTopLevelModel(home);
+  const before = await s.status();
+  assert.equal(before.topLevelModelNative, false, "the fixture reproduces the rewrite condition");
+
+  const reEnabled = await s.enable();
+  assert.equal(reEnabled.enabled, true, "the rewrite still lands on a managed config");
+  assert.match(readFileSync(path.join(home, "config.toml"), "utf8"), /^model = "gpt-5\.6-sol"$/m,
+    "the routed top-level model is repaired, not left in place");
+  assert.equal(
+    readSubagentModel({ codexHome: home }),
+    PICK,
+    "the re-enable deleted the Sub Agent pick and never restored it",
+  );
+});
+
+test("a deliberate Off then On brings the pick back", async (t) => {
+  const home = sandbox(t);
+  const s = switcher(home);
+  await s.enable();
+  writeSubagentAgentFile({ codexHome: home }, PICK);
+
+  await s.disable();
+  assert.equal(readSubagentModel({ codexHome: home }), null, "Off still removes the file Codex reads");
+
+  await s.enable();
+  assert.equal(readSubagentModel({ codexHome: home }), PICK, "On restores the pick the user made");
+  // Restored through the module that owns the format, so Codex gets a usable role
+  // rather than whatever string would make the assertion pass.
+  const body = readFileSync(path.join(home, "agents", SUBAGENT_AGENT_FILE), "utf8");
+  assert.match(body, /name = "modeldock_subagent"/);
+  assert.match(body, /model_provider = "openai"/);
+  assert.match(body, /model_reasoning_effort = "high"/);
+});
+
+test("On invents no agent file for a user who never picked one", async (t) => {
+  const home = sandbox(t);
+  const s = switcher(home);
+  await s.enable();
+
+  routeTopLevelModel(home);
+  await s.enable();
+  assert.equal(readSubagentModel({ codexHome: home }), null, "a pick that never existed must not appear");
+  assert.equal(existsSync(path.join(home, "agents", SUBAGENT_AGENT_FILE)), false);
+});
+
+test("On never overwrites a pick made while ModelDock was off", async (t) => {
+  // The remembered value is recovery material for a file the switcher deleted, not
+  // an owner of the pick. If the dashboard wrote a newer one in the meantime, the
+  // newer choice wins, or switching on would roll the user's selection backwards.
+  const home = sandbox(t);
+  const s = switcher(home);
+  await s.enable();
+  writeSubagentAgentFile({ codexHome: home }, PICK);
+  await s.disable();
+
+  writeSubagentAgentFile({ codexHome: home }, "gpt-5.6-sol");
+  await s.enable();
+  assert.equal(readSubagentModel({ codexHome: home }), "gpt-5.6-sol", "the newer pick survives the restore");
 });
 
 test("the top-level model stays native so Codex can always start", () => {
