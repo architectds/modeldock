@@ -20,6 +20,7 @@ import {
   decodeCompactionSummary,
   describeInputShape,
   dropUnpairedToolItems,
+  flattenChatToolCallsToResponses,
   encodeCompactionSummary,
   freeResponseFailure,
   hiddenToolNamesForModel,
@@ -47,6 +48,7 @@ import {
   restoreNamespaceCall,
   redactBearer,
   relayCompaction,
+  uniquifyReusedToolCallIds,
   relayNativeImage,
   relayNativeResponses,
   relayOpaqueCollaboration,
@@ -241,18 +243,74 @@ test("normalizeGatewayInput keeps paired tool history untouched", () => {
   assert.deepEqual(normalized, input);
 });
 
-test("normalizeGatewayInput keeps one complete pair for a repeated call id", () => {
+test("uniquifyReusedToolCallIds keeps later turns when Codex reuses call_ids", () => {
+  const input = [
+    { type: "function_call", call_id: "exec_command_0", name: "exec_command", arguments: "{}" },
+    { type: "function_call_output", call_id: "exec_command_0", output: "first" },
+    { type: "function_call", call_id: "exec_command_0", name: "exec_command", arguments: "{}" },
+    { type: "function_call_output", call_id: "exec_command_0", output: "second" },
+    { type: "function_call", call_id: "exec_command_0", name: "exec_command", arguments: "{}" },
+    { type: "function_call_output", call_id: "exec_command_0", output: "third" },
+  ];
+  const unique = uniquifyReusedToolCallIds(input);
+  assert.deepEqual(unique.map((item) => item.call_id), [
+    "exec_command_0",
+    "exec_command_0",
+    "exec_command_0__2",
+    "exec_command_0__2",
+    "exec_command_0__3",
+    "exec_command_0__3",
+  ]);
+  const normalized = normalizeGatewayInput(input);
+  assert.equal(normalized.filter((item) => item.type === "function_call").length, 3);
+  assert.equal(normalized.filter((item) => item.type === "function_call_output").length, 3);
+});
+
+test("flattenChatToolCallsToResponses converts chat tool turns into Responses pairs", () => {
+  const input = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "run" }] },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "executing" }],
+      tool_calls: [
+        { id: "exec_command:4", type: "function", function: { name: "exec_command", arguments: "{}" } },
+        { id: "exec_command:5", type: "function", function: { name: "exec_command", arguments: "{}" } },
+      ],
+    },
+    { type: "function_call_output", call_id: "exec_command:4", output: "out4" },
+    { type: "function_call_output", call_id: "exec_command:5", output: "out5" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
+  ];
+  const out = flattenChatToolCallsToResponses(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? item.role ?? item.type), [
+    "user",
+    "assistant",
+    "exec_command:4",
+    "exec_command:4",
+    "exec_command:5",
+    "exec_command:5",
+    "user",
+  ]);
+  assert.equal(out[1].tool_calls, undefined);
+});
+
+test("normalizeGatewayInput uniquifies repeated call ids after an earlier pair closes", () => {
   const input = [
     { type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] },
     { type: "function_call", id: "fc_first", call_id: "call_duplicate", name: "shell_command", arguments: "{\"command\":\"dir\"}" },
-    { type: "function_call", id: "fc_repeated", call_id: "call_duplicate", name: "shell_command", arguments: "{\"command\":\"dir\"}" },
     { type: "function_call_output", id: "fco_first", call_id: "call_duplicate", output: "first result" },
+    { type: "function_call", id: "fc_repeated", call_id: "call_duplicate", name: "shell_command", arguments: "{\"command\":\"dir\"}" },
     { type: "function_call_output", id: "fco_repeated", call_id: "call_duplicate", output: "repeated result" },
   ];
   const normalized = normalizeGatewayInput(input);
   assert.deepEqual(
-    normalized.filter((item) => item.call_id === "call_duplicate").map((item) => [item.type, item.id]),
-    [["function_call", "fc_first"], ["function_call_output", "fco_first"]],
+    normalized.filter((item) => item.type === "function_call").map((item) => [item.call_id, item.id]),
+    [["call_duplicate", "fc_first"], ["call_duplicate__2", "fc_repeated"]],
+  );
+  assert.deepEqual(
+    normalized.filter((item) => item.type === "function_call_output").map((item) => item.call_id),
+    ["call_duplicate", "call_duplicate__2"],
   );
 });
 
