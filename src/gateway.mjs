@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { addressedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
@@ -15,7 +16,7 @@ import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
-import { chatCompletionToResponse, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
+import { chatCompletionToResponse, chatReasoningText, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
@@ -609,6 +610,103 @@ function isToolOutputItem(item) {
   return item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
 }
 
+function chatToolCallId(call) {
+  if (!call || typeof call !== "object") return undefined;
+  const id = call.id ?? call.call_id;
+  return typeof id === "string" && id ? id : undefined;
+}
+
+// Based on jt-wang's PR #36: reuse after a completed pair is a new invocation,
+// not a duplicate stream item. Chat rows are flattened before this pass, so
+// there is only one pairing dialect. A duplicate pending call gets no second
+// queue entry, and first-seen ids win to keep earlier request prefixes stable.
+export function uniquifyReusedToolCallIds(input) {
+  if (!Array.isArray(input)) return input;
+  const used = new Set();
+  const itemIds = new Set();
+  const counts = new Map();
+  const byOriginal = new Map();
+  let changed = false;
+  const out = input.map((item) => {
+    const original = item?.call_id;
+    if ((!isToolCallItem(item) && !isToolOutputItem(item)) || typeof original !== "string" || !original) return item;
+    const repeatedItemId = item.id && itemIds.has(item.id);
+    if (item.id) itemIds.add(item.id);
+    let entry = byOriginal.get(original);
+    if (isToolCallItem(item)) {
+      // Chat and Responses copies may carry object versus serialized arguments.
+      // Compare their meaning without changing the original wire payload.
+      let args = item.arguments;
+      if (typeof args === "string") {
+        try { args = JSON.parse(args); } catch { /* Keep freeform arguments exact. */ }
+      }
+      const signature = [item.type, item.namespace, item.name, args, item.input];
+      if (entry && !entry.closed) {
+        if (!isDeepStrictEqual(entry.signature, signature)) throw new Error("Ambiguous tool history: different pending calls share call_id " + original + ".");
+      } else {
+        let alias = original;
+        let n = counts.get(original) || 1;
+        while (used.has(alias)) alias = original + "__" + (++n);
+        counts.set(original, n);
+        used.add(alias);
+        entry = { alias, signature, closed: false };
+        byOriginal.set(original, entry);
+      }
+    } else if (entry) {
+      entry.closed = true;
+    }
+    // A leading orphan output is left for the existing pairing pass, not
+    // interpreted as a completed invocation that never appeared in the input.
+    if (!entry || entry.alias === original) return item;
+    changed = true;
+    const next = { ...item, call_id: entry.alias };
+    if (repeatedItemId) {
+      next.id = nativeResponsesItemId({ ...next, id: "reused:" + item.id + ":" + entry.alias }, 0);
+    }
+    return next;
+  });
+  return changed ? out : input;
+}
+
+// PR #36's Chat-to-Responses boundary, without a second output lookup/pairing
+// map. Keep results in place and preserve structured content; only the common
+// pairing pass below decides which result belongs to which invocation.
+export function flattenChatToolCallsToResponses(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = [];
+  for (const item of input) {
+    if (item?.type === "message" && item?.role === "tool") {
+      changed = true;
+      const { type, role, tool_call_id, content, name, ...rest } = item;
+      out.push({ ...rest, type: "function_call_output", call_id: tool_call_id, output: item.output ?? content ?? "" });
+      continue;
+    }
+    if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls) && item.tool_calls.length) {
+      changed = true;
+      const { tool_calls, reasoning_content, reasoning, reasoning_text, ...assistant } = item;
+      const thought = chatReasoningText(item);
+      if (thought) out.push({ type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: thought }] });
+      const hasContent = Array.isArray(item.content) ? item.content.length > 0 : typeof item.content === "string" && item.content.trim() !== "";
+      if (hasContent) out.push(assistant);
+      for (const call of tool_calls) {
+        const id = chatToolCallId(call);
+        if (!id) continue;
+        out.push({
+          type: "function_call",
+          call_id: id,
+          name: call?.function?.name ?? call?.name,
+          arguments: call?.function?.arguments ?? call?.arguments ?? "{}",
+          ...(call.namespace ? { namespace: call.namespace } : {}),
+        });
+      }
+      continue;
+    }
+    out.push(item);
+  }
+  return changed ? out : input;
+}
+
 // Go (Console Go) validates tool pairing strictly and rejects the whole request
 // when a tool call has no matching output ("No tool output found for tool call
 // ..."). Codex genuinely produces such orphans - a remote compact task slices
@@ -616,56 +714,23 @@ function isToolOutputItem(item) {
 // emits are paired here: the Responses shape (top-level function_call /
 // custom_tool_call items with function_call_output / custom_tool_call_output)
 // and the chat shape (an assistant message carrying a `tool_calls` array whose
-// results are role:"tool" messages with tool_call_id). The unpaired side is
-// dropped in both directions so the turn survives; paired history is untouched.
+// results are role:"tool" messages with tool_call_id). Normalize the dialect
+// and reused identities once, then drop only the unpaired side. Valid Responses
+// pairs are unchanged; mixed history is represented as canonical Responses pairs.
 export function dropUnpairedToolItems(input) {
   if (!Array.isArray(input)) return input;
+  input = uniquifyReusedToolCallIds(flattenChatToolCallsToResponses(input));
   const callIds = new Set();
   const outputIds = new Set();
   for (const item of input) {
     if (isToolCallItem(item)) callIds.add(item.call_id);
     if (isToolOutputItem(item)) outputIds.add(item.call_id);
-    if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls)) {
-      for (const call of item.tool_calls) {
-        const id = typeof call === "object" && call !== null ? (call.id ?? call.call_id) : undefined;
-        if (typeof id === "string" && id) callIds.add(id);
-      }
-    }
-    if (item?.type === "message" && item?.role === "tool" && typeof item.tool_call_id === "string" && item.tool_call_id) {
-      outputIds.add(item.tool_call_id);
-    }
   }
-  const paired = input
-    .map((item) => {
-      if (isToolCallItem(item)) {
-        return outputIds.has(item.call_id) ? item : null;
-      }
-      if (isToolOutputItem(item)) {
-        return callIds.has(item.call_id) ? item : null;
-      }
-      if (item?.type === "message" && item?.role === "tool") {
-        return callIds.has(item.tool_call_id) ? item : null;
-      }
-      if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls)) {
-        const kept = item.tool_calls.filter((call) => {
-          const id = typeof call === "object" && call !== null ? (call.id ?? call.call_id) : undefined;
-          return outputIds.has(id);
-        });
-        if (kept.length === item.tool_calls.length) return item;
-        // A message whose calls all got severed and that carries no other text
-        // would reach the upstream as an empty assistant turn, which strict
-        // upstreams reject ("content or tool_calls must be set"). Drop it.
-        const hasContent = Array.isArray(item.content)
-          ? item.content.length > 0
-          : typeof item.content === "string" && item.content.trim() !== "";
-        if (kept.length === 0 && !hasContent) return null;
-        const next = { ...item, tool_calls: kept };
-        if (kept.length === 0) delete next.tool_calls;
-        return next;
-      }
-      return item;
-    })
-    .filter((item) => item !== null);
+  const paired = input.filter((item) => {
+    if (isToolCallItem(item)) return outputIds.has(item.call_id);
+    if (isToolOutputItem(item)) return callIds.has(item.call_id);
+    return true;
+  });
   return relocateToolOutputs(paired);
 }
 

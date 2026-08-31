@@ -287,7 +287,7 @@ export function normalizeLlamaServerTimings(value) {
   });
 }
 
-function chatReasoningText(message) {
+export function chatReasoningText(message) {
   if (!message || typeof message !== "object") return "";
   for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
     if (typeof message[field] === "string" && message[field]) return message[field];
