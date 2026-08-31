@@ -132,6 +132,25 @@ test("a native catalog entry missing an older field is upgraded to the current s
   }
 });
 
+test("native catalog instructions use native web search instead of advertising Exa", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-web-tools-"));
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  writeFileSync(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.149.0",
+    models: [{ ...staleNativeEntry(), slug: "gpt-5.6-sol", visibility: "list" }],
+  }), "utf8");
+  try {
+    const catalog = catalogFor({ ...configStub(), nativeCatalogFile });
+    const native = catalog.models.find((entry) => entry.slug === "gpt-5.6-sol");
+    const routed = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
+    assert.ok(native && routed);
+    assert.doesNotMatch(native.base_instructions, /`search <query>`/, "native GPT does not advertise the Exa CLI fallback");
+    assert.match(routed.base_instructions, /`search <query>`/, "routed models retain ModelDock web search");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the generated catalog is accepted by the installed Codex parser", (t) => {
   const probe = spawnSync("codex", ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30_000 });
   if (probe.error?.code === "ENOENT") {

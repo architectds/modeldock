@@ -8,7 +8,7 @@ import { isModelPublished, selectedModelSlugs } from "./model-toggles.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export function baseInstructionsFor(config, { supportsVision = false } = {}) {
+export function baseInstructionsFor(config, { supportsVision = false, nativeWebSearch = false } = {}) {
   const restartScript = process.platform === "win32"
     ? path.resolve(dirname, "../scripts/restart.ps1")
     : path.resolve(dirname, "../scripts/restart.sh");
@@ -22,6 +22,13 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
   const visualFallback = supportsVision
     ? "`preview <path> [path ...]` (attach bounded local images for direct inspection)"
     : "`vision <path> <question>` (delegate image inspection)";
+  const fallbackTools = [
+    visualFallback,
+    ...(nativeWebSearch ? [] : ["`search <query>` (web search)"]),
+    "`recall <query> [scope_dir]` (recall memory)",
+    "`store <content> [scope_dir] [kind]` (store memory)",
+    "`learn <path> [scope_dir]` (bulk-ingest a file or directory into memory)",
+  ].join(", ");
   return [
     "You are Codex, a coding agent collaborating with the user in their workspace.",
     "Follow the user's instructions, use the provided tools when useful, preserve unrelated work, and report results concisely.",
@@ -47,7 +54,7 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
     // The rule is stated as a hard trigger ("if the call fails, switch") rather
     // than a passive availability note: a text-only model otherwise retries the
     // dead tool and reports the capability as gone.
-    `ModelDock MCP tools ride a session connection that Codex never re-establishes after a gateway restart. If an MCP tool call fails with a connection error (fetch failed, ECONNREFUSED, 'unsupported call', or a stale tool list), do NOT retry it and do NOT treat the capability as gone: run the CLI fallback immediately in a shell - \`node scripts/mcp-call.mjs <tool> ...\` (on macOS/Linux, \`sh scripts/mcp-call.sh <tool> ...\` also works when plain \`node\` is not on PATH). Key tools: ${visualFallback}, \`search <query>\` (web search), \`recall <query> [scope_dir]\` (recall memory), \`store <content> [scope_dir] [kind]\` (store memory), \`learn <path> [scope_dir]\` (bulk-ingest a file or directory into memory)`
+    `ModelDock MCP tools ride a session connection that Codex never re-establishes after a gateway restart. If an MCP tool call fails with a connection error (fetch failed, ECONNREFUSED, 'unsupported call', or a stale tool list), do NOT retry it and do NOT treat the capability as gone: run the CLI fallback immediately in a shell - \`node scripts/mcp-call.mjs <tool> ...\` (on macOS/Linux, \`sh scripts/mcp-call.sh <tool> ...\` also works when plain \`node\` is not on PATH). Key tools: ${fallbackTools}`
       + (canGenerateImages ? ", `image <prompt> [size]` (generate an image)" : "")
       + ". Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
     `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops the process on the configured port, starts a fresh detached instance, verifies its local status API, then prints 'verified gateway'; wait for that line before continuing.`,
@@ -57,13 +64,14 @@ export function baseInstructionsFor(config, { supportsVision = false } = {}) {
 // Codex reads one catalog file per install, not per session. An entry can accept
 // an image through the gateway while still being text-only itself, so upstream
 // vision capability - not catalog input admission - selects its instructions.
-function applyPerModelInstructions(config, models) {
+function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
   return models.map((entry) => {
-    const routed = modelEntryFor(config, entry.slug);
+    const native = nativeSlugs.has(entry.slug);
+    const routed = native ? null : modelEntryFor(config, entry.slug);
     const supportsVision = routed
       ? Boolean(routed.supportsVision)
       : Array.isArray(entry.input_modalities) && entry.input_modalities.includes("image");
-    const instructions = baseInstructionsFor(config, { supportsVision });
+    const instructions = baseInstructionsFor(config, { supportsVision, nativeWebSearch: native });
     return {
       ...entry,
       base_instructions: instructions,
@@ -135,8 +143,10 @@ export function catalogFor(config) {
   if (config.nativeMerge === false) {
     return { ...catalog, models: orderCatalogByUse(applyPerModelInstructions(config, models), config.usageByModel) };
   }
-  const merged = mergeNativeCatalog({ ...catalog, models }, config);
-  return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models), config.usageByModel) };
+  const native = readNativeCatalog(config);
+  const nativeSlugs = new Set((native?.models || []).map((entry) => entry?.slug).filter(Boolean));
+  const merged = mergeNativeCatalog({ ...catalog, models }, config, native);
+  return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models, nativeSlugs), config.usageByModel) };
 }
 
 // The Codex App picker list is the model_catalog_json file when configured, not
@@ -148,8 +158,8 @@ export function catalogFor(config) {
 // orderCatalogByUse); picker-hidden entries stay out of the list (requests
 // for them still route natively through the unknown-slug path in the gateway).
 // A missing or stale cache degrades to the curated catalog alone.
-export function mergeNativeCatalog(catalog, config) {
-  const native = readNativeCatalog(config);
+export function mergeNativeCatalog(catalog, config, nativeCatalog = null) {
+  const native = nativeCatalog || readNativeCatalog(config);
   if (!native?.models?.length) return catalog;
   const allowed = allowedEffortsFor(native.captured_with);
   const published = new Set((catalog.models || []).map((entry) => entry?.slug));

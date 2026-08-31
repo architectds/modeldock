@@ -50,6 +50,17 @@ const VISION_MODEL_HIDDEN_TOOLS = new Set([
   "mcp__modeldock__vision_inspect",
 ]);
 
+// Native Codex models already receive OpenAI's hosted web_search and inspect
+// image pixels directly. ModelDock's Exa and delegated-vision duplicates add
+// prompt/tool weight and can send the work through the wrong route. Keep every
+// other ModelDock tool: memory, media production, previews, and voice remain
+// complementary native capabilities.
+const NATIVE_REDUNDANT_TOOL_NAMES = new Set([
+  "mcp__modeldock__web_search_exa",
+  "mcp__modeldock__vision_inspect",
+]);
+const NATIVE_REDUNDANT_NAMESPACE_CHILDREN = new Set(["web_search_exa", "vision_inspect"]);
+
 // Local backends (llama.cpp / Ollama) run on a small context window; Codex
 // sends 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and,
 // together with the system prompt, eat roughly 61K of the window. Whitelist
@@ -2109,6 +2120,58 @@ export function applyToolPolicy(tools, {
   return { tools: out, stripped, namespaces, customToolNames };
 }
 
+function isModelDockNamespace(name) {
+  return String(name || "")
+    .replace(/^namespace:/, "")
+    .replace(/__+$/, "") === "mcp__modeldock";
+}
+
+// Preserve the native Codex tool dialect byte-for-byte except for ModelDock's
+// redundant Exa and delegated-vision declarations. Current clients may send
+// either as flattened functions or ModelDock namespace children;
+// additional_tools uses the same descriptors and is filtered below as well.
+export function stripNativeRedundantTools(tools) {
+  if (!Array.isArray(tools)) return tools;
+  let changed = false;
+  const out = [];
+  for (const tool of tools) {
+    if (NATIVE_REDUNDANT_TOOL_NAMES.has(tool?.name)) {
+      changed = true;
+      continue;
+    }
+    if (tool?.type === "namespace" && isModelDockNamespace(tool.name) && Array.isArray(tool.tools)) {
+      const children = tool.tools.filter((child) => !NATIVE_REDUNDANT_NAMESPACE_CHILDREN.has(child?.name));
+      const namespaceChanged = children.length !== tool.tools.length;
+      if (namespaceChanged) changed = true;
+      if (!children.length) continue;
+      out.push(namespaceChanged ? { ...tool, tools: children } : tool);
+      continue;
+    }
+    out.push(tool);
+  }
+  return changed ? out : tools;
+}
+
+function stripNativeRedundantToolsFromInput(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const out = [];
+  for (const item of input) {
+    if (item?.type !== "additional_tools" || !Array.isArray(item.tools)) {
+      out.push(item);
+      continue;
+    }
+    const tools = stripNativeRedundantTools(item.tools);
+    if (tools === item.tools) {
+      out.push(item);
+      continue;
+    }
+    changed = true;
+    if (tools.length) out.push({ ...item, tools });
+  }
+  return changed ? out : input;
+}
+
 export function hiddenToolNamesForModel({ supportsVision = false, modelHiddenToolNames, profileHiddenToolNames } = {}) {
   const configured = modelHiddenToolNames ?? profileHiddenToolNames;
   const hidden = new Set(configured || (supportsVision ? VISION_MODEL_HIDDEN_TOOLS : TEXT_MODEL_HIDDEN_TOOLS));
@@ -3122,15 +3185,18 @@ function serializedBody(value) {
 }
 
 // Native passthrough for a Responses request. Unlike the routed path there is no
-// tool policy, no historical-image rewrite, and no image escalation: the native
-// backend owns hosted tools, history images, and its own vision. Only the input
-// normalization above and previous_response_id removal apply, then the stream is
-// piped byte-for-byte with the client's signed-in headers.
+// provider-dialect tool policy, historical-image rewrite, or image escalation:
+// the native backend owns hosted tools, history images, and its own vision. The
+// capability-dedup pass removes ModelDock Exa and delegated vision because the
+// native backend owns those jobs; everything else stays in Codex's dialect.
 export async function relayNativeResponses(payload, res, services, { signal } = {}) {
   const { incomingHeaders, requestUrl, metrics, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const native = { ...payload };
-  if (Array.isArray(payload.input)) native.input = normalizeNativeInput(payload.input);
+  if (Array.isArray(payload.input)) {
+    native.input = stripNativeRedundantToolsFromInput(normalizeNativeInput(payload.input));
+  }
+  if (Array.isArray(payload.tools)) native.tools = stripNativeRedundantTools(payload.tools);
   delete native.previous_response_id;
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
   const { body: nativeBody, bytes: upstreamBytes } = serializedBody(native);

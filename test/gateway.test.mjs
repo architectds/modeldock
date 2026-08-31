@@ -2540,9 +2540,29 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
             type: "agent_message",
             content: [{ type: "encrypted_content", encrypted_content: "Run the probe and report back." }],
           },
+          {
+            type: "additional_tools",
+            tools: [{
+              type: "namespace",
+              name: "mcp__modeldock__",
+              tools: [{ name: "web_search_exa" }, { name: "vision_inspect" }, { name: "image_gen" }],
+            }],
+          },
         ],
         previous_response_id: "resp_old",
-        tools: [{ type: "web_search" }],
+        tools: [
+          { type: "web_search" },
+          { type: "function", name: "mcp__modeldock__web_search_exa" },
+          { type: "function", name: "mcp__modeldock__vision_inspect" },
+          { type: "function", name: "mcp__modeldock__recall_memory" },
+          { type: "function", name: "mcp__modeldock__image_gen" },
+          { type: "function", name: "mcp__modeldock__preview_images" },
+          {
+            type: "namespace",
+            name: "mcp__modeldock__",
+            tools: [{ name: "web_search_exa" }, { name: "vision_inspect" }, { name: "hear" }],
+          },
+        ],
       },
       res,
       {
@@ -2573,12 +2593,24 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
     assert.equal(calls[0].headers.host, undefined, "loopback bookkeeping headers are not forwarded");
     assert.equal(calls[0].body.previous_response_id, undefined, "previous_response_id is dropped for native");
     assert.equal(calls[0].body.model, "gpt-5.6-sol");
+    assert.deepEqual(calls[0].body.tools, [
+      { type: "web_search" },
+      { type: "function", name: "mcp__modeldock__recall_memory" },
+      { type: "function", name: "mcp__modeldock__image_gen" },
+      { type: "function", name: "mcp__modeldock__preview_images" },
+      { type: "namespace", name: "mcp__modeldock__", tools: [{ name: "hear" }] },
+    ], "native keeps its hosted search and complementary ModelDock tools, but not Exa or delegated vision");
     assert.equal(calls[0].body.input[0].encrypted_content, undefined, "non-opaque reasoning is stripped");
     assert.equal(calls[0].body.input[1].content[0].text, "hi");
     assert.deepEqual(calls[0].body.input[2].content[0], {
       type: "input_text",
       text: "Run the probe and report back.",
     }, "malformed encrypted agent content is repaired before the native fetch");
+    assert.deepEqual(calls[0].body.input[3].tools, [{
+      type: "namespace",
+      name: "mcp__modeldock__",
+      tools: [{ name: "image_gen" }],
+    }], "native additional_tools removes Exa without dropping other ModelDock capabilities");
     assert.equal(result.usage.input_tokens, 9);
     const forwarded = Buffer.concat(sink.chunks).toString("utf8");
     assert.match(forwarded, /response\.completed/);
