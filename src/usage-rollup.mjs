@@ -55,7 +55,7 @@ export function readRollup(file = usageRollupPath()) {
       // let foldUsageFile backfill this optional bounded view from the event
       // log instead of invalidating the whole rollup on upgrade.
       hours: parsed.hours && typeof parsed.hours === "object" ? parsed.hours : {},
-    };
+  };
   } catch {
     return emptyRollup();
   }
@@ -305,6 +305,13 @@ function addPricedStatsRow(target, key, source = {}) {
   return target;
 }
 
+// One model is one colour across every plot, so the legend that decides which
+// models are named has to be shared by the bars and the donut rather than
+// re-ranked per chart. Anything outside it folds into the same Other bucket the
+// donut uses, which keeps the two views consistent with each other.
+const STATS_MODEL_LIMIT = 6;
+const STATS_OTHER = "__other__";
+
 function statsModelsForBuckets(buckets, retainedKeys) {
   const byModel = new Map();
   for (const [bucketKey, bucket] of Object.entries(buckets || {})) {
@@ -318,13 +325,48 @@ function statsModelsForBuckets(buckets, retainedKeys) {
   const ranked = [...byModel.entries()]
     .map(([id, raw]) => ({ id, raw, ...modelParts(id), ...finishStatsRow(raw) }))
     .sort((a, b) => b.totalTokens - a.totalTokens || b.completedRequests - a.completedRequests || a.id.localeCompare(b.id));
-  const models = ranked.slice(0, 6).map(({ raw, ...entry }) => entry);
-  if (ranked.length > 6) {
+  const models = ranked.slice(0, STATS_MODEL_LIMIT).map(({ raw, ...entry }) => entry);
+  if (ranked.length > STATS_MODEL_LIMIT) {
     const raw = emptyStatsRow();
-    for (const entry of ranked.slice(6)) addStatsRow(raw, entry.raw);
-    models.push({ id: "__other__", model: "", provider: "", ...finishStatsRow(raw) });
+    for (const entry of ranked.slice(STATS_MODEL_LIMIT)) addStatsRow(raw, entry.raw);
+    models.push({ id: STATS_OTHER, model: "", provider: "", ...finishStatsRow(raw) });
   }
   return { models, modelCount: ranked.length };
+}
+
+// Per-bucket attribution for the model-coloured stacks. Priced by the real
+// model key even when the row is folded into Other, so a tail model's cost
+// stays in the spend bar instead of silently becoming zero.
+function bucketModelRows(entries, legend) {
+  const rows = new Map();
+  for (const [key, entry] of Object.entries(entries || {})) {
+    const id = legend.has(key) ? key : STATS_OTHER;
+    const inputTokens = Math.max(0, Number(entry?.in) || 0);
+    const cachedTokens = Math.max(0, Math.min(inputTokens, Number(entry?.cached) || 0));
+    const outputTokens = Math.max(0, Number(entry?.out) || 0);
+    const row = rows.get(id) || { newInput: 0, cached: 0, output: 0, requests: 0, cost: 0 };
+    const { model, provider } = modelParts(key);
+    const cost = estimateApiCost({ model, provider, inputTokens, cachedTokens, outputTokens });
+    row.newInput += Math.max(0, inputTokens - cachedTokens);
+    row.cached += cachedTokens;
+    row.output += outputTokens;
+    row.requests += Math.max(0, Number(entry?.ok) || 0);
+    row.cost += cost.usd;
+    rows.set(id, row);
+  }
+  const out = {};
+  for (const [id, row] of rows) {
+    out[id] = {
+      newInput: Math.round(row.newInput),
+      cached: Math.round(row.cached),
+      output: Math.round(row.output),
+      requests: row.requests,
+      // Not rounded: a quiet day can cost less than a hundredth of a cent, and a
+      // rounded zero would make the spend stack disagree with the spend bar.
+      cost: row.cost,
+    };
+  }
+  return out;
 }
 
 // Aggregate-only dashboard data. The response is deliberately derived from the
@@ -334,24 +376,36 @@ function statsModelsForBuckets(buckets, retainedKeys) {
 // metering therefore cannot turn into a misleading success-rate claim.
 export function usageStats(rollup, now = new Date().toISOString()) {
   const today = validUtcDay(now) || validUtcDay(new Date().toISOString());
+  const dayKeys = [];
+  for (let offset = -(ROLLUP_DAYS - 1); offset <= 0; offset += 1) dayKeys.push(shiftedUtcDay(today, offset));
+  const hourKeys = [];
+  for (let offset = -(ROLLUP_HOURS - 1); offset <= 0; offset += 1) hourKeys.push(shiftedUtcHour(now, offset));
+
+  // The donut and the coloured bars have to agree on which models get a name, so
+  // both read this one thirty-day ranking instead of re-ranking per chart.
+  const legendDays30 = statsModelsForBuckets(rollup?.days, new Set(dayKeys));
+  const modelLegend = legendDays30.models
+    .filter((entry) => entry.id !== STATS_OTHER).map((entry) => entry.id);
+  const legendKeys = new Set(modelLegend);
+
   const rawDays = [];
   const days = [];
-  for (let offset = -(ROLLUP_DAYS - 1); offset <= 0; offset += 1) {
-    const day = shiftedUtcDay(today, offset);
+  for (const day of dayKeys) {
+    const bucket = rollup?.days?.[day] || {};
     const raw = emptyStatsRow();
-    for (const [key, entry] of Object.entries(rollup?.days?.[day] || {})) addPricedStatsRow(raw, key, entry);
+    for (const [key, entry] of Object.entries(bucket)) addPricedStatsRow(raw, key, entry);
     rawDays.push(raw);
-    days.push({ day, ...finishStatsRow(raw) });
+    days.push({ day, ...finishStatsRow(raw), byModel: bucketModelRows(bucket, legendKeys) });
   }
 
   const rawHours = [];
   const hours = [];
-  for (let offset = -(ROLLUP_HOURS - 1); offset <= 0; offset += 1) {
-    const hour = shiftedUtcHour(now, offset);
+  for (const hour of hourKeys) {
+    const bucket = rollup?.hours?.[hour] || {};
     const raw = emptyStatsRow();
-    for (const [key, entry] of Object.entries(rollup?.hours?.[hour] || {})) addPricedStatsRow(raw, key, entry);
+    for (const [key, entry] of Object.entries(bucket)) addPricedStatsRow(raw, key, entry);
     rawHours.push(raw);
-    hours.push({ hour, ...finishStatsRow(raw) });
+    hours.push({ hour, ...finishStatsRow(raw), byModel: bucketModelRows(bucket, legendKeys) });
   }
 
   const period = (count) => {
@@ -364,10 +418,10 @@ export function usageStats(rollup, now = new Date().toISOString()) {
   for (const row of rawHours) addStatsRow(hours24, row);
 
   const modelPeriods = {
-    today: statsModelsForBuckets(rollup?.days, new Set(days.slice(-1).map((entry) => entry.day))),
-    hours24: statsModelsForBuckets(rollup?.hours, new Set(hours.map((entry) => entry.hour))),
-    days7: statsModelsForBuckets(rollup?.days, new Set(days.slice(-7).map((entry) => entry.day))),
-    days30: statsModelsForBuckets(rollup?.days, new Set(days.map((entry) => entry.day))),
+    today: statsModelsForBuckets(rollup?.days, new Set(dayKeys.slice(-1))),
+    hours24: statsModelsForBuckets(rollup?.hours, new Set(hourKeys)),
+    days7: statsModelsForBuckets(rollup?.days, new Set(dayKeys.slice(-7))),
+    days30: legendDays30,
   };
 
   return {
@@ -377,6 +431,8 @@ export function usageStats(rollup, now = new Date().toISOString()) {
     periods: { today: period(1), hours24: finishStatsRow(hours24), days7: period(7), days30: period(ROLLUP_DAYS) },
     days,
     hours,
+    // Ordered palette slots: index + 1 is the colour a model wears in every plot.
+    modelLegend,
     modelPeriods,
     // Current clients read these as the thirty-day view. Keep the aliases while
     // the range-aware dashboard rolls out; they carry no extra data.

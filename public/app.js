@@ -1935,6 +1935,159 @@ let lastStats = null;
 let statsLoadedAt = 0;
 let statsRangeDays = 30;
 
+// One colour per model, shared by every plot on the page. The server ranks the
+// named models once per snapshot (`modelLegend`) so a model keeps the same
+// colour when the range changes; a model that only surfaces inside a shorter
+// window takes the next unused slot instead of borrowing somebody else's.
+const STATS_MODEL_COLORS = [
+  "#50b7ff", "#a78bfa", "#48d6a0", "#f7b955",
+  "#ff8fa3", "#5eead4", "#f0abfc", "#fdba74",
+];
+const STATS_OTHER_ID = "__other__";
+const STATS_OTHER_COLOR = "#5b6f7f";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+let statsColors = new Map([[STATS_OTHER_ID, STATS_OTHER_COLOR]]);
+let statsNames = new Map();
+
+function statsColor(id) {
+  return statsColors.get(id) || STATS_OTHER_COLOR;
+}
+
+function statsModelName(id) {
+  if (id === STATS_OTHER_ID) return t("stats.other");
+  const known = statsNames.get(id);
+  if (known) return known;
+  return entryName("", id);
+}
+
+// Both maps are rebuilt from the snapshot before anything paints, so a stale
+// colour can never outlive the model list that produced it.
+function buildStatsPalette(data, periodModels) {
+  const colors = new Map();
+  const names = new Map();
+  const take = (entry) => {
+    const id = typeof entry === "string" ? entry : entry?.id;
+    if (!id || id === STATS_OTHER_ID || colors.has(id)) return;
+    colors.set(id, STATS_MODEL_COLORS[colors.size % STATS_MODEL_COLORS.length]);
+    names.set(id, entryName(entry, id));
+  };
+  for (const id of data.modelLegend || []) take(id);
+  for (const entry of periodModels || []) take(entry);
+  colors.set(STATS_OTHER_ID, STATS_OTHER_COLOR);
+  names.set(STATS_OTHER_ID, t("stats.other"));
+  statsColors = colors;
+  statsNames = names;
+}
+
+// Display name for a model row, or for a bare legend id that carries no row.
+function entryName(entry, id) {
+  const named = typeof entry === "string" ? "" : String(entry?.model || "");
+  if (named) return named;
+  const split = String(id || "").lastIndexOf("@");
+  return split > 0 ? String(id).slice(0, split) : String(id || "");
+}
+
+// --- Stats hover layer ---
+//
+// Bars and slices are replaced on every render, so the tooltip payload lives in
+// a WeakMap keyed by the element rather than in an attribute that would have to
+// carry escaped markup. One layer serves all four plots, which is also what
+// keeps a hovered model highlighted across charts that live in different cards.
+const statsTipPayloads = new WeakMap();
+let statsTipEl = null;
+let statsTipTarget = null;
+let statsFocusedModel = null;
+
+function statsTipLayer() {
+  if (statsTipEl) return statsTipEl;
+  const layer = document.createElement("div");
+  layer.className = "stats-tip";
+  layer.hidden = true;
+  document.body.append(layer);
+  statsTipEl = layer;
+  return layer;
+}
+
+function statsTipPlace() {
+  if (!statsTipEl || !statsTipTarget || statsTipEl.hidden) return;
+  const rect = statsTipTarget.getBoundingClientRect();
+  const box = statsTipEl.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - box.width - 8, rect.left + rect.width / 2 - box.width / 2));
+  const top = rect.top - box.height - 8 < 8 ? rect.bottom + 8 : rect.top - box.height - 8;
+  statsTipEl.style.left = `${Math.round(left)}px`;
+  statsTipEl.style.top = `${Math.round(top)}px`;
+}
+
+function statsTipShow(target) {
+  const payload = statsTipPayloads.get(target);
+  const layer = statsTipLayer();
+  if (!payload?.rows?.length) {
+    statsTipHide();
+    return;
+  }
+  const head = document.createElement("b");
+  head.className = "stats-tip-period";
+  head.textContent = payload.period;
+  layer.style.setProperty("--stats-tip-accent", statsColor(payload.modelId));
+  const who = document.createElement("span");
+  who.className = "stats-tip-model";
+  const dot = document.createElement("i");
+  dot.style.background = statsColor(payload.modelId);
+  const name = document.createElement("em");
+  name.textContent = statsModelName(payload.modelId);
+  who.append(dot, name);
+  const lines = payload.rows.map((row) => {
+    const line = document.createElement("span");
+    line.className = "stats-tip-row";
+    const label = document.createElement("em");
+    label.textContent = row.label;
+    const value = document.createElement("strong");
+    value.textContent = row.value;
+    line.append(label, value);
+    return line;
+  });
+  layer.replaceChildren(head, who, ...lines);
+  layer.hidden = false;
+  statsTipTarget = target;
+  statsTipPlace();
+}
+
+function statsTipHide() {
+  statsTipTarget = null;
+  if (statsTipEl) statsTipEl.hidden = true;
+}
+
+// Dim every other model, in every plot, while one is being pointed at.
+function statsFocusModel(id) {
+  if (statsFocusedModel === id) return;
+  statsFocusedModel = id;
+  for (const node of document.querySelectorAll("[data-stats-model]")) {
+    node.classList.toggle("is-mute", Boolean(id) && node.dataset.statsModel !== id);
+  }
+}
+
+document.addEventListener("pointerover", (event) => {
+  const target = event.target instanceof Element ? event.target.closest("[data-stats-tip]") : null;
+  if (!target) return;
+  statsTipShow(target);
+  statsFocusModel(target.dataset.statsModel || null);
+});
+document.addEventListener("pointerout", (event) => {
+  const target = event.target instanceof Element ? event.target.closest("[data-stats-tip]") : null;
+  if (!target) return;
+  if (event.relatedTarget instanceof Element && target.contains(event.relatedTarget)) return;
+  statsTipHide();
+  statsFocusModel(null);
+});
+window.addEventListener("scroll", statsTipPlace, true);
+window.addEventListener("resize", statsTipHide);
+// Leaving the tab hides the charts but not the layer they anchored to.
+window.addEventListener("hashchange", () => {
+  statsTipHide();
+  statsFocusModel(null);
+});
+
 function statsDayLabel(day) {
   const date = new Date(`${day}T00:00:00Z`);
   return new Intl.DateTimeFormat(getLang(), { month: "short", day: "numeric", timeZone: "UTC" }).format(date);
@@ -1953,8 +2106,59 @@ function statsEmpty(host) {
   host.replaceChildren(empty);
 }
 
+// Stacked-by-model bars. Every plot on the page answers a different question
+// about the same traffic - tokens, requests, money - so all three are split by
+// the same model colours and read top-to-bottom in the same order.
+function statsSegmentIds(byModel) {
+  const ordered = [];
+  const seen = new Set();
+  for (const id of [...(lastStats?.modelLegend || []), STATS_OTHER_ID, ...Object.keys(byModel)]) {
+    if (seen.has(id) || !byModel[id]) continue;
+    seen.add(id);
+    ordered.push(id);
+  }
+  return ordered;
+}
+
+function statsBucketSegments(bucket, kind) {
+  const byModel = bucket.byModel || {};
+  const segments = [];
+  for (const id of statsSegmentIds(byModel)) {
+    const row = byModel[id];
+    const tokens = row.newInput + row.cached + row.output;
+    const value = kind === "tokens" ? tokens : kind === "requests" ? row.requests : row.cost;
+    if (!(value > 0)) continue;
+    const money = usd(row.cost, { compact: false });
+    const rows = kind === "requests"
+      ? [
+        { label: t("stats.requestVolume"), value: number(row.requests) },
+        { label: t("stats.tokenFlow"), value: number(tokens) },
+        { label: t("stats.apiSpend"), value: money },
+      ]
+      : kind === "spend"
+        ? [
+          { label: t("stats.apiSpend"), value: money },
+          { label: t("stats.tokenFlow"), value: number(tokens) },
+          { label: t("stats.requestVolume"), value: number(row.requests) },
+        ]
+        : [
+          { label: t("stats.newInput"), value: number(row.newInput) },
+          { label: t("stats.cachedInput"), value: number(row.cached) },
+          { label: t("stats.output"), value: number(row.output) },
+          { label: t("stats.requestVolume"), value: number(row.requests) },
+          { label: t("stats.apiSpend"), value: money },
+        ];
+    segments.push({ id, value, rows });
+  }
+  // A quiet bucket still needs a nub on the baseline, or the axis reads as a gap
+  // in the series rather than a period with no traffic. It is deliberately not
+  // painted in the Other colour: that would claim traffic the tail never had.
+  if (!segments.length) segments.push({ id: "", value: 1, rows: [] });
+  return segments;
+}
+
 function renderDailyStats(hostId, days, {
-  valueFor, titleFor, segmentsFor, labelFor = (day) => statsDayLabel(day.day), renderZero = false,
+  valueFor, kind, labelFor = (day) => statsDayLabel(day.day), renderZero = false,
 } = {}) {
   const host = $(hostId);
   if (!host) return;
@@ -1971,27 +2175,25 @@ function renderDailyStats(hostId, days, {
   days.forEach((day, index) => {
     const holder = document.createElement("span");
     holder.className = "stats-day";
-    holder.title = titleFor(day);
-    holder.setAttribute("aria-label", holder.title);
+    const period = labelFor(day);
+    holder.setAttribute("aria-label", `${period}: ${number(values[index])}`);
     const height = max > 0 ? Math.max(2, (values[index] / max) * 100) : 2;
-    if (segmentsFor) {
-      const stack = document.createElement("span");
-      stack.className = "stats-stack";
-      stack.style.height = `${height}%`;
-      for (const segment of segmentsFor(day)) {
-        if (!(segment.value > 0)) continue;
-        const part = document.createElement("i");
-        part.className = `stats-segment ${segment.className}`;
-        part.style.flexGrow = String(segment.value);
-        stack.append(part);
+    const stack = document.createElement("span");
+    stack.className = "stats-stack";
+    stack.style.height = `${height}%`;
+    for (const segment of statsBucketSegments(day, kind)) {
+      const part = document.createElement("i");
+      part.className = "stats-segment";
+      part.style.flexGrow = String(segment.value);
+      part.style.background = segment.id ? statsColor(segment.id) : "rgba(137,160,175,.22)";
+      if (segment.id) part.dataset.statsModel = segment.id;
+      if (segment.rows.length) {
+        part.dataset.statsTip = "1";
+        statsTipPayloads.set(part, { period, modelId: segment.id, rows: segment.rows });
       }
-      holder.append(stack);
-    } else {
-      const bar = document.createElement("i");
-      bar.className = "stats-bar";
-      bar.style.height = `${height}%`;
-      holder.append(bar);
+      stack.append(part);
     }
+    holder.append(stack);
     plot.append(holder);
   });
   const axis = document.createElement("div");
@@ -2004,31 +2206,114 @@ function renderDailyStats(hostId, days, {
   host.replaceChildren(plot, axis);
 }
 
-function renderModelShare(models = [], modelCount = 0) {
+// Annular sector, not a dashed circle: a real path is what makes each slice its
+// own hover target, and a hairline stop short of full turn keeps a single-model
+// period from collapsing into an arc that starts and ends on the same pixel.
+function statsDonutArc(cx, cy, outer, inner, start, end) {
+  const point = (radius, angle) => [
+    (cx + radius * Math.cos(angle)).toFixed(2),
+    (cy + radius * Math.sin(angle)).toFixed(2),
+  ];
+  const sweep = Math.min(end - start, Math.PI * 2 - 0.002);
+  const stop = start + sweep;
+  const large = sweep > Math.PI ? 1 : 0;
+  return [
+    "M", ...point(outer, start),
+    "A", outer, outer, 0, large, 1, ...point(outer, stop),
+    "L", ...point(inner, stop),
+    "A", inner, inner, 0, large, 0, ...point(inner, start),
+    "Z",
+  ].join(" ");
+}
+
+function renderModelShare(models = [], modelCount = 0, periodLabel = "") {
   const host = $("stats-model-chart");
   if (!host) return;
   const used = models.filter((entry) => Number(entry.totalTokens) > 0);
   set("stats-model-count", t("stats.modelCount", { count: number(modelCount) }));
   if (!used.length) return statsEmpty(host);
-  const max = Math.max(1, ...used.map((entry) => Number(entry.totalTokens) || 0));
-  host.replaceChildren(...used.map((entry) => {
+  const total = used.reduce((sum, entry) => sum + (Number(entry.totalTokens) || 0), 0) || 1;
+
+  const wrap = document.createElement("div");
+  wrap.className = "stats-donut-wrap";
+  const donut = document.createElement("div");
+  donut.className = "stats-donut";
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 150 150");
+  svg.setAttribute("role", "img");
+  const centerPct = document.createElement("b");
+  const centerName = document.createElement("span");
+  const showCenter = (entry, share) => {
+    centerPct.textContent = percent(share);
+    centerName.textContent = entry.model || statsModelName(entry.id);
+    centerName.title = entry.id;
+  };
+  const restoreCenter = () => showCenter(used[0], (Number(used[0].totalTokens) || 0) / total);
+
+  let angle = -Math.PI / 2;
+  const tips = new Map();
+  for (const entry of used) {
+    const share = (Number(entry.totalTokens) || 0) / total;
+    const tip = {
+      period: periodLabel,
+      modelId: entry.id,
+      rows: [
+        { label: t("stats.tokenFlow"), value: `${number(entry.totalTokens)} (${percent(share)})` },
+        { label: t("stats.newInput"), value: number(entry.newInputTokens) },
+        { label: t("stats.cachedInput"), value: number(entry.cachedTokens) },
+        { label: t("stats.output"), value: number(entry.outputTokens) },
+        { label: t("stats.requestVolume"), value: number(entry.completedRequests) },
+        { label: t("stats.apiSpend"), value: usd(entry.estimatedApiCostUsd, { compact: false }) },
+      ],
+    };
+    tips.set(entry.id, tip);
+    const slice = document.createElementNS(SVG_NS, "path");
+    slice.setAttribute("d", statsDonutArc(75, 75, 72, 49, angle, angle + share * Math.PI * 2));
+    slice.setAttribute("fill", statsColor(entry.id));
+    slice.classList.add("stats-slice");
+    slice.dataset.statsModel = entry.id;
+    slice.dataset.statsTip = "1";
+    statsTipPayloads.set(slice, tip);
+    slice.addEventListener("pointerenter", () => showCenter(entry, share));
+    slice.addEventListener("pointerleave", restoreCenter);
+    svg.append(slice);
+    angle += share * Math.PI * 2;
+  }
+  restoreCenter();
+  const center = document.createElement("div");
+  center.className = "stats-donut-center";
+  center.append(centerPct, centerName);
+  donut.append(svg, center);
+
+  // The rows are the legend for every coloured plot on the page, which is why
+  // hovering one dims the other models in the bars as well as in the ring.
+  const legend = document.createElement("div");
+  legend.className = "stats-donut-legend";
+  for (const entry of used) {
     const row = document.createElement("div");
-    row.className = "stats-share-row";
+    row.className = "stats-share-row stats-legend-row";
+    row.dataset.statsModel = entry.id;
+    row.dataset.statsTip = "1";
+    statsTipPayloads.set(row, tips.get(entry.id));
+    const dot = document.createElement("i");
+    dot.className = "stats-dot";
+    dot.style.background = statsColor(entry.id);
     const name = document.createElement("span");
     name.className = "stats-share-name";
-    name.textContent = entry.id === "__other__" ? t("stats.other") : entry.model;
-    name.title = entry.id === "__other__" ? name.textContent : entry.id;
-    const track = document.createElement("span");
-    track.className = "stats-share-track";
-    const fill = document.createElement("i");
-    fill.style.width = `${Math.max(1, (entry.totalTokens / max) * 100)}%`;
-    track.append(fill);
+    name.textContent = entry.model || statsModelName(entry.id);
+    name.title = entry.id;
     const value = document.createElement("strong");
     value.className = "stats-share-value";
-    value.textContent = number(entry.totalTokens);
-    row.append(name, track, value);
-    return row;
-  }));
+    const tokens = document.createElement("span");
+    tokens.textContent = number(entry.totalTokens);
+    const cost = document.createElement("small");
+    cost.textContent = usd(entry.estimatedApiCostUsd, { compact: false });
+    value.append(tokens, cost);
+    row.append(dot, name, value);
+    legend.append(row);
+  }
+  wrap.append(donut, legend);
+  host.replaceChildren(wrap);
 }
 
 function paintStatsRange() {
@@ -2060,31 +2345,28 @@ function renderStats(data) {
   const hourly = statsRangeDays === 1;
   const days = hourly ? [...(data.hours || [])] : [...(data.days || [])].slice(-statsRangeDays);
   const labelFor = hourly ? (entry) => statsHourLabel(entry.hour) : (entry) => statsDayLabel(entry.day);
+  const modelPeriod = data.modelPeriods?.[periodKey];
+  buildStatsPalette(data, modelPeriod?.models || data.models);
+  // The snapshot replaces every node the hover layer can point at.
+  statsTipHide();
+  statsFocusModel(null);
   renderDailyStats("stats-token-chart", days, {
     valueFor: (day) => day.totalTokens,
-    titleFor: (day) => t("stats.dayTokens", {
-      day: labelFor(day), newInput: number(day.newInputTokens), cached: number(day.cachedTokens), output: number(day.outputTokens),
-    }),
-    segmentsFor: (day) => [
-      { className: "new-input", value: day.newInputTokens },
-      { className: "cached-input", value: day.cachedTokens },
-      { className: "output", value: day.outputTokens },
-    ],
+    kind: "tokens",
     labelFor,
   });
   renderDailyStats("stats-request-chart", days, {
     valueFor: (day) => day.completedRequests,
-    titleFor: (day) => t("stats.dayRequests", { day: labelFor(day), value: number(day.completedRequests) }),
+    kind: "requests",
     labelFor,
   });
   renderDailyStats("stats-spend-chart", days, {
     valueFor: (day) => day.estimatedApiCostUsd,
-    titleFor: (day) => t("stats.daySpend", { day: labelFor(day), value: usd(day.estimatedApiCostUsd, { compact: false }) }),
+    kind: "spend",
     labelFor,
     renderZero: true,
   });
-  const modelPeriod = data.modelPeriods?.[periodKey];
-  renderModelShare(modelPeriod?.models || data.models, modelPeriod?.modelCount ?? data.modelCount);
+  renderModelShare(modelPeriod?.models || data.models, modelPeriod?.modelCount ?? data.modelCount, `${statsRangeDays}D`);
   const error = $("stats-error");
   if (error) error.hidden = true;
 }

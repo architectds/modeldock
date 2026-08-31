@@ -304,3 +304,49 @@ test("stats keep model share bounded and aggregate the tail", () => {
   assert.equal(stats.models.at(-1).id, "__other__");
   assert.equal(stats.models.at(-1).totalTokens, 300, "the two smallest models are preserved in Other");
 });
+
+// The coloured bars are only honest if a bucket's model stacks add back up to
+// the same totals the summary cards print, and if the ranking that picks the
+// colours is the one the donut uses.
+test("stats attribute each bucket to the models that produced it", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-08-18T01:00:00.000Z", { inputTokens: 500, cachedTokens: 400, outputTokens: 50 }),
+    event("2026-08-18T02:00:00.000Z", {
+      model: "glm-5.3", provider: "opencode-go", inputTokens: 200, cachedTokens: 0, outputTokens: 20,
+    }),
+  ], { now: "2026-08-18T03:00:00.000Z" });
+  const stats = usageStats(rollup, "2026-08-18T12:00:00.000Z");
+  const day = stats.days.at(-1);
+
+  assert.deepEqual(stats.modelLegend, ["deepseek-v4-flash@opencode-go", "glm-5.3@opencode-go"]);
+  const { cost: firstCost, ...first } = day.byModel["deepseek-v4-flash@opencode-go"];
+  const { cost: secondCost, ...second } = day.byModel["glm-5.3@opencode-go"];
+  assert.deepEqual(first, { newInput: 100, cached: 400, output: 50, requests: 1 });
+  assert.deepEqual(second, { newInput: 200, cached: 0, output: 20, requests: 1 });
+  // Each model is priced on its own row, which is the whole point of the split.
+  assert.ok(Math.abs(firstCost - 0.0000578) < 1e-9, "the cached half of the input is billed as cache");
+  assert.ok(Math.abs(secondCost - 0.000368) < 1e-9);
+  const sum = (field) => Object.values(day.byModel).reduce((total, row) => total + row[field], 0);
+  assert.equal(sum("newInput") + sum("cached"), day.newInputTokens + day.cachedTokens);
+  assert.equal(sum("output"), day.outputTokens);
+  assert.equal(sum("requests"), day.completedRequests);
+  assert.ok(Math.abs(sum("cost") - day.estimatedApiCostUsd) < 1e-5, "the spend stack cannot disagree with the spend bar");
+});
+
+test("a bucket folds models outside the legend into the same Other row as the donut", () => {
+  const rollup = emptyRollup();
+  const day = "2026-08-18";
+  rollup.days[day] = {};
+  for (let index = 1; index <= 8; index += 1) {
+    rollup.days[day][`model-${index}@provider-${index}`] = {
+      requests: 1, ok: 1, in: index * 100, out: 0, cached: 0, ms: 1000, okOut: 0, okMs: 0,
+    };
+  }
+  const stats = usageStats(rollup, `${day}T12:00:00.000Z`);
+  const bucket = stats.days.at(-1).byModel;
+
+  assert.equal(Object.keys(bucket).length, 7, "six named models plus one bounded Other segment");
+  assert.equal(stats.modelLegend.length, 6);
+  assert.equal(bucket.__other__.newInput, 300, "the two smallest models are still on the bar");
+  assert.equal(Object.values(bucket).reduce((total, row) => total + row.newInput, 0), stats.days.at(-1).newInputTokens);
+});

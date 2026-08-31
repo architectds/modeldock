@@ -419,6 +419,48 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       }
       assert.equal(new Set(costsByRange.values()).size, 3,
         `Stats range must change the API-cost value, got ${JSON.stringify(Object.fromEntries(costsByRange))}`);
+
+      // Model share is a ring, and every slice is the same model in the same
+      // colour the bars use. Two slices wearing one colour would make the whole
+      // page unreadable, which is the failure this guards.
+      const paint = JSON.parse(await evaluate(`JSON.stringify({
+        slices: [...document.querySelectorAll('#stats-model-chart .stats-slice')].map((n) => n.getAttribute('fill')),
+        legend: [...document.querySelectorAll('#stats-model-chart .stats-legend-row')].map((n) => n.dataset.statsModel),
+        centre: document.querySelector('#stats-model-chart .stats-donut-center b')?.textContent,
+        barColours: [...new Set([...document.querySelectorAll('#stats-token-chart .stats-segment')]
+          .map((n) => n.dataset.statsModel + '=' + n.style.background))],
+      })`));
+      assert.equal(paint.slices.length, 3, "one slice per model in the period");
+      assert.equal(new Set(paint.slices).size, 3, "no two slices may share a colour");
+      assert.equal(paint.legend.length, 3);
+      assert.match(paint.centre, /%$/, "the ring states the share it is highlighting");
+      assert.equal(new Set(paint.barColours.map((entry) => entry.split("=")[1])).size, paint.barColours.length,
+        "a model keeps one colour in every plot");
+
+      // Hover is the only way to read a per-model breakdown off a stacked bar, so
+      // it has to name the model and mute the others across all four cards.
+      const hover = JSON.parse(await evaluate(`(() => {
+        const bar = document.querySelector('#stats-token-chart .stats-segment[data-stats-tip]');
+        bar.dispatchEvent(new PointerEvent('pointerover', { bubbles: true }));
+        const tip = document.querySelector('.stats-tip');
+        return JSON.stringify({
+          hidden: tip ? tip.hidden : 'no layer',
+          model: tip?.querySelector('.stats-tip-model em')?.textContent || '',
+          rows: [...(tip?.querySelectorAll('.stats-tip-row') || [])].map((n) => n.textContent),
+          muted: document.querySelectorAll('.is-mute').length,
+        });
+      })()`));
+      assert.equal(hover.hidden, false, "pointing at a coloured segment opens the tooltip");
+      assert.ok(hover.model.length > 0, "the tooltip names the model behind the segment");
+      assert.ok(hover.rows.length >= 5, `the tooltip breaks the segment down, got ${hover.rows.length} rows`);
+      assert.ok(hover.muted > 0, "every other model dims so the hovered one reads across plots");
+      const leave = JSON.parse(await evaluate(`(() => {
+        const bar = document.querySelector('#stats-token-chart .stats-segment[data-stats-tip]');
+        bar.dispatchEvent(new PointerEvent('pointerout', { bubbles: true }));
+        return JSON.stringify({ hidden: document.querySelector('.stats-tip').hidden, muted: document.querySelectorAll('.is-mute').length });
+      })()`));
+      assert.equal(leave.hidden, true, "the tooltip closes when the pointer leaves");
+      assert.equal(leave.muted, 0, "no model stays muted after the pointer leaves");
     }
 
     // 2. Nothing is on screen that is a translation key rather than a
