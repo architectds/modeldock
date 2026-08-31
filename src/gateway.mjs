@@ -13,7 +13,7 @@ import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnSta
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoints.mjs";
-import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
+import { agentMessageToUserMessage, historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
@@ -487,6 +487,28 @@ export function isCompactV1Request(requestUrl) {
 // compactV2: a Responses request whose last input item is compaction_trigger.
 export function isCompactV2Request(payload) {
   return Array.isArray(payload?.input) && payload.input.at(-1)?.type === "compaction_trigger";
+}
+
+// Codex publishes catalog ids in its picker; any known payload.model is a deliberate
+// session choice and must update modelSelection on every gateway leg - including
+// compact - not only after a normal relay returns client_selected.
+export function syncModelSelectionFromPayload(services, payload, knownModels) {
+  const requested = normalizeLegacySlug(typeof payload?.model === "string" ? payload.model : "", knownModels);
+  if (requested && knownModels?.has(requested) && services.modelSelection) {
+    services.modelSelection.mainModel = requested;
+  }
+  return requested;
+}
+
+export function compactModelForRelay({ config, knownModels, activeModel, requestedModel, fallbackModel }) {
+  const active = activeModel && knownModels?.has(activeModel) ? activeModel : "";
+  const requested = requestedModel && knownModels?.has(requestedModel) ? requestedModel : "";
+  const requestedVision = Boolean(requested && modelEntryFor(config, requested)?.supportsVision);
+  const activeVision = Boolean(active && modelEntryFor(config, active)?.supportsVision);
+  if (requested && requestedVision && !activeVision) return requested;
+  if (active) return active;
+  if (requested) return requested;
+  return fallbackModel || "";
 }
 
 // OpenAI-issued reasoning encrypted_content is an opaque Fernet-style token with
@@ -1012,6 +1034,7 @@ export function normalizeGatewayInput(input) {
   const rewritten = dedupeToolCalls(dropUnpairedToolItems(input))
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
+      if (item?.type === "agent_message") return agentMessageToUserMessage(item);
       if (item?.type !== "compaction") return item;
       const text = compactionSummaryText(item);
       return {
@@ -1020,7 +1043,8 @@ export function normalizeGatewayInput(input) {
         role: "user",
         content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
       };
-    });
+    })
+    .filter(Boolean);
   return promoteCollaborationNewTask(rewritten);
 }
 
@@ -3461,12 +3485,17 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   const mainModel = mainModelFor(services, sessionId);
-  // A compact is a handoff for the model the user selected, not a new vision
-  // escalation. Keeping a selected vision model matters: it can summarize the
-  // visual evidence in its own long-running conversation.
-  const compactModel = requestedModel && knownModels?.has(requestedModel)
-    ? requestedModel
-    : mainModel;
+  const activeModel = normalizeLegacySlug(
+    services.modelSelection?.mainModel || services.mainModel || mainModel,
+    knownModels,
+  ) || mainModel;
+  const compactModel = compactModelForRelay({
+    config,
+    knownModels,
+    activeModel,
+    requestedModel,
+    fallbackModel: mainModel,
+  });
   const route = {
     model: compactModel,
     reason: "compact_summarize",
@@ -3788,6 +3817,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   mediaStore?.touchSession?.(sessionId);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
+  syncModelSelectionFromPayload(services, payload, knownModels);
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
     return relayNativeResponses(payload, res, services, { signal });
   }

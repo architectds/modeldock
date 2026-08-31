@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { promoteCollaborationNewTask, SUBAGENT_SPAWN_RULE, hasOpaqueCollaboration } from "../src/subagent-guidance.mjs";
+import { agentMessageToUserMessage, promoteCollaborationNewTask, SUBAGENT_SPAWN_RULE, hasOpaqueCollaboration } from "../src/subagent-guidance.mjs";
+
+test("agentMessageToUserMessage drops opaque-only agent_message items", () => {
+  assert.equal(agentMessageToUserMessage({
+    type: "agent_message",
+    content: [
+      { type: "input_text", text: "Message Type: NEW_TASK\nPayload:\n" },
+      { type: "encrypted_content", encrypted_content: "gAAAAABopaque_native_cipher_token" },
+    ],
+  }), null);
+});
 
 test("SUBAGENT_SPAWN_RULE uses the managed role without an incompatible full-history fork", () => {
   assert.match(SUBAGENT_SPAWN_RULE, /agent_type="modeldock_subagent"/);
