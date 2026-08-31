@@ -694,16 +694,18 @@ function hostDashAvg(history) {
   return history.reduce((sum, point) => sum + point.v, 0) / history.length;
 }
 
-function usd(value, { compact = true } = {}) {
+// Money is never abbreviated. "$1.3K" throws away the only number the card
+// exists to report, and an option that call sites can forget is how the summary
+// card ended up shortened while its own breakdown rows were not. Sub-cent
+// amounts keep four decimals so a real cost never renders as $0.00.
+function usd(value) {
   const amount = Math.max(0, Number(value) || 0);
-  const compactAmount = compact && amount >= 1000;
-  const tinyAmount = amount > 0 && amount < 0.01;
+  const digits = amount > 0 && amount < 0.01 ? 4 : 2;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    notation: compactAmount ? "compact" : "standard",
-    minimumFractionDigits: tinyAmount ? 4 : compactAmount ? 0 : 2,
-    maximumFractionDigits: tinyAmount ? 4 : compactAmount ? 1 : 2,
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
   }).format(amount);
 }
 
@@ -2128,7 +2130,7 @@ function statsBucketSegments(bucket, kind) {
     const tokens = row.newInput + row.cached + row.output;
     const value = kind === "tokens" ? tokens : kind === "requests" ? row.requests : row.cost;
     if (!(value > 0)) continue;
-    const money = usd(row.cost, { compact: false });
+    const money = usd(row.cost);
     const rows = kind === "requests"
       ? [
         { label: t("stats.requestVolume"), value: number(row.requests) },
@@ -2263,7 +2265,7 @@ function renderModelShare(models = [], modelCount = 0, periodLabel = "") {
         { label: t("stats.cachedInput"), value: number(entry.cachedTokens) },
         { label: t("stats.output"), value: number(entry.outputTokens) },
         { label: t("stats.requestVolume"), value: number(entry.completedRequests) },
-        { label: t("stats.apiSpend"), value: usd(entry.estimatedApiCostUsd, { compact: false }) },
+        { label: t("stats.apiSpend"), value: usd(entry.estimatedApiCostUsd) },
       ],
     };
     tips.set(entry.id, tip);
@@ -2307,7 +2309,7 @@ function renderModelShare(models = [], modelCount = 0, periodLabel = "") {
     const tokens = document.createElement("span");
     tokens.textContent = number(entry.totalTokens);
     const cost = document.createElement("small");
-    cost.textContent = usd(entry.estimatedApiCostUsd, { compact: false });
+    cost.textContent = usd(entry.estimatedApiCostUsd);
     value.append(tokens, cost);
     row.append(dot, name, value);
     legend.append(row);

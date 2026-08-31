@@ -401,6 +401,15 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
           cost: document.getElementById('stats-cost')?.textContent,
         })`));
         costsByRange.set(range, filtered.cost);
+        // Abbreviated money is the bug, not the style: the summary card used to
+        // render "$1.3K" while the model rows under it showed full amounts, so the
+        // number the card exists to report was the one that got thrown away. Requiring
+        // decimals is what rejects "$1.3K" and "$1K" both.
+        assert.match(
+          filtered.cost || "",
+          /^\$[\d,]+\.\d{2,4}$/,
+          `Stats ${range}D cost must be a full dollar amount, got ${JSON.stringify(filtered.cost)}`,
+        );
         const expectedPoints = range === 1 ? 24 : range;
         assert.deepEqual(filtered, {
           tokenDays: expectedPoints,
