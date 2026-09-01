@@ -18,6 +18,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:net";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
 import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
@@ -54,6 +55,15 @@ function findChrome() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function availablePort() {
+  const probe = createServer();
+  probe.listen(0, "127.0.0.1");
+  await new Promise((resolve) => probe.once("listening", resolve));
+  const port = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
+
 // A dashboard on a scratch port with its state in a temp dir, so looking at it
 // cannot touch the developer's own configuration.
 function managedHostSnapshot() {
@@ -87,9 +97,10 @@ function managedHostSnapshot() {
 
 async function startDashboard(t, { managed = false, managedDrawer = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
+  const port = await availablePort();
   const services = createServices({
     host: "127.0.0.1",
-    port: 0,
+    port,
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: OPENCODE_GO_PROFILE.id,
     goBaseUrl: "https://go.example.com/v1",
@@ -103,6 +114,8 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
     debug: { noSessionCheck: true },
     refreshNativeCatalog: false,
     autostartDefault: false,
+    envFile: path.join(dir, ".env"),
+    settingsEventsFile: path.join(dir, "settings-events.jsonl"),
     summariesFile: path.join(dir, "summaries.json"),
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
@@ -227,7 +240,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
   }
 
   const { app } = createApp(services);
-  const server = app.listen(0, "127.0.0.1");
+  const server = app.listen(port, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(async () => {
     await services.mediaStore.cleanup();
@@ -537,6 +550,32 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   )`));
   assert.deepEqual(providerOrder, ["xai-section", "settings-go-token", "commandcode-field", "deepseek-field"],
     "account sign-in providers stay ahead of providers that require API keys");
+
+  // Reproduce the real Cloud-page flow: another provider is already configured,
+  // so Command Code starts as optional. Saving its key must update the persistent
+  // page from the POST response; waiting for a reload left the stale placeholder
+  // visible even though the backend was already using the key.
+  const commandBefore = await evaluate(`document.getElementById('settings-commandcode-token').placeholder`);
+  assert.match(commandBefore, /optional/i);
+  await evaluate(`(() => {
+    document.getElementById('settings-commandcode-token').value = 'user_dashboard-commandcode-test-key';
+    document.getElementById('settings-save').click();
+  })()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const placeholder = await evaluate(`document.getElementById('settings-commandcode-token').placeholder`);
+    if (/configured/i.test(placeholder)) break;
+    await sleep(50);
+  }
+  const commandState = JSON.parse(await evaluate(`JSON.stringify({
+    placeholder: document.getElementById('settings-commandcode-token').placeholder,
+    status: document.getElementById('settings-status').textContent,
+    saveDisabled: document.getElementById('settings-save').disabled,
+    errors: window.__pageErrors,
+  })`));
+  assert.match(commandState.placeholder, /configured/i,
+    `a successful save immediately marks Command Code configured: ${JSON.stringify(commandState)}`);
+  assert.equal(await evaluate(`document.getElementById('settings-commandcode-token').value`), "",
+    "the stored key is never echoed back into the field");
 
   // A connection publishes models to the gateway but must not silently grant
   // lifecycle control. This opens the actual drawer and reads rendered text,

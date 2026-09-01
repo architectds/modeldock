@@ -1480,10 +1480,7 @@ function maybePromptSettings(config) {
 // the only connection setting left in that dialog.
 let lastSettings = null;
 
-async function loadSettings() {
-  const response = await fetch("/api/settings", { cache: "no-store" });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
+function renderProviderTokenFields(data) {
   // One table per keyed provider, so adding an endpoint cannot mean editing this
   // function again. Never echo a stored token back into the field: the
   // placeholder reports whether one is set, and submitting an empty field leaves
@@ -1502,6 +1499,13 @@ async function loadSettings() {
       ? t("settings.configured")
       : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
   }
+}
+
+async function loadSettings() {
+  const response = await fetch("/api/settings", { cache: "no-store" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
+  renderProviderTokenFields(data);
   const status = $("settings-status");
   if (status) status.textContent = "";
   renderAutostart(data);
@@ -3733,9 +3737,11 @@ async function saveSettings() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Save ${response.status}`);
-    $("settings-go-token").value = "";
-    $("settings-deepseek-token").value = "";
-    $("settings-commandcode-token").value = "";
+    // Cloud is a persistent page, not the old modal this save handler predates.
+    // Apply the authoritative response immediately so a newly stored provider
+    // does not keep displaying the stale "optional" placeholder until reload.
+    renderProviderTokenFields(data);
+    lastSettings = data;
     status.textContent = t("settings.saved");
     closeSettings();
     poll().catch(() => {});
