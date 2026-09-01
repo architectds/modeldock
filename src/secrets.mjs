@@ -16,6 +16,7 @@ import process from "node:process";
 export const SECRET_KEYS = new Set([
   "OPENCODE_GO_TOKEN",
   "DEEPSEEK_API_KEY",
+  "COMMANDCODE_API_KEY",
   "EXA_API_KEY",
   "MODELDOCK_CUSTOM_API_KEY",
 ]);

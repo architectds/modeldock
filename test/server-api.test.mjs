@@ -1568,20 +1568,23 @@ test("settings save persists well-formed direct-provider tokens without an infer
       body: JSON.stringify({
         opencodeGoToken: "sk-opencode-valid-token-123456",
         deepseekApiKey: "sk-deepseek-valid-key-123456",
+        commandcodeApiKey: "user_commandcode-valid-key-123456",
       }),
     });
     assert.equal(response.status, 200);
     const body = await response.json();
     assert.equal(body.providers[0].tokenConfigured, true);
     assert.equal(body.providers[1].tokenConfigured, true);
+    assert.equal(body.providers[2].tokenConfigured, true);
 
     const env = await readFile(envFile, "utf8");
     assert.match(env, /^OPENCODE_GO_TOKEN=/m);
     assert.equal(completionProbe, false, "saving a token must not consume a model request");
     assert.match(env, /^DEEPSEEK_API_KEY=/m);
+    assert.match(env, /^COMMANDCODE_API_KEY=/m);
     const events = (await readFile(eventsFile, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.equal(events[events.length - 1].ok, true);
-    assert.deepEqual([...events[events.length - 1].providers].sort(), ["deepseek-official", "opencode-go"]);
+    assert.deepEqual([...events[events.length - 1].providers].sort(), ["commandcode", "deepseek-official", "opencode-go"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

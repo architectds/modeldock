@@ -650,6 +650,7 @@ function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
   const mainToken = config.tokens?.["opencode-go"] || "";
   const deepseekToken = config.tokens?.["deepseek-official"] || "";
+  const commandCodeToken = config.tokens?.commandcode || "";
   const ollamaProfile = profileById("ollama");
   const ollamaConnected = Boolean(ollamaProfile.availableModels?.length);
   const ollamaMain = modelSelection.mainModel && providerForModel(config, modelSelection.mainModel) === "ollama"
@@ -663,6 +664,7 @@ function settingsPayload(services) {
     providers: [
       { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
       { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
+      { id: "commandcode", label: "Command Code", tokenConfigured: Boolean(commandCodeToken) },
       ...(ollamaConnected ? [{ id: "ollama", label: "Ollama (local)", tokenConfigured: true }] : []),
     ],
     custom: {
@@ -1499,6 +1501,18 @@ export function createApp(services = createServices()) {
         }
         updates.DEEPSEEK_API_KEY = checked.value;
       }
+      if (body.commandcodeApiKey) {
+        const token = String(body.commandcodeApiKey).trim();
+        providers.push("commandcode");
+        const checked = validateProviderToken("commandcode", token);
+        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_commandcode_api_key" });
+        if (isPlaceholderToken(token)) {
+          const error = new Error("A valid Command Code API key is required.");
+          error.code = "invalid_commandcode_api_key";
+          throw error;
+        }
+        updates.COMMANDCODE_API_KEY = checked.value;
+      }
       if (body.exaApiKey) {
         const checked = validateProviderToken("exa", body.exaApiKey);
         if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_exa_api_key" });
@@ -1516,6 +1530,7 @@ export function createApp(services = createServices()) {
           config.goTokenSource = "configured";
         }
         config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
+        if (updates.COMMANDCODE_API_KEY) config.tokens.commandcode = updates.COMMANDCODE_API_KEY;
         if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
         // Directory discovery is only GET /models and stays out of the
         // settings critical path. Auth, quota, and model-protocol failures are

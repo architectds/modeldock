@@ -1484,17 +1484,23 @@ async function loadSettings() {
   const response = await fetch("/api/settings", { cache: "no-store" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message || `Settings ${response.status}`);
-  const go = (data.providers || []).find((p) => p.id === "opencode-go");
-  const ds = (data.providers || []).find((p) => p.id === "deepseek-official");
-  const goInput = $("settings-go-token");
-  const dsInput = $("settings-deepseek-token");
-  if (goInput && dsInput) {
-    // Never echo a stored token back into the field: the placeholder reports
-    // whether one is set, and submitting an empty field leaves it alone.
-    goInput.value = "";
-    dsInput.value = "";
-    goInput.placeholder = go?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
-    dsInput.placeholder = ds?.tokenConfigured ? t("settings.configured") : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
+  // One table per keyed provider, so adding an endpoint cannot mean editing this
+  // function again. Never echo a stored token back into the field: the
+  // placeholder reports whether one is set, and submitting an empty field leaves
+  // it alone.
+  const tokenFields = [
+    { element: "settings-go-token", provider: "opencode-go" },
+    { element: "settings-deepseek-token", provider: "deepseek-official" },
+    { element: "settings-commandcode-token", provider: "commandcode" },
+  ];
+  for (const field of tokenFields) {
+    const input = $(field.element);
+    if (!input) continue;
+    const provider = (data.providers || []).find((entry) => entry.id === field.provider);
+    input.value = "";
+    input.placeholder = provider?.tokenConfigured
+      ? t("settings.configured")
+      : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
   }
   const status = $("settings-status");
   if (status) status.textContent = "";
@@ -3712,8 +3718,10 @@ async function saveSettings() {
     const body = {};
     const go = $("settings-go-token").value.trim();
     const deepseek = $("settings-deepseek-token").value.trim();
+    const commandcode = $("settings-commandcode-token").value.trim();
     if (go) body.opencodeGoToken = go;
     if (deepseek) body.deepseekApiKey = deepseek;
+    if (commandcode) body.commandcodeApiKey = commandcode;
     if (!Object.keys(body).length) {
       closeSettings();
       return;
@@ -3727,6 +3735,7 @@ async function saveSettings() {
     if (!response.ok) throw new Error(data.error?.message || `Save ${response.status}`);
     $("settings-go-token").value = "";
     $("settings-deepseek-token").value = "";
+    $("settings-commandcode-token").value = "";
     status.textContent = t("settings.saved");
     closeSettings();
     poll().catch(() => {});

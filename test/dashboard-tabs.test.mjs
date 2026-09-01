@@ -535,7 +535,7 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     [...document.querySelectorAll('.cloud-credentials > .field')]
       .map((field) => field.id || field.querySelector('input')?.id)
   )`));
-  assert.deepEqual(providerOrder, ["xai-section", "settings-go-token", "deepseek-field"],
+  assert.deepEqual(providerOrder, ["xai-section", "settings-go-token", "commandcode-field", "deepseek-field"],
     "account sign-in providers stay ahead of providers that require API keys");
 
   // A connection publishes models to the gateway but must not silently grant

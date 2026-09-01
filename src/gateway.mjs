@@ -400,6 +400,18 @@ export function sessionIdsFrom(headers) {
 // does the native config default apply, so a fresh session behaves exactly as
 // Codex would without ModelDock.
 const NATIVE_DEFAULT_MODEL = "gpt-5.6-sol";
+// A routed provider can expire between turns. Compaction is the one request that
+// must still succeed before Codex can move the task onto another model, so it has
+// one explicit failover target on the signed-in native leg. This is deliberately
+// a bare native slug; the @opencode-go Luna is a different provider and would
+// reproduce the same quota failure we are escaping.
+const NATIVE_COMPACTION_FALLBACK_MODEL = "gpt-5.6-luna";
+const NATIVE_COMPACTION_FALLBACK_CLASSES = new Set([
+  "quota_exhausted",
+  "auth_failed",
+  "rate_limited",
+  "upstream_unavailable",
+]);
 function mainModelFor(services, sessionId) {
   const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
   if (sessionModel) return sessionModel;
@@ -3753,6 +3765,28 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       // 502) must reach translateUpstreamError and writeCompactFailureReport, not
       // throw out of a JSON.parse into the generic catch below.
       const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
+      if (NATIVE_COMPACTION_FALLBACK_CLASSES.has(translated.classification)) {
+        // The selected model remains unchanged. Only this compact request moves
+        // to native Luna, once, so an expired routed subscription cannot trap a
+        // long task before the user's newly selected native turn can begin.
+        finish?.({
+          ok: false,
+          httpStatus: upstream.status,
+          upstream: target.provider,
+          error: translated.body.error.message.slice(0, 400),
+          requestShape: describeInputShape(payload.input),
+          compression: compressionInfo,
+          fallbackModel: NATIVE_COMPACTION_FALLBACK_MODEL,
+        });
+        metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: false, routeReason: operation, upstreamRequestBytes: upstreamRequest.bytes }));
+        recordUsage({ ...compactRoute, status: upstream.status });
+        return relayNativeResponses(
+          { ...payload, model: NATIVE_COMPACTION_FALLBACK_MODEL },
+          res,
+          services,
+          { signal },
+        );
+      }
       writeCompactFailureReport(
         compactFailureReport(
           { ...summarizeBody, model: upstreamModel },

@@ -15,6 +15,7 @@ import { loadConfig, migrateEnvSecrets, parseEnvFile } from "../src/config.mjs";
 test("recognizes only the token keys as secrets", () => {
   assert.equal(isSecretKey("OPENCODE_GO_TOKEN"), true);
   assert.equal(isSecretKey("DEEPSEEK_API_KEY"), true);
+  assert.equal(isSecretKey("COMMANDCODE_API_KEY"), true);
   assert.equal(isSecretKey("EXA_API_KEY"), true);
   assert.equal(isSecretKey("MODELDOCK_CUSTOM_API_KEY"), true);
   assert.equal(isSecretKey("MODELDOCK_PORT"), false);

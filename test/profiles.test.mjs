@@ -78,7 +78,7 @@ test("lists all profiles as selectable options", () => {
   // not by being absent from the registry, which still has to validate its id.
   // xai sits with the other keyed providers: registered up front so its id
   // validates, empty until someone signs in.
-  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "xai", "ollama", "llamacpp", "vllm"]);
+  assert.deepEqual(options.map((option) => option.id), ["opencode-go", "deepseek-official", "custom", "xai", "commandcode", "ollama", "llamacpp", "vllm"]);
   assert.ok(options.every((option) => typeof option.label === "string" && option.label.length > 0));
   assert.equal(options.find((option) => option.id === "deepseek-official")?.label, "DeepSeek");
 });

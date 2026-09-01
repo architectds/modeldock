@@ -567,11 +567,69 @@ const XAI_PROFILE = {
   },
 };
 
+// Command Code is a hosted, keyed provider in the same family as OpenCode Go:
+// one Bearer credential, an OpenAI-shaped GET /models directory, and Chat
+// Completions inference, which the existing Responses-to-Chat bridge already
+// speaks. No new protocol work.
+//
+// Its directory deliberately mixes two dialects, and this is the measured
+// boundary (2026-08-31): a Claude model on /chat/completions is refused with
+// "Model \"claude-sonnet-5\" must be called via /provider/v1/messages (Anthropic
+// Messages shape)." while deepseek/, Qwen/, xai/, google/ and the bare gpt-5.6
+// ids all answer 200 with well-formed tool calls. Publishing the Claude half would
+// ship the picker a model whose every request is a guaranteed 400, so the
+// discovery filter leaves it out rather than inventing a Messages dialect we do
+// not implement.
+const COMMAND_CODE_MESSAGES_PREFIX = "claude-";
+const COMMAND_CODE_PROFILE = {
+  id: "commandcode",
+  label: "Command Code",
+  baseUrl: "https://api.commandcode.ai/provider/v1",
+  tokenEnvName: "COMMANDCODE_API_KEY",
+  modelDiscovery: true,
+  // Chat only: Messages-dialect models are filtered out of discovery below.
+  discoveryTransports: new Set(["chat"]),
+  discoveryModel(id, entry) {
+    const claude = String(id).startsWith(COMMAND_CODE_MESSAGES_PREFIX);
+    // The directory publishes context_length per model. Use the vendor's own
+    // number where it gives one, and fall back to the shared conservative window
+    // where it does not - never a guessed larger value, because the window is
+    // what Codex sizes its compaction threshold from.
+    const published = Number(entry?.context_length) || 0;
+    return {
+      id,
+      label: String(entry?.name || id),
+      endpoint: claude ? "messages" : "chat",
+      // Listing a model is not proof it sees images, so no vision is claimed.
+      supportsVision: false,
+      visionStatus: "unknown",
+      contextWindow: published || CONTEXT_WINDOW,
+      contextSource: published ? "vendor" : "fallback",
+      status: "available",
+    };
+  },
+  availableModels: [],
+  modelCatalog({ mainModel, baseInstructions }) {
+    return modelCatalogDefaults({
+      profileId: "commandcode",
+      mainModel,
+      displayName: "Command Code",
+      description: "Command Code Provider API through ModelDock.",
+      compHash: "modeldock-commandcode-v1",
+      inputModalities: ["text"],
+      supportsSearchTool: false,
+      availableModels: COMMAND_CODE_PROFILE.availableModels,
+      baseInstructions,
+    });
+  },
+};
+
 const PROFILES = {
   "opencode-go": OPENCODE_GO_PROFILE,
   "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
   custom: CUSTOM_PROFILE,
   xai: XAI_PROFILE,
+  commandcode: COMMAND_CODE_PROFILE,
   ollama: OLLAMA_PROFILE,
   llamacpp: LLAMACPP_PROFILE,
   vllm: VLLM_PROFILE,
@@ -652,6 +710,23 @@ defineRouting(OPENCODE_GO_PROFILE, {
 
 defineRouting(XAI_PROFILE, {
   baseUrlFor: () => trimBase(XAI_PROFILE.baseUrl),
+});
+
+// Every Command Code model is a Chat Completions model: declaring the transport
+// here is what makes the relay take the existing Responses-to-Chat bridge instead
+// of sending Responses at an endpoint that only answers chat. The base URL comes
+// from defineRouting's default, so a test or a redirected install can still move
+// it through config without a second env knob being invented for it.
+defineRouting(COMMAND_CODE_PROFILE, {
+  tokenPattern: /^user_/,
+  tokenHint: "A Command Code Provider API key must start with user_ (create one at https://commandcode.ai/provider).",
+  target: (config, model) => ({
+    provider: "commandcode",
+    model: bareModelId(model),
+    url: `${COMMAND_CODE_PROFILE.baseUrlFor(config, model)}/chat/completions`,
+    transport: "chat",
+    token: config?.tokens?.commandcode || "",
+  }),
 });
 
 defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {

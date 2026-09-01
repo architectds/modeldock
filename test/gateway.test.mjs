@@ -3862,18 +3862,34 @@ test("transfer-out counts the bytes that were actually sent upstream", async () 
   assert.equal(result.upstreamBytes, Buffer.byteLength(sentBodies[0]), "measured what went on the wire");
 });
 
-test("relayCompaction reports the failure telemetry when the upstream rejects the summarize call", async () => {
+test("relayCompaction falls back once to native Luna when the routed provider rejects compaction", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const finishes = [];
+  const calls = [];
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-compact-state-"));
   const previousStateDir = process.env.MODELDOCK_STATE_DIR;
   process.env.MODELDOCK_STATE_DIR = stateDir;
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(
-    JSON.stringify({ error: { message: "invalid_api_key", type: "invalid_request_error" } }),
-    { status: 401, headers: { "content-type": "application/json" } },
-  );
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    if (calls.length === 1) {
+      return new Response(
+        JSON.stringify({ error: { message: "Insufficient balance", type: "invalid_request_error" } }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        id: "resp_native_compact",
+        object: "response",
+        status: "completed",
+        model: "gpt-5.6-luna",
+        output: [{ type: "compaction", id: "cmp_native", encrypted_content: "native-token" }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
   try {
     const result = await relayCompaction(
       {
@@ -3891,26 +3907,77 @@ test("relayCompaction reports the failure telemetry when the upstream rejects th
           begin: () => (telemetry) => finishes.push(telemetry),
           recordResponseUsage: () => {},
         },
+        requestUrl: "/v1/responses",
+        incomingHeaders: { authorization: "Bearer native-session" },
       },
       {},
       true,
     );
-    assert.equal(result.ok, false);
-    assert.equal(result.httpStatus, 401, "the upstream 401 is reported, not a swallowed 502");
-    assert.equal(finishes.length, 1, "the failure finish fires exactly once");
+    assert.equal(result.ok, true);
+    assert.equal(result.httpStatus, 200);
+    assert.equal(calls.length, 2, "one routed attempt and one native fallback are made");
+    assert.equal(calls[0].body.model, "deepseek-v4-flash");
+    assert.equal(calls[1].body.model, "gpt-5.6-luna", "the fallback is native Luna, never Luna or Qwen at OpenCode Go");
+    assert.ok(calls[1].body.input.some((item) => item.type === "compaction_trigger"), "native Luna receives the real compact request");
+    assert.match(calls[1].url, /chatgpt\.com\/backend-api\/codex\/responses$/);
+    assert.equal(finishes.length, 2, "the routed failure and native success each close their trace");
     assert.equal(finishes[0].httpStatus, 401);
+    assert.equal(finishes[0].fallbackModel, "gpt-5.6-luna");
     assert.deepEqual(
       finishes[0].requestShape.itemTypes,
       { message: 1, compaction_trigger: 1 },
       "the request shape rides the failure telemetry",
     );
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
-    assert.equal(body.error.type, "auth_failed", "the 401 is translated into the auth_failed class");
+    assert.equal(body.model, "gpt-5.6-luna");
+    assert.equal(body.output[0].type, "compaction");
   } finally {
     globalThis.fetch = originalFetch;
     if (previousStateDir === undefined) delete process.env.MODELDOCK_STATE_DIR;
     else process.env.MODELDOCK_STATE_DIR = previousStateDir;
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("relayCompaction never loops when native Luna also rejects the fallback", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    const message = calls.length === 1 ? "Insufficient balance" : "native session unavailable";
+    return new Response(JSON.stringify({ error: { message } }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const result = await relayCompaction(
+      {
+        model: "deepseek-v4-flash",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        requestUrl: "/v1/responses",
+        incomingHeaders: { authorization: "Bearer expired-native-session" },
+      },
+      {},
+      true,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.httpStatus, 401);
+    assert.equal(calls.length, 2, "one routed attempt plus one native attempt is the hard limit");
+    assert.equal(calls[1].body.model, "gpt-5.6-luna");
+    assert.match(Buffer.concat(sink.chunks).toString("utf8"), /native session unavailable/);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

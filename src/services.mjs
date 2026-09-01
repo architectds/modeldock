@@ -51,11 +51,19 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(10_000),
     });
-    const fetchedIds = response.ok
-      ? [...new Set(((await response.json())?.data || [])
-        .map((entry) => entry?.id)
-        .filter((id) => typeof id === "string" && id))]
-      : [];
+    // The directory entry is kept beside the id rather than thrown away, because a
+    // provider that publishes a real context window should have that number used
+    // instead of the shared conservative fallback. Only the provider's own
+    // discoveryModel ever reads it, so providers whose directory publishes no
+    // per-model facts are unaffected.
+    const directory = new Map();
+    if (response.ok) {
+      for (const entry of (await response.json())?.data || []) {
+        const id = entry?.id;
+        if (typeof id === "string" && id && !directory.has(id)) directory.set(id, entry);
+      }
+    }
+    const fetchedIds = [...directory.keys()];
     if (!fetchedIds.length) return { changed: false, discovered: 0 };
     const existing = profile.availableModels || [];
     const existingById = new Map(existing.map((model) => [model.id, model]));
@@ -65,7 +73,7 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       .map((id) => {
         const endpoint = profile.discoveryTransportFor?.(id) || "responses";
         const candidate = profile.discoveryModel
-          ? profile.discoveryModel(id)
+          ? profile.discoveryModel(id, directory.get(id))
           : {
               id,
               label: labelForModelId(id),

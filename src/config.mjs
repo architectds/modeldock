@@ -385,9 +385,11 @@ export function loadConfig() {
   // "no token" plus an audit event, never to a silent 401 wall.
   const rawOpencodeToken = process.env.OPENCODE_GO_TOKEN || "";
   const rawDeepseekToken = process.env.DEEPSEEK_API_KEY || "";
+  const rawCommandCodeToken = process.env.COMMANDCODE_API_KEY || "";
   const ignoredTokens = [];
   if (rawOpencodeToken && isPlaceholderToken(rawOpencodeToken)) ignoredTokens.push("opencode-go");
   if (rawDeepseekToken && isPlaceholderToken(rawDeepseekToken)) ignoredTokens.push("deepseek-official");
+  if (rawCommandCodeToken && isPlaceholderToken(rawCommandCodeToken)) ignoredTokens.push("commandcode");
   if (ignoredTokens.length) {
     recordSettingsEvent({ action: "env_placeholder_ignored", providers: ignoredTokens, ok: false, error: "placeholder_token_ignored" });
   }
@@ -434,9 +436,13 @@ export function loadConfig() {
   // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
   const ollamaSnapshotFile = ollamaSnapshotPath();
   const ollamaSnapshot = readOllamaSnapshot(ollamaSnapshotFile);
+  const commandCodeToken = rawCommandCodeToken && !isPlaceholderToken(rawCommandCodeToken) ? rawCommandCodeToken : "";
   const tokens = {
     "opencode-go": opencodeGoToken,
     "deepseek-official": deepseekToken,
+    // A second OpenCode-family keyed endpoint: same shape, so it is read the same
+    // way and appears in the picker only once a key exists.
+    ...(commandCodeToken ? { commandcode: commandCodeToken } : {}),
     ...(customApiKey ? { custom: customApiKey } : {}),
   };
 
@@ -501,6 +507,10 @@ export function loadConfig() {
     opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
+    // Command Code's Provider API root. Overridable for the same reason the other
+    // hosted bases are: the wire tests must be able to drive the built bundle
+    // against a strict mock instead of the real vendor.
+    commandcodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_COMMANDCODE_BASE_URL || "https://api.commandcode.ai/provider/v1"),
     // Zen free tier: the free models route here instead of zen/go. Overridable
     // so sandbox/CI can point free traffic at a mock upstream.
     zenBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_ZEN_BASE_URL || "https://opencode.ai/zen/v1"),
