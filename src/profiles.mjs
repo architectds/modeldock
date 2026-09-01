@@ -581,6 +581,56 @@ const XAI_PROFILE = {
 // discovery filter leaves it out rather than inventing a Messages dialect we do
 // not implement.
 const COMMAND_CODE_MESSAGES_PREFIX = "claude-";
+// Command Code's directory does not publish modalities, so discovery joins each
+// id to a provider-specific capability ledger. Keep this exact rather than using
+// a broad vendor regex: one family can expose visual and text-only routes side by
+// side (DeepSeek Flash versus Vision Exp, Qwen 3.7 Plus versus Max, MiMo versus
+// MiMo Pro). On 2026-08-31 the reachable entries were sent the same four-quadrant
+// PNG through Command Code Chat. A positive entry either read those pixels,
+// showed pixel evidence on an image-accepting route, or is a plan-gated sibling
+// with the same published multimodal contract. Explicit image rejections stay
+// out. New ids default to text-only until they have equivalent evidence.
+const COMMAND_CODE_VISION_MODELS = new Set([
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "deepseek/deepseek-v4-flash-vision-exp",
+  "moonshotai/Kimi-K3",
+  "moonshotai/Kimi-K2.7-Code",
+  "moonshotai/Kimi-K2.7-Code-Highspeed",
+  "moonshotai/Kimi-K2.6",
+  "moonshotai/Kimi-K2.5",
+  "z-ai/glm-5.3-flash",
+  "zai-org/GLM-5.2",
+  "zai-org/GLM-5.2-Fast",
+  "MiniMaxAI/MiniMax-M3",
+  "xiaomi/mimo-v2.5",
+  "Qwen/Qwen3.8-Max",
+  "Qwen/Qwen3.8-27B",
+  "Qwen/Qwen3.8-Flash",
+  "Qwen/Qwen3.7-Plus",
+  "Qwen/Qwen3.7-Flash",
+  "Qwen/Qwen3.6-Max-Preview",
+  "Qwen/Qwen3.6-Plus",
+  "google/gemini-3.7-flash",
+  "google/gemini-3.6-flash",
+  "google/gemini-3.5-flash",
+  "google/gemini-3.5-flash-lite",
+  "google/gemini-3.1-flash-lite",
+  "thinkingmachines/inkling",
+  "thinkingmachines/inkling-small",
+  "xai/grok-4.5",
+  "xai/grok-4.6",
+]);
+
+function commandCodeModelSeesImages(id) {
+  return COMMAND_CODE_VISION_MODELS.has(String(id || ""));
+}
+
 const COMMAND_CODE_PROFILE = {
   id: "commandcode",
   label: "Command Code",
@@ -596,13 +646,12 @@ const COMMAND_CODE_PROFILE = {
     // where it does not - never a guessed larger value, because the window is
     // what Codex sizes its compaction threshold from.
     const published = Number(entry?.context_length) || 0;
+    const supportsVision = commandCodeModelSeesImages(id);
     return {
       id,
       label: String(entry?.name || id),
       endpoint: claude ? "messages" : "chat",
-      // Listing a model is not proof it sees images, so no vision is claimed.
-      supportsVision: false,
-      visionStatus: "unknown",
+      supportsVision,
       contextWindow: published || CONTEXT_WINDOW,
       contextSource: published ? "vendor" : "fallback",
       status: "available",

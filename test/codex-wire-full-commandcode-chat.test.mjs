@@ -23,6 +23,9 @@ const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
 const UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
 const ROUTED_SLUG = `${UPSTREAM_MODEL}@commandcode`;
+const VISION_UPSTREAM_MODEL = "Qwen/Qwen3.8-Flash";
+const VISION_ROUTED_SLUG = `${VISION_UPSTREAM_MODEL}@commandcode`;
+const BLUE_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZCMsAAAAASUVORK5CYII=";
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -140,11 +143,11 @@ function toolStream(calls, reasoningText) {
   ]);
 }
 
-function textStream(text) {
+function textStream(text, model = UPSTREAM_MODEL) {
   return sse([{
     id: "chatcmpl_cmd_fixture",
     created: 31,
-    model: UPSTREAM_MODEL,
+    model,
     choices: [{ index: 0, delta: { role: "assistant", content: text }, finish_reason: "stop" }],
     usage: { prompt_tokens: 9000, completion_tokens: 9, prompt_tokens_details: { cached_tokens: 0 } },
   }]);
@@ -167,6 +170,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       // filtered, not merely described as filtered.
       return res.end(JSON.stringify({ data: [
         { id: UPSTREAM_MODEL, name: "DeepSeek V4 Flash (latest)", context_length: 1_000_000 },
+        { id: VISION_UPSTREAM_MODEL, name: "Qwen 3.8 Flash", context_length: 1_000_000 },
         { id: "claude-sonnet-5", name: "Claude Sonnet 5", context_length: 1_000_000 },
       ] }));
     }
@@ -182,7 +186,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     if (body.input !== undefined || body.instructions !== undefined || body.include !== undefined || body.cache_prompt !== undefined) {
       return rejectWith(400, "Responses-only field reached a Chat upstream");
     }
-    if (body.model !== UPSTREAM_MODEL) {
+    if (![UPSTREAM_MODEL, VISION_UPSTREAM_MODEL].includes(body.model)) {
       return rejectWith(400, `wrong model reached the upstream: ${JSON.stringify(body.model)}`);
     }
     if (!Array.isArray(body.messages) || !body.messages.length) {
@@ -197,6 +201,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     }
     const toolIds = new Set(body.messages.filter((message) => message.role === "tool").map((message) => message.tool_call_id));
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (body.model === VISION_UPSTREAM_MODEL) return res.end(textStream("COMMAND_CODE_VISION_OK", body.model));
     // Longest history first: the third turn carries a, b and c, so checking the
     // a+b pair ahead of c would answer the same hop twice.
     if (toolIds.has("call_cmd_c")) return res.end(textStream("CMD_TOOL_LOOP_COMPLETE"));
@@ -258,11 +263,11 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   assert.ok(!published.some((id) => id.startsWith("claude-")),
     `the vendor directory listed a Claude model and it reached the picker anyway: ${published}`);
 
-  const send = async (input, stream = true) => {
+  const send = async (input, stream = true, model = ROUTED_SLUG, sessionId = "full-commandcode-chat-fixture") => {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-codex-session-id": "full-commandcode-chat-fixture" },
-      body: JSON.stringify({ ...fixture.request, model: ROUTED_SLUG, stream, input }),
+      headers: { "content-type": "application/json", "x-codex-session-id": sessionId },
+      body: JSON.stringify({ ...fixture.request, model, stream, input }),
     });
     const text = await response.text();
     assert.equal(response.status, 200, `built bundle rejected the full package: ${text}\n${stderr}`);
@@ -303,6 +308,37 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   assert.match(third, /CMD_TOOL_LOOP_COMPLETE/);
   assert.equal(requests[2].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_cmd_c"))?.reasoning_content,
     "Both results are in; keep going.");
+
+  // Keep the same complete 164-tool Codex capture and add the ordinary image
+  // item that a pasted screenshot contributes. This exercises the real catalog,
+  // router, vision-specific tool filter and Responses-to-Chat image conversion
+  // together; a hand-authored reduced tool package would miss that coupling.
+  const visualInput = [
+    ...fixture.request.input,
+    {
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "Name the dominant image color." },
+        { type: "input_image", image_url: BLUE_PNG },
+      ],
+    },
+  ];
+  const visual = await send(visualInput, true, VISION_ROUTED_SLUG, "full-commandcode-chat-vision");
+  assert.match(visual, /COMMAND_CODE_VISION_OK/);
+  const visualRequest = requests.at(-1);
+  const visualNames = new Set(visualRequest.tools.map((tool) => tool.function.name));
+  assert.ok(visualNames.has("view_image"), "a visual Command Code model keeps direct image inspection");
+  assert.equal(
+    [...visualNames].some((name) => name === "vision_inspect" || name.endsWith("__vision_inspect")),
+    false,
+    "a visual Command Code model must not delegate images to the fallback model",
+  );
+  assert.ok(
+    visualRequest.messages.some((message) => Array.isArray(message.content)
+      && message.content.some((part) => part?.type === "image_url" && part.image_url?.url === BLUE_PNG)),
+    "the complete Codex image item reaches Command Code Chat",
+  );
 
   // And the Messages-only half is unreachable even when a stale Codex picker sends
   // it: never published means refused at the gate, not forwarded to a Chat endpoint

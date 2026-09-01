@@ -21,6 +21,69 @@ const DIRECTORY = {
   ],
 };
 
+// Complete non-Claude directory observed from Command Code on 2026-08-31.
+// Keeping both sides explicit prevents a new or renamed model from inheriting a
+// family-wide guess: every current id has one expected image contract.
+const VISION_MODEL_IDS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gpt-5.4-mini",
+  "deepseek/deepseek-v4-flash-vision-exp",
+  "moonshotai/Kimi-K3",
+  "moonshotai/Kimi-K2.7-Code",
+  "moonshotai/Kimi-K2.7-Code-Highspeed",
+  "moonshotai/Kimi-K2.6",
+  "moonshotai/Kimi-K2.5",
+  "z-ai/glm-5.3-flash",
+  "zai-org/GLM-5.2",
+  "zai-org/GLM-5.2-Fast",
+  "MiniMaxAI/MiniMax-M3",
+  "xiaomi/mimo-v2.5",
+  "Qwen/Qwen3.8-Max",
+  "Qwen/Qwen3.8-27B",
+  "Qwen/Qwen3.8-Flash",
+  "Qwen/Qwen3.7-Plus",
+  "Qwen/Qwen3.7-Flash",
+  "Qwen/Qwen3.6-Max-Preview",
+  "Qwen/Qwen3.6-Plus",
+  "google/gemini-3.7-flash",
+  "google/gemini-3.6-flash",
+  "google/gemini-3.5-flash",
+  "google/gemini-3.5-flash-lite",
+  "google/gemini-3.1-flash-lite",
+  "thinkingmachines/inkling",
+  "thinkingmachines/inkling-small",
+  "xai/grok-4.5",
+  "xai/grok-4.6",
+];
+
+const TEXT_MODEL_IDS = [
+  "deepseek/deepseek-v4-pro",
+  "deepseek/deepseek-v4-flash",
+  "deepseek/deepseek-v4-flash-fast",
+  "zai-org/GLM-5.3",
+  "zai-org/GLM-5.1",
+  "zai-org/GLM-5",
+  "MiniMaxAI/MiniMax-M2.7",
+  "MiniMaxAI/MiniMax-M2.5",
+  "xiaomi/mimo-v2.5-pro",
+  "Qwen/Qwen3.7-Max",
+  "stepfun/Step-3.7-Flash",
+  "stepfun/Step-3.5-Flash",
+  "tencent/hy3-paid",
+  "tencent/hy4-preview",
+  "sakana/fugu-ultra",
+  "nvidia/nemotron-3-ultra-550b-a55b",
+  "poolside/laguna-s-2.1-free",
+  "meta/muse-spark-1.1",
+  "meta/muse-spark-1.2",
+  "meta/muse-spark-1.2-contributor",
+];
+
 function freshProfile() {
   const profile = profileById("commandcode");
   profile.availableModels = [];
@@ -126,14 +189,36 @@ test("a vendor context window is used and an absent one falls back without guess
   assert.ok(windowless.contextWindow > 0 && windowless.contextWindow <= 1000000);
 });
 
-test("a discovered model is labelled by the directory and never claims vision", async () => {
+test("the complete current Command Code directory has an explicit vision contract", () => {
+  const profile = freshProfile();
+  assert.equal(VISION_MODEL_IDS.length + TEXT_MODEL_IDS.length, 54, "the full non-Claude directory is classified");
+  assert.equal(new Set([...VISION_MODEL_IDS, ...TEXT_MODEL_IDS]).size, 54, "no model appears on both sides");
+  for (const id of VISION_MODEL_IDS) {
+    assert.equal(profile.discoveryModel(id, { name: id }).supportsVision, true, `${id} keeps direct vision`);
+  }
+  for (const id of TEXT_MODEL_IDS) {
+    assert.equal(profile.discoveryModel(id, { name: id }).supportsVision, false, `${id} stays on delegated vision`);
+  }
+});
+
+test("directory labels and catalog modalities follow per-model Command Code vision", async () => {
   const profile = freshProfile();
   const { fetchImpl } = mockFetch(DIRECTORY);
   await refreshProfileModels(profile, discoveryConfig(DIRECTORY), { fetchImpl });
 
   const flash = profile.availableModels.find((model) => model.id === "deepseek/deepseek-v4-flash");
   assert.equal(flash.label, "DeepSeek V4 Flash (latest)", "the vendor's display name is used instead of a raw id");
-  assert.equal(flash.supportsVision, false, "listing a model is not evidence it sees images");
+  assert.equal(flash.supportsVision, false, "plain DeepSeek V4 Flash rejects image input");
+  const qwen = profile.availableModels.find((model) => model.id === "Qwen/Qwen3.8-27B");
+  assert.equal(qwen.supportsVision, true, "Qwen 3.8 reads image pixels through Command Code Chat");
+
+  const catalog = profile.modelCatalog({
+    mainModel: "Qwen/Qwen3.8-27B",
+    baseInstructions: "fixture instructions",
+  });
+  const bySlug = new Map(catalog.models.map((model) => [model.slug, model]));
+  assert.deepEqual(bySlug.get("Qwen/Qwen3.8-27B@commandcode").input_modalities, ["text", "image"]);
+  assert.deepEqual(bySlug.get("deepseek/deepseek-v4-flash@commandcode").input_modalities, ["text"]);
 });
 
 test("discovery stays off when the directory is unreachable or the key is absent", async () => {
