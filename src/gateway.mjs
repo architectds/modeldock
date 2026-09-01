@@ -578,6 +578,23 @@ export function normalizeNativeInput(input) {
   });
 }
 
+// A routed Chat bridge emits replayable reasoning_text in reasoning.content.
+// Native Responses accepts that shape for ordinary turns, but its remote
+// compaction validator requires reasoning.content to be empty. Preserve the
+// reasoning item, id, summary, and metadata so the history remains ordered;
+// only remove the field that is invalid on this one fallback boundary.
+function normalizeNativeCompactionFallbackInput(input) {
+  if (!Array.isArray(input)) return input;
+  let changed = false;
+  const normalized = input.map((item) => {
+    if (item?.type !== "reasoning" || !Array.isArray(item.content) || item.content.length === 0) return item;
+    changed = true;
+    const { content: _routedReasoningContent, ...rest } = item;
+    return rest;
+  });
+  return changed ? normalized : input;
+}
+
 function isToolCallItem(item) {
   return item?.type === "function_call" || item?.type === "custom_tool_call";
 }
@@ -3781,7 +3798,11 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: false, routeReason: operation, upstreamRequestBytes: upstreamRequest.bytes }));
         recordUsage({ ...compactRoute, status: upstream.status });
         return relayNativeResponses(
-          { ...payload, model: NATIVE_COMPACTION_FALLBACK_MODEL },
+          {
+            ...payload,
+            model: NATIVE_COMPACTION_FALLBACK_MODEL,
+            input: normalizeNativeCompactionFallbackInput(payload.input),
+          },
           res,
           services,
           { signal },

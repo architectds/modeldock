@@ -2481,6 +2481,16 @@ test("normalizeNativeInput strips non-opaque reasoning and expands summaries", (
   assert.equal(out[4], input[4]);
 });
 
+test("normalizeNativeInput keeps replayable reasoning content on ordinary native turns", () => {
+  const reasoning = {
+    type: "reasoning",
+    id: "reasoning_routed_turn",
+    summary: [],
+    content: [{ type: "reasoning_text", text: "Inspect the current state." }],
+  };
+  assert.equal(normalizeNativeInput([reasoning])[0], reasoning);
+});
+
 test("normalizeNativeInput converts malformed encrypted agent messages to plain input", () => {
   const malformed = {
     type: "agent_message",
@@ -3870,6 +3880,20 @@ test("relayCompaction falls back once to native Luna when the routed provider re
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-compact-state-"));
   const previousStateDir = process.env.MODELDOCK_STATE_DIR;
   process.env.MODELDOCK_STATE_DIR = stateDir;
+  const fallbackInput = [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+    {
+      type: "reasoning",
+      id: "reasoning_from_routed_chat",
+      summary: [],
+      content: [{ type: "reasoning_text", text: "Inspect the repository before continuing." }],
+      encrypted_content: null,
+      internal_chat_message_metadata_passthrough: { source: "routed-chat" },
+    },
+    { type: "function_call", id: "fc_compact", call_id: "call_compact", name: "exec_command", arguments: "{\"cmd\":\"git status --short\"}" },
+    { type: "function_call_output", id: "fco_compact", call_id: "call_compact", output: "" },
+    { type: "compaction_trigger" },
+  ];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), body: JSON.parse(options.body) });
@@ -3877,6 +3901,21 @@ test("relayCompaction falls back once to native Luna when the routed provider re
       return new Response(
         JSON.stringify({ error: { message: "Insufficient balance", type: "invalid_request_error" } }),
         { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    const invalidReasoningIndex = calls[1].body.input.findIndex((item) =>
+      item?.type === "reasoning" && Array.isArray(item.content) && item.content.length > 0);
+    if (invalidReasoningIndex >= 0) {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: `Invalid 'input[${invalidReasoningIndex}].content': array too long. Expected an array with maximum length 0, but got an array with length 1 instead.`,
+            type: "invalid_request_error",
+            param: `input[${invalidReasoningIndex}].content`,
+            code: "array_above_max_length",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
       );
     }
     return new Response(
@@ -3895,10 +3934,7 @@ test("relayCompaction falls back once to native Luna when the routed provider re
       {
         model: "deepseek-v4-flash",
         stream: false,
-        input: [
-          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
-          { type: "compaction_trigger" },
-        ],
+        input: fallbackInput,
       },
       res,
       {
@@ -3918,6 +3954,17 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     assert.equal(calls.length, 2, "one routed attempt and one native fallback are made");
     assert.equal(calls[0].body.model, "deepseek-v4-flash");
     assert.equal(calls[1].body.model, "gpt-5.6-luna", "the fallback is native Luna, never Luna or Qwen at OpenCode Go");
+    const nativeReasoning = calls[1].body.input.find((item) => item.type === "reasoning");
+    assert.equal(nativeReasoning.content, undefined, "routed reasoning_text is removed from the native compact request");
+    assert.equal(nativeReasoning.encrypted_content, undefined, "the existing native sanitizer also removes the null routed blob");
+    assert.equal(nativeReasoning.id, "reasoning_from_routed_chat", "reasoning identity survives the fallback rewrite");
+    assert.deepEqual(
+      nativeReasoning.internal_chat_message_metadata_passthrough,
+      { source: "routed-chat" },
+      "reasoning metadata survives the fallback rewrite",
+    );
+    assert.ok(calls[1].body.input.some((item) => item.type === "function_call" && item.call_id === "call_compact"));
+    assert.ok(calls[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_compact"));
     assert.ok(calls[1].body.input.some((item) => item.type === "compaction_trigger"), "native Luna receives the real compact request");
     assert.match(calls[1].url, /chatgpt\.com\/backend-api\/codex\/responses$/);
     assert.equal(finishes.length, 2, "the routed failure and native success each close their trace");
@@ -3925,7 +3972,7 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     assert.equal(finishes[0].fallbackModel, "gpt-5.6-luna");
     assert.deepEqual(
       finishes[0].requestShape.itemTypes,
-      { message: 1, compaction_trigger: 1 },
+      { message: 1, reasoning: 1, function_call: 1, function_call_output: 1, compaction_trigger: 1 },
       "the request shape rides the failure telemetry",
     );
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
