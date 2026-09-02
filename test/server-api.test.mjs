@@ -86,6 +86,11 @@ async function startApp(configOverrides = {}) {
     config.codexCatalogFile = config.codexCatalogFile || path.join(dir, "codex-model-catalog.json");
     config.nativeCatalogFile = config.nativeCatalogFile || path.join(dir, "native-catalog.json");
   }
+  if (!config.usageEventsFile) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-usage-events-test-"));
+    owned.push(dir);
+    config.usageEventsFile = path.join(dir, "usage-events.jsonl");
+  }
   const services = createServices(config);
   const { app } = createApp(services);
   // Isolate the endpoint list too: a test that writes the real one would
@@ -182,9 +187,11 @@ test("model API exposes selectable main and vision-capable options", async (t) =
   const initial = await (await fetch(`${instance.base}/api/models`)).json();
   assert.equal(initial.selected.mainModel, "deepseek-v4-flash");
   assert.deepEqual(initial.options.filter((model) => model.supportsVision).map((model) => model.id), ["deepseek-v4-flash-vision-exp@opencode-go", "gpt-5.6-luna@opencode-go", "grok-4.5@opencode-go", "grok-4.6@opencode-go", "hy4-preview@opencode-go", "kimi-k2.5@opencode-go", "kimi-k2.6@opencode-go", "kimi-k2.7-code@opencode-go", "mimo-v2.5@opencode-go", "mimo-v2.5-free@opencode-go", "qwen3.8-flash@opencode-go"]);
-  const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5" }) });
+  const changed = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" }) });
   assert.equal(changed.status, 200);
   assert.deepEqual((await changed.json()).selected, { mainModel: "gpt-5.6-luna@opencode-go", visionModel: "kimi-k2.5@opencode-go" });
+  const ambiguous = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "kimi-k2.5" }) });
+  assert.equal(ambiguous.status, 400, "a routed model without its provider is never assigned through the active profile");
   const invalid = await fetch(`${instance.base}/api/models`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "deepseek-v4-flash" }) });
   assert.equal(invalid.status, 400);
 });
@@ -220,6 +227,36 @@ test("vision selection is persisted for a later gateway update restart", async (
   assert.equal(disabled.status, 200);
   assert.match(await readFile(envFile, "utf8"), /^MODELDOCK_VISION_MODEL=none$/m,
     "None stays disabled after a restart instead of falling back to a default");
+});
+
+test("native vision selection persists its provider without changing the Codex wire slug", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-native-vision-selection-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const codexHome = dir;
+  const envFile = path.join(dir, ".env");
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  const codexCatalogFile = path.join(dir, "codex-model-catalog.json");
+  await writeFile(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.149.0",
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", input_modalities: ["text", "image"] }],
+  }), "utf8");
+  await writeFile(path.join(codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-native-token" } }), "utf8");
+  await writeFile(envFile, "UNRELATED_SETTING=kept\n", "utf8");
+  const instance = await startApp({ codexHome, envFile, nativeCatalogFile, codexCatalogFile });
+  t.after(instance.stop);
+
+  const changed = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ visionModel: "gpt-5.6-luna" }),
+  });
+  assert.equal(changed.status, 200);
+  assert.equal((await changed.json()).selected.visionModel, "gpt-5.6-luna",
+    "the running selection keeps the native Codex slug");
+  const persisted = await readFile(envFile, "utf8");
+  assert.match(persisted, /^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m,
+    "the durable selection records the native provider explicitly");
+  assert.match(persisted, /^UNRELATED_SETTING=kept$/m);
 });
 
 test("connecting Ollama publishes local models without changing the selected main model", async (t) => {
@@ -430,6 +467,56 @@ test("api/status returns expected shape", async (t) => {
   assert.equal(body.runtime.migrationRequired, Number(process.versions.node.split(".", 1)[0]) < 24);
 });
 
+test("api/status restores the latest primary model from the durable usage stream", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-latest-model-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const usageEventsFile = path.join(dir, "usage-events.jsonl");
+  await writeFile(usageEventsFile, [
+    JSON.stringify({ at: "2026-09-02T10:00:00.000Z", model: "Qwen/Qwen3.8-Flash@commandcode", provider: "commandcode", route: "client_selected", status: 200 }),
+    JSON.stringify({ at: "2026-09-02T10:01:00.000Z", model: "gpt-5.6-luna", provider: "openai", route: "current_turn_image", status: 200 }),
+    "",
+  ].join("\n"), "utf8");
+  const instance = await startApp({ usageEventsFile });
+  t.after(instance.stop);
+
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.config.routeModel, "Qwen/Qwen3.8-Flash@commandcode");
+  assert.equal(status.config.routeProviderLabel, "Command Code");
+  assert.equal(status.models.selected.mainModel, "deepseek-v4-flash",
+    "the latest-model projection does not rewrite the gateway routing fallback");
+  assert.equal(instance.services.recordLatestMainRoute({
+    ok: false,
+    httpStatus: 200,
+    upstream: "openai",
+    route: { model: "gpt-5.6-sol", reason: "native_passthrough" },
+  }), false, "a semantic failure on HTTP 200 is not a successful latest model");
+  const afterFailure = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(afterFailure.config.routeModel, "Qwen/Qwen3.8-Flash@commandcode");
+});
+
+test("api/status labels a native fallback from the same provider projection used after traffic", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-native-label-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  await writeFile(nativeCatalogFile, JSON.stringify({
+    models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" }],
+  }), "utf8");
+  await writeFile(path.join(dir, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  const instance = await startApp({
+    mainModel: "gpt-5.6-luna",
+    nativeMerge: true,
+    codexHome: dir,
+    nativeCatalogFile,
+    codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
+  });
+  t.after(instance.stop);
+
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.config.mainProvider, "openai");
+  assert.equal(status.config.mainProviderLabel, "ChatGPT (native)");
+  assert.equal(status.config.routeProviderLabel, "ChatGPT (native)");
+});
+
 test("api/stats returns bounded aggregate usage without request identity", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-stats-api-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -461,10 +548,10 @@ test("api/stats returns bounded aggregate usage without request identity", async
   assert.equal(body.periods.days30.completedRequests, 2);
   assert.ok(Math.abs(body.periods.days30.estimatedApiCostUsd - 0.0002004) < 1e-12);
   assert.equal(body.periods.days30.costCoverage, 1);
-  assert.equal(body.models[0].id, "qwen3.8-flash@opencode-go");
-  assert.equal(body.modelPeriods.today.models[0].id, "qwen3.8-flash@opencode-go");
-  assert.equal(body.modelPeriods.hours24.models[0].id, "qwen3.8-flash@opencode-go");
-  assert.equal(body.modelLabels["qwen3.8-flash@opencode-go"], "Qwen 3.8 Flash");
+  assert.equal(body.models[0].id, "qwen3.8-flash");
+  assert.equal(body.modelPeriods.today.models[0].id, "qwen3.8-flash");
+  assert.equal(body.modelPeriods.hours24.models[0].id, "qwen3.8-flash");
+  assert.equal(body.modelLabels["qwen3.8-flash"], "Qwen 3.8 Flash");
   assert.doesNotMatch(JSON.stringify(body), /sessionId|threadId|prompt|outputText/);
 });
 
@@ -494,7 +581,11 @@ test("api/stats keeps a Command Code model on its canonical cross-provider name"
   t.after(instance.stop);
 
   const body = await (await fetch(`${instance.base}/api/stats`)).json();
-  assert.equal(body.modelLabels["Qwen/Qwen3.8-Flash@commandcode"], "Qwen 3.8 Flash");
+  assert.equal(body.modelPeriods.hours24.models[0].id, "qwen3.8-flash",
+    "the same model from two providers has one stats identity");
+  assert.equal(body.modelLabels["qwen3.8-flash"], "Qwen 3.8 Flash");
+  assert.ok(body.series.hours24.at(-1).byModel["qwen3.8-flash"],
+    "the time series uses the same canonical id as the model share");
   assert.ok(Math.abs(body.modelPeriods.hours24.models[0].estimatedApiCostUsd - 0.0898) < 1e-12);
   assert.equal(body.modelPeriods.hours24.models[0].costCoverage, 1);
 });

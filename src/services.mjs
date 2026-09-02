@@ -28,7 +28,7 @@ import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggl
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
-import { usageEventsPath } from "./usage-events.mjs";
+import { mainRouteFromUsageEvent, readLatestMainRoute, usageEventsPath, usageFromRelayResult } from "./usage-events.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
@@ -173,6 +173,8 @@ export function createServices(config = loadConfig()) {
   // Same redirect as the catalog: a test config that isolates one isolates both,
   // and the writer below orders the picker from it.
   const rollupFile = mutableConfig.usageRollupFile || usageRollupPath();
+  const usageEventsFile = mutableConfig.usageEventsFile || usageEventsPath();
+  let latestMainRoute = readLatestMainRoute(usageEventsFile);
   // Resolved once and published on services, so the boot-time tidy and the
   // endpoint that edits the same file can never disagree about which file it is.
   const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
@@ -384,11 +386,28 @@ export function createServices(config = loadConfig()) {
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile,
-    usageEventsFile: mutableConfig.usageEventsFile || usageEventsPath(),
+    usageEventsFile,
     modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
   });
+  services.latestMainRoute = () => latestMainRoute;
+  services.recordLatestMainRoute = (result) => {
+    // Streaming providers can report a semantic response.failed on an HTTP 200.
+    // That is not a successful model choice and must not appear live only to
+    // disappear again when the durable usage stream is read after restart.
+    if (result?.ok === false) return false;
+    const candidate = mainRouteFromUsageEvent({
+      ...usageFromRelayResult(result),
+      at: new Date().toISOString(),
+    });
+    if (!candidate) return false;
+    latestMainRoute = candidate;
+    // The relay's terminal metric event may already have fired. Emit once more
+    // so an open dashboard receives the route projection just recorded.
+    metrics.emit("change");
+    return true;
+  };
   // The configured subagent model (modeldock_subagent's `model`) is edited by
   // the dashboard while the gateway stays running. Keep one source of truth:
   // the managed agent file. The cached reader costs only a stat when unchanged

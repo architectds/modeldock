@@ -3,7 +3,8 @@ import test from "node:test";
 import { Writable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
 import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 import { baseInstructionsFor } from "../src/catalog.mjs";
@@ -2488,7 +2489,23 @@ test("normalizeNativeInput keeps replayable reasoning content on ordinary native
     summary: [],
     content: [{ type: "reasoning_text", text: "Inspect the current state." }],
   };
-  assert.equal(normalizeNativeInput([reasoning])[0], reasoning);
+  const normalized = normalizeNativeInput([reasoning])[0];
+  assert.deepEqual(normalized.content, reasoning.content);
+  assert.match(normalized.id, /^rs_/, "the native item id is normalized without discarding replayable reasoning");
+});
+
+test("normalizeNativeInput removes routed reasoning content only for native compaction", () => {
+  const reasoning = {
+    type: "reasoning",
+    id: "chatcmpl-routed-reasoning",
+    summary: [],
+    content: [{ type: "reasoning_text", text: "Inspect the current state." }],
+    internal_chat_message_metadata_passthrough: { source: "routed-chat" },
+  };
+  const normalized = normalizeNativeInput([reasoning], { compaction: true })[0];
+  assert.equal(normalized.content, undefined);
+  assert.match(normalized.id, /^rs_/);
+  assert.deepEqual(normalized.internal_chat_message_metadata_passthrough, { source: "routed-chat" });
 });
 
 test("normalizeNativeInput converts malformed encrypted agent messages to plain input", () => {
@@ -3884,14 +3901,17 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
     {
       type: "reasoning",
-      id: "reasoning_from_routed_chat",
+      id: "chatcmpl-routed-reasoning",
       summary: [],
       content: [{ type: "reasoning_text", text: "Inspect the repository before continuing." }],
       encrypted_content: null,
       internal_chat_message_metadata_passthrough: { source: "routed-chat" },
     },
-    { type: "function_call", id: "fc_compact", call_id: "call_compact", name: "exec_command", arguments: "{\"cmd\":\"git status --short\"}" },
+    { type: "message", id: "chatcmpl-routed-message", role: "assistant", content: [{ type: "output_text", text: "Checking." }] },
+    { type: "function_call", id: "call_1743456947ce4e81af29f881", call_id: "call_compact", name: "exec_command", arguments: "{\"cmd\":\"git status --short\"}" },
     { type: "function_call_output", id: "fco_compact", call_id: "call_compact", output: "" },
+    { type: "custom_tool_call", id: "call_routed_patch", call_id: "call_patch", name: "apply_patch", input: "*** Begin Patch" },
+    { type: "custom_tool_call_output", id: "ctco_compact", call_id: "call_patch", output: "ok" },
     { type: "compaction_trigger" },
   ];
   const originalFetch = globalThis.fetch;
@@ -3915,6 +3935,30 @@ test("relayCompaction falls back once to native Luna when the routed provider re
             code: "array_above_max_length",
           },
         }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    const requiredPrefixes = new Map([
+      ["message", "msg_"],
+      ["reasoning", "rs_"],
+      ["function_call", "fc_"],
+      ["function_call_output", "fco_"],
+      ["custom_tool_call", "ctc_"],
+      ["custom_tool_call_output", "ctco_"],
+    ]);
+    const invalidIdIndex = calls[1].body.input.findIndex((item) => {
+      const prefix = requiredPrefixes.get(item?.type);
+      return prefix && typeof item.id === "string" && !item.id.startsWith(prefix);
+    });
+    if (invalidIdIndex >= 0) {
+      const item = calls[1].body.input[invalidIdIndex];
+      return new Response(
+        JSON.stringify({ error: {
+          message: `Invalid 'input[${invalidIdIndex}].id': '${item.id}'. Expected an ID that begins with '${requiredPrefixes.get(item.type).slice(0, -1)}'.`,
+          type: "invalid_request_error",
+          param: `input[${invalidIdIndex}].id`,
+          code: "invalid_value",
+        } }),
         { status: 400, headers: { "content-type": "application/json" } },
       );
     }
@@ -3957,14 +4001,16 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     const nativeReasoning = calls[1].body.input.find((item) => item.type === "reasoning");
     assert.equal(nativeReasoning.content, undefined, "routed reasoning_text is removed from the native compact request");
     assert.equal(nativeReasoning.encrypted_content, undefined, "the existing native sanitizer also removes the null routed blob");
-    assert.equal(nativeReasoning.id, "reasoning_from_routed_chat", "reasoning identity survives the fallback rewrite");
+    assert.match(nativeReasoning.id, /^rs_/, "routed reasoning receives a native item id");
     assert.deepEqual(
       nativeReasoning.internal_chat_message_metadata_passthrough,
       { source: "routed-chat" },
       "reasoning metadata survives the fallback rewrite",
     );
-    assert.ok(calls[1].body.input.some((item) => item.type === "function_call" && item.call_id === "call_compact"));
+    const nativeFunction = calls[1].body.input.find((item) => item.type === "function_call" && item.call_id === "call_compact");
+    assert.match(nativeFunction.id, /^fc_/, "Chat function calls receive native item ids while their call ids stay stable");
     assert.ok(calls[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_compact"));
+    assert.ok(calls[1].body.input.some((item) => item.type === "custom_tool_call" && item.id.startsWith("ctc_") && item.call_id === "call_patch"));
     assert.ok(calls[1].body.input.some((item) => item.type === "compaction_trigger"), "native Luna receives the real compact request");
     assert.match(calls[1].url, /chatgpt\.com\/backend-api\/codex\/responses$/);
     assert.equal(finishes.length, 2, "the routed failure and native success each close their trace");
@@ -3972,7 +4018,7 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     assert.equal(finishes[0].fallbackModel, "gpt-5.6-luna");
     assert.deepEqual(
       finishes[0].requestShape.itemTypes,
-      { message: 1, reasoning: 1, function_call: 1, function_call_output: 1, compaction_trigger: 1 },
+      { message: 2, reasoning: 1, function_call: 1, function_call_output: 1, custom_tool_call: 1, custom_tool_call_output: 1, compaction_trigger: 1 },
       "the request shape rides the failure telemetry",
     );
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
@@ -3983,6 +4029,190 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     if (previousStateDir === undefined) delete process.env.MODELDOCK_STATE_DIR;
     else process.env.MODELDOCK_STATE_DIR = previousStateDir;
     rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a direct native compact accepts the complete captured Voxel Chat history", async () => {
+  const fixture = JSON.parse(gunzipSync(readFileSync(new URL(
+    "./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz",
+    import.meta.url,
+  ))).toString("utf8"));
+  assert.equal(fixture.capture.kind, "captured_codex_compaction_history");
+  assert.equal(fixture.capture.inputItems, 1659);
+  assert.equal(fixture.input[41].type, "function_call");
+  assert.match(fixture.input[41].id, /^call_/, "the captured routed history carries the invalid native item id");
+
+  const sink = collectStream();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url: String(url), body });
+    assert.equal(body.model, "gpt-5.6-terra");
+    assert.equal(body.input.length, fixture.input.length, "the direct native boundary preserves the complete captured history");
+    const prefixes = new Map([
+      ["message", "msg_"],
+      ["reasoning", "rs_"],
+      ["function_call", "fc_"],
+      ["function_call_output", "fco_"],
+      ["custom_tool_call", "ctc_"],
+      ["custom_tool_call_output", "ctco_"],
+    ]);
+    for (const [index, item] of body.input.entries()) {
+      assert.ok(!Array.isArray(item?.content) || item.type !== "reasoning" || item.content.length === 0,
+        `direct native compact input[${index}] retains routed reasoning content`);
+      const prefix = prefixes.get(item?.type);
+      if (prefix && typeof item.id === "string") {
+        assert.ok(item.id.startsWith(prefix), `direct native compact input[${index}] ${item.type} has invalid id ${item.id}`);
+      }
+    }
+    const repaired = body.input[41];
+    assert.match(repaired.id, /^fc_/, "the exact Voxel failure item is rewritten for native Responses");
+    assert.equal(repaired.call_id, fixture.input[41].call_id, "the tool call/output join key is unchanged");
+    return new Response(JSON.stringify({
+      id: "resp_native_voxel_direct_compact",
+      object: "response",
+      status: "completed",
+      model: "gpt-5.6-terra",
+      output: [{ type: "compaction", id: "cmp_native_voxel_direct", encrypted_content: "gAAAAcaptured_native_voxel_direct_token" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const baseServices = compactServices();
+    const result = await relayResponses(
+      { model: "gpt-5.6-terra", stream: false, input: fixture.input },
+      responseStub(sink),
+      {
+        ...baseServices,
+        mainModel: "gpt-5.6-terra",
+        nativeSlugs: new Set(["gpt-5.6-luna", "gpt-5.6-terra"]),
+        requestUrl: "/v1/responses",
+        incomingHeaders: { authorization: "Bearer native-session", "x-codex-session-id": "captured-voxel-direct" },
+      },
+    );
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(calls.length, 1, "a selected native model takes one native request, with no routed detour");
+    assert.match(calls[0].url, /chatgpt\.com\/backend-api\/codex\/responses$/);
+    const compacted = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(compacted.output[0].type, "compaction");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("captured Voxel Chat history compacts through native and resumes a native tool turn", async () => {
+  const fixture = JSON.parse(gunzipSync(readFileSync(new URL(
+    "./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz",
+    import.meta.url,
+  ))).toString("utf8"));
+  assert.equal(fixture.capture.kind, "captured_codex_compaction_history");
+  assert.equal(fixture.capture.inputItems, 1659);
+  assert.equal(fixture.capture.originalFailureIndex, 41);
+  assert.equal(fixture.input[41].type, "function_call");
+  assert.match(fixture.input[41].id, /^call_/, "the fixture retains the exact invalid Chat item-id dialect");
+
+  const compactSink = collectStream();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const body = JSON.parse(options.body);
+    calls.push({ url: String(url), body });
+    if (calls.length === 1) {
+      return new Response(JSON.stringify({ error: { message: "Insufficient balance", type: "invalid_request_error" } }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (calls.length === 2) {
+      const prefixes = new Map([
+        ["message", "msg_"],
+        ["reasoning", "rs_"],
+        ["function_call", "fc_"],
+        ["function_call_output", "fco_"],
+        ["custom_tool_call", "ctc_"],
+        ["custom_tool_call_output", "ctco_"],
+      ]);
+      for (const [index, item] of body.input.entries()) {
+        assert.ok(!Array.isArray(item?.content) || item.type !== "reasoning" || item.content.length === 0,
+          `native compact input[${index}] retains routed reasoning content`);
+        const prefix = prefixes.get(item?.type);
+        if (prefix && typeof item.id === "string") {
+          assert.ok(item.id.startsWith(prefix), `native compact input[${index}] ${item.type} has invalid id ${item.id}`);
+        }
+      }
+      const callIds = new Set(body.input
+        .filter((item) => item.type === "function_call" || item.type === "custom_tool_call")
+        .map((item) => item.call_id));
+      const outputIds = new Set(body.input
+        .filter((item) => item.type === "function_call_output" || item.type === "custom_tool_call_output")
+        .map((item) => item.call_id));
+      assert.deepEqual([...callIds].filter((id) => !outputIds.has(id)), [], "the long compact history has no orphan calls");
+      assert.deepEqual([...outputIds].filter((id) => !callIds.has(id)), [], "the long compact history has no orphan outputs");
+      return new Response(JSON.stringify({
+        id: "resp_native_voxel_compact",
+        object: "response",
+        status: "completed",
+        model: "gpt-5.6-luna",
+        output: [{ type: "compaction", id: "cmp_native_voxel", encrypted_content: "gAAAAcaptured_native_voxel_token" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    assert.equal(body.model, "gpt-5.6-terra");
+    assert.equal(body.input[0].type, "compaction", "the native turn resumes from the compact item");
+    return new Response(JSON.stringify({
+      id: "resp_native_voxel_resume",
+      object: "response",
+      status: "completed",
+      model: "gpt-5.6-terra",
+      output: [{ id: "fc_native_resume", type: "function_call", status: "completed", call_id: "call_native_resume", name: "exec_command", arguments: "{\"cmd\":\"echo resumed\"}" }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const baseServices = compactServices();
+    const services = {
+      ...baseServices,
+      config: {
+        ...baseServices.config,
+        commandcodeBaseUrl: "https://commandcode.example/provider/v1",
+        tokens: { ...baseServices.config.tokens, commandcode: "user_test_commandcode" },
+      },
+      mainModel: "Qwen/Qwen3.8-Flash@commandcode",
+      knownModels: new Set([...baseServices.knownModels, "Qwen/Qwen3.8-Flash@commandcode"]),
+      nativeSlugs: new Set(["gpt-5.6-luna", "gpt-5.6-terra"]),
+      requestUrl: "/v1/responses",
+      incomingHeaders: { authorization: "Bearer native-session", "x-codex-session-id": "captured-voxel" },
+    };
+    const compactResult = await relayCompaction(
+      { model: "Qwen/Qwen3.8-Flash@commandcode", stream: false, input: fixture.input },
+      responseStub(compactSink),
+      services,
+      {},
+      true,
+    );
+    assert.equal(compactResult.ok, true);
+    assert.equal(calls.length, 2, "the routed rejection falls back exactly once");
+    assert.equal(calls[1].body.input.length, fixture.input.length, "normalization removes no captured history items");
+    const compacted = JSON.parse(Buffer.concat(compactSink.chunks).toString("utf8"));
+    assert.equal(compacted.output[0].type, "compaction");
+
+    const resumeSink = collectStream();
+    const resumeResult = await relayResponses(
+      {
+        model: "gpt-5.6-terra",
+        stream: false,
+        input: [
+          compacted.output[0],
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Continue the task." }] },
+        ],
+      },
+      responseStub(resumeSink),
+      { ...services, mainModel: "gpt-5.6-terra" },
+    );
+    assert.equal(resumeResult.ok, true, JSON.stringify({ resumeResult, body: Buffer.concat(resumeSink.chunks).toString("utf8") }));
+    const resumed = JSON.parse(Buffer.concat(resumeSink.chunks).toString("utf8"));
+    assert.equal(resumed.output[0].type, "function_call");
+    assert.equal(resumed.output[0].name, "exec_command", "tool use survives the compact-and-switch boundary");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

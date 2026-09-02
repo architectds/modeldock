@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { loadConfig, hasChatGptLogin, tokenFromCodexToml } from "../src/config.mjs";
+import { loadConfig, hasChatGptLogin, tokenFromCodexToml, encodePersistedModelRef, decodePersistedModelRef } from "../src/config.mjs";
 
 test("reads an OpenCode bearer token only from a supported provider section", () => {
   const source = `
@@ -156,6 +156,70 @@ test("MODELDOCK_VISION_MODEL=none persists a provider with no vision route", () 
     assert.equal(config.profileId, "deepseek-official");
     assert.equal(config.mainModel, "deepseek-v4-flash@deepseek-official");
     assert.equal(config.visionModel, "");
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("persisted model references keep the provider identity separate from the Codex wire slug", () => {
+  const native = new Set(["gpt-5.6-luna"]);
+  assert.equal(encodePersistedModelRef("gpt-5.6-luna"), "gpt-5.6-luna@openai");
+  assert.equal(encodePersistedModelRef("gpt-5.6-luna@opencode-go"), "gpt-5.6-luna@opencode-go");
+  assert.equal(decodePersistedModelRef("gpt-5.6-luna@openai", { nativeSlugs: native }), "gpt-5.6-luna");
+  assert.equal(decodePersistedModelRef("gpt-5.6-luna@opencode-go", { nativeSlugs: native }), "gpt-5.6-luna@opencode-go");
+  assert.equal(decodePersistedModelRef("gpt-5.6-luna", { nativeSlugs: native }), "gpt-5.6-luna",
+    "the legacy bare native value is migrated without changing its owner");
+  assert.equal(decodePersistedModelRef("kimi-k2.5", { nativeSlugs: native }), "kimi-k2.5@opencode-go",
+    "a legacy bare routed value resolves through its historical owner, not the active profile");
+});
+
+test("a native vision choice reloads as native even while OpenCode Go is the default profile", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-native-vision-"));
+  const envFile = path.join(home, "isolated.env");
+  const nativeCatalogFile = path.join(home, "native-catalog.json");
+  const keys = ["MODELDOCK_CODEX_HOME", "MODELDOCK_ENV_FILE", "MODELDOCK_NATIVE_CATALOG_FILE", "MODELDOCK_PROFILE", "MODELDOCK_VISION_MODEL", "MODELDOCK_NATIVE_MERGE"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    writeFileSync(nativeCatalogFile, JSON.stringify({
+      captured_with: "0.149.0",
+      models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list" }],
+    }), "utf8");
+    writeFileSync(envFile, [
+      "MODELDOCK_PROFILE=opencode-go",
+      "MODELDOCK_VISION_MODEL=gpt-5.6-luna@openai",
+      "MODELDOCK_NATIVE_MERGE=1",
+      "",
+    ].join("\n"), "utf8");
+    process.env.MODELDOCK_CODEX_HOME = home;
+    process.env.MODELDOCK_ENV_FILE = envFile;
+    process.env.MODELDOCK_NATIVE_CATALOG_FILE = nativeCatalogFile;
+    delete process.env.MODELDOCK_PROFILE;
+    delete process.env.MODELDOCK_VISION_MODEL;
+    delete process.env.MODELDOCK_NATIVE_MERGE;
+    const config = loadConfig();
+    assert.equal(config.profileId, "opencode-go");
+    assert.equal(config.visionModel, "gpt-5.6-luna");
+
+    // Existing installs wrote the native slug without its owner. The cached
+    // native catalog makes that old value unambiguous during the upgrade.
+    writeFileSync(envFile, "MODELDOCK_PROFILE=opencode-go\nMODELDOCK_VISION_MODEL=gpt-5.6-luna\nMODELDOCK_NATIVE_MERGE=1\n", "utf8");
+    delete process.env.MODELDOCK_PROFILE;
+    delete process.env.MODELDOCK_VISION_MODEL;
+    delete process.env.MODELDOCK_NATIVE_MERGE;
+    assert.equal(loadConfig().visionModel, "gpt-5.6-luna");
+
+    writeFileSync(envFile, "MODELDOCK_PROFILE=commandcode\nMODELDOCK_VISION_MODEL=gpt-5.6-luna\nMODELDOCK_NATIVE_MERGE=1\n", "utf8");
+    delete process.env.MODELDOCK_PROFILE;
+    delete process.env.MODELDOCK_VISION_MODEL;
+    delete process.env.MODELDOCK_NATIVE_MERGE;
+    const otherActiveProfile = loadConfig();
+    assert.equal(otherActiveProfile.profileId, "commandcode");
+    assert.equal(otherActiveProfile.visionModel, "gpt-5.6-luna",
+      "the active provider never takes ownership of a legacy native selection");
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];

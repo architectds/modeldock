@@ -555,44 +555,66 @@ function compactionSummaryText(item) {
   return undefined;
 }
 
-// Native input rewrites: strip non-opaque reasoning blobs and expand compaction
-// summaries into a plain message the native backend accepts. Opaque native
-// tokens pass through untouched.
-export function normalizeNativeInput(input) {
-  if (!Array.isArray(input)) return input;
-  return input.map((item) => {
-    if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
-    if (item?.type !== "compaction") return sanitizeMessageContentForNative(item);
-    const summary = compactionSummaryText(item);
-    if (summary === undefined) return item;
-    return {
-      type: "message",
-      role: "user",
-      content: [
-        {
-          type: "input_text",
-          text: `Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:\n\n${summary}`,
-        },
-      ],
-    };
-  });
+const NATIVE_ITEM_ID_PREFIX = new Map([
+  ["message", "msg"],
+  ["reasoning", "rs"],
+  ["function_call", "fc"],
+  ["function_call_output", "fco"],
+  ["custom_tool_call", "ctc"],
+  ["custom_tool_call_output", "ctco"],
+  ["agent_message", "amsg"],
+]);
+
+function nativeResponsesItemId(item, index) {
+  const prefix = NATIVE_ITEM_ID_PREFIX.get(item?.type);
+  if (!prefix || typeof item?.id !== "string" || !item.id) return item?.id;
+  if (item.id.startsWith(`${prefix}_`)) return item.id;
+  // Chat Completions uses one `call_*` value as both its tool-call item id and
+  // call id. Native Responses separates them: the item id is `fc_*`/`ctc_*`,
+  // while the paired output still points at the unchanged `call_*` call_id.
+  // Hashing makes the rewrite deterministic across retries without exposing
+  // arguments or output text in the generated identifier.
+  const identity = [item.type, item.id, item.call_id || "", index].join("\0");
+  return `${prefix}_${createHash("sha256").update(identity).digest("hex").slice(0, 48)}`;
 }
 
-// A routed Chat bridge emits replayable reasoning_text in reasoning.content.
-// Native Responses accepts that shape for ordinary turns, but its remote
-// compaction validator requires reasoning.content to be empty. Preserve the
-// reasoning item, id, summary, and metadata so the history remains ordered;
-// only remove the field that is invalid on this one fallback boundary.
-function normalizeNativeCompactionFallbackInput(input) {
+// All native input takes this one path: an ordinary turn, a direct native
+// compact request, and a routed compact fallback. Routed Chat output can be in
+// that history, so normalize native item-id namespaces as well as reasoning and
+// ModelDock compaction summaries. `call_id` is deliberately untouched because
+// it is the call/output join key. Opaque native compact tokens pass through.
+export function normalizeNativeInput(input, { compaction = false } = {}) {
   if (!Array.isArray(input)) return input;
-  let changed = false;
-  const normalized = input.map((item) => {
-    if (item?.type !== "reasoning" || !Array.isArray(item.content) || item.content.length === 0) return item;
-    changed = true;
-    const { content: _routedReasoningContent, ...rest } = item;
-    return rest;
+  return input.map((item, index) => {
+    if (!item || typeof item !== "object") return item;
+    let next;
+    if (item.type === "reasoning") {
+      next = sanitizeReasoningForNative(item);
+      if (compaction && Array.isArray(next.content) && next.content.length > 0) {
+        const { content: _routedReasoningContent, ...withoutContent } = next;
+        next = withoutContent;
+      }
+    } else if (item.type === "compaction") {
+      const summary = compactionSummaryText(item);
+      next = summary === undefined ? item : {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: `Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:\n\n${summary}`,
+          },
+        ],
+      };
+    } else {
+      next = sanitizeMessageContentForNative(item);
+    }
+    const id = nativeResponsesItemId(next, index);
+    if (id !== next.id) {
+      next = { ...next, id };
+    }
+    return next;
   });
-  return changed ? normalized : input;
 }
 
 function isToolCallItem(item) {
@@ -3106,7 +3128,8 @@ async function pipeFreeStream(upstreamBody, res, tee, failedMessage, onFirstResp
 // actually specific to them: the status, and the token counts when the upstream
 // reported any.
 function usageRecorder(services, { startedAt, sessionId, threadId }) {
-  const record = services.recordUsage || recordUsageEvent;
+  const record = services.recordUsage
+    || ((fields) => recordUsageEvent({ ...fields, filePath: services.usageEventsFile }));
   return (fields) => record({ durationMs: Date.now() - startedAt, sessionId, threadId, ...fields });
 }
 
@@ -3223,7 +3246,9 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   const native = { ...payload };
   if (Array.isArray(payload.input)) {
-    native.input = stripNativeRedundantToolsFromInput(normalizeNativeInput(payload.input));
+    native.input = stripNativeRedundantToolsFromInput(normalizeNativeInput(payload.input, {
+      compaction: isCompactV1Request(requestUrl) || isCompactV2Request(payload),
+    }));
   }
   if (Array.isArray(payload.tools)) native.tools = stripNativeRedundantTools(payload.tools);
   delete native.previous_response_id;
@@ -3801,7 +3826,6 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
           {
             ...payload,
             model: NATIVE_COMPACTION_FALLBACK_MODEL,
-            input: normalizeNativeCompactionFallbackInput(payload.input),
           },
           res,
           services,

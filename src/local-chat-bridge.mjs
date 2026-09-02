@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { parseSseData } from "./sse.mjs";
 
@@ -266,9 +267,28 @@ function chatReasoningText(message) {
   return "";
 }
 
+const RESPONSE_ITEM_PREFIX = new Map([
+  ["message", "msg"],
+  ["reasoning", "rs"],
+  ["function_call", "fc"],
+  ["custom_tool_call", "ctc"],
+]);
+
+function responseItemId(type, identity) {
+  const prefix = RESPONSE_ITEM_PREFIX.get(type);
+  const id = String(identity || "item");
+  if (!prefix || id.startsWith(`${prefix}_`)) return id;
+  return `${prefix}_${createHash("sha256").update(`${type}\0${id}`).digest("hex").slice(0, 48)}`;
+}
+
+function normalizeResponseItemId(item, identity = item?.call_id || item?.id) {
+  const id = responseItemId(item?.type, identity);
+  return id === item?.id ? item : { ...item, id };
+}
+
 function responseReasoningItem(id, content, status = "completed") {
   return {
-    id,
+    id: responseItemId("reasoning", id),
     type: "reasoning",
     status,
     summary: [],
@@ -282,7 +302,7 @@ function responseReasoningItem(id, content, status = "completed") {
 
 function responseMessageItem(id, content) {
   return {
-    id,
+    id: responseItemId("message", id),
     type: "message",
     role: "assistant",
     status: "completed",
@@ -291,11 +311,12 @@ function responseMessageItem(id, content) {
 }
 
 function responseFunctionItem(id, toolCall) {
+  const callId = toolCall.id || id;
   return {
-    id: toolCall.id || id,
+    id: responseItemId("function_call", callId),
     type: "function_call",
     status: "completed",
-    call_id: toolCall.id || id,
+    call_id: callId,
     name: toolCall.function?.name || "",
     arguments: typeof toolCall.function?.arguments === "string" ? toolCall.function.arguments : textValue(toolCall.function?.arguments || {}),
   };
@@ -330,7 +351,9 @@ export function chatCompletionToResponse(chat, { restoreCall = (item) => item } 
   if (reasoning) output.push(responseReasoningItem(`${id}-reasoning`, reasoning));
   if (typeof message.content === "string" && message.content) output.push(responseMessageItem(`${id}-message`, message.content));
   for (let index = 0; index < (message.tool_calls || []).length; index += 1) {
-    output.push(restoreCall(responseFunctionItem(`${id}-call-${index}`, message.tool_calls[index])));
+    output.push(normalizeResponseItemId(
+      restoreCall(responseFunctionItem(`${id}-call-${index}`, message.tool_calls[index])),
+    ));
   }
   return terminalResponse({
     id,
@@ -376,7 +399,7 @@ class ChatResponseAssembler {
 
   openMessage() {
     if (this.message) return [];
-    const id = `${this.id}-message`;
+    const id = responseItemId("message", `${this.id}-message`);
     this.message = { id, text: "", index: this.nextOutputIndex++ };
     return [
       { type: "response.output_item.added", response_id: this.id, output_index: this.message.index, item: { id, type: "message", role: "assistant", status: "in_progress", content: [] } },
@@ -386,7 +409,7 @@ class ChatResponseAssembler {
 
   openReasoning() {
     if (this.reasoning) return [];
-    const id = `${this.id}-reasoning`;
+    const id = responseItemId("reasoning", `${this.id}-reasoning`);
     this.reasoning = { id, text: "", index: this.nextOutputIndex++ };
     return [
       { type: "response.output_item.added", response_id: this.id, output_index: this.reasoning.index, item: responseReasoningItem(id, "", "in_progress") },
@@ -398,20 +421,36 @@ class ChatResponseAssembler {
     const key = Number.isInteger(index) ? index : 0;
     let entry = this.calls.get(key);
     if (!entry) {
-      entry = { id: delta?.id || `${this.id}-call-${key}`, name: "", arguments: "", emitted: false, index: this.nextOutputIndex++ };
+      entry = { callId: delta?.id || `${this.id}-call-${key}`, itemId: "", itemType: "function_call", name: "", arguments: "", emitted: false, index: this.nextOutputIndex++ };
       this.calls.set(key, entry);
     }
-    if (typeof delta?.id === "string" && delta.id) entry.id = delta.id;
+    if (!entry.emitted && typeof delta?.id === "string" && delta.id) entry.callId = delta.id;
     if (typeof delta?.function?.name === "string" && delta.function.name) entry.name = delta.function.name;
     const events = [];
     if (!entry.emitted && entry.name) {
       entry.emitted = true;
-      const item = this.restoreCall({ id: entry.id, type: "function_call", status: "in_progress", call_id: entry.id, name: entry.name, arguments: "" });
+      const item = normalizeResponseItemId(this.restoreCall({
+        id: responseItemId("function_call", entry.callId),
+        type: "function_call",
+        status: "in_progress",
+        call_id: entry.callId,
+        name: entry.name,
+        arguments: "",
+      }), entry.callId);
+      entry.itemId = item.id;
+      entry.itemType = item.type;
       events.push({ type: "response.output_item.added", response_id: this.id, output_index: entry.index, item });
     }
     if (typeof delta?.function?.arguments === "string") {
       entry.arguments += delta.function.arguments;
-      if (entry.emitted) events.push({ type: "response.function_call_arguments.delta", response_id: this.id, item_id: entry.id, call_id: entry.id, output_index: entry.index, delta: delta.function.arguments });
+      if (entry.emitted) events.push({
+        type: entry.itemType === "custom_tool_call" ? "response.custom_tool_call_input.delta" : "response.function_call_arguments.delta",
+        response_id: this.id,
+        item_id: entry.itemId,
+        call_id: entry.callId,
+        output_index: entry.index,
+        delta: delta.function.arguments,
+      });
     }
     return events;
   }
@@ -460,8 +499,17 @@ class ChatResponseAssembler {
     }
     for (const entry of this.calls.values()) {
       if (!entry.emitted || !entry.name) continue;
-      const item = this.restoreCall({ id: entry.id, type: "function_call", status: "completed", call_id: entry.id, name: entry.name, arguments: entry.arguments });
-      events.push({ type: "response.function_call_arguments.done", response_id: this.id, item_id: entry.id, call_id: entry.id, output_index: entry.index, arguments: entry.arguments });
+      const item = normalizeResponseItemId(this.restoreCall({
+        id: entry.itemId || responseItemId("function_call", entry.callId),
+        type: "function_call",
+        status: "completed",
+        call_id: entry.callId,
+        name: entry.name,
+        arguments: entry.arguments,
+      }), entry.callId);
+      events.push(item.type === "custom_tool_call"
+        ? { type: "response.custom_tool_call_input.done", response_id: this.id, item_id: item.id, call_id: entry.callId, output_index: entry.index, input: item.input }
+        : { type: "response.function_call_arguments.done", response_id: this.id, item_id: item.id, call_id: entry.callId, output_index: entry.index, arguments: entry.arguments });
       events.push({ type: "response.output_item.done", response_id: this.id, output_index: entry.index, item });
       indexedOutput.push({ index: entry.index, item });
     }

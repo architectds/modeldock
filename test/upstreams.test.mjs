@@ -664,16 +664,6 @@ test("an owner-qualified twin of a native slug stays on its routed camp", async 
   assert.equal(called.headers["chatgpt-account-id"], undefined, "routed calls carry no native account header");
 });
 
-test("the @openai suffix does not route: it is a picker label, not an owner", async () => {
-  const { providerForModel, tokenFor } = await import("../src/profiles.mjs");
-  const config = { profileId: "opencode-go", tokens: { "opencode-go": "go-token" } };
-  // Native-ness is carried by nativeSlugs, not by a suffix: PROFILES has no
-  // "openai" entry, so both forms resolve to the default profile here.
-  assert.equal(providerForModel(config, "gpt-5.6-terra"), "opencode-go");
-  assert.equal(providerForModel(config, "gpt-5.6-terra@openai"), "opencode-go");
-  assert.equal(tokenFor(config, "gpt-5.6-terra@openai"), "go-token");
-});
-
 // This backend answers `response.completed` with an EMPTY output array and puts
 // the words only in the deltas, so a reader that waits for the finished object
 // gets a 200 and no answer - which is what "returned no output text" was.

@@ -7,7 +7,7 @@ import express from "express";
 import zlib from "node:zlib";
 import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { ownsEnvFile, parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff } from "./config.mjs";
+import { ownsEnvFile, parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff, encodePersistedModelRef } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
 import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
@@ -48,7 +48,7 @@ import { applyContextOverrides, contextOverridesPath, readContextOverrides, vali
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
-import { foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
+import { canonicalUsageModelId, foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
 import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
@@ -397,19 +397,21 @@ function modelsPayload(services) {
 // still use the same friendly label as the Models page. Resolve only ids that
 // appear in this bounded snapshot: historical traffic stays visible without
 // turning /api/stats into a copy of the full catalog.
-function statsModelLabels(services, stats) {
+function statsModelDirectory(services) {
   const labels = new Map();
   const remember = (id, label) => {
-    const key = String(id || "");
+    const key = canonicalUsageModelId(id);
     const value = String(label || "").trim();
-    if (key && value && !labels.has(key)) labels.set(key, value);
+    if (!key || !value) return;
+    const existing = labels.get(key) || "";
+    // Prefer the complete canonical name (for example GPT-5.6-Luna over Luna)
+    // when providers give the same model family different display labels.
+    if (!existing || value.length > existing.length) labels.set(key, value);
   };
-  for (const option of modelOptions(services.config, services.config.profileId)) {
-    remember(option.id, option.label || option.id);
-  }
   // A provider can be temporarily disconnected after it generated usage. Its
   // retained directory still gives old rows a human name without claiming the
-  // provider is currently selectable.
+  // provider is currently selectable. Iterating the provider registry first
+  // also gives every copy of one named model one stable canonical id.
   for (const profile of allProfiles()) {
     for (const model of profile.availableModels || []) {
       remember(publishedSlugFor(profile.id, model), model.label || model.id);
@@ -418,13 +420,25 @@ function statsModelLabels(services, stats) {
   for (const model of readNativeCatalog(services.config)?.models || []) {
     if (model?.slug) remember(`${model.slug}@${NATIVE_PROVIDER.id}`, model.display_name || model.slug);
   }
+  // Enabled options can include a custom/local model that is not retained by a
+  // static provider directory. Feed those through the same identity table.
+  for (const option of modelOptions(services.config, services.config.profileId)) {
+    remember(option.id, option.label || option.id);
+  }
+  return {
+    labelFor: (id) => labels.get(id) || "",
+  };
+}
+
+function statsModelLabels(directory, stats) {
   const used = new Set(stats?.modelLegend || []);
   for (const period of Object.values(stats?.modelPeriods || {})) {
     for (const model of period?.models || []) used.add(model?.id);
   }
   const out = {};
   for (const id of used) {
-    if (id && id !== "__other__" && labels.has(id)) out[id] = labels.get(id);
+    const label = directory.labelFor(id);
+    if (id && id !== "__other__" && label) out[id] = label;
   }
   return out;
 }
@@ -631,20 +645,23 @@ function statusPayload(services) {
   // Routing itself still uses providerForModel - see upstreamBaseForModel.
   const models = modelsPayload(services);
   const mainProvider = models.selectedProvider;
-  const providerLabel = providerOptions(config).find((p) => p.id === mainProvider)?.label || mainProvider;
-  // The route card shows the most recent actual request first, falling back to
-  // the dashboard selection. Native passthrough (reason "native_passthrough")
-  // never rewrites modelSelection, so without this the card would keep showing
-  // the last relayed model while native traffic runs.
   const ROUTE_PROVIDER_LABELS = {
     "openai": "ChatGPT (native)",
     "opencode-go": "OpenCode Go",
     "deepseek-official": "DeepSeek",
   };
-  const lastRequest = metrics.recent.find((record) => record.kind === "responses" && record.model);
+  const providerLabelFor = (provider) => ROUTE_PROVIDER_LABELS[provider]
+    || profileOptions().find((entry) => entry.id === provider)?.label
+    || provider;
+  const providerLabel = providerLabelFor(mainProvider);
+  // The route card shows the most recent actual request first, falling back to
+  // the dashboard selection. Native passthrough (reason "native_passthrough")
+  // never rewrites modelSelection, so without this the card would keep showing
+  // the last relayed model while native traffic runs.
+  const lastRequest = services.latestMainRoute?.();
   const routeModel = lastRequest?.model || selected.mainModel;
-  const routeProvider = lastRequest?.upstream || mainProvider;
-  const routeProviderLabel = ROUTE_PROVIDER_LABELS[routeProvider] || providerOptions(config).find((p) => p.id === routeProvider)?.label || routeProvider;
+  const routeProvider = lastRequest?.provider || mainProvider;
+  const routeProviderLabel = providerLabelFor(routeProvider);
   return metrics.snapshot({
     ready: mainTokenReady,
     config: {
@@ -904,8 +921,10 @@ async function relayGatewayRequest(req, res, services) {
       ingressBytes: req.modeldockIngressBytes,
       requestUrl: req.originalUrl,
       localHostRuntime: services.localHostRuntime,
+      usageEventsFile: services.usageEventsFile,
       signal: controller.signal,
     });
+    services.recordLatestMainRoute?.(result);
     if (result?.route?.reason === "client_selected" && modelSelection && result.route.model !== modelSelection.mainModel) {
       modelSelection.mainModel = result.route.model;
     }
@@ -1365,7 +1384,7 @@ export function createApp(services = createServices()) {
           }
           const onEnv = {
             MODELDOCK_PROFILE: onSelection.providerId,
-            MODELDOCK_VISION_MODEL: onSelection.visionModel || "none",
+            MODELDOCK_VISION_MODEL: onSelection.visionModel ? encodePersistedModelRef(onSelection.visionModel) : "none",
           };
           if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
           writeEnvFile(onEnv, config.envFile);
@@ -1418,16 +1437,17 @@ export function createApp(services = createServices()) {
   app.get("/api/profiles", (req, res) => res.json({ selected: config.profileId, options: profileOptions() }));
   app.post("/api/models", mutateConfig, (req, res) => {
     const current = services.modelSelection;
-    // Resolve a bare id to its published form first: the options list is fully
-    // owner-qualified, so a legacy/dashboard submission of "kimi-k2.5" must match
-    // the "kimi-k2.5@opencode-go" entry instead of 400ing on an exact-id lookup.
-    // A bare id that is already a published entry must stay as-is: native GPT
-    // slugs live bare in the merged set (gpt-5.6-luna, provider openai), and
-    // qualifying them through the active profile would mislabel them as routed.
+    // The options list is the ownership contract: routed models include their
+    // provider and native Codex models use their exact bare wire slug. Never
+    // repair an unknown bare id through the active profile here; that was the
+    // ambiguity that turned a saved native Luna choice into OpenCode Go Luna.
     const currentOptions = modelOptions(config, config.profileId);
-    const qualify = (id) => (currentOptions.some((entry) => entry.id === id) ? id : publishedSlugFor(config.profileId, id));
-    let nextMain = qualify(req.body?.mainModel === undefined ? current.mainModel : req.body.mainModel);
-    let nextVision = qualify(req.body?.visionModel === undefined ? current.visionModel : req.body.visionModel);
+    const currentOwned = (id) => {
+      if (!id || currentOptions.some((entry) => entry.id === id)) return id;
+      return publishedSlugFor(config.profileId, id);
+    };
+    let nextMain = req.body?.mainModel === undefined ? currentOwned(current.mainModel) : req.body.mainModel;
+    let nextVision = req.body?.visionModel === undefined ? currentOwned(current.visionModel) : req.body.visionModel;
     const nextProvider = req.body?.provider;
     if (nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
@@ -1446,7 +1466,7 @@ export function createApp(services = createServices()) {
     // restart and its normal update restart. "none" is deliberate: an empty
     // .env value would be interpreted as a request for the shipped default.
     try {
-      writeEnvFile({ MODELDOCK_VISION_MODEL: nextVision || "none" }, config.envFile);
+      writeEnvFile({ MODELDOCK_VISION_MODEL: nextVision ? encodePersistedModelRef(nextVision) : "none" }, config.envFile);
     } catch (error) {
       recordConfigAction(metrics, "models_update", { ok: false, error: error.message });
       return res.status(500).json({ error: { type: "model_selection_write_failed", message: error.message } });
@@ -1927,8 +1947,9 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/stats", (req, res) => {
     const rollup = readRollup(services.usageRollupFile || usageRollupPath());
+    const directory = statsModelDirectory(services);
     const stats = usageStats(rollup);
-    return res.json({ ...stats, modelLabels: statsModelLabels(services, stats) });
+    return res.json({ ...stats, modelLabels: statsModelLabels(directory, stats) });
   });
   app.get("/api/local/discover", async (req, res) => {
     try {

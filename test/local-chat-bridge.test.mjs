@@ -244,8 +244,11 @@ test("Chat completion becomes a Codex Responses completion with cached-token usa
     restoreCall: (item) => item.name === "apply_patch" ? { ...item, type: "custom_tool_call", input: JSON.parse(item.arguments).input } : item,
   });
   assert.equal(response.id, "chatcmpl_1");
+  assert.match(response.output[0].id, /^msg_/);
   assert.equal(response.output[0].content[0].text, "Working.");
   assert.equal(response.output[1].type, "custom_tool_call");
+  assert.match(response.output[1].id, /^ctc_/);
+  assert.equal(response.output[1].call_id, "call_a", "the provider call id remains the tool-output join key");
   assert.equal(response.output[1].input, "*** Begin Patch");
   assert.equal(response.usage.input_tokens_details.cached_tokens, 8304);
 });
@@ -259,6 +262,7 @@ test("non-stream Chat reasoning dialects become replayable Responses items", () 
       usage: { prompt_tokens: 12, completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 5 } },
     });
     assert.equal(response.output[0].type, "reasoning");
+    assert.match(response.output[0].id, /^rs_/);
     assert.equal(response.output[0].content[0].text, `think:${field}`);
     assert.deepEqual(response.output[0].summary, []);
     assert.equal(response.output[0].encrypted_content, "");
@@ -296,9 +300,46 @@ test("Chat stream produces complete Responses function-call lifecycle with cache
   const done = events.find((event) => event.type === "response.function_call_arguments.done");
   const completed = events.find((event) => event.type === "response.completed");
   assert.equal(added.item.name, "echo");
+  assert.match(added.item.id, /^fc_/);
+  assert.equal(added.item.call_id, "call_echo");
+  assert.equal(done.item_id, added.item.id);
+  assert.equal(done.call_id, "call_echo");
   assert.equal(done.arguments, "{\"value\":\"second\"}");
   assert.equal(completed.response.output[0].name, "echo");
   assert.equal(completed.response.usage.input_tokens_details.cached_tokens, 8304);
+});
+
+test("streamed Chat custom tools use native-compatible item ids without changing call ids", () => {
+  const events = chatChunksToResponseEvents([{
+    id: "chatcmpl_patch",
+    model: "Qwen3.8-27B",
+    choices: [{ index: 0, delta: {
+      tool_calls: [{ index: 0, id: "call_patch", type: "function", function: { name: "apply_patch", arguments: "{\"input\":\"*** Begin" } }],
+    } }],
+  }, {
+    id: "chatcmpl_patch",
+    model: "Qwen3.8-27B",
+    choices: [{ index: 0, delta: {
+      tool_calls: [{ index: 0, function: { arguments: " Patch\"}" } }],
+    }, finish_reason: "tool_calls" }],
+  }], {
+    restoreCall: (item) => item.name === "apply_patch"
+      ? { ...item, type: "custom_tool_call", input: item.arguments }
+      : item,
+  });
+  const added = events.find((event) => event.type === "response.output_item.added");
+  const delta = events.find((event) => event.type === "response.custom_tool_call_input.delta");
+  const done = events.find((event) => event.type === "response.custom_tool_call_input.done");
+  const completed = events.find((event) => event.type === "response.completed");
+  assert.equal(added.item.type, "custom_tool_call");
+  assert.match(added.item.id, /^ctc_/);
+  assert.equal(added.item.call_id, "call_patch");
+  assert.equal(delta.item_id, added.item.id);
+  assert.equal(delta.call_id, "call_patch");
+  assert.equal(done.item_id, added.item.id);
+  assert.equal(done.call_id, "call_patch");
+  assert.match(completed.response.output[0].id, /^ctc_/);
+  assert.equal(completed.response.output[0].call_id, "call_patch");
 });
 
 test("streamed Chat reasoning survives a complete Responses tool round trip", () => {

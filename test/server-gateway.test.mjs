@@ -7,6 +7,7 @@ import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { readLatestMainRoute } from "../src/usage-events.mjs";
 
 // Bare-path relay tests exercise the routed gateway, not the caller-key guard.
 // Enforcement is ON by default since 0.1.10, so these tests opt out explicitly;
@@ -48,6 +49,7 @@ async function startApp(configOverrides = {}) {
   config.summariesFile = path.join(dir, "summaries.json");
   config.codexCatalogFile = path.join(dir, "codex-model-catalog.json");
   config.nativeCatalogFile = path.join(dir, "native-catalog.json");
+  config.usageEventsFile = path.join(dir, "usage-events.jsonl");
   config.codexHome = dir;
   const services = createServices(config);
   const { app } = createApp(services);
@@ -123,6 +125,8 @@ test("gateway: image turns escalate to the vision model; an explicit client mode
   await imageTurn.text();
   assert.equal(seen[0].model, "gpt-5.6-luna", "image turn is escalated to the vision model");
   assert.equal(seen[0].input[0].content[0].type, "input_image", "image bytes are forwarded untouched");
+  const statusAfterVision = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(statusAfterVision.config.routeModel, "deepseek-v4-flash", "a vision escalation does not replace the latest main model");
 
   const continuation = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
@@ -135,6 +139,8 @@ test("gateway: image turns escalate to the vision model; an explicit client mode
   assert.equal(continuation.status, 200);
   await continuation.text();
   assert.equal(seen[1].model, "deepseek-v4-flash", "the explicit client model reclaims the wheel - no cascade onto the vision model");
+  const statusAfterContinuation = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(statusAfterContinuation.config.routeModel, "deepseek-v4-flash", "the completed routed request updates the latest main model projection");
 
   const textTurn = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
@@ -147,6 +153,8 @@ test("gateway: image turns escalate to the vision model; an explicit client mode
   assert.equal(textTurn.status, 200);
   await textTurn.text();
   assert.equal(seen[2].model, "deepseek-v4-flash", "a fresh text turn returns to the main model");
+  assert.equal(readLatestMainRoute(instance.services.usageEventsFile)?.model, "deepseek-v4-flash",
+    "the relay persists the same latest-model projection in the configured usage stream");
 });
 
 test("gateway: deepseek-official models route to the DeepSeek upstream with its token", async (t) => {

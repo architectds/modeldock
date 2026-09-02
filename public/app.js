@@ -1059,10 +1059,38 @@ let lastModelData = null;
 // one the server reports. Cleared once the saved selection catches up.
 let visionProviderOverride = "";
 
+function renderCurrentModel(data) {
+  const models = data?.models || {};
+  const selected = models.selected || {};
+  const providers = models.providers || [];
+  // The route header and this read-only model block describe the same fact.
+  // Using models.selected here created a second pipeline that stayed on the
+  // catalog default while config.routeModel already followed real Codex calls.
+  const modelId = data?.config?.routeModel || selected.mainModel || "";
+  const providerId = models.options?.find((model) => model.id === modelId)?.provider
+    || models.selectedProvider
+    || "other";
+  const providerLabel = data?.config?.routeProviderLabel
+    || providers.find((provider) => provider.id === providerId)?.label
+    || providerId;
+  const modelLabel = models.options?.find((model) => model.id === modelId)?.label || modelId;
+  const providerDisplay = $("main-provider-display");
+  const modelDisplay = $("main-model-display-name");
+  if (providerDisplay) providerDisplay.textContent = providerLabel;
+  if (modelDisplay) modelDisplay.textContent = modelLabel;
+  const mainModelStatic = document.querySelector(".model-static");
+  if (mainModelStatic) mainModelStatic.classList.toggle("busy", modelBusy);
+  if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
+  if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
+}
+
 function renderModelOptions(data) {
   const models = data.models;
   if (!models?.options) return;
   lastModelData = data;
+  // This must run on every status event. The selectable model set changes
+  // rarely, but the latest real route can change from one request to the next.
+  renderCurrentModel(data);
   const signature = modelSignature(models);
   if (signature === lastModelSignature) {
     // Models did not change since the last SSE event; keep the current DOM.
@@ -1072,23 +1100,8 @@ function renderModelOptions(data) {
   lastModelSignature = signature;
   const selected = models.selected || {};
   const providers = models.providers || [];
-  const selectedProvider = models.selectedProvider || "other";
   const visionProviders = models.visionProviders || providers;
   const selectedVisionProvider = models.selectedVisionProvider || "";
-  // The main model is a display, not a picker: it follows what Codex is
-  // actually using (the GUI selection is echoed back through client_selected),
-  // so the dashboard never writes it. Only the vision and subagent rows are
-  // editable, and both read the same published options set below.
-  const providerLabel = providers.find((provider) => provider.id === selectedProvider)?.label || selectedProvider;
-  const mainModelLabel = models.options.find((model) => model.id === selected.mainModel)?.label || selected.mainModel;
-  const providerDisplay = $("main-provider-display");
-  const modelDisplay = $("main-model-display-name");
-  if (providerDisplay) providerDisplay.textContent = providerLabel;
-  if (modelDisplay) modelDisplay.textContent = mainModelLabel;
-  const mainModelStatic = document.querySelector(".model-static");
-  if (mainModelStatic) mainModelStatic.classList.toggle("busy", modelBusy);
-  if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
-  if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
   const visionProviderSelect = $("vision-provider-select");
   if (visionProviderSelect) {
     // Honour a provider the user just picked (visionProviderOverride) over the
@@ -1974,6 +1987,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 let statsColors = new Map([[STATS_OTHER_ID, STATS_OTHER_COLOR]]);
 let statsNames = new Map();
+let statsModelOrder = [STATS_OTHER_ID];
 
 function statsColor(id) {
   return statsColors.get(id) || STATS_OTHER_COLOR;
@@ -2004,6 +2018,10 @@ function buildStatsPalette(data, periodModels) {
   names.set(STATS_OTHER_ID, t("stats.other"));
   statsColors = colors;
   statsNames = names;
+  statsModelOrder = [
+    ...(periodModels || []).map((entry) => entry?.id).filter((id) => id && id !== STATS_OTHER_ID),
+    STATS_OTHER_ID,
+  ];
 }
 
 // Display name for a model row, or for a bare legend id that carries no row.
@@ -2138,7 +2156,7 @@ function statsEmpty(host) {
 function statsSegmentIds(byModel) {
   const ordered = [];
   const seen = new Set();
-  for (const id of [...(lastStats?.modelLegend || []), STATS_OTHER_ID, ...Object.keys(byModel)]) {
+  for (const id of [...statsModelOrder, ...Object.keys(byModel)]) {
     if (seen.has(id) || !byModel[id]) continue;
     seen.add(id);
     ordered.push(id);
@@ -2369,7 +2387,11 @@ function renderStats(data) {
     : t("stats.notUpdated"));
 
   const hourly = statsRangeDays === 1;
-  const days = hourly ? [...(data.hours || [])] : [...(data.days || [])].slice(-statsRangeDays);
+  // The server builds one complete projection per range: aggregate, model
+  // ranking and buckets all share the same legend. Falling back keeps the
+  // public API readable from an older gateway during an in-place update.
+  const days = [...(data.series?.[periodKey]
+    || (hourly ? data.hours || [] : (data.days || []).slice(-statsRangeDays)))];
   const labelFor = hourly ? (entry) => statsHourLabel(entry.hour) : (entry) => statsDayLabel(entry.day);
   const modelPeriod = data.modelPeriods?.[periodKey];
   buildStatsPalette(data, modelPeriod?.models || data.models);

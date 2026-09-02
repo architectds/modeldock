@@ -15,6 +15,7 @@ import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
+import { nativeModelSlugs } from "./native-catalog.mjs";
 import {
   DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
   MIN_ZSTD_MEMORY_BUDGET_BYTES,
@@ -66,6 +67,31 @@ export function parseEnvFile(source) {
     entries[match[1]] = value;
   }
   return entries;
+}
+
+const NATIVE_PROVIDER_ID = "openai";
+const LEGACY_BARE_PROVIDER_ID = "opencode-go";
+
+// Persist the owner with the model. Native Codex slugs must stay bare on the
+// request wire, but a bare value in .env is ambiguous when an external provider
+// publishes the same model. The storage-only @openai suffix removes that guess;
+// decodePersistedModelRef strips it before the selection reaches Codex.
+export function encodePersistedModelRef(model) {
+  const id = String(model || "").trim();
+  if (!id || id.includes(PROVIDER_SEPARATOR)) return id;
+  return `${id}${PROVIDER_SEPARATOR}${NATIVE_PROVIDER_ID}`;
+}
+
+export function decodePersistedModelRef(raw, { nativeSlugs = new Set() } = {}) {
+  const id = String(raw || "").trim();
+  if (!id) return "";
+  const nativeSuffix = `${PROVIDER_SEPARATOR}${NATIVE_PROVIDER_ID}`;
+  if (id.endsWith(nativeSuffix)) return id.slice(0, -nativeSuffix.length);
+  if (id.includes(PROVIDER_SEPARATOR) || nativeSlugs.has(id)) return id;
+  // Only pre-owner values reach this branch. Before provider-qualified picker
+  // slugs, bare routed ids belonged to OpenCode Go. MODELDOCK_PROFILE must not
+  // reinterpret that historical value as a different owner.
+  return publishedSlugFor(LEGACY_BARE_PROVIDER_ID, id);
 }
 
 // The .env format is line-based, so a value carrying a newline would inject
@@ -378,6 +404,10 @@ export function loadConfig() {
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || path.join(os.homedir(), ".codex"));
   const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
   const profile = profileById(profileId);
+  const nativeCatalogFile = process.env.MODELDOCK_NATIVE_CATALOG_FILE
+    ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
+    : "";
+  const cachedNativeSlugs = nativeModelSlugs({ nativeCatalogFile });
 
   // Load-side write protection: a placeholder or unreadable token in .env is
   // treated as unset and (for OpenCode Go) falls back to the Codex config
@@ -450,8 +480,7 @@ export function loadConfig() {
   // the provider-qualified slug when the id needs one so the Codex picker and internal
   // routing agree on what is ours versus the native backend's GPT-5.6-Luna.
   const modelRef = (raw) => {
-    const id = String(raw || "").trim();
-    return !id || id.includes(PROVIDER_SEPARATOR) ? id : publishedSlugFor(profileId, id);
+    return decodePersistedModelRef(raw, { nativeSlugs: cachedNativeSlugs });
   };
   const customSlug = customModel ? `${customModel}${PROVIDER_SEPARATOR}custom` : "";
   // Connecting a backend publishes a model; it does not select one. Publishing
@@ -459,7 +488,10 @@ export function loadConfig() {
   // chooses per session, and the routing fallback is derived per session and
   // bootstrapped from the native config default (see gateway.mjs). This value
   // is only a display/catalog default.
-  const mainModel = modelRef("deepseek-v4-flash");
+  // MODELDOCK_PROFILE still chooses the default external route when no Codex
+  // task has selected a model. It does not own or reinterpret any saved model
+  // reference; those are decoded independently above.
+  const mainModel = publishedSlugFor(profileId, "deepseek-v4-flash");
   // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
   // Luna so image turns never route to the zen free endpoint, whose empty-output
   // bug burns the whole output budget and returns nothing (200 + output:[] or a
@@ -475,7 +507,7 @@ export function loadConfig() {
     if (raw) return !["0", "false", "off"].includes(raw);
     return hasChatGptLogin(codexHome);
   })();
-  const defaultVisionModel = !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna";
+  const defaultVisionModel = !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna@openai";
   const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
   // "none" is the durable representation for a provider with no vision model.
   // An empty env value cannot represent this because it intentionally falls back
@@ -567,9 +599,7 @@ export function loadConfig() {
     // Native GPT models captured from the Codex desktop CLI, merged into the
     // published catalog so they stay selectable in the App picker. The cache
     // lives at ~/.modeldock/native-catalog.json by default.
-    nativeCatalogFile: process.env.MODELDOCK_NATIVE_CATALOG_FILE
-      ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
-      : "",
+    nativeCatalogFile,
     refreshNativeCatalog: !envOff("MODELDOCK_REFRESH_NATIVE_CATALOG"),
     codexHome,
     envFile: envFileFor(),

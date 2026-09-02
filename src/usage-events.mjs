@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -22,6 +22,7 @@ export function usageEventsPath() {
 // dependency: when the file passes the cap it becomes `.1` (replacing the
 // previous `.1`), so at most two files exist.
 const ROTATE_BYTES = 5 * 1024 * 1024;
+const PRIMARY_MODEL_ROUTES = new Set(["client_selected", "default_main", "native_passthrough"]);
 
 // Active file size, maintained across appends so the hot path stats once per
 // process (or per redirect) instead of once per relay request.
@@ -118,4 +119,51 @@ export function usageFromRelayResult(result, { model, provider } = {}) {
     outputTokens: usage.output_tokens,
     totalTokens: usage.total_tokens,
   };
+}
+
+// The dashboard's read-only current-model block follows actual primary Codex
+// traffic. Vision escalation, tool continuation and compaction are work done on
+// behalf of that model, not a new main-model choice, so they cannot replace it.
+export function mainRouteFromUsageEvent(event) {
+  const model = safeText(event?.model, "");
+  const provider = safeText(event?.provider, "");
+  const route = safeText(event?.route, "");
+  const status = Number(event?.status);
+  const at = String(event?.at || "");
+  if (!model || !provider || !PRIMARY_MODEL_ROUTES.has(route)) return null;
+  if (!Number.isInteger(status) || status < 200 || status >= 300) return null;
+  if (!Number.isFinite(Date.parse(at))) return null;
+  return { model, provider, at };
+}
+
+// Reuse the existing bounded metering log as the durable source. Reading at
+// gateway boot costs at most two 5 MiB files and avoids a second latest-model
+// cache that could drift from the events Stats already trusts.
+export function readLatestMainRoute(filePath = usageEventsPath()) {
+  let latest = null;
+  let latestAt = -1;
+  for (const file of [`${filePath}.1`, filePath]) {
+    let lines;
+    try {
+      lines = readFileSync(file, "utf8").split(/\r?\n/);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      if (!line) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const candidate = mainRouteFromUsageEvent(event);
+      const candidateAt = candidate ? Date.parse(candidate.at) : -1;
+      if (candidate && candidateAt >= latestAt) {
+        latest = candidate;
+        latestAt = candidateAt;
+      }
+    }
+  }
+  return latest;
 }

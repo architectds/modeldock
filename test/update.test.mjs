@@ -366,7 +366,10 @@ test("createUpdater.apply deploys the complete Windows install and rechecks at c
   for (const [relative, body] of Object.entries(oldFiles)) {
     writeFileSync(path.join(rootDir, relative), body);
   }
-  const userEnv = "MODELDOCK_VISION_MODEL=kimi-k2.5@opencode-go\n";
+  // The selection records its owner and the updater must preserve it byte for
+  // byte. MODELDOCK_PROFILE is a provider connection default, never permission
+  // to reinterpret the saved native model as an OpenCode Go model.
+  const userEnv = "MODELDOCK_PROFILE=opencode-go\nMODELDOCK_VISION_MODEL=gpt-5.6-luna@openai\n";
   writeFileSync(path.join(rootDir, ".env"), userEnv);
 
   const assets = {

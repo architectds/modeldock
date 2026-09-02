@@ -385,7 +385,7 @@ test("managed equal lanes write total context and disable unified KV", () => {
   const running = [
     "-m", "D:/models/qwen.gguf", "-c", "262144", "--parallel", "1",
     "-ngl", "0", "-sm", "none", "-mg", "1", "-dev", "Vulkan1",
-    "--kv-unified", "--jinja",
+    "--kv-unified", "--cache-reuse", "64", "--jinja",
   ];
   const next = managedLlamaLaunchArgs(running, {
     profile: { laneCount: 2, laneContextTokens: 200_000, deviceIndices: [0, 1], tensorSplit: [0.5, 0.5] },
@@ -400,6 +400,8 @@ test("managed equal lanes write total context and disable unified KV", () => {
   assert.equal(next.filter((value) => value === "-sm").length, 1);
   assert.ok(next.includes("--no-kv-unified"));
   assert.ok(!next.includes("--kv-unified"));
+  assert.deepEqual(next.filter((value) => value === "--cache-reuse"), ["--cache-reuse"]);
+  assert.equal(next[next.indexOf("--cache-reuse") + 1], "256");
   assert.equal(next[next.indexOf("--slot-save-path") + 1], "D:/ModelDock/KV");
   assert.ok(next.includes("--jinja"));
 });

@@ -21,6 +21,7 @@ import { gunzipSync } from "node:zlib";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
+const longSwitchFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz", import.meta.url))).toString("utf8"));
 const UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
 const ROUTED_SLUG = `${UPSTREAM_MODEL}@commandcode`;
 const VISION_UPSTREAM_MODEL = "Qwen/Qwen3.8-Flash";
@@ -159,6 +160,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-wire-commandcode-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [];
+  const nativeRequests = [];
   const upstream = http.createServer(async (req, res) => {
     const rejectWith = (status, error) => {
       res.writeHead(status, { "content-type": "application/json" });
@@ -177,6 +179,34 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (req.url === "/native/responses") {
+      nativeRequests.push(body);
+      const prefixes = new Map([
+        ["message", "msg_"],
+        ["reasoning", "rs_"],
+        ["function_call", "fc_"],
+        ["function_call_output", "fco_"],
+        ["custom_tool_call", "ctc_"],
+        ["custom_tool_call_output", "ctco_"],
+      ]);
+      for (const [index, item] of (body.input || []).entries()) {
+        const prefix = prefixes.get(item?.type);
+        if (prefix && typeof item.id === "string" && !item.id.startsWith(prefix)) {
+          return rejectWith(400, `Invalid 'input[${index}].id': '${item.id}'. Expected an ID that begins with '${prefix.slice(0, -1)}'.`);
+        }
+        if (item?.type === "reasoning" && Array.isArray(item.content) && item.content.length > 0) {
+          return rejectWith(400, `Invalid 'input[${index}].content': array too long.`);
+        }
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({
+        id: "resp_native_long_compact",
+        object: "response",
+        status: "completed",
+        model: body.model,
+        output: [{ type: "compaction", id: "cmp_native_long", encrypted_content: "gAAAAcaptured_native_long_token" }],
+      }));
+    }
     requests.push(body);
     // The vendor's real root carries /provider/v1, so the bridge must land on its
     // chat surface and nowhere else.
@@ -238,6 +268,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       // test. The mock serves /provider/v1/models for it.
       COMMANDCODE_API_KEY: "user_fixturekey",
       MODELDOCK_COMMANDCODE_BASE_URL: `http://127.0.0.1:${upstreamPort}/provider/v1`,
+      CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${upstreamPort}/native`,
       MODELDOCK_STATE_DIR: path.join(root, "state"),
       MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
       MODELDOCK_REQUIRE_CALLER_KEY: "0",
@@ -288,6 +319,11 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     "the delegated vision tool is how a text-only model still sees a picture");
   const firstOutput = completedResponse(first).output;
   assert.deepEqual(firstOutput.map((item) => item.type), ["reasoning", "function_call", "function_call"]);
+  assert.match(firstOutput[0].id, /^rs_/, "Chat reasoning is stored in a native-compatible Responses namespace");
+  assert.ok(firstOutput.slice(1).every((item) => /^fc_/.test(item.id)),
+    "Chat tool item ids are native-compatible before Codex persists them");
+  assert.deepEqual(firstOutput.slice(1).map((item) => item.call_id), ["call_cmd_a", "call_cmd_b"],
+    "tool-output join ids remain the upstream call ids");
 
   const firstTurn = [
     ...firstOutput,
@@ -339,6 +375,25 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       && message.content.some((part) => part?.type === "image_url" && part.image_url?.url === BLUE_PNG)),
     "the complete Codex image item reaches Command Code Chat",
   );
+
+  // Recombine the complete current top-level Codex package with the complete
+  // captured 1,659-item Voxel history that failed after Command Code -> native
+  // switching. This strict built-bundle hop is the actual regression boundary:
+  // every historical Chat item must speak native Responses before Terra sees it.
+  assert.equal(longSwitchFixture.capture.inputItems, 1659);
+  assert.match(longSwitchFixture.input[41].id, /^call_/);
+  const nativeCompact = await send(
+    longSwitchFixture.input,
+    false,
+    "gpt-5.6-terra",
+    "full-commandcode-native-long-switch",
+  );
+  assert.equal(nativeRequests.length, 1);
+  assert.equal(nativeRequests[0].input.length, longSwitchFixture.input.length);
+  assert.match(nativeRequests[0].input[41].id, /^fc_/,
+    "the exact historical call_* failure is repaired in the shipped bundle");
+  assert.equal(nativeRequests[0].input[41].call_id, longSwitchFixture.input[41].call_id);
+  assert.equal(JSON.parse(nativeCompact).output[0].type, "compaction");
 
   // And the Messages-only half is unreachable even when a stale Codex picker sends
   // it: never published means refused at the gate, not forwarded to a Chat endpoint

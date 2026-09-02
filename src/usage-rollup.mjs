@@ -312,14 +312,33 @@ function addPricedStatsRow(target, key, source = {}) {
 const STATS_MODEL_LIMIT = 6;
 const STATS_OTHER = "__other__";
 
+// Stats describe a model family, not a billing route. Provider-qualified and
+// vendor-namespaced spellings of the same model therefore share one durable
+// key in every aggregate and chart. Pricing still uses the original raw key.
+export function canonicalUsageModelId(model) {
+  const raw = String(model || "").trim();
+  if (!raw) return raw;
+  const providerAt = raw.lastIndexOf("@");
+  const withoutProvider = providerAt > 0 ? raw.slice(0, providerAt) : raw;
+  const vendorSeparator = withoutProvider.lastIndexOf("/");
+  const bare = vendorSeparator >= 0 ? withoutProvider.slice(vendorSeparator + 1) : withoutProvider;
+  return bare
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/[^a-z0-9.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || raw;
+}
+
 function statsModelsForBuckets(buckets, retainedKeys) {
   const byModel = new Map();
   for (const [bucketKey, bucket] of Object.entries(buckets || {})) {
     if (!retainedKeys.has(bucketKey)) continue;
     for (const [key, entry] of Object.entries(bucket || {})) {
-      const raw = byModel.get(key) || emptyStatsRow();
+      const id = canonicalUsageModelId(key);
+      const raw = byModel.get(id) || emptyStatsRow();
       addPricedStatsRow(raw, key, entry);
-      byModel.set(key, raw);
+      byModel.set(id, raw);
     }
   }
   const ranked = [...byModel.entries()]
@@ -340,7 +359,8 @@ function statsModelsForBuckets(buckets, retainedKeys) {
 function bucketModelRows(entries, legend) {
   const rows = new Map();
   for (const [key, entry] of Object.entries(entries || {})) {
-    const id = legend.has(key) ? key : STATS_OTHER;
+    const canonical = canonicalUsageModelId(key);
+    const id = legend.has(canonical) ? canonical : STATS_OTHER;
     const inputTokens = Math.max(0, Number(entry?.in) || 0);
     const cachedTokens = Math.max(0, Math.min(inputTokens, Number(entry?.cached) || 0));
     const outputTokens = Math.max(0, Number(entry?.out) || 0);
@@ -369,6 +389,36 @@ function bucketModelRows(entries, legend) {
   return out;
 }
 
+// One range projection owns all facts shown for that range: its aggregate,
+// ranked model share, legend and time buckets. Keeping these together prevents
+// the donut from re-ranking a model that the bar pipeline already folded into
+// Other (the 1D Command Code Qwen regression).
+function statsProjection(buckets, keys, keyName) {
+  const retainedKeys = new Set(keys);
+  const modelPeriod = statsModelsForBuckets(buckets, retainedKeys);
+  const legend = new Set(modelPeriod.models
+    .filter((entry) => entry.id !== STATS_OTHER)
+    .map((entry) => entry.id));
+  const total = emptyStatsRow();
+  const timeline = keys.map((key) => {
+    const entries = buckets?.[key] || {};
+    const raw = emptyStatsRow();
+    for (const [model, entry] of Object.entries(entries)) addPricedStatsRow(raw, model, entry);
+    addStatsRow(total, raw);
+    return {
+      [keyName]: key,
+      ...finishStatsRow(raw),
+      byModel: bucketModelRows(entries, legend),
+    };
+  });
+  return {
+    summary: finishStatsRow(total),
+    models: modelPeriod.models,
+    modelCount: modelPeriod.modelCount,
+    timeline,
+  };
+}
+
 // Aggregate-only dashboard data. The response is deliberately derived from the
 // bounded daily/hourly rollup rather than the raw event log, so session/thread
 // ids and every other per-request detail stay on disk and never reach the browser.
@@ -381,63 +431,42 @@ export function usageStats(rollup, now = new Date().toISOString()) {
   const hourKeys = [];
   for (let offset = -(ROLLUP_HOURS - 1); offset <= 0; offset += 1) hourKeys.push(shiftedUtcHour(now, offset));
 
-  // The donut and the coloured bars have to agree on which models get a name, so
-  // both read this one thirty-day ranking instead of re-ranking per chart.
-  const legendDays30 = statsModelsForBuckets(rollup?.days, new Set(dayKeys));
-  const modelLegend = legendDays30.models
-    .filter((entry) => entry.id !== STATS_OTHER).map((entry) => entry.id);
-  const legendKeys = new Set(modelLegend);
-
-  const rawDays = [];
-  const days = [];
-  for (const day of dayKeys) {
-    const bucket = rollup?.days?.[day] || {};
-    const raw = emptyStatsRow();
-    for (const [key, entry] of Object.entries(bucket)) addPricedStatsRow(raw, key, entry);
-    rawDays.push(raw);
-    days.push({ day, ...finishStatsRow(raw), byModel: bucketModelRows(bucket, legendKeys) });
-  }
-
-  const rawHours = [];
-  const hours = [];
-  for (const hour of hourKeys) {
-    const bucket = rollup?.hours?.[hour] || {};
-    const raw = emptyStatsRow();
-    for (const [key, entry] of Object.entries(bucket)) addPricedStatsRow(raw, key, entry);
-    rawHours.push(raw);
-    hours.push({ hour, ...finishStatsRow(raw), byModel: bucketModelRows(bucket, legendKeys) });
-  }
-
-  const period = (count) => {
-    const raw = emptyStatsRow();
-    for (const row of rawDays.slice(-count)) addStatsRow(raw, row);
-    return finishStatsRow(raw);
+  const projections = {
+    today: statsProjection(rollup?.days, dayKeys.slice(-1), "day"),
+    hours24: statsProjection(rollup?.hours, hourKeys, "hour"),
+    days7: statsProjection(rollup?.days, dayKeys.slice(-7), "day"),
+    days30: statsProjection(rollup?.days, dayKeys, "day"),
   };
-
-  const hours24 = emptyStatsRow();
-  for (const row of rawHours) addStatsRow(hours24, row);
-
-  const modelPeriods = {
-    today: statsModelsForBuckets(rollup?.days, new Set(dayKeys.slice(-1))),
-    hours24: statsModelsForBuckets(rollup?.hours, new Set(hourKeys)),
-    days7: statsModelsForBuckets(rollup?.days, new Set(dayKeys.slice(-7))),
-    days30: legendDays30,
+  const modelPeriods = Object.fromEntries(Object.entries(projections).map(([key, projection]) => [key, {
+    models: projection.models,
+    modelCount: projection.modelCount,
+  }]));
+  const series = {
+    hours24: projections.hours24.timeline,
+    days7: projections.days7.timeline,
+    days30: projections.days30.timeline,
   };
+  const modelLegend = projections.days30.models
+    .filter((entry) => entry.id !== STATS_OTHER)
+    .map((entry) => entry.id);
 
   return {
     timezone: "UTC",
     windowDays: ROLLUP_DAYS,
     updatedAt: String(rollup?.lastFoldedAt || ""),
-    periods: { today: period(1), hours24: finishStatsRow(hours24), days7: period(7), days30: period(ROLLUP_DAYS) },
-    days,
-    hours,
+    periods: Object.fromEntries(Object.entries(projections).map(([key, projection]) => [key, projection.summary])),
+    // Exact period projections are what the dashboard renders. `days` and
+    // `hours` remain public API aliases for clients predating range-aware bars.
+    series,
+    days: series.days30,
+    hours: series.hours24,
     // Ordered palette slots: index + 1 is the colour a model wears in every plot.
     modelLegend,
     modelPeriods,
     // Current clients read these as the thirty-day view. Keep the aliases while
     // the range-aware dashboard rolls out; they carry no extra data.
-    models: modelPeriods.days30.models,
-    modelCount: modelPeriods.days30.modelCount,
+    models: projections.days30.models,
+    modelCount: projections.days30.modelCount,
   };
 }
 

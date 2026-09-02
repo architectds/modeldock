@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
   ROLLUP_DAYS,
   ROLLUP_HOURS,
+  canonicalUsageModelId,
   emptyRollup,
   foldEvents,
   foldUsageFile,
@@ -16,6 +17,15 @@ import {
   rollupTotals,
   usageStats,
 } from "../src/usage-rollup.mjs";
+
+test("stats model identity removes only vendor and provider routing syntax", () => {
+  assert.equal(canonicalUsageModelId("qwen3.8-flash@opencode-go"), "qwen3.8-flash");
+  assert.equal(canonicalUsageModelId("Qwen/Qwen3.8-Flash@commandcode"), "qwen3.8-flash");
+  assert.equal(canonicalUsageModelId("gpt-5.6-luna@openai"), "gpt-5.6-luna");
+  assert.equal(canonicalUsageModelId("gpt-5.6-luna@opencode-go"), "gpt-5.6-luna");
+  assert.equal(canonicalUsageModelId("mimo-v2.5-free@opencode-go"), "mimo-v2.5-free",
+    "a distinct product tier remains a distinct model family");
+});
 
 const event = (at, over = {}) => JSON.stringify({
   at, model: "deepseek-v4-flash", provider: "opencode-go",
@@ -300,7 +310,7 @@ test("stats keep model share bounded and aggregate the tail", () => {
 
   assert.equal(stats.modelCount, 8);
   assert.equal(stats.models.length, 7, "six named models plus one bounded Other row");
-  assert.equal(stats.models[0].id, "model-8@provider-8");
+  assert.equal(stats.models[0].id, "model-8");
   assert.equal(stats.models.at(-1).id, "__other__");
   assert.equal(stats.models.at(-1).totalTokens, 300, "the two smallest models are preserved in Other");
 });
@@ -318,9 +328,9 @@ test("stats attribute each bucket to the models that produced it", () => {
   const stats = usageStats(rollup, "2026-08-18T12:00:00.000Z");
   const day = stats.days.at(-1);
 
-  assert.deepEqual(stats.modelLegend, ["deepseek-v4-flash@opencode-go", "glm-5.3@opencode-go"]);
-  const { cost: firstCost, ...first } = day.byModel["deepseek-v4-flash@opencode-go"];
-  const { cost: secondCost, ...second } = day.byModel["glm-5.3@opencode-go"];
+  assert.deepEqual(stats.modelLegend, ["deepseek-v4-flash", "glm-5.3"]);
+  const { cost: firstCost, ...first } = day.byModel["deepseek-v4-flash"];
+  const { cost: secondCost, ...second } = day.byModel["glm-5.3"];
   assert.deepEqual(first, { newInput: 100, cached: 400, output: 50, requests: 1 });
   assert.deepEqual(second, { newInput: 200, cached: 0, output: 20, requests: 1 });
   // Each model is priced on its own row, which is the whole point of the split.
@@ -349,4 +359,49 @@ test("a bucket folds models outside the legend into the same Other row as the do
   assert.equal(stats.modelLegend.length, 6);
   assert.equal(bucket.__other__.newInput, 300, "the two smallest models are still on the bar");
   assert.equal(Object.values(bucket).reduce((total, row) => total + row.newInput, 0), stats.days.at(-1).newInputTokens);
+});
+
+test("each range uses one model projection for its donut and all three timelines", () => {
+  const rollup = emptyRollup();
+  const today = "2026-08-18";
+  const old = "2026-08-10";
+  rollup.days[old] = {};
+  for (let index = 1; index <= 6; index += 1) {
+    rollup.days[old][`old-${index}@provider`] = {
+      requests: 1, ok: 1, in: 10_000 + index, out: 0, cached: 0, ms: 1000, okOut: 0, okMs: 0,
+    };
+  }
+  const recent = {
+    requests: 2, ok: 2, in: 1000, out: 100, cached: 800, ms: 1000, okOut: 100, okMs: 1000,
+  };
+  rollup.days[today] = { "recent-model@provider": recent };
+  rollup.hours[`${today}T12:00:00.000Z`] = { "recent-model@provider": recent };
+
+  const stats = usageStats(rollup, `${today}T12:30:00.000Z`);
+  assert.ok(!stats.modelLegend.includes("recent-model"), "the thirty-day top six deliberately excludes the recent model");
+  assert.equal(stats.modelPeriods.hours24.models[0].id, "recent-model");
+  assert.ok(stats.series.hours24.at(-1).byModel["recent-model"],
+    "the 1D bars use the 1D legend instead of folding its donut model into Other");
+  assert.ok(stats.series.days7.at(-1).byModel["recent-model"],
+    "the 7D bars use the same model projection as the 7D donut");
+  assert.ok(!stats.series.hours24.at(-1).byModel.__other__);
+});
+
+test("one canonical model identity combines provider aliases before every chart ranks them", () => {
+  const rollup = emptyRollup();
+  const day = "2026-08-18";
+  const hour = `${day}T12:00:00.000Z`;
+  const go = { requests: 1, ok: 1, in: 500, out: 50, cached: 400, ms: 1000, okOut: 50, okMs: 1000 };
+  const command = { requests: 1, ok: 1, in: 700, out: 70, cached: 600, ms: 1000, okOut: 70, okMs: 1000 };
+  rollup.days[day] = {
+    "qwen3.8-flash@opencode-go": go,
+    "Qwen/Qwen3.8-Flash@commandcode": command,
+  };
+  rollup.hours[hour] = rollup.days[day];
+  const stats = usageStats(rollup, `${day}T12:30:00.000Z`);
+  assert.equal(stats.modelPeriods.hours24.modelCount, 1);
+  assert.equal(stats.modelPeriods.hours24.models[0].id, "qwen3.8-flash");
+  assert.equal(stats.modelPeriods.hours24.models[0].totalTokens, 1320);
+  assert.deepEqual(Object.keys(stats.series.hours24.at(-1).byModel), ["qwen3.8-flash"]);
+  assert.equal(stats.series.hours24.at(-1).byModel["qwen3.8-flash"].requests, 2);
 });

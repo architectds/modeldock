@@ -120,6 +120,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
     usageRollupFile: path.join(dir, "usage-rollup.json"),
+    usageEventsFile: path.join(dir, "usage-events.jsonl"),
   });
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -347,7 +348,12 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
     return;
   }
-  const { base } = await startDashboard(t);
+  const { base, services } = await startDashboard(t);
+  services.recordLatestMainRoute({
+    route: { model: "qwen3.8-flash@opencode-go", reason: "client_selected" },
+    upstream: "opencode-go",
+    httpStatus: 200,
+  });
   const { send, evaluate } = await openBrowser(t, chromePath);
 
   // Record what the page throws, before it has a chance to throw anything.
@@ -383,6 +389,17 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     return true;
   })()`);
   await sleep(500);
+
+  // Reproduce the stale DeepSeek card: the configured catalog fallback is
+  // DeepSeek, while the latest real Codex request used Qwen. The route header
+  // already followed the request; the model block used a separate selection
+  // object and stayed wrong indefinitely.
+  const currentModel = JSON.parse(await evaluate(`JSON.stringify({
+    provider: document.getElementById('main-provider-display')?.textContent.trim(),
+    model: document.getElementById('main-model-display-name')?.textContent.trim(),
+  })`));
+  assert.deepEqual(currentModel, { provider: "OpenCode Go", model: "Qwen 3.8 Flash" },
+    "the read-only model block follows the same latest route as the route header");
 
   for (const tab of TABS) {
     await evaluate(`location.hash = '#${tab}'`);
@@ -435,6 +452,22 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
           activeRange: String(range),
           cost: filtered.cost,
         }, `Stats ${range}D filter must update every aggregate and chart together`);
+        const identities = JSON.parse(await evaluate(`JSON.stringify({
+          token: [...new Set([...document.querySelectorAll('#stats-token-chart .stats-segment[data-stats-model]')]
+            .map((node) => node.dataset.statsModel))].sort(),
+          requests: [...new Set([...document.querySelectorAll('#stats-request-chart .stats-segment[data-stats-model]')]
+            .map((node) => node.dataset.statsModel))].sort(),
+          spend: [...new Set([...document.querySelectorAll('#stats-spend-chart .stats-segment[data-stats-model]')]
+            .map((node) => node.dataset.statsModel))].sort(),
+          donut: [...document.querySelectorAll('#stats-model-chart .stats-slice')]
+            .map((node) => node.dataset.statsModel).sort(),
+        })`));
+        assert.deepEqual(identities.token, identities.donut,
+          `Stats ${range}D token flow must use the donut model identities`);
+        assert.deepEqual(identities.requests, identities.donut,
+          `Stats ${range}D request flow must use the donut model identities`);
+        assert.deepEqual(identities.spend, identities.donut.filter((id) => id !== '__other__'),
+          `Stats ${range}D spend must use the priced donut model identities`);
         if (range === 1) {
           const axisLabels = JSON.parse(await evaluate(`JSON.stringify([...document.querySelectorAll('#stats-token-chart .stats-axis span')].map((node) => node.textContent))`));
           assert.equal(axisLabels.length, 2);

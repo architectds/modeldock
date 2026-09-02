@@ -223,6 +223,7 @@ const OVERRIDE_FLAGS = {
   splitMode: ["-sm", "--split-mode"],
   tensorSplit: ["-ts", "--tensor-split"],
   device: ["-dev", "--device"],
+  cacheReuse: ["--cache-reuse"],
   slotSavePath: ["--slot-save-path"],
   visionProjectorPath: ["--mmproj"],
 };
@@ -291,6 +292,9 @@ export function applyLaunchOverrides(args, overrides = {}) {
   if (overrides.splitMode) out.push("-sm", String(overrides.splitMode));
   if (overrides.tensorSplit) out.push("-ts", String(overrides.tensorSplit));
   if (overrides.device) out.push("-dev", String(overrides.device));
+  if (Number.isSafeInteger(overrides.cacheReuse) && overrides.cacheReuse >= 0) {
+    out.push("--cache-reuse", String(overrides.cacheReuse));
+  }
   if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
   if (overrides.visionProjectorPath) out.push("--mmproj", String(overrides.visionProjectorPath));
   // Write the cache topology explicitly. Managed profiles use independent,
@@ -450,7 +454,7 @@ export async function waitForEngineStop({ pid, discover, timeoutMs = 10_000 }) {
 // remain byte-for-byte argv entries from the user's pre-takeover process.
 // llama.cpp's -c is the total KV budget: independent equal lanes therefore use
 // P * C here while Codex is told only the per-lane C.
-export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath, visionProjectorPath, cacheTypeK = "q4_0", cacheTypeV = "q4_0" } = {}) {
+export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath, visionProjectorPath, cacheTypeK = "q4_0", cacheTypeV = "q4_0", cacheReuse = 256 } = {}) {
   const lanes = Number(profile?.laneCount);
   const perLane = Number(profile?.laneContextTokens);
   if (!Number.isSafeInteger(lanes) || lanes < 1 || lanes > 3) {
@@ -458,6 +462,9 @@ export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath,
   }
   if (!Number.isSafeInteger(perLane) || perLane <= 0) {
     throw new TypeError("A managed llama.cpp launch needs a positive per-lane context.");
+  }
+  if (!Number.isSafeInteger(cacheReuse) || cacheReuse < 0) {
+    throw new TypeError("A managed llama.cpp launch needs a non-negative cache reuse threshold.");
   }
   const root = typeof slotSavePath === "string" ? slotSavePath.trim() : "";
   if (!root) throw new TypeError("A managed llama.cpp launch needs an SSD slot-state directory.");
@@ -483,6 +490,9 @@ export function managedLlamaLaunchArgs(args, { profile, slotSavePath, modelPath,
     // single or unrelated backend. Let the managed CUDA topology choose its
     // selected devices rather than inherit that stale restriction.
     device: null,
+    // Exact-prefix reuse still comes from prompt caching. This enables llama.cpp
+    // KV shifting for non-identical prompt chunks of at least 256 tokens.
+    cacheReuse,
     slotSavePath: root,
     visionProjectorPath,
     kvUnified: false,

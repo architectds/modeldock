@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { recordUsageEvent, usageFromRelayResult } from "../src/usage-events.mjs";
+import { mainRouteFromUsageEvent, readLatestMainRoute, recordUsageEvent, usageFromRelayResult } from "../src/usage-events.mjs";
 
 function tempFile() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-usage-"));
@@ -23,6 +23,30 @@ test("recordUsageEvent appends one JSON line per event", (t) => {
   assert.equal(first.totalTokens, 15);
   const second = JSON.parse(lines[1]);
   assert.equal(second.inputTokens, undefined, "absent counts are omitted, not zeroed");
+});
+
+test("latest main route survives restart without treating helper routes as model choices", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-latest-route-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage-events.jsonl");
+  recordUsageEvent({ model: "qwen3.8-flash@opencode-go", provider: "opencode-go", route: "client_selected", status: 200, at: "2026-09-02T10:00:00.000Z", filePath: file });
+  recordUsageEvent({ model: "gpt-5.6-luna", provider: "openai", route: "current_turn_image", status: 200, at: "2026-09-02T10:01:00.000Z", filePath: file });
+  recordUsageEvent({ model: "gpt-5.6-luna", provider: "openai", route: "tool_continuation", status: 200, at: "2026-09-02T10:02:00.000Z", filePath: file });
+  recordUsageEvent({ model: "gpt-5.6-terra", provider: "openai", route: "native_passthrough", status: 500, at: "2026-09-02T10:03:00.000Z", filePath: file });
+  assert.deepEqual(readLatestMainRoute(file), {
+    model: "qwen3.8-flash@opencode-go",
+    provider: "opencode-go",
+    at: "2026-09-02T10:00:00.000Z",
+  });
+});
+
+test("native and default main routes are eligible for the one current-model projection", () => {
+  assert.deepEqual(mainRouteFromUsageEvent({
+    model: "gpt-5.6-luna", provider: "openai", route: "native_passthrough", status: 200, at: "2026-09-02T11:00:00.000Z",
+  }), { model: "gpt-5.6-luna", provider: "openai", at: "2026-09-02T11:00:00.000Z" });
+  assert.deepEqual(mainRouteFromUsageEvent({
+    model: "Qwen/Qwen3.8-Flash@commandcode", provider: "commandcode", route: "default_main", status: 200, at: "2026-09-02T12:00:00.000Z",
+  }), { model: "Qwen/Qwen3.8-Flash@commandcode", provider: "commandcode", at: "2026-09-02T12:00:00.000Z" });
 });
 
 test("recordUsageEvent records session and thread ids when present", (t) => {
