@@ -392,6 +392,43 @@ function modelsPayload(services) {
   };
 }
 
+// Metering stores the provider-qualified wire id so usage remains unambiguous
+// even when two providers serve a similarly named model. The Stats page should
+// still use the same friendly label as the Models page. Resolve only ids that
+// appear in this bounded snapshot: historical traffic stays visible without
+// turning /api/stats into a copy of the full catalog.
+function statsModelLabels(services, stats) {
+  const labels = new Map();
+  const remember = (id, label) => {
+    const key = String(id || "");
+    const value = String(label || "").trim();
+    if (key && value && !labels.has(key)) labels.set(key, value);
+  };
+  for (const option of modelOptions(services.config, services.config.profileId)) {
+    remember(option.id, option.label || option.id);
+  }
+  // A provider can be temporarily disconnected after it generated usage. Its
+  // retained directory still gives old rows a human name without claiming the
+  // provider is currently selectable.
+  for (const profile of allProfiles()) {
+    for (const model of profile.availableModels || []) {
+      remember(publishedSlugFor(profile.id, model), model.label || model.id);
+    }
+  }
+  for (const model of readNativeCatalog(services.config)?.models || []) {
+    if (model?.slug) remember(`${model.slug}@${NATIVE_PROVIDER.id}`, model.display_name || model.slug);
+  }
+  const used = new Set(stats?.modelLegend || []);
+  for (const period of Object.values(stats?.modelPeriods || {})) {
+    for (const model of period?.models || []) used.add(model?.id);
+  }
+  const out = {};
+  for (const id of used) {
+    if (id && id !== "__other__" && labels.has(id)) out[id] = labels.get(id);
+  }
+  return out;
+}
+
 function subagentPayload(services) {
   const options = subagentModelOptions(services.config);
   const selected = readSubagentModel(services.config) || SUBAGENT_DEFAULT_MODEL;
@@ -1890,7 +1927,8 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/stats", (req, res) => {
     const rollup = readRollup(services.usageRollupFile || usageRollupPath());
-    return res.json(usageStats(rollup));
+    const stats = usageStats(rollup);
+    return res.json({ ...stats, modelLabels: statsModelLabels(services, stats) });
   });
   app.get("/api/local/discover", async (req, res) => {
     try {

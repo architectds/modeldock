@@ -13,6 +13,11 @@ test("the pricing snapshot carries current OpenCode Go base rates", () => {
     cached: 0.016,
     output: 0.47,
   });
+  assert.deepEqual(apiRate("Qwen/Qwen3.8-Flash", "commandcode"), {
+    input: 0.15,
+    cached: 0.016,
+    output: 0.47,
+  });
   assert.deepEqual(apiRate("hy4-preview", "opencode-go"), {
     input: 0.834,
     cached: 0.042,

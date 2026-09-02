@@ -20,7 +20,7 @@ const TEXT_EXTENSIONS = new Set([".html", ".js", ".css", ".svg", ".json", ".txt"
 
 // Only these top-level assets ship in the bundle. Vision eval images stay on disk and
 // are dev-only: loadTaskImage returns null when they are absent and the eval skips.
-const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico", "icon.svg", "favicon.png", "favicon.ico"];
+const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico", "icon.svg", "favicon.png", "favicon.ico", "commandcode-favicon.svg"];
 
 // Minify an inlined text asset before it becomes a string literal in the
 // bundle. esbuild's own minify never touches string literals, so without this

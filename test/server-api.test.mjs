@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile } from "../src/profiles.mjs";
+import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile, profileById } from "../src/profiles.mjs";
 import { dpapiSupported } from "../src/secrets.mjs";
 import {
   ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
@@ -464,7 +464,39 @@ test("api/stats returns bounded aggregate usage without request identity", async
   assert.equal(body.models[0].id, "qwen3.8-flash@opencode-go");
   assert.equal(body.modelPeriods.today.models[0].id, "qwen3.8-flash@opencode-go");
   assert.equal(body.modelPeriods.hours24.models[0].id, "qwen3.8-flash@opencode-go");
+  assert.equal(body.modelLabels["qwen3.8-flash@opencode-go"], "Qwen 3.8 Flash");
   assert.doesNotMatch(JSON.stringify(body), /sessionId|threadId|prompt|outputText/);
+});
+
+test("api/stats keeps a Command Code model on its canonical cross-provider name", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-commandcode-stats-api-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const profile = profileById("commandcode");
+  const previous = profile.availableModels;
+  profile.availableModels = [{ id: "Qwen/Qwen3.8-Flash", label: "Qwen 3.8 Flash", supportsVision: true }];
+  t.after(() => { profile.availableModels = previous; });
+  const usageRollupFile = path.join(dir, "usage-rollup.json");
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const hour = `${now.toISOString().slice(0, 13)}:00:00.000Z`;
+  const usage = {
+    "Qwen/Qwen3.8-Flash@commandcode": {
+      requests: 1, ok: 1, in: 1_000_000, out: 100_000, cached: 800_000, ms: 5000, okOut: 100_000, okMs: 5000,
+    },
+  };
+  await writeFile(usageRollupFile, JSON.stringify({
+    version: 2,
+    lastFoldedAt: now.toISOString(),
+    days: { [day]: usage },
+    hours: { [hour]: usage },
+  }), "utf8");
+  const instance = await startApp({ usageRollupFile });
+  t.after(instance.stop);
+
+  const body = await (await fetch(`${instance.base}/api/stats`)).json();
+  assert.equal(body.modelLabels["Qwen/Qwen3.8-Flash@commandcode"], "Qwen 3.8 Flash");
+  assert.ok(Math.abs(body.modelPeriods.hours24.models[0].estimatedApiCostUsd - 0.0898) < 1e-12);
+  assert.equal(body.modelPeriods.hours24.models[0].costCoverage, 1);
 });
 
 test("api endpoints reject cross-origin browser reads", async (t) => {

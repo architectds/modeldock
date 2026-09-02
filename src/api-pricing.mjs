@@ -45,6 +45,9 @@ const RATES = new Map([
   ["qwen3.7-max@opencode-go", { input: 2.5, cached: 0.5, output: 7.5 }],
   ["qwen3.7-plus@opencode-go", { input: 0.4, cached: 0.04, output: 1.6 }],
   ["qwen3.8-flash@opencode-go", { input: 0.15, cached: 0.016, output: 0.47 }],
+  // Equivalent public Qwen API price for Command Code subscription traffic.
+  // This is not Command Code billing; the Stats card reports comparable API value.
+  ["Qwen/Qwen3.8-Flash@commandcode", { input: 0.15, cached: 0.016, output: 0.47 }],
   ["qwen3.8-max@opencode-go", { input: 2, cached: 0.25, output: 6 }],
 
   // OpenAI direct API base rates for native Codex traffic, checked on

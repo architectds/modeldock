@@ -95,7 +95,7 @@ function managedHostSnapshot() {
   };
 }
 
-async function startDashboard(t, { managed = false, managedDrawer = false } = {}) {
+async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const port = await availablePort();
   const services = createServices({
@@ -190,7 +190,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
     models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
   });
   t.after(() => applyLocalEngineProfile("llamacpp", null));
-  services.discoverEngines = async () => [{
+  const observedEngine = {
     engine: "llamacpp",
     label: "llama.cpp",
     baseUrl: "http://127.0.0.1:11435",
@@ -200,9 +200,10 @@ async function startDashboard(t, { managed = false, managedDrawer = false } = {}
     binary: "D:/llama-cpp/llama-server.exe",
     cmdline: "D:/llama-cpp/llama-server.exe -m D:/models/qwen.gguf -c 262144 --parallel 1 --port 11435",
     launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-  }];
+  };
+  services.discoverEngines = async () => managedDrawerOffline ? [] : [observedEngine];
   services.probeGpus = async () => [];
-  if (managedDrawer) {
+  if (managedDrawer || managedDrawerOffline) {
     const endpoint = "http://127.0.0.1:11435/v1";
     const launch = {
       binary: "D:/llama-cpp/llama-server.exe",
@@ -261,6 +262,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     narrow: 600,
     "hostmonitor-narrow": 900,
     "managed-drawer": 1200,
+    "managed-drawer-offline": 1800,
   }[instance] ?? 1500;
   const port = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
@@ -448,6 +450,7 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       const paint = JSON.parse(await evaluate(`JSON.stringify({
         slices: [...document.querySelectorAll('#stats-model-chart .stats-slice')].map((n) => n.getAttribute('fill')),
         legend: [...document.querySelectorAll('#stats-model-chart .stats-legend-row')].map((n) => n.dataset.statsModel),
+        names: [...document.querySelectorAll('#stats-model-chart .stats-share-name')].map((n) => n.textContent),
         centre: document.querySelector('#stats-model-chart .stats-donut-center b')?.textContent,
         barColours: [...new Set([...document.querySelectorAll('#stats-token-chart .stats-segment')]
           .map((n) => n.dataset.statsModel + '=' + n.style.background))],
@@ -455,6 +458,7 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       assert.equal(paint.slices.length, 3, "one slice per model in the period");
       assert.equal(new Set(paint.slices).size, 3, "no two slices may share a colour");
       assert.equal(paint.legend.length, 3);
+      assert.ok(paint.names.includes("Qwen 3.8 Flash"), `Stats uses the model catalog's normalized name, not an upstream wire id: ${JSON.stringify(paint.names)}`);
       assert.match(paint.centre, /%$/, "the ring states the share it is highlighting");
       assert.equal(new Set(paint.barColours.map((entry) => entry.split("=")[1])).size, paint.barColours.length,
         "a model keeps one colour in every plot");
@@ -819,6 +823,7 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
   const drawer = JSON.parse(await evaluate(`JSON.stringify({
     visible: document.getElementById('local-drawer').offsetParent !== null,
     formVisible: document.getElementById('local-host-management-form').offsetParent !== null,
+    port: document.getElementById('local-config-port').value,
     model: document.getElementById('local-host-model-file').value,
     projector: document.getElementById('local-host-vision-projector').value,
     cacheDirectory: document.getElementById('local-host-kv-directory').value,
@@ -828,11 +833,15 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
     cacheReadonly: document.getElementById('local-host-kv-directory').readOnly,
     visionDisabled: document.getElementById('local-host-vision-enabled').disabled,
     budgetDisabled: document.getElementById('local-host-kv-budget').disabled,
+    portReadonly: document.getElementById('local-config-port').readOnly,
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+    startVisible: document.getElementById('local-config-start').offsetParent !== null,
+    leftStartRemoved: document.getElementById('llamacpp-restart') === null,
   })`));
   assert.deepEqual(drawer, {
     visible: true,
     formVisible: true,
+    port: "11435",
     model: "D:/models/managed-model.gguf",
     projector: "D:/models/managed-projector.gguf",
     cacheDirectory: "D:/managed-kv",
@@ -842,7 +851,70 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
     cacheReadonly: true,
     visionDisabled: true,
     budgetDisabled: true,
+    portReadonly: true,
     leaveVisible: true,
+    startVisible: false,
+    leftStartRemoved: true,
+  });
+});
+
+test("a stopped managed llama keeps its full drawer and moves Start service there", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const { base } = await startDashboard(t, { managedDrawerOffline: true });
+  const { evaluate } = await openBrowser(t, chromePath, { instance: "managed-drawer-offline" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && document.querySelector('#local-engine-list')?.textContent.includes('engine is not answering')`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    document.getElementById('llamacpp-configure').click();
+    return true;
+  })()`);
+  await sleep(400);
+  const drawer = JSON.parse(await evaluate(`JSON.stringify({
+    visible: document.getElementById('local-drawer').offsetParent !== null,
+    formVisible: document.getElementById('local-host-management-form').offsetParent !== null,
+    port: document.getElementById('local-config-port').value,
+    model: document.getElementById('local-host-model-file').value,
+    projector: document.getElementById('local-host-vision-projector').value,
+    cacheDirectory: document.getElementById('local-host-kv-directory').value,
+    budget: document.getElementById('local-host-kv-budget').value,
+    portReadonly: document.getElementById('local-config-port').readOnly,
+    modelReadonly: document.getElementById('local-host-model-file').readOnly,
+    startVisible: document.getElementById('local-config-start').offsetParent !== null,
+    startLabel: document.getElementById('local-config-start').textContent.trim(),
+    saveVisible: document.getElementById('local-config-save').offsetParent !== null,
+    disconnectVisible: document.getElementById('local-config-disconnect').offsetParent !== null,
+    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+    gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
+    management: document.getElementById('local-host-management-state').textContent.trim(),
+    leftStartRemoved: document.getElementById('llamacpp-restart') === null,
+  })`));
+  assert.deepEqual(drawer, {
+    visible: true,
+    formVisible: true,
+    port: "11435",
+    model: "D:/models/managed-model.gguf",
+    projector: "D:/models/managed-projector.gguf",
+    cacheDirectory: "D:/managed-kv",
+    budget: "32",
+    portReadonly: true,
+    modelReadonly: true,
+    startVisible: true,
+    startLabel: "Start service",
+    saveVisible: false,
+    disconnectVisible: false,
+    leaveVisible: true,
+    gateway: "Gateway: connected - 1 model(s), but the engine is not answering",
+    management: "Managed profile: --parallel 1 \u00b7 --ctx-size 215,040. Multiple sessions available.",
+    leftStartRemoved: true,
   });
 });
 

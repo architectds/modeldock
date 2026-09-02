@@ -328,10 +328,8 @@
         <div class="custom-row">
           <button id="ollama-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
           <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
-          <button id="ollama-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
-        <p id="ollama-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
         </div>
       </div>
@@ -347,10 +345,8 @@
         <div class="custom-row">
           <button id="llamacpp-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
           <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn" data-i18n-title="local.manageTip" title="Let ModelDock manage this host">Manage</button>
-          <button id="llamacpp-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
-        <p id="llamacpp-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="llamacpp-error" class="custom-error" aria-live="polite" hidden></p>
         </div>
       </div>
@@ -366,10 +362,8 @@
         <div class="custom-row">
           <button id="vllm-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
           <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
-          <button id="vllm-restart" type="button" class="custom-action engine-button" data-i18n="local.restart" hidden>Start it again</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
-        <p id="vllm-restart-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Replays the recorded command line. Settings passed through environment variables are not captured.</p>
         <p id="vllm-error" class="custom-error" aria-live="polite" hidden></p>
         </div>
       </div>
@@ -432,7 +426,9 @@
           </div>
         </section>
         <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
+        <p id="local-config-start-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Starts this service from its saved command. Settings passed through environment variables are not captured.</p>
         <div class="custom-row local-config-actions">
+          <button id="local-config-start" type="button" class="custom-action primary" data-i18n="local.restart" hidden>Start service</button>
           <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
           <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
         </div>

@@ -1599,6 +1599,10 @@ const PROVIDER_MARKS = {
     viewBox: "0 0 24 24",
     path: "M14.234 10.162L22.977 0h-2.072l-7.591 8.824L7.251 0H.258l9.168 13.343L.258 24H2.33l8.016-9.318L16.749 24h6.993l-9.168-13.838zm-2.837 3.299l-.929-1.329L3.076 1.56h3.182l5.965 8.532l.929 1.329l7.754 11.09h-3.182z",
   },
+  commandcode: {
+    color: "#f4f4f4",
+    image: "/assets/commandcode-favicon.svg",
+  },
   llamacpp: {
     color: "#b9c8d4",
     viewBox: "0 0 24 24",
@@ -1617,6 +1621,15 @@ function providerMark(provider) {
   const wrap = document.createElement("span");
   wrap.className = `roster-provider-mark roster-provider-mark-${key.replace(/[^a-z0-9]+/g, "-")}`;
   wrap.setAttribute("aria-hidden", "true");
+  if (mark.image) {
+    const image = document.createElement("img");
+    image.src = mark.image;
+    image.alt = "";
+    image.decoding = "async";
+    wrap.append(image);
+    wrap.style.setProperty("--provider-color", mark.color);
+    return wrap;
+  }
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", mark.viewBox);
   svg.setAttribute("focusable", "false");
@@ -1982,7 +1995,8 @@ function buildStatsPalette(data, periodModels) {
     const id = typeof entry === "string" ? entry : entry?.id;
     if (!id || id === STATS_OTHER_ID || colors.has(id)) return;
     colors.set(id, STATS_MODEL_COLORS[colors.size % STATS_MODEL_COLORS.length]);
-    names.set(id, entryName(entry, id));
+    const label = String(data?.modelLabels?.[id] || "").trim();
+    names.set(id, label || entryName(entry, id));
   };
   for (const id of data.modelLegend || []) take(id);
   for (const entry of periodModels || []) take(entry);
@@ -2257,7 +2271,7 @@ function renderModelShare(models = [], modelCount = 0, periodLabel = "") {
   const centerName = document.createElement("span");
   const showCenter = (entry, share) => {
     centerPct.textContent = percent(share);
-    centerName.textContent = entry.model || statsModelName(entry.id);
+    centerName.textContent = statsModelName(entry.id);
     centerName.title = entry.id;
   };
   const restoreCenter = () => showCenter(used[0], (Number(used[0].totalTokens) || 0) / total);
@@ -2312,7 +2326,7 @@ function renderModelShare(models = [], modelCount = 0, periodLabel = "") {
     dot.style.background = statsColor(entry.id);
     const name = document.createElement("span");
     name.className = "stats-share-name";
-    name.textContent = entry.model || statsModelName(entry.id);
+    name.textContent = statsModelName(entry.id);
     name.title = entry.id;
     const value = document.createElement("strong");
     value.className = "stats-share-value";
@@ -2486,7 +2500,15 @@ async function renderLocalEngines() {
     // blue. An engine that has stopped answering is dropped from the map so the
     // colour follows reality rather than the last good scan.
     localDiscovery.clear();
+    localKnownEngines.clear();
     for (const engine of engines) {
+      // Reachability and identity are different facts. A stopped managed host
+      // must remain available to the drawer even though it must not paint the
+      // engine as online. Its durable record is what carries the saved model,
+      // projector, SSD KV directory, budget, port, and launch profile.
+      if (preferKnownEngine(engine, localKnownEngines.get(engine.engine))) {
+        localKnownEngines.set(engine.engine, engine);
+      }
       // One entry per engine, and which one matters: discovery lists the ports
       // it read from the process table before the fixed candidates, precisely so
       // the attributed one wins. Overwriting on a repeated engine id inverted
@@ -2498,7 +2520,11 @@ async function renderLocalEngines() {
       }
     }
     for (const engineId of localEngineIds) paintEngineButton(engineId);
-    for (const engineId of localEngineIds) paintRestartButton(engineId);
+    if (localConfigEngine) {
+      const found = localKnownEngines.get(localConfigEngine) || localDiscovery.get(localConfigEngine);
+      if (localConfigEngine === "llamacpp") renderLocalHostControl(localConfigEngine, found);
+      renderLocalStartAction(localConfigEngine, found);
+    }
     for (const engine of engines) {
       const item = document.createElement("li");
       item.className = "local-engine";
@@ -3000,7 +3026,9 @@ function renderOllamaSection(state) {
   ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
   // Same rule the other two get: something to replay, and nothing answering.
   localCanRestart.set("ollama", Boolean(ollamaState.canRestart));
-  paintRestartButton("ollama");
+  if (localConfigEngine === "ollama") {
+    renderLocalStartAction("ollama", localKnownEngines.get("ollama") || localDiscovery.get("ollama"));
+  }
 }
 
 // --- Local engines: one port dialog for all three ---
@@ -3019,21 +3047,36 @@ function renderOllamaSection(state) {
 // enforced by assertLocalBase on the server.
 const localEngineIds = ["ollama", "llamacpp", "vllm"];
 const localDiscovery = new Map();
+// Includes stopped managed/remembered hosts. Never use this map to paint an
+// engine as reachable; it exists so Manage always describes the saved host.
+const localKnownEngines = new Map();
 const localCanRestart = new Map();
 
-// Offered only when there is a launch to replay and nothing is answering:
-// starting a second copy on a port the first one holds just fails.
-function paintRestartButton(engine) {
-  const button = $(`${engine}-restart`);
+// Start belongs in the management drawer, beside the configuration it will
+// launch. The server independently refuses a second copy if the process came
+// back between this render and the click.
+function renderLocalStartAction(engine, found) {
+  const button = $("local-config-start");
+  const hint = $("local-config-start-hint");
   if (!button) return;
-  const offer = Boolean(localCanRestart.get(engine)) && !localDiscovery.has(engine);
+  const offer = localConfigEngine === engine
+    && Boolean(found?.management || localCanRestart.get(engine))
+    && !localDiscovery.has(engine);
   button.hidden = !offer;
-  // The remembered launch is the process's own argv and nothing else. An engine
-  // configured through LLAMA_ARG_* or OLLAMA_HOST comes back with the same
-  // command line and different settings, so say so rather than imply a faithful
-  // replay. This goes away once a chosen spec exists, because those args are ours.
-  const hint = $(`${engine}-restart-hint`);
-  if (hint) hint.hidden = !offer;
+  button.dataset.engine = offer ? engine : "";
+  // A managed host has an exact activeSpec. Only user-owned replay needs the
+  // warning that environment-only arguments were not captured.
+  if (hint) hint.hidden = !offer || Boolean(found?.management);
+  if (offer) {
+    const save = $("local-config-save");
+    if (save) save.hidden = true;
+  } else if (!found?.management && localConfigEngine === engine) {
+    // A service can come online from another route while its drawer is open.
+    // Restore the ordinary action instead of leaving the previous Start state
+    // frozen in the UI until the drawer is closed and reopened.
+    const save = $("local-config-save");
+    if (save) save.hidden = false;
+  }
 }
 
 // A connected engine beats an idle one; an engine we could attribute to a
@@ -3044,6 +3087,12 @@ function preferEngine(next, current) {
   if (Boolean(next.connected) !== Boolean(current.connected)) return Boolean(next.connected);
   if (Boolean(next.pid) !== Boolean(current.pid)) return Boolean(next.pid);
   return false;
+}
+function preferKnownEngine(next, current) {
+  if (!current) return true;
+  if (Boolean(next.management) !== Boolean(current.management)) return Boolean(next.management);
+  if (Boolean(next.offline) !== Boolean(current.offline)) return !next.offline;
+  return preferEngine(next, current);
 }
 const localConnectedState = new Map();
 const localDefaultPorts = { ollama: 11434, llamacpp: 8080, vllm: 8000 };
@@ -3112,7 +3161,9 @@ function renderLocalEngineState(engine, state) {
   // not answering: starting a second copy on a port the first one holds fails,
   // and offering it would read as a control that does not work.
   localCanRestart.set(engine, Boolean(state?.canRestart));
-  paintRestartButton(engine);
+  if (localConfigEngine === engine) {
+    renderLocalStartAction(engine, localKnownEngines.get(engine) || localDiscovery.get(engine));
+  }
 }
 
 const renderLocalSections = {
@@ -3135,13 +3186,17 @@ function renderLocalHostControl(engine, found) {
   control.hidden = !supported;
   if (!supported) return;
 
-  const connected = Boolean(found && !found.offline && localConnectedState.get("llamacpp"));
+  const online = Boolean(found && !found.offline && localDiscovery.has("llamacpp"));
+  const routed = Boolean(localConnectedState.get("llamacpp"));
+  const connected = online && routed;
   const management = found?.management || null;
   const gateway = $("local-host-gateway-state");
   if (gateway) {
     gateway.textContent = connected
       ? t("host.gatewayConnected")
-      : t("host.gatewayNotConnected");
+      : (routed && !online
+        ? t("local.gatewayOffline", { count: found?.connectedModels || 0 })
+        : t("host.gatewayNotConnected"));
   }
   const state = $("local-host-management-state");
   if (state) {
@@ -3161,7 +3216,7 @@ function renderLocalHostControl(engine, found) {
   // successful takeover look like a blank drawer and forced users to wonder
   // whether their choices had been retained. The values are read-only while
   // managed; Leave management returns the form to its editable setup state.
-  if (form) form.hidden = !connected;
+  if (form) form.hidden = false;
   // The drawer's bottom primary is contextual: before the gateway route exists
   // it connects ("Connect and Save" - the manual-port path); once connected
   // and unmanaged it performs the takeover ("Save and Manage"); once managed
@@ -3206,6 +3261,8 @@ function renderLocalHostControl(engine, found) {
   }
   if (budget) budget.disabled = managedReadonly;
   if (visionToggle) visionToggle.disabled = managedReadonly;
+  const port = $("local-config-port");
+  if (port) port.readOnly = managedReadonly;
   for (const id of ["local-host-model-browse", "local-host-vision-browse", "local-host-kv-browse"]) {
     const browse = $(id);
     if (browse) {
@@ -3232,6 +3289,23 @@ function renderLocalHostControl(engine, found) {
       hint.textContent = "";
     }
   }
+  const disconnect = $("local-config-disconnect");
+  if (disconnect) disconnect.hidden = !routed || Boolean(management);
+}
+
+function localEnginePort(found, engine) {
+  const direct = Number(found?.port);
+  if (Number.isInteger(direct) && direct > 0 && direct <= 65535) return direct;
+  for (const value of [found?.baseUrl, found?.management?.endpoint]) {
+    try {
+      const parsed = new URL(String(value || ""));
+      const port = Number(parsed.port);
+      if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
+    } catch {
+      // An empty or malformed observation falls through to the normal hint.
+    }
+  }
+  return localDefaultPorts[engine] || 8080;
 }
 
 async function openLocalConfig(engine) {
@@ -3242,8 +3316,8 @@ async function openLocalConfig(engine) {
   // completes. A managed host must not open as a blank editable form merely
   // because that scan is still in flight: finish the one read, then show its
   // durable paths read-only.
-  if (engine === "llamacpp" && !localDiscovery.has(engine)) await renderLocalEngines();
-  const found = localDiscovery.get(engine);
+  if (engine === "llamacpp" && !localKnownEngines.has(engine)) await renderLocalEngines();
+  const found = localKnownEngines.get(engine) || localDiscovery.get(engine);
   if (engine === "llamacpp") {
     const model = $("local-host-model-file");
     const projector = $("local-host-vision-projector");
@@ -3261,7 +3335,8 @@ async function openLocalConfig(engine) {
   // Pre-filled when discovery found it, empty with a hint when it did not.
   const port = $("local-config-port");
   if (port) {
-    port.value = found ? String(found.port) : "";
+    port.readOnly = false;
+    port.value = found ? String(localEnginePort(found, engine)) : "";
     port.placeholder = String(localDefaultPorts[engine] || 8080);
   }
 
@@ -3300,6 +3375,7 @@ async function openLocalConfig(engine) {
   // After the defaults above: for a connected, unmanaged llama.cpp this
   // switches the bottom primary into its "Save and Manage" mode.
   renderLocalHostControl(engine, found);
+  renderLocalStartAction(engine, found);
 
   // Not modal: the row this drawer describes stays readable beside it, which
   // is the whole reason it is not the dialog it replaced.
@@ -3427,40 +3503,57 @@ for (const engineId of localEngineIds) {
     if (event.target.closest("button")) return;
     openLocalConfig(engineId);
   });
-  // The request carries an engine id and nothing else: what runs is what the
-  // gateway wrote down while that engine was serving.
-  $(`${engineId}-restart`)?.addEventListener("click", async () => {
-    const button = $(`${engineId}-restart`);
-    button.disabled = true;
-    localShow(engineId, t("local.restarting"), false);
-    try {
-      const reply = await fetch("/api/local/restart", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ engine: engineId }),
-      });
-      const body = await reply.json();
-      if (!reply.ok) throw new Error(body.error?.message || `Restart ${reply.status}`);
-      // A model can take a while to load - a large one much longer than any
-      // fixed wait would be honest about - so this polls until the engine
-      // answers or the ceiling is reached, and says which happened.
-      let up = false;
-      for (let waited = 0; waited < 60_000 && !up; waited += 2_000) {
-        await new Promise((resolve) => setTimeout(resolve, 2_000));
-        await renderLocalEngines();
-        up = localDiscovery.has(engineId);
-      }
-      localShow(engineId, up ? "" : t("local.restartSlow"), !up);
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-    } catch (error) {
-      localShow(engineId, error.message, true);
-    } finally {
-      button.disabled = false;
-    }
-  });
   paintEngineButton(engineId);
 }
+
+// The request carries an engine id and nothing else: what runs is what the
+// gateway wrote down while that engine was serving. It lives in the drawer so
+// the user sees the exact saved configuration before starting a heavy service.
+$("local-config-start")?.addEventListener("click", async () => {
+  const button = $("local-config-start");
+  const engine = button?.dataset.engine || localConfigEngine;
+  if (!button || !engine) return;
+  const errorLine = $("local-config-error");
+  button.disabled = true;
+  button.textContent = t("local.restarting");
+  if (errorLine) {
+    errorLine.hidden = true;
+    errorLine.textContent = "";
+  }
+  try {
+    const reply = await fetch("/api/local/restart", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ engine }),
+    });
+    const body = await reply.json();
+    if (!reply.ok) throw new Error(body.error?.message || `Start ${reply.status}`);
+    // A model can take a while to load - a large one much longer than any
+    // fixed wait would be honest about - so this polls until the engine
+    // answers or the ceiling is reached, and says which happened.
+    let up = false;
+    for (let waited = 0; waited < 60_000 && !up; waited += 2_000) {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      await renderLocalEngines();
+      up = localDiscovery.has(engine);
+    }
+    if (!up && errorLine) {
+      errorLine.hidden = false;
+      errorLine.textContent = t("local.restartSlow");
+    }
+    poll().catch(() => {});
+    pollConfig().catch(() => {});
+    if (up && localConfigEngine === engine) await openLocalConfig(engine);
+  } catch (error) {
+    if (errorLine) {
+      errorLine.hidden = false;
+      errorLine.textContent = error.message;
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = t("local.restart");
+  }
+});
 $("local-config-close")?.addEventListener("click", closeLocalConfig);
 $("local-config-save")?.addEventListener("click", () => {
   if ($("local-config-save")?.dataset.mode === "manage") submitLocalManage().catch(() => {});

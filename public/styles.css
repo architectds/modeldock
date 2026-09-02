@@ -774,6 +774,7 @@ body { padding-left: 88px; }
 .roster-provider { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; color: var(--muted); }
 .roster-provider-mark { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; color: var(--provider-color, var(--muted)); }
 .roster-provider-mark svg { display: block; width: 16px; height: 16px; fill: currentColor; }
+.roster-provider-mark img { display: block; width: 16px; height: 16px; object-fit: contain; }
 .roster-provider-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .roster-metric-cell { width: 175px; min-width: 175px; }
 .roster-metric { display: grid; grid-template-columns: max-content minmax(68px, 1fr); align-items: center; gap: 9px; min-width: 164px; }
