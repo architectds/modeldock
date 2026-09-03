@@ -6,23 +6,11 @@
 // commits or abandons the lease after the model response ends.
 
 import { LOCAL_HOST_MAX_LANES } from "./local-host-profile.mjs";
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
-  return value;
-}
-
-function timestamp(value, label) {
-  const result = text(value, label);
-  if (Number.isNaN(Date.parse(result))) throw new TypeError(`${label} must be an ISO timestamp.`);
-  return result;
-}
+import {
+  isoTimestamp as timestamp,
+  positiveInteger,
+  requiredText as text,
+} from "./local-host-validation.mjs";
 
 function sessionKey(value) {
   const key = text(value, "A local host session key");

@@ -24,3 +24,14 @@ export function isLoopbackHost(value) {
   const host = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   return LOOPBACK_HOSTS.has(host);
 }
+
+// Compare the network identity of two endpoint URLs while deliberately
+// ignoring their API paths (/v1, /props, and so on).
+export function sameEndpointHost(left, right) {
+  if (!left || !right) return false;
+  try {
+    return new URL(left).host === new URL(right).host;
+  } catch {
+    return false;
+  }
+}

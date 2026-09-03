@@ -1,19 +1,17 @@
-import { bareModelId, providerForModel, tokenFor, profileById } from "./profiles.mjs";
+import { bareModelId, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { VISION_EVIDENCE_INSTRUCTIONS, VISION_EVIDENCE_MAX_CHARS } from "./vision-evidence.mjs";
 import { visionCacheKey, visionEvidenceCache } from "./vision-cache.mjs";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { readCodexAuth } from "./codex-auth.mjs";
-import { customEndpointFor } from "./custom-endpoints.mjs";
-import { readXaiAuth } from "./xai-auth.mjs";
+import { customEndpointFor } from "./custom-endpoint-routing.mjs";
+import { xaiGenerationCapabilities, xaiSessionToken, xaiVideoModel } from "./xai-capabilities.mjs";
+import { XAI_API_BASE } from "./xai-auth.mjs";
+import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 import { forEachSseEvent, sseDataLines } from "./sse.mjs";
 import { previewLocalImages } from "./image-preview.mjs";
 import os from "node:os";
 import path from "node:path";
-function upstreamUrl(baseUrl, path) {
-  return `${baseUrl.replace(/\/$/, "")}/${path.replace(/^\//, "")}`;
-}
-
 function safeErrorBody(text) {
   return String(text || "").replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]").slice(0, 1_000);
 }
@@ -81,33 +79,9 @@ export function parseMcpTextResult(body) {
 // and native vision. Mirrors NATIVE_BASE in gateway.mjs, which relayNativeResponses
 // uses for the main relay; the two must name the same host or a native model would
 // answer on the relay and 404 in the harness.
-const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
-const XAI_RESPONSES_BASE = "https://api.x.ai/v1/responses";
-const XAI_VIDEO_BASE = "https://api.x.ai/v1/videos";
-const XAI_VIDEO_MODELS = new Set(["grok-imagine-video", "grok-imagine-video-1.5"]);
-
-function xaiSessionToken(config) {
-  return config.tokens?.xai || readXaiAuth(config.xaiAuthFile)?.accessToken || "";
-}
-
-function xaiModels(config) {
-  return readXaiAuth(config.xaiAuthFile)?.models || [];
-}
-
-function xaiHasModelList(config) {
-  return xaiModels(config).length > 0;
-}
-
-function xaiVideoModel(config, requested = "") {
-  const model = String(requested || "").trim();
-  if (model && !XAI_VIDEO_MODELS.has(model)) return "";
-  const models = xaiModels(config);
-  if (!models.length) return model || "grok-imagine-video-1.5";
-  if (model) return models.includes(model) ? model : "";
-  if (models.includes("grok-imagine-video-1.5")) return "grok-imagine-video-1.5";
-  return models.includes("grok-imagine-video") ? "grok-imagine-video" : "";
-}
-
+const NATIVE_BASE = NATIVE_CODEX_BASE;
+const XAI_RESPONSES_BASE = `${XAI_API_BASE}/responses`;
+const XAI_VIDEO_BASE = `${XAI_API_BASE}/videos`;
 function generatedImagePath(bytes, mime = "") {
   const extension = mime === "image/png" || bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
     ? "png"
@@ -147,15 +121,15 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   }
 
   function hasXaiSession() {
-    return Boolean(xaiSessionToken(config));
+    return xaiGenerationCapabilities(config).connected;
   }
 
   function hasXaiImageGeneration() {
-    return hasXaiSession() && (!xaiHasModelList(config) || xaiModels(config).includes("grok-4.6"));
+    return xaiGenerationCapabilities(config).image;
   }
 
   function hasXaiVideoGeneration() {
-    return hasXaiSession() && Boolean(xaiVideoModel(config));
+    return xaiGenerationCapabilities(config).video;
   }
 
   async function generateImage(args) {
@@ -429,37 +403,32 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     }
   }
 
-  const RESPONSES_MODELS = new Set(["gpt-5.6-luna", "grok-4.5", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code"]);
-  const ZEN_FREE_BASE = `${(config.zenBaseUrl || "https://opencode.ai/zen/v1").replace(/\/+$/, "")}/chat/completions`;
-
   function isNativeVisionModel(model) {
     // The raw slug decides, never bareModelId: the "@provider" suffix is exactly
     // what distinguishes the routed twin from the native entry of one model.
     return Boolean(getNativeSlugs()?.has?.(model));
   }
 
-  // Which dialect a vision call speaks is an OpenCode-side fact and stays
-  // here; where it is sent is the provider's, and asking the profile is what
-  // stops a local vision model from having its image posted to opencode.ai -
-  // this had no case for ollama, llamacpp or vllm at all.
+  // Provider targets own both address and dialect. Rebuilding that decision
+  // here with a second model allowlist sent Command Code and llama.cpp vision
+  // calls to /responses even while their route declared Chat Completions.
   function visionEndpointFor(model) {
-    if (isNativeVisionModel(model)) return { url: `${NATIVE_BASE}/responses`, style: "responses", native: true };
-    const provider = providerForModel(config, model);
-    const base = profileById(provider).baseUrlFor(config, model);
-    // Every provider in the registry other than OpenCode Go speaks Responses.
-    // An empty base means nothing is configured for this model, so fall
-    // through rather than build a URL with no host.
-    if (provider !== "opencode-go" && base) return { url: `${base}/responses`, style: "responses" };
-    const goBase = profileById("opencode-go").baseUrlFor(config, model);
-    const upstream = bareModelId(model);
-    if (upstream.endsWith("-free") || upstream === "big-pickle") return { url: `${goBase}/chat/completions`, style: "chat" };
-    if (RESPONSES_MODELS.has(upstream)) return { url: `${goBase}/responses`, style: "responses" };
-    return { url: `${goBase}/chat/completions`, style: "chat" };
+    if (isNativeVisionModel(model)) {
+      return { url: `${NATIVE_BASE}/responses`, style: "responses", native: true, model: bareModelId(model) };
+    }
+    const target = upstreamTargetFor(config, model);
+    if (!target.url) throw new Error(`Unknown provider in vision model reference: ${target.provider}`);
+    return {
+      url: target.url,
+      style: target.transport === "chat" ? "chat" : "responses",
+      native: false,
+      model: target.model,
+    };
   }
 
   async function callVisionModel(model, images, prompt) {
     // Resolve the endpoint first: it decides which credential the call needs.
-    const { url, style, native } = visionEndpointFor(model);
+    const { url, style, native, model: upstreamModel } = visionEndpointFor(model);
     const nativeAuth = native ? readCodexAuth(config.codexHome || path.join(os.homedir(), ".codex")) : null;
     const token = native ? nativeAuth.accessToken : tokenFor(config, model);
     if (!token) {
@@ -469,7 +438,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     }
     // Send the bare id upstream; the @provider suffix is a routing address for this
     // gate, never part of the model name an upstream API knows.
-    const common = { model: bareModelId(model), max_output_tokens: 4_096, stream: false };
+    const common = { model: upstreamModel, max_output_tokens: 4_096, stream: false };
     // The ChatGPT backend refuses a request that does not say so: every native
     // call it accepts carries store:false, which is why the main relay sends it
     // too. Without this line the native vision leg answered 400 "Store must be

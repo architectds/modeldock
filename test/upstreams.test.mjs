@@ -4,6 +4,7 @@ import { createUpstreams, parseMcpTextResult, extractOutputText } from "../src/u
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { applyLocalEngineProfile, profileById } from "../src/profiles.mjs";
 
 test("generateImage posts to the native backend and saves the PNG", async () => {
   const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-upstreams-auth-"));
@@ -263,7 +264,7 @@ test("searchWeb passes through and parses Exa response", async () => {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
       visionFallbackModel: "f",
@@ -301,7 +302,7 @@ test("searchWeb appends exaApiKey as query param when configured", async () => {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "secret-key",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
       visionFallbackModel: "f",
@@ -328,7 +329,7 @@ test("searchWeb surfaces upstream errors and redacts bearer tokens", async () =>
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "k",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "v",
       visionFallbackModel: "f",
@@ -358,9 +359,12 @@ test("inspectVision reads a local path, registers it, and calls the vision model
   let sentBody = null;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
-    assert.match(String(url), /\/chat\/completions$/);
+    assert.match(String(url), /\/responses$/);
     sentBody = JSON.parse(options.body);
-    return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "It shows a red chart." } }] }), { status: 200 });
+    return new Response(JSON.stringify({
+      id: "resp_v",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "It shows a red chart." }] }],
+    }), { status: 200 });
   };
 
   const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
@@ -370,7 +374,7 @@ test("inspectVision reads a local path, registers it, and calls the vision model
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
@@ -388,7 +392,60 @@ test("inspectVision reads a local path, registers it, and calls the vision model
     assert.match(result.imageRefs[0], /^img_/);
     assert.equal(store.get(result.imageRefs[0]).mime, "image/png");
     assert.equal(sentBody.model, "mimo-v2.5-free");
-    assert.match(sentBody.messages[0].content[1].image_url.url, /^data:image\/png;base64,/);
+    assert.match(sentBody.input[0].content[1].image_url, /^data:image\/png;base64,/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("vision inspection uses the same Chat target declared by Command Code and llama.cpp", async (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-vision-target-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pngPath = path.join(dir, "shot.png");
+  writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
+  const priorLocal = profileById("llamacpp");
+  const priorSnapshot = { baseUrl: priorLocal.baseUrl, models: [...(priorLocal.availableModels || [])] };
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11435/v1",
+    models: [{ id: "local-qwen", upstreamId: "local-wire-id", supportsVision: true }],
+  });
+  t.after(() => applyLocalEngineProfile("llamacpp", priorSnapshot));
+
+  const cases = [
+    {
+      model: "Qwen/Qwen3.8-Flash@commandcode",
+      config: { commandcodeBaseUrl: "https://command.example/v1", tokens: { commandcode: "user_test" } },
+      endpoint: "https://command.example/v1/chat/completions",
+      upstreamModel: "Qwen/Qwen3.8-Flash",
+    },
+    {
+      model: "local-qwen@llamacpp",
+      config: { tokens: {} },
+      endpoint: "http://127.0.0.1:11435/v1/chat/completions",
+      upstreamModel: "local-wire-id",
+    },
+  ];
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const entry of cases) {
+      let observed = null;
+      globalThis.fetch = async (url, options) => {
+        observed = { url: String(url), body: JSON.parse(options.body) };
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Visible." } }] }), { status: 200 });
+      };
+      const store = new (await import("../src/media-store.mjs")).MediaStore({ ttlMs: 60_000, maxBytes: 10 * 1024 * 1024, maxEntries: 8 });
+      const upstreams = createUpstreams({
+        config: { ...entry.config, visionModel: entry.model, visionTimeoutMs: 90_000 },
+        metrics: new (await import("../src/metrics.mjs")).Metrics({ recentLimit: 10 }),
+        mediaStore: store,
+        visionCache: new (await import("../src/vision-cache.mjs")).createVisionCache(),
+      });
+      const result = await upstreams.inspectVision({ path: pngPath, question: "What is visible?" });
+      assert.equal(result.answer, "Visible.");
+      assert.equal(observed.url, entry.endpoint);
+      assert.equal(observed.body.model, entry.upstreamModel);
+      assert.equal(observed.body.messages[0].content[1].type, "image_url");
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -408,7 +465,9 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {
     upstreamCalls += 1;
-    return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "## Summary\nA chart." } }] }), { status: 200 });
+    return new Response(JSON.stringify({
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "## Summary\nA chart." }] }],
+    }), { status: 200 });
   };
 
   const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
@@ -418,7 +477,7 @@ test("inspectVision caches the transcription and skips the upstream on repeat", 
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
@@ -454,7 +513,7 @@ test("inspectVision rejects a missing path and a missing ref", async (t) => {
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
@@ -480,7 +539,10 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     sentBody = JSON.parse(options.body);
-    return new Response(JSON.stringify({ id: "resp_v", choices: [{ message: { role: "assistant", content: "## Summary\nThe good chart." } }] }), { status: 200 });
+    return new Response(JSON.stringify({
+      id: "resp_v",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "## Summary\nThe good chart." }] }],
+    }), { status: 200 });
   };
 
   const MediaStore = (await import("../src/media-store.mjs")).MediaStore;
@@ -490,7 +552,7 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
@@ -508,7 +570,7 @@ test("inspectVision degrades one bad image instead of failing the whole turn", a
     });
     assert.equal(result.answer, "## Summary\nThe good chart.", "the turn survives with the readable image");
     assert.equal(result.imageRefs.length, 2, "both refs are still reported (including the expired one)");
-    assert.equal(sentBody.messages[0].content.filter((c) => c.type === "image_url").length, 1, "only the readable image reaches the vision model");
+    assert.equal(sentBody.input[0].content.filter((c) => c.type === "input_image").length, 1, "only the readable image reaches the vision model");
     assert.equal(result.skippedImages.length, 1, "the caller is told which image was skipped");
     assert.match(result.skippedImages[0], /img_expired/);
   } finally {
@@ -529,7 +591,7 @@ test("inspectVision reports a combined failure message when every image is bad",
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "t" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "mimo-v2.5-free",
       visionFallbackModel: "minimax-m3",
@@ -584,7 +646,7 @@ test("a native vision model is sent to the ChatGPT backend on the Codex sign-in"
       codexHome,
       // Only an OpenCode Go credential exists; a native call must not use it.
       tokens: { "opencode-go": "go-token" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "gpt-5.6-terra",
       visionFallbackModel: "minimax-m3",
@@ -643,7 +705,7 @@ test("an owner-qualified twin of a native slug stays on its routed camp", async 
       exaMcpUrl: "https://mcp.exa.ai/mcp",
       exaApiKey: "",
       tokens: { "opencode-go": "go-token" },
-      goBaseUrl: "https://go.example.com/v1",
+      opencodeBaseUrl: "https://go.example.com/v1",
       visionTimeoutMs: 90_000,
       visionModel: "gpt-5.6-luna@opencode-go",
     },

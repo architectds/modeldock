@@ -197,6 +197,10 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
         if (item?.type === "reasoning" && Array.isArray(item.content) && item.content.length > 0) {
           return rejectWith(400, `Invalid 'input[${index}].content': array too long.`);
         }
+        if (item?.type === "reasoning"
+          && !(typeof item.encrypted_content === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(item.encrypted_content))) {
+          return rejectWith(404, `Item with id '${item.id}' not found. Items are not persisted when store is set to false.`);
+        }
       }
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({
@@ -290,6 +294,11 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     }
   });
   await waitForStatus(gatewayPort);
+  const providerIcon = await fetch(`http://127.0.0.1:${gatewayPort}/assets/commandcode-favicon.svg`);
+  assert.equal(providerIcon.status, 200, "the built bundle serves the Command Code provider mark");
+  assert.equal(providerIcon.headers.get("content-type"), "image/svg+xml; charset=utf-8",
+    "the bundled favicon reaches the browser as an SVG rather than an opaque download");
+  assert.match(await providerIcon.text(), /<svg\b/, "the served provider mark contains SVG image data");
   const published = await waitForModel(gatewayPort, ROUTED_SLUG);
   assert.ok(!published.some((id) => id.startsWith("claude-")),
     `the vendor directory listed a Claude model and it reached the picker anyway: ${published}`);
@@ -345,6 +354,20 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   assert.equal(requests[2].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_cmd_c"))?.reasoning_content,
     "Both results are in; keep going.");
 
+  // Switch the live generated Chat turn to native before compaction too. The
+  // reasoning item came from this bridge with encrypted_content:"", so its
+  // rs_* id is not an OpenAI item that a store:false request can retrieve.
+  await send([
+    ...fixture.request.input,
+    ...firstTurn,
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Continue on the native model." }] },
+  ], false, "gpt-5.6-terra", "full-commandcode-native-ordinary-switch");
+  assert.equal(nativeRequests.length, 1);
+  assert.equal(nativeRequests[0].input.some((item) => item?.type === "reasoning"), false,
+    "a routed Chat reasoning id never reaches an ordinary native turn");
+  assert.ok(nativeRequests[0].input.some((item) => item?.type === "function_call" && item.call_id === "call_cmd_a"),
+    "the tool history beside the dropped reasoning remains available to native");
+
   // Keep the same complete 164-tool Codex capture and add the ordinary image
   // item that a pasted screenshot contributes. This exercises the real catalog,
   // router, vision-specific tool filter and Responses-to-Chat image conversion
@@ -388,11 +411,18 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     "gpt-5.6-terra",
     "full-commandcode-native-long-switch",
   );
-  assert.equal(nativeRequests.length, 1);
-  assert.equal(nativeRequests[0].input.length, longSwitchFixture.input.length);
-  assert.match(nativeRequests[0].input[41].id, /^fc_/,
+  assert.equal(nativeRequests.length, 2);
+  const nativeCompactRequest = nativeRequests.at(-1);
+  const foreignReasoning = longSwitchFixture.input.filter((item) => item?.type === "reasoning"
+    && !(typeof item.encrypted_content === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(item.encrypted_content)));
+  assert.equal(foreignReasoning.length, 432, "the captured long session carries the routed reasoning state that native cannot retrieve");
+  assert.equal(nativeCompactRequest.input.length, longSwitchFixture.input.length - foreignReasoning.length,
+    "only unpersisted routed reasoning is removed at the native boundary");
+  const repairedCall = nativeCompactRequest.input.find((item) => item?.type === "function_call"
+    && item.call_id === longSwitchFixture.input[41].call_id);
+  assert.match(repairedCall.id, /^fc_/,
     "the exact historical call_* failure is repaired in the shipped bundle");
-  assert.equal(nativeRequests[0].input[41].call_id, longSwitchFixture.input[41].call_id);
+  assert.equal(repairedCall.call_id, longSwitchFixture.input[41].call_id);
   assert.equal(JSON.parse(nativeCompact).output[0].type, "compaction");
 
   // And the Messages-only half is unreachable even when a stale Codex picker sends

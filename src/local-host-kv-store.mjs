@@ -18,18 +18,13 @@ import {
   sameKvStorageDirectory,
   touchLocalHostKvState,
 } from "./local-host-kv-state.mjs";
+import { requiredText as text } from "./local-host-validation.mjs";
 
 // How long an untouched session checkpoint may live. Seven days covers "back
 // next week" without letting dead conversations squat in the budget for
 // months; the space cap already bounds the worst case, and the price of an
 // expired state that does return is one cold prefill.
 export const KV_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
 
 function stateFilePath(storage, filename) {
   const root = path.resolve(storage.directory);

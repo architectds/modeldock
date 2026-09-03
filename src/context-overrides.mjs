@@ -10,8 +10,8 @@
 // Overrides live outside the catalog rather than editing it, so an upgrade that
 // ships a better default cannot silently discard what somebody measured, and
 // clearing one restores the shipped value rather than some earlier guess.
-import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 // Below this a window cannot hold a system prompt plus one exchange; above it
@@ -42,15 +42,12 @@ export function readContextOverrides(file = contextOverridesPath()) {
 }
 
 export function writeContextOverrides(file, overrides) {
-  mkdirSync(path.dirname(file), { recursive: true });
   if (!Object.keys(overrides).length) {
     // An empty file and no file mean the same thing; keep only one of them.
     try { rmSync(file, { force: true }); } catch { /* best effort */ }
     return file;
   }
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(overrides, null, 2), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, overrides);
   return file;
 }
 

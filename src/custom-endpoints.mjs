@@ -10,11 +10,14 @@
 // rewriting four keys and hoping nothing reads a half-updated file. Keys are
 // encrypted with the same DPAPI helper that protects the provider tokens, so
 // moving out of .env does not move out of encryption.
-import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
+import { profileById } from "./profiles.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
+export { customEndpointFor } from "./custom-endpoint-routing.mjs";
 
 export class CustomEndpointsError extends Error {
   constructor(code, message) {
@@ -39,11 +42,6 @@ function normalizeBase(raw) {
 // One record per published model. The model id is the key because that is what
 // routing has to resolve: a request arrives naming a model, and the endpoint
 // that serves it has to be found from the name alone.
-// Provider ids this gateway defines itself. A user-named provider may not
-// take one of these: the suffix is a routing address, and two different
-// things answering to one address is the failure this whole change removes.
-export const RESERVED_PROVIDER_IDS = ["opencode-go", "deepseek-official", "ollama", "llamacpp", "vllm", "openai"];
-
 // Lowercase, no separator, no spaces: the id becomes the @suffix of every
 // model this endpoint publishes, and that suffix is parsed by splitting on
 // the separator.
@@ -62,7 +60,12 @@ export function validateProviderId(value) {
   // existed is in that group, and moving them would change the slug Codex has
   // in its picker.
   if (!id) return "custom";
-  if (RESERVED_PROVIDER_IDS.includes(id)) {
+  // The provider registry is the owner of built-in addresses. A handwritten
+  // reserved-name list drifted as xAI and Command Code were added and allowed
+  // custom endpoints to overwrite those profiles. The native OpenAI address
+  // is not a routed profile, so it is the sole explicit reservation here.
+  const registered = profileById(id);
+  if (id === NATIVE_PROVIDER_ID || (registered && id !== "custom" && !registered.userDefined)) {
     throw new CustomEndpointsError("provider", `${id} is a built-in provider name. Choose another.`);
   }
   return id;
@@ -110,7 +113,6 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
 }
 
 export function writeCustomEndpoints(file, endpoints) {
-  mkdirSync(path.dirname(file), { recursive: true });
   if (!endpoints.length) {
     try { rmSync(file, { force: true }); } catch { /* best effort */ }
     return file;
@@ -125,12 +127,10 @@ export function writeCustomEndpoints(file, endpoints) {
     supportsVision: Boolean(entry.supportsVision),
     addedAt: entry.addedAt || new Date().toISOString(),
   }));
-  const tmp = `${file}.${process.pid}.tmp`;
   // mode on the temp file: rename preserves it, and on macOS/Linux the API
   // keys in this file are plaintext (DPAPI is Windows-only), so the file mode
   // is their only at-rest protection.
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, payload, { mode: 0o600 });
   // POSIX only: the keys are plaintext there and the mode is their whole
   // protection. On Windows they are DPAPI-sealed already, and an icacls spawn
   // per save would be cost without coverage.
@@ -142,34 +142,6 @@ export function writeCustomEndpoints(file, endpoints) {
     }
   }
   return file;
-}
-
-// Routing asks this, and only this: which endpoint serves this model?
-// The endpoint serving a model, by the address the model carries.
-//
-// The suffix is the provider, and looking it up by bare model id alone made
-// two providers serving the same id indistinguishable: qwen@together resolved
-// to whichever host happened to be first in the list. The suffix is the whole
-// reason providers are named.
-//
-// A bare id still matches on model alone, because a caller that has not been
-// through routing yet - a probe, a legacy config value - has no suffix to give.
-export function customEndpointFor(endpoints, model) {
-  if (!model) return null;
-  const slug = String(model);
-  const separator = slug.lastIndexOf("@");
-  const bare = separator > 0 ? slug.slice(0, separator) : slug;
-  const provider = separator > 0 ? slug.slice(separator + 1) : "";
-  const list = endpoints || [];
-  if (provider) {
-    const owned = list.find((entry) =>
-      entry.modelId === bare && (entry.providerId || "custom") === provider);
-    if (owned) return owned;
-    // A suffix naming a provider that serves no such model resolves to nothing
-    // rather than to somebody else s endpoint.
-    if (list.some((entry) => (entry.providerId || "custom") === provider)) return null;
-  }
-  return list.find((entry) => entry.modelId === bare) || null;
 }
 
 export function addCustomEndpoint(endpoints, entry) {

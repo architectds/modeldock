@@ -6,8 +6,8 @@
 // with a size suffix) which the published slug cannot carry, so each entry
 // keeps both the published
 // id (colon -> dash) and the original upstream id for the wire.
-import path from "node:path";
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 
@@ -149,10 +149,7 @@ export function readOllamaSnapshot(file = ollamaSnapshotPath()) {
 }
 
 export function writeOllamaSnapshot(file, snapshot) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(snapshot, null, 2), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, snapshot);
   return file;
 }
 

@@ -306,5 +306,5 @@ test("connecting a custom endpoint publishes a model without becoming the defaul
   const config = loadConfig();
   assert.notEqual(config.mainModel, "qwen3.8:27b@custom", "a connected custom endpoint must not take the main slot");
   assert.equal(config.mainModel, "deepseek-v4-flash@opencode-go");
-  assert.equal(config.customModel, "qwen3.8:27b", "the model is still published for the picker");
+  assert.equal(config.customEndpoints[0].modelId, "qwen3.8:27b", "the model is still published for the picker");
 });

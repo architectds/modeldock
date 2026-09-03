@@ -6,30 +6,14 @@
 // made the decision. Conversation history remains in Codex, never here.
 
 import { createHash } from "node:crypto";
+import {
+  isoTimestamp as timestamp,
+  nonNegativeInteger,
+  positiveInteger,
+  requiredText as text,
+} from "./local-host-validation.mjs";
 
 export const LOCAL_HOST_KV_STATE_VERSION = 1;
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
-  return value;
-}
-
-function nonNegativeInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${label} must be a non-negative integer.`);
-  return value;
-}
-
-function timestamp(value, label) {
-  const result = text(value, label);
-  if (Number.isNaN(Date.parse(result))) throw new TypeError(`${label} must be an ISO timestamp.`);
-  return result;
-}
 
 function safeFilename(value) {
   const filename = text(value, "A KV state filename");

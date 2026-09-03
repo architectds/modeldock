@@ -3,14 +3,10 @@
 // material. A future transport receives only reference names after this policy
 // has been explicitly enabled.
 
+import { positiveInteger, requiredText as text } from "./local-host-validation.mjs";
+
 const REMOTE_ACTIONS = new Set(["infer", "cancel_own", "read_status"]);
 const LOCAL_ACTIONS = new Set([...REMOTE_ACTIONS, "manage", "recycle", "configure"]);
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
 
 function normalizePrincipals(value) {
   if (!Array.isArray(value)) throw new TypeError("Sharing principals must be an array.");
@@ -24,11 +20,6 @@ function normalizePrincipals(value) {
   }));
   if (new Set(principals.map(({ id }) => id)).size !== principals.length) throw new TypeError("Sharing principal ids must be unique.");
   return principals;
-}
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
-  return value;
 }
 
 export function disabledLocalHostSharing() {

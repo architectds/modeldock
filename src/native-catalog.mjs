@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 
 // Async exec so the model-refresh timer and startup capture never block the event
 // loop of a live relay: `codex debug models` can take seconds (or hang to its
@@ -151,14 +152,7 @@ export async function refreshNativeCatalog(config) {
     const parsed = JSON.parse(output);
     if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return null;
     const file = nativeCatalogPath(config);
-    mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.tmp.${process.pid}`;
-    writeFileSync(
-      temporary,
-      JSON.stringify({ captured_with: await codexVersion(), models: parsed.models }, null, 2),
-      "utf8",
-    );
-    renameSync(temporary, file);
+    atomicWriteJsonSync(file, { captured_with: await codexVersion(), models: parsed.models });
     return parsed.models;
   } catch (error) {
     console.log(`[gate] native model catalog refresh failed: ${error.message}`);

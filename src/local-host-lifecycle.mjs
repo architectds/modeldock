@@ -7,14 +7,7 @@ import path from "node:path";
 import { stat } from "node:fs/promises";
 import { launchSpecFrom, spawnEngineDetached, waitForEngineStop } from "./engine-processes.mjs";
 import { readLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
-
-function sameEndpoint(left, right) {
-  try {
-    return new URL(left).host === new URL(right).host;
-  } catch {
-    return false;
-  }
-}
+import { sameEndpointHost } from "./loopback.mjs";
 
 function canonicalBinary(value) {
   const resolved = path.resolve(String(value || ""));
@@ -153,7 +146,7 @@ export function createLocalHostLifecycleOperations({
     await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
   };
 
-  const findCurrent = async () => (await discover()).find((candidate) => sameEndpoint(candidate.baseUrl, endpoint)) || null;
+  const findCurrent = async () => (await discover()).find((candidate) => sameEndpointHost(candidate.baseUrl, endpoint)) || null;
 
   return {
     persist,

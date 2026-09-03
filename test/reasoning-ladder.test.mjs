@@ -23,8 +23,6 @@ function configStub(over = {}) {
     profileId: "opencode-go",
     mainModel: "deepseek-v4-flash",
     tokens: { "opencode-go": "t", "deepseek-official": "t" },
-    goToken: "t",
-    deepseekApiKey: "t",
     nativeMerge: false,
     nativeCatalogFile: "/nonexistent-native-catalog.json",
     ...over,

@@ -219,7 +219,7 @@ test("a local vision model's image never leaves this machine", async () => {
     const upstreams = createUpstreams({
       config: {
         ollamaBaseUrl: "http://127.0.0.1:11434",
-        goBaseUrl: "https://opencode.ai/zen/go/v1",
+        opencodeBaseUrl: "https://opencode.ai/zen/go/v1",
         tokens: { "opencode-go": "sk-opencode" },
         visionModel: model,
         visionTimeoutMs: 30_000,
@@ -284,7 +284,7 @@ test("a failing vision model fails, rather than being replaced by a remote one",
   const upstreams = createUpstreams({
     config: {
       ollamaBaseUrl: "http://127.0.0.1:11434",
-      goBaseUrl: "https://opencode.ai/zen/go/v1",
+      opencodeBaseUrl: "https://opencode.ai/zen/go/v1",
       tokens: { "opencode-go": "sk-go" },
       visionModel: model,
       visionTimeoutMs: 30_000,

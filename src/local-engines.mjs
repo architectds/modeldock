@@ -10,11 +10,13 @@
 // both speak the OpenAI dialect and either can be moved to the other's port,
 // so a port alone would mislabel them.
 import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { launchSpecFrom, listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
 import { modelFactsAreStale, readModelFacts } from "./gguf.mjs";
+import { LOCAL_ENGINE_DEFINITIONS, localEngineDefinitions } from "./local-engine-definitions.mjs";
 
 export class LocalEngineError extends Error {
   constructor(code, message) {
@@ -26,25 +28,22 @@ export class LocalEngineError extends Error {
 
 // Ollama is listed first because it is the only one with a dedicated connect
 // path; the rest share the keyless OpenAI-compatible route.
-const LOCAL_CANDIDATES = [
-  { port: 11434, hint: "ollama" },
-  { port: 8080, hint: "llama.cpp" },
-  { port: 8000, hint: "vllm" },
-];
+const LOCAL_CANDIDATES = localEngineDefinitions()
+  .filter((entry) => entry.defaultPort > 0 && entry.id !== "openai")
+  .map((entry) => ({ port: entry.defaultPort, hint: entry.label }));
 
 // The engines this gateway can attach a profile to. Ollama is absent because
 // it connects through its own older route and snapshot. Kept in one place so
 // the discovery, the route, and the page cannot drift into disagreeing about
 // which engines are offerable - which is exactly how this feature shipped
 // unreachable the first time.
-export const CONNECTABLE_ENGINES = ["llamacpp", "vllm"];
+export const CONNECTABLE_ENGINES = localEngineDefinitions()
+  .filter((entry) => entry.connectable)
+  .map((entry) => entry.id);
 
-export const ENGINE_LABELS = {
-  ollama: "Ollama",
-  llamacpp: "llama.cpp",
-  vllm: "vLLM",
-  openai: "OpenAI-compatible",
-};
+export const ENGINE_LABELS = Object.fromEntries(
+  Object.values(LOCAL_ENGINE_DEFINITIONS).map((entry) => [entry.id, entry.label]),
+);
 
 // Pure: given what each probe returned, name the engine. The names are the
 // ids used everywhere else - the provider suffix, the snapshot key, the
@@ -218,10 +217,7 @@ export function readLocalEnginesSnapshot(file = localEnginesSnapshotPath()) {
 export function writeLocalEngineSnapshot(file, engine, snapshot) {
   const all = readLocalEnginesSnapshot(file) || {};
   all[engine] = snapshot;
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, all);
   return file;
 }
 
@@ -248,10 +244,7 @@ export function readModelFactsCache(file = modelFactsCachePath()) {
 
 function writeModelFactsCache(file, all) {
   try {
-    mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
-    renameSync(tmp, file);
+    atomicWriteJsonSync(file, all);
   } catch {
     // A cache that cannot be written is a slow scan, not a broken one.
   }
@@ -284,10 +277,7 @@ export function clearLocalEngineSnapshot(file, engine) {
       rmSync(file, { force: true });
       return file;
     }
-    mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(all, null, 2), "utf8");
-    renameSync(tmp, file);
+    atomicWriteJsonSync(file, all);
   } catch {
     // Best effort: a stale entry is only honoured while it still parses.
   }

@@ -9,6 +9,7 @@ import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 // with it present while unmanaged) and puts it back, so the pick is never a
 // second copy that can disagree - it is recovery material for a file it deleted.
 import { SUBAGENT_AGENT_FILE, readSubagentModel, writeSubagentAgentFile } from "./subagent-config.mjs";
+import { PROVIDER_SEPARATOR } from "./profiles.mjs";
 
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -48,7 +49,6 @@ async function atomicWrite(file, content) {
 // never carry the separator. The top-level config.toml model must be a native
 // slug so Codex can start without the published catalog, so "@" is the whole
 // test.
-const PROVIDER_SEPARATOR = "@";
 const MANAGED_ORIGINAL_EXISTED = /^\s*#\s*ModelDock original config existed:\s*(true|false)\s*$/im;
 const CODERX_ROUTER_BEGIN = /^\s*#\s*BEGIN\s+codex-router-managed\s*(?:#.*)?$/m;
 
@@ -410,10 +410,14 @@ export class CodexConfigSwitcher {
     }
   }
 
-  async enable() {
+  #assertLocalCodexHome() {
     if (this.foreignCodexHome) {
       throw Object.assign(new Error(this.foreignCodexHome), { code: "FOREIGN_CODEX_HOME" });
     }
+  }
+
+  async enable() {
+    this.#assertLocalCodexHome();
     const state = await this.#readState();
     if (state.stateError) throw Object.assign(new Error(`Cannot read switch state: ${state.stateError}`), { code: "STATE_INVALID" });
     if (state.enabled) {
@@ -547,9 +551,7 @@ export class CodexConfigSwitcher {
   }
 
   async disable() {
-    if (this.foreignCodexHome) {
-      throw Object.assign(new Error(this.foreignCodexHome), { code: "FOREIGN_CODEX_HOME" });
-    }
+    this.#assertLocalCodexHome();
     const state = await this.#readState();
     if (!state.enabled) return this.status();
     let current = await this.#readCurrent();

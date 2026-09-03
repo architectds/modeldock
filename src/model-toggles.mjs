@@ -25,8 +25,8 @@
 // upgrade that ships a new model list cannot discard the choices somebody made
 // about it, and clearing a choice restores the shipped behaviour rather than
 // some earlier snapshot of it.
-import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 export function modelTogglesPath() {
@@ -50,7 +50,6 @@ export function readModelToggles(file = modelTogglesPath()) {
 }
 
 export function writeModelToggles(file, toggles) {
-  mkdirSync(path.dirname(file), { recursive: true });
   const off = {};
   for (const [slug, value] of Object.entries(toggles || {})) {
     if (typeof value === "boolean" && slug) off[slug] = value;
@@ -60,9 +59,7 @@ export function writeModelToggles(file, toggles) {
     try { rmSync(file, { force: true }); } catch { /* best effort */ }
     return file;
   }
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(off, null, 2), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, off);
   return file;
 }
 

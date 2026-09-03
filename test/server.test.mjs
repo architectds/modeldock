@@ -33,7 +33,8 @@ test("publishes a complete Codex model catalog schema", () => {
 test("serves both local MCP tools over Streamable HTTP", async (t) => {
   // Keep the tool surface hermetic: the memory vault is opt-in, so the default
   // list is exactly the media/web/image tools regardless of the local .env.
-  const config = { ...loadConfig(), goToken: "test-token", memoryEnabled: false };
+  const loaded = loadConfig();
+  const config = { ...loaded, tokens: { ...loaded.tokens, "opencode-go": "test-token" }, memoryEnabled: false };
   const instance = createApp(createServices(config));
   const server = instance.app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -77,9 +78,10 @@ test("adds both Grok media tools only for a connected xAI subscription", async (
 
 test("serves the memory view when the vault is enabled", async (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-server-memory-"));
+  const loaded = loadConfig();
   const config = {
-    ...loadConfig(),
-    goToken: "test-token",
+    ...loaded,
+    tokens: { ...loaded.tokens, "opencode-go": "test-token" },
     memoryEnabled: true,
     memoryDir: dir,
     memoryRefreshHours: 0,

@@ -10,6 +10,19 @@ function errorResult(error) {
   return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
 }
 
+export function recordMcpError(metrics, error) {
+  metrics.recent.unshift({
+    id: "mcp",
+    kind: "mcp",
+    startedAt: Date.now(),
+    finishedAt: Date.now(),
+    status: "error",
+    error: error instanceof Error ? error.message : String(error),
+  });
+  metrics.recent.length = Math.min(metrics.recent.length, metrics.recentLimit);
+  metrics.emit("change");
+}
+
 // acceptScopeOnly is true only on gateway-side endpoints: the stdio bridge
 // forwards internal args after injecting them, so the gateway schema must keep
 // scope_only even though the model-facing tools/list never advertises it.

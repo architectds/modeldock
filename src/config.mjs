@@ -2,13 +2,14 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
-import { readLocalEnginesSnapshot } from "./local-engines.mjs";
+import { CONNECTABLE_ENGINES, readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
 import { readModelToggles } from "./model-toggles.mjs";
 import { readCustomEndpoints } from "./custom-endpoints.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 import { encryptSecret, decryptSecret, isSecretKey } from "./secrets.mjs";
 import { defaultStateDir, stateDir, stateFile } from "./state-dir.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -69,8 +70,6 @@ export function parseEnvFile(source) {
   return entries;
 }
 
-const NATIVE_PROVIDER_ID = "openai";
-const LEGACY_BARE_PROVIDER_ID = "opencode-go";
 
 // Persist the owner with the model. Native Codex slugs must stay bare on the
 // request wire, but a bare value in .env is ambiguous when an external provider
@@ -91,7 +90,7 @@ export function decodePersistedModelRef(raw, { nativeSlugs = new Set() } = {}) {
   // Only pre-owner values reach this branch. Before provider-qualified picker
   // slugs, bare routed ids belonged to OpenCode Go. MODELDOCK_PROFILE must not
   // reinterpret that historical value as a different owner.
-  return publishedSlugFor(LEGACY_BARE_PROVIDER_ID, id);
+  return publishedSlugFor(DEFAULT_PROFILE_ID, id);
 }
 
 // The .env format is line-based, so a value carrying a newline would inject
@@ -402,8 +401,11 @@ export function loadConfig() {
   // CODEX_HOME may point at a CLI runtime parent rather than the Desktop store;
   // only ModelDock's explicit test/admin override may replace this path.
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || path.join(os.homedir(), ".codex"));
-  const profileId = (process.env.MODELDOCK_PROFILE || "opencode-go").trim().toLowerCase();
+  const profileId = (process.env.MODELDOCK_PROFILE || DEFAULT_PROFILE_ID).trim().toLowerCase();
   const profile = profileById(profileId);
+  if (!profile) {
+    throw new Error(`Unknown MODELDOCK_PROFILE: ${profileId}`);
+  }
   const nativeCatalogFile = process.env.MODELDOCK_NATIVE_CATALOG_FILE
     ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
     : "";
@@ -413,13 +415,13 @@ export function loadConfig() {
   // treated as unset and (for OpenCode Go) falls back to the Codex config
   // backup instead of being routed. A bad persisted value therefore degrades to
   // "no token" plus an audit event, never to a silent 401 wall.
-  const rawOpencodeToken = process.env.OPENCODE_GO_TOKEN || "";
-  const rawDeepseekToken = process.env.DEEPSEEK_API_KEY || "";
-  const rawCommandCodeToken = process.env.COMMANDCODE_API_KEY || "";
-  const ignoredTokens = [];
-  if (rawOpencodeToken && isPlaceholderToken(rawOpencodeToken)) ignoredTokens.push("opencode-go");
-  if (rawDeepseekToken && isPlaceholderToken(rawDeepseekToken)) ignoredTokens.push("deepseek-official");
-  if (rawCommandCodeToken && isPlaceholderToken(rawCommandCodeToken)) ignoredTokens.push("commandcode");
+  const credentialInputs = new Map(credentialProfiles().map((entry) => [
+    entry.id,
+    String(process.env[entry.tokenEnvName] || ""),
+  ]));
+  const ignoredTokens = [...credentialInputs]
+    .filter(([, token]) => token && isPlaceholderToken(token))
+    .map(([provider]) => provider);
   if (ignoredTokens.length) {
     recordSettingsEvent({ action: "env_placeholder_ignored", providers: ignoredTokens, ok: false, error: "placeholder_token_ignored" });
   }
@@ -429,11 +431,13 @@ export function loadConfig() {
   // actually came from the backup (a placeholder env value is ignored). The Go
   // camp is profile-independent: a DeepSeek main model still routes its
   // vision/web harness through it, so discovery applies to every profile.
+  const rawOpencodeToken = credentialInputs.get(DEFAULT_PROFILE_ID) || "";
   const opencodeEnvValid = Boolean(rawOpencodeToken) && !isPlaceholderToken(rawOpencodeToken);
   const backupOpenCode = discoverCodexGoToken(codexHome);
   const opencodeGoToken = opencodeEnvValid ? rawOpencodeToken : backupOpenCode.token;
   const opencodeGoSource = opencodeEnvValid ? "environment" : backupOpenCode.source;
-  const deepseekToken = rawDeepseekToken && !isPlaceholderToken(rawDeepseekToken) ? rawDeepseekToken : "";
+  const directTokens = Object.fromEntries([...credentialInputs]
+    .filter(([, token]) => token && !isPlaceholderToken(token)));
   // Custom endpoint (dashboard "Custom model" section): a user-configured
   // Responses provider. Empty until the Add flow writes these keys into .env.
   // The list is the source of truth. The single MODELDOCK_CUSTOM_* slot is
@@ -454,26 +458,15 @@ export function loadConfig() {
   // a config - the catalog writer, the roster, a test fixture - sees the same
   // set without each of them reaching for the file.
   const modelToggles = readModelToggles();
-  const customBaseUrl = customEndpoints[0]?.baseUrl || "";
-  const customApiKey = customEndpoints[0]?.apiKey || "";
-  const customModel = customEndpoints[0]?.modelId || "";
-  const customVision = Boolean(customEndpoints[0]?.supportsVision);
-  // Advertised context window of the custom endpoint model (e.g. 32768 for a
-  // local 32K llama.cpp serve). Written by the Add flow from /v1/models
-  // meta.n_ctx so compaction thresholds match the real backend, not the 250K fallback.
-  const customContextWindow = Number(customEndpoints[0]?.contextWindow) || 0;
+  const primaryCustomEndpoint = customEndpoints[0] || null;
   // Ollama connection snapshot: the model list captured at connect time, restored
   // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
   const ollamaSnapshotFile = ollamaSnapshotPath();
   const ollamaSnapshot = readOllamaSnapshot(ollamaSnapshotFile);
-  const commandCodeToken = rawCommandCodeToken && !isPlaceholderToken(rawCommandCodeToken) ? rawCommandCodeToken : "";
   const tokens = {
-    "opencode-go": opencodeGoToken,
-    "deepseek-official": deepseekToken,
-    // A second OpenCode-family keyed endpoint: same shape, so it is read the same
-    // way and appears in the picker only once a key exists.
-    ...(commandCodeToken ? { commandcode: commandCodeToken } : {}),
-    ...(customApiKey ? { custom: customApiKey } : {}),
+    ...directTokens,
+    [DEFAULT_PROFILE_ID]: opencodeGoToken,
+    ...(primaryCustomEndpoint?.apiKey ? { custom: primaryCustomEndpoint.apiKey } : {}),
   };
 
   // A model reference may come from an older .env as a bare id (gpt-5.6-luna). Publish
@@ -482,7 +475,9 @@ export function loadConfig() {
   const modelRef = (raw) => {
     return decodePersistedModelRef(raw, { nativeSlugs: cachedNativeSlugs });
   };
-  const customSlug = customModel ? `${customModel}${PROVIDER_SEPARATOR}custom` : "";
+  const customSlug = primaryCustomEndpoint?.modelId
+    ? `${primaryCustomEndpoint.modelId}${PROVIDER_SEPARATOR}custom`
+    : "";
   // Connecting a backend publishes a model; it does not select one. Publishing
   // is the whole of what "can be the main model" means - the Codex picker
   // chooses per session, and the routing fallback is derived per session and
@@ -514,7 +509,7 @@ export function loadConfig() {
   // to the mode-aware default above on the next process start.
   const visionModel = configuredVision.toLowerCase() === "none"
     ? ""
-    : modelRef(configuredVision || (customVision && customSlug ? customSlug : defaultVisionModel));
+    : modelRef(configuredVision || (primaryCustomEndpoint?.supportsVision && customSlug ? customSlug : defaultVisionModel));
 
   const debug = {
     enabled: envOn("MODELDOCK_DEBUG"),
@@ -537,7 +532,6 @@ export function loadConfig() {
     // Per-camp base URLs: the OpenCode Go camp is profile-independent so a DeepSeek main
     // model can still route its vision/web harness to the Go camp, and vice versa.
     opencodeBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
-    goBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_UPSTREAM_BASE_URL || "https://opencode.ai/zen/go/v1"),
     deepseekBaseUrl: normalizedBaseUrl(process.env.MODELDOCK_DEEPSEEK_BASE_URL || "https://api.deepseek.com"),
     // Command Code's Provider API root. Overridable for the same reason the other
     // hosted bases are: the wire tests must be able to drive the built bundle
@@ -551,11 +545,6 @@ export function loadConfig() {
     customEndpoints,
     contextOverrides,
     modelToggles,
-    customBaseUrl,
-    customApiKey,
-    customModel,
-    customVision,
-    customContextWindow,
     ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),
     ollamaSnapshotFile,
     mainModel,
@@ -578,7 +567,7 @@ export function loadConfig() {
     memoryEnabled: !envOff("MODELDOCK_MEMORY"),
     memoryDir: process.env.MODELDOCK_MEMORY_DIR
       ? path.resolve(process.env.MODELDOCK_MEMORY_DIR)
-      : path.join(os.homedir(), ".modeldock", "memory"),
+      : stateFile("memory"),
     memoryRefreshHours: Number(process.env.MODELDOCK_MEMORY_REFRESH_HOURS || 6),
     exaMcpUrl: normalizedBaseUrl(process.env.EXA_MCP_URL || "https://mcp.exa.ai/mcp"),
     exaApiKey: process.env.EXA_API_KEY || "",
@@ -613,7 +602,7 @@ export function loadConfig() {
   // Same contract for the keyless OpenAI-dialect engines: republish what the
   // last connect saw, without probing a machine that may be offline now.
   const localSnapshot = readLocalEnginesSnapshot() || {};
-  for (const engineId of ["llamacpp", "vllm"]) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+  for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
   applyContextOverrides(allProfiles(), contextOverrides, { publishedSlugFor });
@@ -624,7 +613,9 @@ export function publicConfig(config) {
   return {
     bind: `${config.host}:${config.port}`,
     profile: config.profileId,
-    goBaseUrl: config.goBaseUrl,
+    // Legacy public response name. It is a projection of the canonical field,
+    // never a second internal setting that can drift from it.
+    goBaseUrl: config.opencodeBaseUrl,
     opencodeBaseUrl: config.opencodeBaseUrl,
     deepseekBaseUrl: config.deepseekBaseUrl,
     mainModel: config.mainModel,
@@ -633,7 +624,7 @@ export function publicConfig(config) {
     // Provider tokens live in one place: the per-provider map. goToken was the
     // pre-multi-provider single field and is gone; readers must use tokens.
     tokenConfigured: Boolean(Object.values(config.tokens || {}).some(Boolean)),
-    tokenSource: config.goTokenSource || (config.tokens?.["opencode-go"] ? "configured" : "missing"),
+    tokenSource: config.goTokenSource || (config.tokens?.[DEFAULT_PROFILE_ID] ? "configured" : "missing"),
     debug: {
       enabled: Boolean(config.debug?.enabled),
       noReasoning: Boolean(config.debug?.noReasoning),

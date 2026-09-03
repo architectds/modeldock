@@ -17,6 +17,8 @@ import {
   writeCustomEndpoints,
 } from "../src/custom-endpoints.mjs";
 import { dpapiSupported } from "../src/secrets.mjs";
+import { allProfiles } from "../src/profiles.mjs";
+import { NATIVE_PROVIDER_ID } from "../src/native-provider.mjs";
 
 function tmpFile(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-endpoints-"));
@@ -265,6 +267,9 @@ test("an endpoint belongs to the provider it names", (t) => {
   // A provider that serves no such model resolves to nothing rather than to
   // somebody else's endpoint.
   assert.equal(customEndpointFor(stored, "legacy@alpha"), null);
+  // An unknown explicit provider is just as authoritative. It must not fall
+  // through to the legacy custom endpoint (or any other same-id endpoint).
+  assert.equal(customEndpointFor(stored, "legacy@missing-provider"), null);
 });
 
 test("a clash is per provider, and built-in names are refused", (t) => {
@@ -281,7 +286,11 @@ test("a clash is per provider, and built-in names are refused", (t) => {
     (error) => error.code === "duplicate",
   );
   // A built-in name would put two different things at one address.
-  for (const reserved of ["ollama", "llamacpp", "vllm", "opencode-go", "deepseek-official"]) {
+  const reservedProviders = [
+    ...allProfiles().filter((profile) => !profile.userDefined && profile.id !== "custom").map((profile) => profile.id),
+    NATIVE_PROVIDER_ID,
+  ];
+  for (const reserved of reservedProviders) {
     assert.throws(
       () => addCustomEndpoint(list, { modelId: "x", baseUrl: "https://x.example/v1", apiKey: "", providerId: reserved }),
       (error) => error.code === "provider",

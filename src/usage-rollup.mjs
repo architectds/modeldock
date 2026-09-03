@@ -12,8 +12,8 @@
 // same as a 5,000-token one; tps is total tokens over total time and cache rate
 // is total cached over total input, both of which need the sums and neither of
 // which can be recovered from a stored average.
-import path from "node:path";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { estimateApiCost } from "./api-pricing.mjs";
 import { stateFile } from "./state-dir.mjs";
 
@@ -45,16 +45,50 @@ export function emptyRollup() {
   return { version: ROLLUP_VERSION, lastFoldedAt: "", days: {}, hours: {} };
 }
 
+function plainObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function validIsoCursor(value) {
+  if (value === "") return true;
+  if (typeof value !== "string") return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function validBucketKey(key, resolution) {
+  try {
+    if (resolution === "day") {
+      return /^\d{4}-\d{2}-\d{2}$/.test(key)
+        && new Date(`${key}T00:00:00.000Z`).toISOString().slice(0, 10) === key;
+    }
+    return /^\d{4}-\d{2}-\d{2}T\d{2}:00:00\.000Z$/.test(key)
+      && new Date(key).toISOString() === key;
+  } catch {
+    return false;
+  }
+}
+
+function validBucketCollection(value, resolution) {
+  if (!plainObject(value)) return false;
+  return Object.entries(value).every(([key, bucket]) => validBucketKey(key, resolution)
+    && plainObject(bucket)
+    && Object.values(bucket).every((row) => plainObject(row)
+      && Object.values(row).every((field) => typeof field === "number" && Number.isFinite(field) && field >= 0)));
+}
+
 export function readRollup(file = usageRollupPath()) {
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
-    if (parsed?.version !== ROLLUP_VERSION || !parsed.days) return emptyRollup();
+    if (parsed?.version !== ROLLUP_VERSION
+      || !validIsoCursor(parsed.lastFoldedAt)
+      || !validBucketCollection(parsed.days, "day")) return emptyRollup();
     return {
       ...parsed,
       // v2 initially carried only daily buckets. Keep those thirty days and
       // let foldUsageFile backfill this optional bounded view from the event
       // log instead of invalidating the whole rollup on upgrade.
-      hours: parsed.hours && typeof parsed.hours === "object" ? parsed.hours : {},
+      hours: validBucketCollection(parsed.hours, "hour") ? parsed.hours : {},
   };
   } catch {
     return emptyRollup();
@@ -62,10 +96,7 @@ export function readRollup(file = usageRollupPath()) {
 }
 
 export function writeRollup(file, rollup) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(rollup), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, rollup, { space: 0 });
   return file;
 }
 
@@ -90,19 +121,23 @@ function addEvent(bucket, event) {
   const ok = event.status >= 200 && event.status < 300;
   entry.requests += 1;
   if (ok) entry.ok += 1;
-  entry.in += Number(event.inputTokens) || 0;
-  entry.out += Number(event.outputTokens) || 0;
-  entry.cached += Number(event.cachedTokens) || 0;
-  entry.ms += Number(event.durationMs) || 0;
+  const count = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  };
+  entry.in += count(event.inputTokens);
+  entry.out += count(event.outputTokens);
+  entry.cached += count(event.cachedTokens);
+  entry.ms += count(event.durationMs);
   // Throughput is measured over the requests that produced tokens. A 500 that
   // spent two seconds and wrote nothing is a failure, not slow generation, and
   // counting its time drags the rate of every model that ever errors.
-  const outTokens = Number(event.outputTokens) || 0;
-  const ms = Number(event.durationMs) || 0;
+  const outTokens = count(event.outputTokens);
+  const ms = count(event.durationMs);
   const plausible = ms > 0 && outTokens / (ms / 1000) <= MAX_PLAUSIBLE_TPS;
   if (ok && plausible) {
-    entry.okOut += Number(event.outputTokens) || 0;
-    entry.okMs += Number(event.durationMs) || 0;
+    entry.okOut += outTokens;
+    entry.okMs += ms;
   }
   bucket[rollupKey(event)] = entry;
   return bucket;
@@ -126,8 +161,11 @@ export function foldEvents(rollup, lines, { now = "", recordHours = true } = {})
     } catch {
       continue;
     }
-    const at = String(event?.at || "");
-    if (!at || at <= since) continue;
+    const rawAt = String(event?.at || "");
+    const atMs = Date.parse(rawAt);
+    if (!Number.isFinite(atMs)) continue;
+    const at = new Date(atMs).toISOString();
+    if (at <= since) continue;
     const day = dayOf(at);
     rollup.days[day] = addEvent(rollup.days[day] || {}, event);
     const hour = hourOf(at);

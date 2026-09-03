@@ -17,7 +17,7 @@ import {
   createScreenshotPreview,
   SCREENSHOT_PREVIEW_WORKER_INPUT_MAX_BYTES,
 } from "./image-transport.mjs";
-import { readXaiAuth } from "./xai-auth.mjs";
+import { xaiGenerationCapabilities } from "./xai-capabilities.mjs";
 
 async function runImagePreviewWorker() {
   const chunks = [];
@@ -51,10 +51,9 @@ if (process.argv[2] === "--image-preview-worker") {
 
 const baseUrl = gatewayBaseUrl();
 const config = loadConfig();
-const xaiAuth = readXaiAuth();
-const grokConnected = Boolean(xaiAuth?.accessToken);
-const grokImageAvailable = grokConnected && (!xaiAuth.models?.length || xaiAuth.models.includes("grok-4.6"));
-const grokVideoAvailable = grokConnected && (!xaiAuth.models?.length || xaiAuth.models.includes("grok-imagine-video") || xaiAuth.models.includes("grok-imagine-video-1.5"));
+const xaiCapabilities = xaiGenerationCapabilities(config);
+const grokImageAvailable = xaiCapabilities.image;
+const grokVideoAvailable = xaiCapabilities.video;
 
 // Codex spawns this bridge from the session working directory, so process.cwd()
 // is the project the user is actually in. Defaulting scope_dir to it makes

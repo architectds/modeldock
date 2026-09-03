@@ -1,7 +1,10 @@
 import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { atomicWriteTextSync } from "./atomic-file.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { modelOptions, providerOptions } from "./model-options.mjs";
+import { NATIVE_PROVIDER } from "./native-provider.mjs";
+export { NATIVE_PROVIDER } from "./native-provider.mjs";
 
 // The pick is stored in this file and nowhere else. Codex reads <codexHome>/agents
 // at startup, so the switcher has to remove it on disable: the file pins
@@ -23,8 +26,6 @@ export const SUBAGENT_AGENT_FILE = "modeldock-subagent.toml";
 export const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
 // The built-in native ChatGPT provider, shared by the subagent and vision
 // pickers: one spelling, one label, everywhere it is offered.
-export const NATIVE_PROVIDER = { id: "openai", label: "ChatGPT (native)" };
-
 export function subagentModelOptions(config) {
   // The published model set already includes native GPT slugs while signed in
   // (modelOptions -> appendNativeModels); the subagent picker is that same set.
@@ -80,7 +81,7 @@ export function writeSubagentAgentFile(config, model) {
     "# Managed by ModelDock. Edit this file from the ModelDock dashboard; a full Codex restart is required after changes.",
     'name = "modeldock_subagent"',
     'description = "Default ModelDock-managed role for ordinary delegation; use another named role only when the user explicitly requests it."',
-    'model_provider = "openai"',
+    `model_provider = "${NATIVE_PROVIDER.id}"`,
     `model = "${model}"`,
     'model_reasoning_effort = "high"',
     'developer_instructions = """',
@@ -90,8 +91,6 @@ export function writeSubagentAgentFile(config, model) {
     '"""',
     "",
   ].join("\n");
-  const temporary = `${file}.${process.pid}.tmp`;
-  writeFileSync(temporary, content, "utf8");
-  renameSync(temporary, file);
+  atomicWriteTextSync(file, content);
 }
 

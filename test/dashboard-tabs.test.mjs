@@ -103,8 +103,8 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     port,
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: OPENCODE_GO_PROFILE.id,
-    goBaseUrl: "https://go.example.com/v1",
-    goToken: "tab-render-test",
+    opencodeBaseUrl: "https://go.example.com/v1",
+    tokens: { "opencode-go": "tab-render-test" },
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
     mediaTtlMs: 60_000,
@@ -354,6 +354,20 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     upstream: "opencode-go",
     httpStatus: 200,
   });
+  const oldSession = services.metrics.begin("responses", {
+    model: "deepseek-v4-flash@opencode-go",
+    sessionId: "model-switch-session",
+  });
+  oldSession({ ok: true });
+  await sleep(2);
+  const newSession = services.metrics.begin("responses", {
+    model: "qwen3.8-flash@opencode-go",
+    sessionId: "model-switch-session",
+  });
+  newSession({ ok: true });
+  for (const record of services.metrics.recent.filter((entry) => entry.sessionId === "model-switch-session")) {
+    record.finishedAt = 123456789;
+  }
   const { send, evaluate } = await openBrowser(t, chromePath);
 
   // Record what the page throws, before it has a chance to throw anything.
@@ -390,6 +404,18 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   })()`);
   await sleep(500);
 
+  const commandCodeIcon = JSON.parse(await evaluate(`new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve(JSON.stringify({
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+    }));
+    image.onerror = () => resolve(JSON.stringify({ width: 0, height: 0 }));
+    image.src = '/assets/commandcode-favicon.svg';
+  })`));
+  assert.ok(commandCodeIcon.width > 0 && commandCodeIcon.height > 0,
+    "the Command Code provider icon decodes to nonzero browser dimensions");
+
   // Reproduce the stale DeepSeek card: the configured catalog fallback is
   // DeepSeek, while the latest real Codex request used Qwen. The route header
   // already followed the request; the model block used a separate selection
@@ -400,6 +426,49 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   })`));
   assert.deepEqual(currentModel, { provider: "OpenCode Go", model: "Qwen 3.8 Flash" },
     "the read-only model block follows the same latest route as the route header");
+  assert.match(
+    await evaluate(`document.querySelector('#session-select option[value="model-switch-session"]')?.textContent || ''`),
+    /qwen3\.8-flash/i,
+    "a session chip reports the newest model after a provider/model switch, even when finishes share a timestamp",
+  );
+
+  // A model option can keep the same provider-qualified id while discovery
+  // corrects a rendered fact such as its label or vision capability. The
+  // browser render cache must follow the complete option projection, not only
+  // identity. Otherwise every later status event is accepted but the stale DOM
+  // remains until an unrelated model is added or removed.
+  const qwen = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === "qwen3.8-flash");
+  const originalQwenLabel = qwen.label;
+  const originalProviderLabel = OPENCODE_GO_PROFILE.label;
+  t.after(() => {
+    qwen.label = originalQwenLabel;
+    OPENCODE_GO_PROFILE.label = originalProviderLabel;
+  });
+  qwen.label = "Qwen 3.8 Flash Refreshed";
+  OPENCODE_GO_PROFILE.label = "OpenCode Go Refreshed";
+  const refreshFinish = services.metrics.begin("responses", { model: "qwen3.8-flash@opencode-go" });
+  refreshFinish({ ok: true });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await evaluate(`document.getElementById('main-model-display-name')?.textContent.trim() === 'Qwen 3.8 Flash Refreshed'`)) break;
+    await sleep(50);
+  }
+  assert.equal(await evaluate(`document.getElementById('main-model-display-name')?.textContent.trim()`), "Qwen 3.8 Flash Refreshed",
+    "a changed option projection invalidates the shared model render cache");
+  assert.equal(
+    await evaluate(`document.querySelector('#vision-provider-select option[value="opencode-go"]')?.textContent.trim()`),
+    "OpenCode Go Refreshed",
+    "a changed provider projection invalidates the same shared model render cache",
+  );
+  qwen.label = originalQwenLabel;
+  OPENCODE_GO_PROFILE.label = originalProviderLabel;
+  const restoreFinish = services.metrics.begin("responses", { model: "qwen3.8-flash@opencode-go" });
+  restoreFinish({ ok: true });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await evaluate(`document.getElementById('main-model-display-name')?.textContent.trim() === 'Qwen 3.8 Flash'`)) break;
+    await sleep(50);
+  }
+  assert.equal(await evaluate(`document.getElementById('main-model-display-name')?.textContent.trim()`), "Qwen 3.8 Flash",
+    "the same cache also accepts a projection changing back without an identity change");
 
   for (const tab of TABS) {
     await evaluate(`location.hash = '#${tab}'`);
@@ -713,11 +782,32 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
       localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] },
       inputTokens: 1_000,
       outputTokens: 100,
+      sessionId: `host-session-${redraw % 2}`,
     });
+    await sleep(8);
     finish.markFirstResponse();
+    await sleep(8);
     finish({ localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] } });
     await sleep(160);
   }
+  await sleep(350);
+  const hostCountsBeforeFilter = JSON.parse(await evaluate(`JSON.stringify({
+    prefill: document.getElementById('hostdash-prefill-count')?.textContent,
+    decode: document.getElementById('hostdash-decode-last')?.textContent,
+  })`));
+
+  // The ordinary dashboard filter scopes trace cards only. Managed-host
+  // telemetry is host-wide and has no per-session authority, so selecting one
+  // conversation must not blank the prefill/decode monitor.
+  await evaluate(`location.hash = '#dashboard'`);
+  await sleep(200);
+  await evaluate(`(() => {
+    const select = document.getElementById('session-select');
+    select.value = 'host-session-0';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    location.hash = '#hostmonitor';
+  })()`);
+  await sleep(200);
 
   const monitor = JSON.parse(await evaluate(`(() => {
     const canvases = ['hostdash-prefill-wave', 'hostdash-decode-wave'].map((id) => {
@@ -731,6 +821,8 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
       canvases,
       swimlanes: document.querySelectorAll('#hostdash-swimlanes .swimlane').length,
       swimSegments: document.querySelectorAll('#hostdash-swimlanes .swim-segment').length,
+      prefillCount: document.getElementById('hostdash-prefill-count')?.textContent,
+      selectedSession: document.getElementById('session-select')?.value,
       overflowing: [...document.querySelectorAll('#local-host-dashboard, .hostdash-grid, .hostdash-totals, .swimlane-track')]
         .filter((node) => node.scrollWidth > node.clientWidth + 1)
         .map((node) => node.id || node.className),
@@ -748,6 +840,11 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
   }
   assert.equal(monitor.swimlanes, 1, "the managed lane renders as one swimlane");
   assert.ok(monitor.swimSegments >= 2, "the lane timeline renders cold, restore, and hot events");
+  assert.equal(monitor.selectedSession, "host-session-0", "the regression exercises an active dashboard session filter");
+  assert.notEqual(hostCountsBeforeFilter.prefill, "0", "the fixture produced host-wide prefill history");
+  assert.equal(monitor.prefillCount, hostCountsBeforeFilter.prefill, "host-wide prefill history survives a trace-session filter");
+  assert.equal(await evaluate(`document.getElementById('hostdash-decode-last')?.textContent`), hostCountsBeforeFilter.decode,
+    "host-wide decode history survives the same trace-session filter");
   assert.deepEqual(monitor.overflowing, [], "the managed-host board does not overflow its visible columns");
 });
 
@@ -926,6 +1023,8 @@ test("a stopped managed llama keeps its full drawer and moves Start service ther
     saveVisible: document.getElementById('local-config-save').offsetParent !== null,
     disconnectVisible: document.getElementById('local-config-disconnect').offsetParent !== null,
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
+    managedActionsTogether: document.getElementById('local-host-unmanage').parentElement === document.getElementById('local-config-start').parentElement,
+    startImmediatelyAfterLeave: document.getElementById('local-host-unmanage').nextElementSibling === document.getElementById('local-config-start'),
     gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
     management: document.getElementById('local-host-management-state').textContent.trim(),
     leftStartRemoved: document.getElementById('llamacpp-restart') === null,
@@ -945,6 +1044,8 @@ test("a stopped managed llama keeps its full drawer and moves Start service ther
     saveVisible: false,
     disconnectVisible: false,
     leaveVisible: true,
+    managedActionsTogether: true,
+    startImmediatelyAfterLeave: true,
     gateway: "Gateway: connected - 1 model(s), but the engine is not answering",
     management: "Managed profile: --parallel 1 \u00b7 --ctx-size 215,040. Multiple sessions available.",
     leftStartRemoved: true,
@@ -978,5 +1079,7 @@ test("a canvas is sized from its CSS box, never from its own bitmap", () => {
   const measured = (app.match(/const width = canvas\.clientWidth;/g) || []).length;
   const guarded = (app.match(/if \(!width \|\| !height\) return;/g) || []).length;
   assert.equal(measured, guarded, "each canvas measurement keeps the hidden-view guard beneath it");
-  assert.ok(measured >= 2, "both wave renderers are covered");
+  assert.equal(measured, 1, "all dashboard waves share one measured renderer");
+  assert.equal((app.match(/drawCacheWave/g) || []).length, 0, "no call site may retain the removed parallel cache renderer");
+  assert.ok((app.match(/drawWave\(/g) || []).length >= 8, "every wave delegates to the shared renderer");
 });

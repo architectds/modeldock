@@ -1,10 +1,20 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { allProfiles, bareModelId, modelEntryFor, profileById, publishedSlugFor } from "./profiles.mjs";
+import {
+  allProfiles,
+  bareModelId,
+  DEFAULT_PROFILE_ID,
+  enabledProviderOptions,
+  modelEntryFor,
+  profileById,
+  providerForModel,
+  publishedSlugFor,
+} from "./profiles.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
 import { isModelPublished, selectedModelSlugs } from "./model-toggles.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -86,25 +96,53 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
 // Build the Codex model catalog for the active profile. This is the single place
 // that answers "what can this model do" for Codex.
 export function catalogFor(config) {
-  const profile = config.profile || profileById(config.profileId || "opencode-go");
-  // Every published entry is owner-qualified, the main model included: a bare
-  // mainModel reference (legacy .env or a test fixture) is normalized to its
-  // published form so the catalog never carries an id whose label and route
-  // could disagree. Ids no profile owns (native GPT ids, unknown) pass through.
-  const mainModel = publishedSlugFor(config.profileId || profile.id, config.mainModel);
-  const catalog = profile.modelCatalog({
+  const profile = config.profile || profileById(config.profileId || DEFAULT_PROFILE_ID);
+  // Read native metadata even when the user has opted out of publishing it:
+  // identity still has to distinguish a native bare selection from a routed
+  // legacy id. The merge itself remains disabled below when requested.
+  const nativeIdentity = readNativeCatalog(config);
+  const native = config.nativeMerge === false ? null : nativeIdentity;
+  const nativeSlugs = new Set((nativeIdentity?.models || []).map((entry) => entry?.slug).filter(Boolean));
+  // Every routed entry is owner-qualified. Native GPT ids are already
+  // canonical bare ids and are deliberately kept that way; they must never
+  // borrow the active route.
+  const nativeMainSelected = nativeSlugs.has(String(config.mainModel || ""));
+  const mainModel = nativeMainSelected
+    // modelCatalogDefaults owns routed catalog construction and necessarily
+    // qualifies its main id. Feed it a real routed fallback, then add the
+    // native entry separately, so a native bare id is never rewritten as ours.
+    ? profile.availableModels?.find((entry) => entry?.status !== "unavailable")?.id || config.mainModel
+    : publishedSlugFor(config.profileId || profile.id, config.mainModel);
+  const baseCatalog = profile.modelCatalog({
     mainModel,
     visionModel: config.visionModel,
     baseInstructions: baseInstructionsFor(config),
   });
+  // Profile catalog builders know their routed models, while the native catalog
+  // is the authority for a bare GPT id. When a native model is selected as the
+  // main model, put that exact native entry first instead of letting the active
+  // routed profile reinterpret the same bare id.
+  const nativeMain = native?.models?.find((entry) => entry?.slug === config.mainModel);
+  const catalog = nativeMain
+    ? {
+        ...baseCatalog,
+        models: [
+          nativeEntryForCatalog(nativeMain, config?.contextOverrides),
+          ...(baseCatalog.models || []),
+        ],
+      }
+    : baseCatalog;
   const enabledProviderIds = enabledProvidersFor(config);
+  const nativeServiceable = Boolean(native && hasChatGptLogin(config.codexHome));
   // A configured vision model whose provider can no longer serve (its token was
   // removed) is a fallback in name only: admitting attachments on its strength
   // would walk every escalated turn into a 503. The owner must be an enabled
-  // provider; a bare native slug resolves to the active profile and passes,
-  // which is the permissive edge this check deliberately leaves open.
-  const visionRouteServiceable = Boolean(config.visionModel)
-    && enabledProviderIds.has(ownerProviderFor(config.visionModel));
+  // provider. Native models are checked against the Codex login independently
+  // because their bare ids have no routed-provider suffix.
+  const visionRef = String(config.visionModel || "");
+  const nativeVision = visionRef.endsWith("@openai") || nativeSlugs.has(visionRef);
+  const visionRouteServiceable = Boolean(visionRef)
+    && (nativeVision ? hasChatGptLogin(config.codexHome) : enabledProviderIds.has(providerForModel(config, visionRef)));
   // Stamped by the server next to contextOverrides; absent in callers that only
   // want the shipped catalog, which then publishes everything as before.
   const toggles = config.modelToggles || {};
@@ -127,15 +165,19 @@ export function catalogFor(config) {
     // Only models owned by a provider with a configured token are published. The
     // active profile is always included (its token may resolve from the Codex
     // config backup); other providers need an explicit key.
-    const owner = ownerProviderFor(entry.slug);
-    const profile = profileById(owner);
-    const modelEntry = profile.availableModels?.find((m) => m.id === entry.slug.replace(/@.*$/, ""));
+    const nativeEntry = nativeSlugs.has(entry.slug);
+    const owner = nativeEntry ? NATIVE_PROVIDER_ID : providerForModel(config, entry.slug);
+    const ownerProfile = allProfiles().find((candidate) => candidate.id === owner);
+    const modelEntry = nativeEntry
+      ? { status: "available" }
+      : ownerProfile?.availableModels?.find((model) => model.id === bareModelId(entry.slug));
     // Switched off on the Models page. A model the gateway is itself pointed at
     // is published whatever the file says: the selection is the later and
     // stronger statement, and withholding it would leave Codex unable to name
     // the model it is currently talking to.
     if (!isModelPublished(toggles, entry.slug) && !selected.has(entry.slug)) return false;
-    return enabledProviderIds.has(owner) && modelEntry?.status !== "unavailable";
+    return (nativeEntry ? nativeServiceable : enabledProviderIds.has(owner))
+      && modelEntry?.status !== "unavailable";
   });
   // Wizard-managed opt-out: without a GPT subscription the native GPT models are
   // "see it, can't use it" noise (every request 401s), so subscribers keep the
@@ -143,8 +185,6 @@ export function catalogFor(config) {
   if (config.nativeMerge === false) {
     return { ...catalog, models: orderCatalogByUse(applyPerModelInstructions(config, models), config.usageByModel) };
   }
-  const native = readNativeCatalog(config);
-  const nativeSlugs = new Set((native?.models || []).map((entry) => entry?.slug).filter(Boolean));
   const merged = mergeNativeCatalog({ ...catalog, models }, config, native);
   return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models, nativeSlugs), config.usageByModel) };
 }
@@ -295,7 +335,7 @@ function nativeEntryForCatalog(model, overrides = {}) {
     : { ...model };
   return {
     ...named,
-    provider: "openai",
+    provider: NATIVE_PROVIDER_ID,
     ...(contextWindow ? {
       context_window: contextWindow,
       max_context_window: contextWindow,
@@ -304,23 +344,5 @@ function nativeEntryForCatalog(model, overrides = {}) {
 }
 
 export function enabledProvidersFor(config) {
-  const ids = new Set([config.profileId || "opencode-go"]);
-  const tokens = config.tokens || {};
-  for (const [provider, token] of Object.entries(tokens)) {
-    if (token) ids.add(provider);
-  }
-  // A keyless engine has no credential to check, so "connected" is the only
-  // test that means anything: it publishes once it has models. This named
-  // Ollama alone, so llama.cpp and vLLM could be connected and still never
-  // reach the catalog file Codex reads. server.mjs applies the same rule.
-  for (const entry of allProfiles()) {
-    if (entry.tokenEnvName) continue;
-    if (entry.availableModels?.length) ids.add(entry.id);
-  }
-  return ids;
-}
-
-function ownerProviderFor(slug) {
-  const at = String(slug || "").lastIndexOf("@");
-  return at > 0 ? String(slug).slice(at + 1) : "opencode-go";
+  return new Set(enabledProviderOptions(config).map((entry) => entry.id));
 }

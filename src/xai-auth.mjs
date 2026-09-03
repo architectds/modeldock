@@ -16,8 +16,8 @@
 // public callback URL, and the user may be on a machine without a browser at
 // all. They open a short URL anywhere, type a nine-character code, and this
 // polls until they approve.
-import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
@@ -183,7 +183,6 @@ export function readXaiAuth(file = xaiAuthPath()) {
 }
 
 export function writeXaiAuth(file, auth) {
-  mkdirSync(path.dirname(file), { recursive: true });
   const payload = {
     accessToken: encryptSecret(auth.accessToken || ""),
     refreshToken: encryptSecret(auth.refreshToken || ""),
@@ -192,13 +191,11 @@ export function writeXaiAuth(file, auth) {
     models: Array.isArray(auth.models) ? auth.models : [],
     connectedAt: auth.connectedAt || new Date().toISOString(),
   };
-  const tmp = `${file}.${process.pid}.tmp`;
   // mode on the temp file, not just a chmod after: rename preserves the temp
   // file's permissions, so the refresh token is never world-readable even for
   // the instant between rename and hardening. DPAPI covers the content only on
   // Windows; on macOS/Linux the file mode is the whole protection.
-  writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, payload, { mode: 0o600 });
   // POSIX only: on Windows the tokens are DPAPI-sealed and %USERPROFILE% ACLs
   // already exclude other users, while protectPrivateFile there costs an
   // icacls spawn on a write that runs from the ten-minute refresh timer.

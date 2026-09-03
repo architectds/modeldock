@@ -3,13 +3,10 @@ import { loadConfig } from "./config.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
-import { createMcpNodeHandler } from "./mcp.mjs";
+import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { memoryStoreFor } from "./memory.mjs";
-
-function urlHost(host) {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-}
+import { urlHost } from "./loopback.mjs";
 
 // Standalone MCP sidecar. Serves only /mcp (streamable HTTP) plus /healthz, so
 // Codex can consume web / vision / audio tools without any Responses gateway in
@@ -45,18 +42,7 @@ export async function startMcpServer(config = loadConfig(), {
 
   const mcpHandler = createMcpNodeHandler({
     upstreams,
-    onError: (error) => {
-      metrics.recent.unshift({
-        id: "mcp",
-        kind: "mcp",
-        startedAt: Date.now(),
-        finishedAt: Date.now(),
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      metrics.recent.length = Math.min(metrics.recent.length, metrics.recentLimit);
-      metrics.emit("change");
-    },
+    onError: (error) => recordMcpError(metrics, error),
   });
 
   app.all("/mcp", (req, res) => mcpHandler(req, res, req.body));

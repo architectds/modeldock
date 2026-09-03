@@ -9,13 +9,13 @@ import { Decompress as ZstdFallbackDecoder } from "fzstd";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { ownsEnvFile, parseEnvFile, loadConfig, publicConfig, writeEnvFile, envFileFor, migrateEnvSecrets, isPlaceholderToken, envOff, encodePersistedModelRef } from "./config.mjs";
 import { catalogFor } from "./catalog.mjs";
-import { nativeModelSlugs, readNativeCatalog, refreshNativeCatalog } from "./native-catalog.mjs";
+import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
 import { NATIVE_IMAGE_PATHS, localWarmBaseFromSessionOpening, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
-import { createMcpNodeHandler } from "./mcp.mjs";
+import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
@@ -28,20 +28,22 @@ import { SessionNames } from "./session-names.mjs";
 import { latestCodexSessionOpening } from "./codex-session-prefix.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
-import { urlHost } from "./loopback.mjs";
+import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
 // Re-exported: tests and embedders construct the service bag through
 // server.mjs, and that path stays stable across the services split.
 export { createServices };
-import { anyProviderRouteConfigured, codexModelCatalog, modelCatalogModels, modelOptions, modelProviderOf, providerModels, providerOptions, providerRouteConfigured, publishedModelIds, visionOptionsAcrossProviders } from "./model-options.mjs";
-import { NATIVE_PROVIDER, SUBAGENT_DEFAULT_MODEL, readSubagentModel, subagentModelOptions, subagentProviders, writeSubagentAgentFile } from "./subagent-config.mjs";
+import { anyProviderRouteConfigured, canonicalModelRefOf, codexModelCatalog, modelCatalogModels, modelInventory, modelOptions, modelOwnerOf, providerModels, providerOptions, providerRouteConfigured, publishedModelIds, visionOptionsAcrossProviders } from "./model-options.mjs";
+import { SUBAGENT_DEFAULT_MODEL, readSubagentModel, subagentModelOptions, subagentProviders, writeSubagentAgentFile } from "./subagent-config.mjs";
+import { NATIVE_PROVIDER } from "./native-provider.mjs";
 // Re-exported: tests and the config switcher import the catalog through
 // server.mjs, and that path stays stable across the model-options split.
 export { codexModelCatalog };
 import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
-import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointFor, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
+import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
+import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
@@ -52,6 +54,7 @@ import { canonicalUsageModelId, foldUsageFile, readRollup, rollupKey, rollupTota
 import { probeGpus } from "./gpu.mjs";
 import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
+import { localEngineDefinitions } from "./local-engine-definitions.mjs";
 import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
 import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
 import { applyLocalHostPlan, calibrateAndApplyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
@@ -62,6 +65,7 @@ import {
   LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
   LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS,
   optimisticNvidiaParallelContext,
+  sampleGpuMetrics,
   selectNvidiaRuntimeProfile,
 } from "./local-host-nvidia.mjs";
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
@@ -94,6 +98,7 @@ const STATIC_MIME = {
   ".css": "text/css; charset=utf-8",
   ".png": "image/png",
   ".ico": "image/x-icon",
+  ".svg": "image/svg+xml; charset=utf-8",
 };
 
 function contentTypeFor(file) {
@@ -127,19 +132,6 @@ function serveInlineStatic(app) {
     if (req.method !== "GET") return next();
     if (!serve(req, res, publicTree, "")) next();
   });
-}
-
-// Two local engine addresses name the same server. Compared by host and port
-// because the stored form carries the /v1 the Responses dialect lives under and
-// the discovered form does not, so the strings never match even when the server
-// does.
-function sameLocalHost(a, b) {
-  if (!a || !b) return false;
-  try {
-    return new URL(a).host === new URL(b).host;
-  } catch {
-    return false;
-  }
 }
 
 function managedHostId(engine, baseUrl) {
@@ -209,14 +201,46 @@ function managedLaunchHasVision(record) {
   return position >= 0 && Boolean(String(args[position + 1] || "").trim());
 }
 
+function managedCapacity(profile) {
+  if (!profile) return null;
+  return createLocalHostCapacityFromLaneProfile(profile, {
+    outputReserveTokens: Math.min(16_384, Math.max(1, Math.floor(profile.laneContextTokens / 4))),
+  });
+}
+
+// One projection owns the catalog-facing model facts learned from a local
+// engine. Connect, live refresh, and managed restart may observe those facts at
+// different times, but none of them may maintain a private field mapping.
+function projectLocalModel(current, {
+  modelFacts = null,
+  upstreamId = "",
+  supportsVision,
+  chatTemplateSupportsObjectArguments,
+  mediaMarker,
+  contextWindow = 0,
+  autoCompactTokenLimit = 0,
+} = {}) {
+  return {
+    ...current,
+    ...(modelFacts?.modelSlug ? { id: modelFacts.modelSlug } : {}),
+    ...(modelFacts?.modelName ? { label: modelFacts.modelName } : {}),
+    ...(upstreamId ? { upstreamId } : {}),
+    ...(typeof supportsVision === "boolean" ? { supportsVision } : {}),
+    ...(typeof chatTemplateSupportsObjectArguments === "boolean"
+      ? { chatTemplateSupportsObjectArguments }
+      : {}),
+    ...(typeof mediaMarker === "string" ? { mediaMarker } : {}),
+    ...(contextWindow > 0 ? { contextWindow } : {}),
+    ...(autoCompactTokenLimit > 0 ? { autoCompactTokenLimit } : {}),
+  };
+}
+
 function managedHostSummary(record, engine) {
   if (!record || record.adapterId !== "llamacpp-nvidia") return null;
   const storage = record.kvState;
   const launchDirectory = engine?.launch?.slotSavePath || "";
   const profile = record.activeProfile || record.desiredProfile || null;
-  const capacity = profile ? createLocalHostCapacityFromLaneProfile(profile, {
-    outputReserveTokens: Math.min(16_384, Math.max(1, Math.floor(profile.laneContextTokens / 4))),
-  }) : null;
+  const capacity = managedCapacity(profile);
   return {
     id: record.id,
     state: record.state,
@@ -265,9 +289,7 @@ async function publishManagedLocalEngine(services, record, running) {
   const file = services.localEnginesFile || localEnginesSnapshotPath();
   const snapshot = readLocalEnginesSnapshot(file)?.llamacpp;
   if (!snapshot?.models?.length || !record?.activeSpec) return false;
-  const capacity = record.activeProfile ? createLocalHostCapacityFromLaneProfile(record.activeProfile, {
-    outputReserveTokens: Math.min(16_384, Math.max(1, Math.floor(record.activeProfile.laneContextTokens / 4))),
-  }) : null;
+  const capacity = managedCapacity(record.activeProfile);
   const contextWindow = Number(capacity?.maxSingleRequestTokens)
     || Number(running?.launch?.ctxSize)
     || Number(record.capabilities?.contextTokens)
@@ -285,18 +307,14 @@ async function publishManagedLocalEngine(services, record, running) {
   const supportsVision = typeof running?.supportsVision === "boolean"
     ? running.supportsVision
     : managedLaunchHasVision(record);
-  const models = snapshot.models.map((model) => ({
-    ...model,
-    ...(contextWindow ? { contextWindow } : {}),
-    ...(autoCompactTokenLimit ? { autoCompactTokenLimit } : {}),
-    ...(facts?.modelSlug ? { id: facts.modelSlug } : {}),
-    ...(facts?.modelName ? { label: facts.modelName } : {}),
-    ...(endpointModel ? { upstreamId: endpointModel } : {}),
+  const models = snapshot.models.map((model) => projectLocalModel(model, {
+    modelFacts: facts,
+    upstreamId: endpointModel,
     supportsVision,
-    ...(typeof running?.chatTemplateSupportsObjectArguments === "boolean"
-      ? { chatTemplateSupportsObjectArguments: running.chatTemplateSupportsObjectArguments }
-      : {}),
-    ...(typeof running?.mediaMarker === "string" ? { mediaMarker: running.mediaMarker } : {}),
+    chatTemplateSupportsObjectArguments: running?.chatTemplateSupportsObjectArguments,
+    mediaMarker: running?.mediaMarker,
+    contextWindow,
+    autoCompactTokenLimit,
   }));
   const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
@@ -375,7 +393,7 @@ function modelsPayload(services) {
   // provider in the list the vision picker can see the models but never pick
   // one. The native provider is not a routed profile, so it is appended here
   // rather than in providerOptions (which would leak it into non-vision lists).
-  if (visionOptions.some((model) => model.provider === "openai")) visionProviders.push(NATIVE_PROVIDER);
+  if (visionOptions.some((model) => model.provider === NATIVE_PROVIDER.id)) visionProviders.push(NATIVE_PROVIDER);
   return {
     selected,
     options,
@@ -386,9 +404,65 @@ function modelsPayload(services) {
     // never touches profileId, so the dashboard rendered impossible pairs of
     // a provider and a model. profileId remains the fallback for a model the
     // catalog cannot place.
-    selectedProvider: modelProviderOf(options, selected.mainModel) || services.config.profileId || "opencode-go",
+    selectedProvider: modelOwnerOf(services.config, selected.mainModel) || services.config.profileId || DEFAULT_PROFILE_ID,
     visionProviders,
-    selectedVisionProvider: selected.visionModel ? modelProviderOf(options, selected.visionModel) || services.config.profileId : "",
+    selectedVisionProvider: selected.visionModel ? modelOwnerOf(services.config, selected.visionModel) || services.config.profileId : "",
+  };
+}
+
+// Reconcile picker state after a provider or endpoint is removed. Every
+// disconnect path calls this one projection after updating the provider
+// registry; none may keep its own idea of which selected models still exist.
+function reconcileModelSelection(services) {
+  const { config, modelSelection } = services;
+  const options = modelOptions(config, config.profileId);
+  const byId = new Map(options.map((entry) => [entry.id, entry]));
+  const currentMain = canonicalModelRefOf(config, modelSelection.mainModel);
+  const currentVision = canonicalModelRefOf(config, modelSelection.visionModel);
+  const fallback = byId.has(currentMain) ? null : onModeSelection(services);
+  const mainModel = byId.has(currentMain) ? currentMain : fallback?.mainModel || "";
+  const visionModel = currentVision && byId.get(currentVision)?.supportsVision ? currentVision : "";
+  const visionChanged = visionModel !== modelSelection.visionModel;
+
+  modelSelection.mainModel = mainModel;
+  modelSelection.visionModel = visionModel;
+  const configuredMain = canonicalModelRefOf(config, config.mainModel);
+  config.mainModel = byId.has(configuredMain) ? configuredMain : mainModel;
+  config.visionModel = visionModel;
+  if (visionChanged) {
+    writeEnvFile({ MODELDOCK_VISION_MODEL: visionModel ? encodePersistedModelRef(visionModel) : "none" }, config.envFile);
+  }
+  return { mainModel, visionModel, visionChanged };
+}
+
+function providerLabelFor(provider) {
+  if (provider === NATIVE_PROVIDER.id) return NATIVE_PROVIDER.label;
+  return allProfiles().find((entry) => entry.id === provider)?.label || provider;
+}
+
+// One route projection feeds readiness, provider label, endpoint and wire in
+// the dashboard. Those fields used to be derived independently, which allowed
+// a Command Code Chat route to be displayed as OpenCode Responses and a native
+// GPT selection to inherit the active external provider's URL.
+function modelRouteProjection(config, model) {
+  const provider = modelOwnerOf(config, model);
+  if (provider === NATIVE_PROVIDER.id) {
+    return {
+      provider,
+      providerLabel: NATIVE_PROVIDER.label,
+      upstreamUrl: "",
+      wire: "responses",
+      ready: hasChatGptLogin(config.codexHome),
+    };
+  }
+  const target = upstreamTargetFor(config, model);
+  const profile = profileById(target.provider);
+  return {
+    provider: target.provider,
+    providerLabel: providerLabelFor(target.provider),
+    upstreamUrl: target.baseUrl,
+    wire: target.transport || "responses",
+    ready: Boolean(profile && (profile.keyless || tokenFor(config, model))),
   };
 }
 
@@ -408,22 +482,12 @@ function statsModelDirectory(services) {
     // when providers give the same model family different display labels.
     if (!existing || value.length > existing.length) labels.set(key, value);
   };
-  // A provider can be temporarily disconnected after it generated usage. Its
-  // retained directory still gives old rows a human name without claiming the
-  // provider is currently selectable. Iterating the provider registry first
-  // also gives every copy of one named model one stable canonical id.
-  for (const profile of allProfiles()) {
-    for (const model of profile.availableModels || []) {
-      remember(publishedSlugFor(profile.id, model), model.label || model.id);
-    }
-  }
-  for (const model of readNativeCatalog(services.config)?.models || []) {
-    if (model?.slug) remember(`${model.slug}@${NATIVE_PROVIDER.id}`, model.display_name || model.slug);
-  }
-  // Enabled options can include a custom/local model that is not retained by a
-  // static provider directory. Feed those through the same identity table.
-  for (const option of modelOptions(services.config, services.config.profileId)) {
-    remember(option.id, option.label || option.id);
+  // Include temporarily disconnected and hidden entries so historical traffic
+  // keeps a human name without making those models selectable. Identity and
+  // labels come from the same inventory used by every picker.
+  for (const entry of modelInventory(services.config)) {
+    const id = entry.native ? `${entry.id}@${NATIVE_PROVIDER.id}` : entry.id;
+    remember(id, entry.label || entry.id);
   }
   return {
     labelFor: (id) => labels.get(id) || "",
@@ -547,24 +611,18 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
   const slug = String(engine?.modelFacts?.modelSlug || "").trim();
   if (!Array.isArray(saved) || saved.length !== 1 || !advertised) return null;
   const current = saved[0];
-  const next = {
-    ...current,
-    ...(name && slug ? { id: slug, label: name } : {}),
+  const next = projectLocalModel(current, {
+    modelFacts: name && slug ? { modelName: name, modelSlug: slug } : null,
     upstreamId: advertised,
-    // llama.cpp exposes this on its live /props payload, unlike vLLM and
-    // generic OpenAI-compatible servers. It must overwrite a previous Connect
-    // observation in either direction; preserving true after --mmproj is
-    // removed is worse than showing no visual option at all.
-    ...(engine?.engine === "llamacpp" && typeof engine.supportsVision === "boolean"
-      ? { supportsVision: engine.supportsVision }
-      : {}),
-    ...(engine?.engine === "llamacpp" && typeof engine.chatTemplateSupportsObjectArguments === "boolean"
-      ? { chatTemplateSupportsObjectArguments: engine.chatTemplateSupportsObjectArguments }
-      : {}),
-    ...(engine?.engine === "llamacpp" && typeof engine.mediaMarker === "string"
-      ? { mediaMarker: engine.mediaMarker }
-      : {}),
-  };
+    // llama.cpp exposes these on /props. They must overwrite an earlier
+    // observation in either direction, especially vision after --mmproj is
+    // removed. Other engines do not publish this contract.
+    supportsVision: engine?.engine === "llamacpp" ? engine.supportsVision : undefined,
+    chatTemplateSupportsObjectArguments: engine?.engine === "llamacpp"
+      ? engine.chatTemplateSupportsObjectArguments
+      : undefined,
+    mediaMarker: engine?.engine === "llamacpp" ? engine.mediaMarker : undefined,
+  });
   if (JSON.stringify(current) === JSON.stringify(next)) return null;
   return {
     ...snapshot,
@@ -575,6 +633,23 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
 async function probeManagedNvidiaGpus(services) {
   const probe = services.probeGpus || probeGpus;
   return probe({});
+}
+
+async function discoveredLocalEngine(services, engine, baseUrl = "") {
+  const found = await (services.discoverEngines || discoverLocalEngines)({});
+  return found.find((candidate) => candidate.engine === engine
+    && (!baseUrl || sameLocalHost(candidate.baseUrl, baseUrl))) || null;
+}
+
+function managedLifecycleOperations(services, record) {
+  return (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
+    hostId: record.id,
+    endpoint: record.endpoint,
+    registryFile: services.localHostRegistryFile,
+    discover: () => (services.discoverEngines || discoverLocalEngines)({}),
+    runtime: services.localHostRuntime,
+    logDir: services.engineLogDir || stateFile("engine-logs"),
+  });
 }
 
 function calibrationLaneProfile(target, { laneCount = 1, laneContextTokens = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS, id = "bootstrap" } = {}) {
@@ -600,19 +675,9 @@ async function requireManagedGpuHeadroom(services, profile) {
   const sample = await probeManagedNvidiaGpus(services);
   const shortages = [];
   for (const allocation of profile.gpus || []) {
-    const gpu = sample.find((candidate, index) => {
-      const id = candidate?.uuid || `nvidia-${Number.isInteger(candidate?.index) ? candidate.index : index}`;
-      return id === allocation.id;
-    });
-    const total = Number(gpu?.totalBytes);
-    const used = Number(gpu?.usedBytes);
-    const reportedFree = Number(gpu?.freeBytes);
-    const free = Number.isSafeInteger(reportedFree) && reportedFree >= 0 ? reportedFree : total - used;
-    if (!Number.isSafeInteger(total) || !Number.isSafeInteger(used)) {
-      throw new Error(`Could not measure managed GPU ${allocation.id} after the target model started.`);
-    }
-    if (free < 1024 ** 3) {
-      shortages.push(`${allocation.id} has ${(Math.max(0, free) / 1024 ** 3).toFixed(2)} GiB free`);
+    const { freeBytes } = sampleGpuMetrics(sample, allocation);
+    if (freeBytes < 1024 ** 3) {
+      shortages.push(`${allocation.id} has ${(freeBytes / 1024 ** 3).toFixed(2)} GiB free`);
     }
   }
   if (shortages.length) {
@@ -637,23 +702,16 @@ function statusPayload(services) {
     }
   }
   const selected = modelSelection || { mainModel: config.mainModel, visionModel: config.visionModel };
-  const mainTokenReady = Boolean(tokenFor(config, selected.mainModel));
   // Which provider owns the selected main model is a display fact, and the picker
   // already answers it from the published catalog. Deriving it a second way here
   // (providerForModel, which resolves the routing question and always returns an
   // answer) let the route card and the picker disagree about the same model.
-  // Routing itself still uses providerForModel - see upstreamBaseForModel.
+  // Routing itself uses the provider registry's canonical target projection.
   const models = modelsPayload(services);
-  const mainProvider = models.selectedProvider;
-  const ROUTE_PROVIDER_LABELS = {
-    "openai": "ChatGPT (native)",
-    "opencode-go": "OpenCode Go",
-    "deepseek-official": "DeepSeek",
-  };
-  const providerLabelFor = (provider) => ROUTE_PROVIDER_LABELS[provider]
-    || profileOptions().find((entry) => entry.id === provider)?.label
-    || provider;
-  const providerLabel = providerLabelFor(mainProvider);
+  const mainRoute = modelRouteProjection(config, selected.mainModel);
+  const visionRoute = selected.visionModel ? modelRouteProjection(config, selected.visionModel) : null;
+  const mainProvider = mainRoute.provider;
+  const mainTokenReady = mainRoute.ready;
   // The route card shows the most recent actual request first, falling back to
   // the dashboard selection. Native passthrough (reason "native_passthrough")
   // never rewrites modelSelection, so without this the card would keep showing
@@ -670,11 +728,12 @@ function statusPayload(services) {
       // provider owns the selected main model, which base URL and wire style it hits.
       mainProvider,
       routeModel,
+      routeProvider,
       routeProviderLabel,
-      mainProviderLabel: providerLabel,
-      mainUpstreamUrl: upstreamBaseForModel(config, selected.mainModel),
-      mainWire: "responses",
-      visionUpstreamUrl: selected.visionModel ? upstreamBaseForModel(config, selected.visionModel) : "",
+      mainProviderLabel: mainRoute.providerLabel,
+      mainUpstreamUrl: mainRoute.upstreamUrl,
+      mainWire: mainRoute.wire,
+      visionUpstreamUrl: visionRoute?.upstreamUrl || "",
     },
     // One source of truth for the model block. This used to be a hand-copied
     // duplicate of modelsPayload, and the copies drifted: /api/models derived the
@@ -702,9 +761,7 @@ function statusPayload(services) {
 
 function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
-  const mainToken = config.tokens?.["opencode-go"] || "";
-  const deepseekToken = config.tokens?.["deepseek-official"] || "";
-  const commandCodeToken = config.tokens?.commandcode || "";
+  const primaryCustomEndpoint = config.customEndpoints?.[0] || null;
   const ollamaProfile = profileById("ollama");
   const ollamaConnected = Boolean(ollamaProfile.availableModels?.length);
   const ollamaMain = modelSelection.mainModel && providerForModel(config, modelSelection.mainModel) === "ollama"
@@ -715,17 +772,18 @@ function settingsPayload(services) {
     : "";
   return {
     tokenConfigured: anyProviderRouteConfigured(config),
-    providers: [
-      { id: "opencode-go", label: "OpenCode Go", tokenConfigured: Boolean(mainToken) },
-      { id: "deepseek-official", label: "DeepSeek (Official)", tokenConfigured: Boolean(deepseekToken) },
-      { id: "commandcode", label: "Command Code", tokenConfigured: Boolean(commandCodeToken) },
-      ...(ollamaConnected ? [{ id: "ollama", label: "Ollama (local)", tokenConfigured: true }] : []),
-    ],
+    providers: credentialProfiles()
+      .map((profile) => ({
+        id: profile.id,
+        label: profile.label,
+        settingsField: profile.settingsField,
+        tokenConfigured: Boolean(config.tokens?.[profile.id]),
+      })),
     custom: {
-      baseUrl: config.customBaseUrl || "",
-      model: config.customModel || "",
-      apiKeyConfigured: Boolean(config.tokens?.["custom"]),
-      asVision: Boolean(config.customVision),
+      baseUrl: primaryCustomEndpoint?.baseUrl || "",
+      model: primaryCustomEndpoint?.modelId || "",
+      apiKeyConfigured: Boolean(primaryCustomEndpoint?.apiKey),
+      asVision: Boolean(primaryCustomEndpoint?.supportsVision),
       // The whole list, so the API page renders every endpoint rather than
       // the first one. Keys never leave the machine: only whether one is set.
       endpoints: (config.customEndpoints || []).map((entry) => ({
@@ -788,12 +846,16 @@ function settingsPayload(services) {
   };
 }
 
-function configMutationGuard(config, callerKey) {
-  const allowedOrigins = new Set([
+function localDashboardOrigins(config) {
+  return new Set([
     `http://${urlHost(config.host)}:${config.port}`,
     `http://127.0.0.1:${config.port}`,
     `http://localhost:${config.port}`,
   ]);
+}
+
+function configMutationGuard(config, callerKey) {
+  const allowedOrigins = localDashboardOrigins(config);
   return (req, res, next) => {
     const origin = req.get("origin");
     if (origin && !allowedOrigins.has(origin)) {
@@ -823,11 +885,7 @@ function configMutationGuard(config, callerKey) {
 // gateway. The route also carries the caller capability key; Origin filtering
 // remains useful defense in depth for browser callers that somehow learn it.
 function crossOriginGuard(config) {
-  const allowedOrigins = new Set([
-    `http://${urlHost(config.host)}:${config.port}`,
-    `http://127.0.0.1:${config.port}`,
-    `http://localhost:${config.port}`,
-  ]);
+  const allowedOrigins = localDashboardOrigins(config);
   return (req, res, next) => {
     const origin = req.get("origin");
     if (origin && !allowedOrigins.has(origin)) {
@@ -870,10 +928,6 @@ function recordConfigAction(metrics, operation, result) {
 // The dashboard's view of the same question the relay asks. It had its own
 // if-chain and disagreed with the relay about Ollama, so the address shown
 // was not the address used.
-function upstreamBaseForModel(config, model) {
-  return profileById(providerForModel(config, model)).baseUrlFor(config, model);
-}
-
 function serveModels(req, res, { config, modelSelection }) {
   // Advertise the dashboard-selected main model (with its modalities/plugins) so Codex
   // starts conversations with the model the user actually picked.
@@ -1206,18 +1260,7 @@ export function createApp(services = createServices()) {
 
   const mcpHandler = createMcpNodeHandler({
     upstreams,
-    onError: (error) => {
-      metrics.recent.unshift({
-        id: "mcp",
-        kind: "mcp",
-        startedAt: Date.now(),
-        finishedAt: Date.now(),
-        status: "error",
-        error: error instanceof Error ? error.message : String(error),
-      });
-      metrics.recent.length = Math.min(metrics.recent.length, metrics.recentLimit);
-      metrics.emit("change");
-    },
+    onError: (error) => recordMcpError(metrics, error),
   });
 
   // Capability-key routes: the base_url written into config.toml carries the key
@@ -1301,21 +1344,30 @@ export function createApp(services = createServices()) {
     ...(await configSwitcher.status()),
   })));
 
-  const mutateConfig = configMutationGuard(config, services.callerKey);
+  const localPostGuard = configMutationGuard(config, services.callerKey);
   let configMutationQueue = Promise.resolve();
-  // One config mutation at a time, across every route that rewrites shared
-  // state. The queue never rejects: each queued handler answers its own
-  // response, so a failed predecessor must not poison the successors.
-  const queueConfigMutation = (work) => {
-    const run = configMutationQueue.then(work);
-    configMutationQueue = run.catch(() => {});
-    return run;
+  // One request-sized lease around every shared-state mutation. Keeping the
+  // queue in middleware means a new mutation route cannot silently bypass it;
+  // read-only POSTs use localPostGuard directly and never wait behind a restart.
+  const serializeConfigMutation = (_req, res, next) => {
+    const previous = configMutationQueue;
+    let release;
+    const lease = new Promise((resolve) => { release = resolve; });
+    configMutationQueue = previous.then(() => lease, () => lease);
+    let released = false;
+    const finish = () => {
+      if (released) return;
+      released = true;
+      release();
+    };
+    res.once("finish", finish);
+    res.once("close", finish);
+    previous.then(next, next);
   };
+  const mutateConfig = [localPostGuard, serializeConfigMutation];
   const configAction = (operation) => async (req, res) => {
     try {
-      const run = configMutationQueue.then(() => configSwitcher[operation]());
-      configMutationQueue = run.catch(() => {});
-      const result = await run;
+      const result = await configSwitcher[operation]();
       recordConfigAction(metrics, `config_${operation}`, { ok: true });
       return res.json(result);
     } catch (error) {
@@ -1337,7 +1389,7 @@ export function createApp(services = createServices()) {
       return res.status(400).json({ error: { type: "invalid_mode", message: "mode must be 'off' or 'on'." } });
     }
     try {
-      const run = configMutationQueue.then(async () => {
+      const result = await (async () => {
         let result;
         // Wizard-managed native-GPT merge opt-out (no ChatGPT subscription). It is a
         // persistent property of the account, so it is applied on every enabling mode.
@@ -1393,9 +1445,8 @@ export function createApp(services = createServices()) {
         }
         recordConfigAction(metrics, `config_mode_${mode}`, { ok: true });
         return result;
-      });
-      configMutationQueue = run.catch(() => {});
-      return res.json(await run);
+      })();
+      return res.json(result);
     } catch (error) {
       recordConfigAction(metrics, `config_mode_${mode}`, { ok: false, error: error.message });
       const conflict = error.code === "STATE_INVALID";
@@ -1413,10 +1464,10 @@ export function createApp(services = createServices()) {
       onboardedAt: status.onboardedAt || null,
       nativeMerge: config.nativeMerge !== false,
       mode: status.enabled ? "on" : "off",
-      tokenConfigured: {
-        "opencode-go": Boolean(config.tokens?.["opencode-go"]),
-        "deepseek-official": Boolean(config.tokens?.["deepseek-official"]),
-      },
+      tokenConfigured: Object.fromEntries(credentialProfiles().map((profile) => [
+        profile.id,
+        Boolean(config.tokens?.[profile.id]),
+      ])),
       // This legacy field name is the wizard contract; a connected keyless
       // engine is equally able to unlock ON mode.
       anyTokenConfigured: anyProviderRouteConfigured(config),
@@ -1441,13 +1492,12 @@ export function createApp(services = createServices()) {
     // provider and native Codex models use their exact bare wire slug. Never
     // repair an unknown bare id through the active profile here; that was the
     // ambiguity that turned a saved native Luna choice into OpenCode Go Luna.
-    const currentOptions = modelOptions(config, config.profileId);
-    const currentOwned = (id) => {
-      if (!id || currentOptions.some((entry) => entry.id === id)) return id;
-      return publishedSlugFor(config.profileId, id);
-    };
-    let nextMain = req.body?.mainModel === undefined ? currentOwned(current.mainModel) : req.body.mainModel;
-    let nextVision = req.body?.visionModel === undefined ? currentOwned(current.visionModel) : req.body.visionModel;
+    // Persisted selections already carry their provider (or are native bare
+    // ids). Preserve them exactly when this request changes only the other
+    // selector; re-qualifying through the active profile silently changed
+    // native Luna into routed OpenCode Luna on upgrade.
+    let nextMain = req.body?.mainModel === undefined ? canonicalModelRefOf(config, current.mainModel) : req.body.mainModel;
+    let nextVision = req.body?.visionModel === undefined ? canonicalModelRefOf(config, current.visionModel) : req.body.visionModel;
     const nextProvider = req.body?.provider;
     if (nextProvider !== undefined && nextProvider !== config.profileId) {
       const known = profileOptions().some((entry) => entry.id === nextProvider);
@@ -1536,39 +1586,18 @@ export function createApp(services = createServices()) {
       // Config objects built by tests (and any future non-loadConfig wiring)
       // may lack the tokens map; the settings write must still work.
       config.tokens = config.tokens || {};
-      if (body.opencodeGoToken) {
-        const token = String(body.opencodeGoToken).trim();
-        providers.push("opencode-go");
-        if (isPlaceholderToken(token)) {
-          const error = new Error("A valid OpenCode Go token is required.");
-          error.code = "invalid_opencode_go_token";
-          throw error;
+      for (const profile of credentialProfiles()) {
+        if (!body[profile.settingsField]) continue;
+        const token = String(body[profile.settingsField]).trim();
+        providers.push(profile.id);
+        const checked = validateProviderToken(profile.id, token);
+        if (!checked.ok || isPlaceholderToken(token)) {
+          throw Object.assign(
+            new Error(checked.ok ? profile.settingsInvalidMessage : checked.error),
+            { code: profile.settingsErrorCode },
+          );
         }
-        updates.OPENCODE_GO_TOKEN = token;
-      }
-      if (body.deepseekApiKey) {
-        const token = String(body.deepseekApiKey).trim();
-        providers.push("deepseek-official");
-        const checked = validateProviderToken("deepseek-official", token);
-        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_deepseek_api_key" });
-        if (isPlaceholderToken(token)) {
-          const error = new Error("A valid DeepSeek API key is required.");
-          error.code = "invalid_deepseek_api_key";
-          throw error;
-        }
-        updates.DEEPSEEK_API_KEY = checked.value;
-      }
-      if (body.commandcodeApiKey) {
-        const token = String(body.commandcodeApiKey).trim();
-        providers.push("commandcode");
-        const checked = validateProviderToken("commandcode", token);
-        if (!checked.ok) throw Object.assign(new Error(checked.error), { code: "invalid_commandcode_api_key" });
-        if (isPlaceholderToken(token)) {
-          const error = new Error("A valid Command Code API key is required.");
-          error.code = "invalid_commandcode_api_key";
-          throw error;
-        }
-        updates.COMMANDCODE_API_KEY = checked.value;
+        updates[profile.tokenEnvName] = checked.value;
       }
       if (body.exaApiKey) {
         const checked = validateProviderToken("exa", body.exaApiKey);
@@ -1580,14 +1609,14 @@ export function createApp(services = createServices()) {
       }
       if (Object.keys(updates).length) {
         writeEnvFile(updates, config.envFile);
-        config.tokens["opencode-go"] = updates.OPENCODE_GO_TOKEN || config.tokens["opencode-go"];
+        for (const profile of credentialProfiles()) {
+          if (updates[profile.tokenEnvName]) config.tokens[profile.id] = updates[profile.tokenEnvName];
+        }
         if (updates.OPENCODE_GO_TOKEN) {
           // The per-provider map is the single token source; only the audit
           // "where did it come from" hint needs updating in-session.
           config.goTokenSource = "configured";
         }
-        config.tokens["deepseek-official"] = updates.DEEPSEEK_API_KEY || config.tokens["deepseek-official"];
-        if (updates.COMMANDCODE_API_KEY) config.tokens.commandcode = updates.COMMANDCODE_API_KEY;
         if (updates.EXA_API_KEY) config.exaApiKey = updates.EXA_API_KEY;
         // Directory discovery is only GET /models and stays out of the
         // settings critical path. Auth, quota, and model-protocol failures are
@@ -1612,7 +1641,7 @@ export function createApp(services = createServices()) {
 
   // Dashboard "Custom model" flow: list the models a user endpoint advertises,
   // then Add runs a Responses probe before persisting the provider.
-  app.post("/api/custom/list-models", mutateConfig, async (req, res) => {
+  app.post("/api/custom/list-models", localPostGuard, async (req, res) => {
     const { baseUrl, apiKey } = req.body || {};
     try {
       const result = await listEndpointModels({ baseUrl, apiKey });
@@ -1632,19 +1661,14 @@ export function createApp(services = createServices()) {
   // routing tables all move together instead of drifting until a restart.
   const republishEndpoints = () => {
     config.customEndpoints = readCustomEndpoints(endpointsFile());
-    // The first entry mirrors into the single-value fields the settings
-    // payload and the legacy readers still use, so a change to the list is
-    // visible everywhere at once rather than after a restart.
+    // The first key still drives the provider-level readiness bit. Endpoint
+    // identity, address, capability, and routing remain owned by the list.
     const first = config.customEndpoints[0] || null;
-    config.customBaseUrl = first?.baseUrl || "";
-    config.customModel = first?.modelId || "";
-    config.customApiKey = first?.apiKey || "";
-    config.customContextWindow = first?.contextWindow || 0;
-    config.customVision = Boolean(first?.supportsVision);
     config.tokens = { ...(config.tokens || {}) };
     if (first?.apiKey) config.tokens.custom = first.apiKey;
     else delete config.tokens.custom;
     applyCustomProfile(config);
+    reconcileModelSelection(services);
     services.writeCatalogFile?.();
     return config.customEndpoints;
   };
@@ -1750,18 +1774,6 @@ export function createApp(services = createServices()) {
     }
     writeCustomEndpoints(endpointsFile(), next);
     republishEndpoints();
-    // A selection cannot outlive the endpoint that served it. Vision is a
-    // stored preference, so it has to be let go of explicitly; the main model
-    // records what Codex routed with and corrects itself on the next request.
-    // Published under its own provider, so the selection it may have filled
-    // carries that provider and not a hard-coded "custom".
-    const gone = before.find((entry) => entry.modelId === model
-      && (!providerId || (entry.providerId || "custom") === providerId));
-    const qualified = `${model}${PROVIDER_SEPARATOR}${gone?.providerId || "custom"}`;
-    if (config.visionModel === qualified) {
-      config.visionModel = "";
-      services.modelSelection.visionModel = "";
-    }
     // The model stays in the picker and no longer resolves; a restart drops it.
     await services.configSwitcher.markRestartRequired();
     recordConfigAction(metrics, "custom_endpoint_remove", { ok: true });
@@ -1909,15 +1921,13 @@ export function createApp(services = createServices()) {
     // skipped the native GPT models, which are appended to the set rather than
     // living in a profile - so the page was missing the models with the most
     // traffic on a signed-in machine.
-    const providerLabels = new Map(providerOptions(config).map((entry) => [entry.id, entry.label]));
-    providerLabels.set(NATIVE_PROVIDER.id, NATIVE_PROVIDER.label);
     const models = modelOptions(config, config.profileId)
       .filter((entry) => !entry.status || entry.status === "available")
       .map((entry) => ({
         id: entry.id,
         model: bareModelId(entry.id),
         provider: entry.provider,
-        providerLabel: providerLabels.get(entry.provider) || entry.provider,
+        providerLabel: providerLabelFor(entry.provider),
         label: entry.label || entry.id,
         supportsVision: Boolean(entry.supportsVision),
         visionTier: entry.visionTier || "",
@@ -2045,6 +2055,7 @@ export function createApp(services = createServices()) {
       }
       const runtimeStatus = await services.localHostRuntime?.status?.() || services.localHostRuntime?.snapshot?.() || null;
       return res.json({
+        engineDefinitions: localEngineDefinitions(),
         // The manage form's suggested SSD KV directory and budget.
         // Server-computed so the default directory is one this install already
         // owns (state dir, correct permissions, removed with the install) on
@@ -2152,19 +2163,19 @@ export function createApp(services = createServices()) {
             : null;
           const friendly = facts?.modelName || "";
           const slug = facts?.modelSlug || "";
-          return {
-            id: slug || model.id,
+          return projectLocalModel({
+            id: model.id,
+            label: model.label || model.id,
+          }, {
+            modelFacts: friendly && slug ? { modelName: friendly, modelSlug: slug } : null,
             upstreamId: model.id,
-            label: friendly || model.label || model.id,
             supportsVision,
-            ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
-              ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
-              : {}),
-            ...(engine === "llamacpp" && typeof discovered?.mediaMarker === "string"
-              ? { mediaMarker: discovered.mediaMarker }
-              : {}),
+            chatTemplateSupportsObjectArguments: engine === "llamacpp"
+              ? discovered?.chatTemplateSupportsObjectArguments
+              : undefined,
+            mediaMarker: engine === "llamacpp" ? discovered?.mediaMarker : undefined,
             contextWindow: model.contextWindow,
-          };
+          });
         }),
       };
       writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
@@ -2184,7 +2195,7 @@ export function createApp(services = createServices()) {
   // The browser cannot reveal an absolute path from an <input type=file>, but
   // llama.cpp must receive one in argv. This endpoint exposes only fixed
   // native-dialog kinds; it never executes a caller-provided command or path.
-  app.post("/api/local/pick", mutateConfig, async (req, res) => {
+  app.post("/api/local/pick", localPostGuard, async (req, res) => {
     try {
       const selected = await (services.pickLocalHostPath || pickLocalHostPath)(req.body?.kind);
       return res.json({ path: selected });
@@ -2204,7 +2215,7 @@ export function createApp(services = createServices()) {
   // and restarts a process, and the runtime's beginTransition() answers a
   // concurrent attempt with an error - but a double-click deserves "wait your
   // turn", not a 502.
-  app.post("/api/local/manage", mutateConfig, (req, res) => queueConfigMutation(async () => {
+  app.post("/api/local/manage", mutateConfig, async (req, res) => {
     const { engine, cacheDirectory, cacheBudgetGiB } = req.body || {};
     try {
       if (engine !== "llamacpp") throw new LocalEngineError("engine", "Managed host control currently supports NVIDIA llama.cpp only.");
@@ -2232,8 +2243,7 @@ export function createApp(services = createServices()) {
       if (!snapshot?.baseUrl) {
         throw new LocalEngineError("not_connected", "Connect this llama.cpp server to the gateway before taking over host control.");
       }
-      const live = await (services.discoverEngines || discoverLocalEngines)({});
-      const running = live.find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, snapshot.baseUrl));
+      const running = await discoveredLocalEngine(services, "llamacpp", snapshot.baseUrl);
       if (!running) throw new LocalEngineError("not_found", "The connected llama.cpp server is not answering. Start it, then take over host control.");
       const launch = launchSpecFrom(running);
       if (!launch) {
@@ -2318,14 +2328,7 @@ export function createApp(services = createServices()) {
         },
       });
       const releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      const operations = (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
-        hostId: id,
-        endpoint: snapshot.baseUrl,
-        registryFile: services.localHostRegistryFile,
-        discover: () => (services.discoverEngines || discoverLocalEngines)({}),
-        runtime: services.localHostRuntime,
-        logDir: services.engineLogDir || stateFile("engine-logs"),
-      });
+      const operations = managedLifecycleOperations(services, takenOver);
       // Slot shape alone is not enough. llama.cpp creates some CUDA graph and
       // workspace allocations only at the final context size, so a target must
       // also leave one real GiB free on every participating card after it is
@@ -2466,8 +2469,7 @@ export function createApp(services = createServices()) {
           await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(latest, updated));
           result = { ...result, record: updated };
         }
-        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, snapshot.baseUrl));
+        const current = await discoveredLocalEngine(services, "llamacpp", snapshot.baseUrl);
         await publishManagedLocalEngine(services, result.record, current);
         const ok = result.outcome === "applied";
         const restored = result.outcome === "recovered";
@@ -2512,13 +2514,13 @@ export function createApp(services = createServices()) {
       const status = error instanceof LocalEngineError ? 400 : 502;
       return res.status(status).json({ error: { type: error.code || "local_manage_failed", message: error.message } });
     }
-  }));
+  });
 
   // Releasing management returns process ownership as well as metadata: restore
   // the immutable pre-takeover argv first, verify it, then revoke authority.
   // SSD files are retained because deleting a user-selected directory would be
   // a separate destructive action.
-  app.post("/api/local/unmanage", mutateConfig, (req, res) => queueConfigMutation(async () => {
+  app.post("/api/local/unmanage", mutateConfig, async (req, res) => {
     const id = String(req.body?.hostId || "").trim();
     if (!id) return res.status(400).json({ error: { type: "host", message: "A managed local host id is required." } });
     try {
@@ -2588,7 +2590,7 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, "local_unmanage", { ok: false, error: error.message });
       return res.status(502).json({ error: { type: "local_unmanage_failed", message: error.message } });
     }
-  }));
+  });
 
   // Explicit destructive reclaim of the SSD KV checkpoints. unmanage retains
   // them on purpose (deleting a user-chosen directory is its own decision);
@@ -2668,8 +2670,7 @@ export function createApp(services = createServices()) {
     // fails to bind, and the only place that failure appears is the log below.
     // Checking here costs one probe and turns a confusing "start" into a plain
     // "it is already running".
-    const alreadyUp = (await (services.discoverEngines || discoverLocalEngines)({}))
-      .some((found) => found.engine === engine);
+    const alreadyUp = Boolean(await discoveredLocalEngine(services, engine));
     if (alreadyUp) {
       recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: "already running" });
       return res.status(409).json({
@@ -2679,20 +2680,12 @@ export function createApp(services = createServices()) {
     if (managed?.activeSpec) {
       const releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
       try {
-        const operations = (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
-          hostId: managed.id,
-          endpoint: managed.endpoint,
-          registryFile: services.localHostRegistryFile,
-          discover: () => (services.discoverEngines || discoverLocalEngines)({}),
-          runtime: services.localHostRuntime,
-          logDir: services.engineLogDir || stateFile("engine-logs"),
-        });
+        const operations = managedLifecycleOperations(services, managed);
         const result = await applyLocalHostPlan(managed, {
           desiredSpec: managed.activeSpec,
           desiredProfile: managed.activeProfile,
         }, operations);
-        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, managed.endpoint));
+        const current = await discoveredLocalEngine(services, "llamacpp", managed.endpoint);
         await publishManagedLocalEngine(services, result.record, current);
         await services.localHostRuntime?.refresh?.(result.record);
         const ok = result.outcome === "applied";
@@ -2754,6 +2747,7 @@ export function createApp(services = createServices()) {
     }
     clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
     applyLocalEngineProfile(engine, null);
+    reconcileModelSelection(services);
     services.writeCatalogFile?.();
     recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
     return res.json({ engine, models: [], settings: settingsPayload(services) });
@@ -2770,6 +2764,7 @@ export function createApp(services = createServices()) {
     config.tokens = { ...(config.tokens || {}) };
     if (auth?.accessToken) config.tokens.xai = auth.accessToken;
     else delete config.tokens.xai;
+    reconcileModelSelection(services);
     services.writeCatalogFile?.();
     // The cached subscription list makes the picker correct immediately. A
     // background directory read then picks up later xAI additions without ever
@@ -2936,19 +2931,7 @@ export function createApp(services = createServices()) {
       clearOllamaSnapshot(services.ollamaSnapshotFile);
       applyOllamaProfile(config, null);
       config.ollamaBaseUrl = OLLAMA_DEFAULT_BASE;
-      // A disconnected provider cannot serve its models: clear main/vision when
-      // they pointed at an Ollama model.
-      const updates = {};
-      if (providerForModel(config, config.mainModel) === "ollama") {
-        config.mainModel = "deepseek-v4-flash@opencode-go";
-        services.modelSelection.mainModel = config.mainModel;
-      }
-      if (providerForModel(config, config.visionModel) === "ollama") {
-        updates.MODELDOCK_VISION_MODEL = "";
-        config.visionModel = "";
-        services.modelSelection.visionModel = "";
-      }
-      if (Object.keys(updates).length) writeEnvFile(updates, config.envFile);
+      reconcileModelSelection(services);
       services.writeCatalogFile?.();
       recordConfigAction(metrics, "ollama_disconnect", { ok: true });
       return res.json({ ok: true, connected: false, settings: settingsPayload(services) });
@@ -3131,17 +3114,14 @@ export async function reconcileLocalHostsOnBoot(services) {
         // Capability discovery is auxiliary to the cache/runtime recovery.
         // A just-restarted llama.cpp can answer Chat before its probe does, so
         // only publish live capability details when the probe is available.
-        void (async () => {
-          try {
-            const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-              .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
-            if (current && await publishManagedLocalEngine(services, record, current)) {
-              console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
-            }
-          } catch (error) {
-            console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
+        try {
+          const current = await discoveredLocalEngine(services, "llamacpp", record.endpoint);
+          if (current && await publishManagedLocalEngine(services, record, current)) {
+            console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
           }
-        })();
+        } catch (error) {
+          console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
+        }
       } catch (error) {
         console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
       }
@@ -3151,17 +3131,9 @@ export async function reconcileLocalHostsOnBoot(services) {
     let releaseTransition;
     try {
       releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      const operations = (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
-        hostId: record.id,
-        endpoint: record.endpoint,
-        registryFile: services.localHostRegistryFile,
-        discover: () => (services.discoverEngines || discoverLocalEngines)({}),
-        runtime: services.localHostRuntime,
-        logDir: services.engineLogDir || stateFile("engine-logs"),
-      });
+      const operations = managedLifecycleOperations(services, record);
       const result = await reconcileInterruptedLocalHost(record, operations);
-      const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-        .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
+      const current = await discoveredLocalEngine(services, "llamacpp", record.endpoint);
       await publishManagedLocalEngine(services, result.record, current);
       await services.localHostRuntime?.refresh?.(result.record);
       console.log(`[gate] local host ${record.id} boot reconciliation: ${result.outcome}`);

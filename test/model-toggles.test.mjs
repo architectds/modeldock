@@ -71,7 +71,7 @@ function catalogSlugs(config) {
   return codexModelCatalog({
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: OPENCODE_GO_PROFILE.id,
-    goToken: "test-token",
+    tokens: { "opencode-go": "test-token" },
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
     refreshNativeCatalog: false,
@@ -110,8 +110,7 @@ async function startApp() {
     port: 0,
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: OPENCODE_GO_PROFILE.id,
-    goBaseUrl: "https://go.example.com/v1",
-    goToken: "test-token",
+    opencodeBaseUrl: "https://go.example.com/v1",
     tokens: { "opencode-go": "test-token" },
     mainModel: "deepseek-v4-flash@opencode-go",
     visionModel: "gpt-5.6-luna@opencode-go",

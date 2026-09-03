@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { upstreamTargetFor, isLocalBackend } from "../src/gateway.mjs";
@@ -31,8 +31,7 @@ async function startApp(t) {
     port: 0,
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: "opencode-go",
-    goBaseUrl: "https://go.example.com/v1",
-    goToken: "test-token",
+    opencodeBaseUrl: "https://go.example.com/v1",
     tokens: { "opencode-go": "test-token" },
     mainModel: "deepseek-v4-flash",
     visionModel: "",
@@ -48,6 +47,7 @@ async function startApp(t) {
     autostartDefault: false,
     codexHome,
     customEndpoints: [],
+    envFile: path.join(dir, ".env"),
     codexCatalogFile: path.join(dir, "catalog.json"),
     nativeCatalogFile: path.join(dir, "native.json"),
     summariesFile: path.join(dir, "summaries.json"),
@@ -166,4 +166,6 @@ test("removing an endpoint releases a vision selection that pointed at it", asyn
   await post(app.base, "/api/custom/remove", { modelId: "seeing" });
   assert.equal(live.visionModel, "", "a selection must not outlive the endpoint that served it");
   assert.equal(app.services.modelSelection.visionModel, "");
+  assert.match(await readFile(live.envFile, "utf8"), /^MODELDOCK_VISION_MODEL=none$/m,
+    "disconnect persists the reconciled selection instead of restoring a default on restart");
 });

@@ -12,12 +12,7 @@ import {
   createLocalHostResidency,
   leaseLocalHostResidency,
 } from "./local-host-residency.mjs";
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
+import { requiredText as text } from "./local-host-validation.mjs";
 
 function noOp() {}
 

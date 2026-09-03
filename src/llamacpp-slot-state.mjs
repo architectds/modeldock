@@ -1,11 +1,7 @@
 // The narrow llama.cpp slot-state wire. Keeping it separate from the manifest
 // means the scheduler never guesses an endpoint, filename, or response shape.
 
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
+import { requiredText as text } from "./local-host-validation.mjs";
 
 function slotId(value) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("A llama.cpp slot id must be a non-negative integer.");

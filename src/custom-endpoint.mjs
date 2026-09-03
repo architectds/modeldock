@@ -23,10 +23,9 @@ export function normalizeBaseUrl(raw) {
   return /\/v1$/i.test(value) ? value : `${value}/v1`;
 }
 
-// Only https and loopback http are acceptable: the gate is a local service and a
-// custom endpoint must never point it at an arbitrary LAN or internet target.
-export function validateBaseUrl(raw) {
-  const url = normalizeBaseUrl(raw);
+function validateEndpoint(raw, { appendV1 = false } = {}) {
+  const value = String(raw || "").trim().replace(/\/+$/, "");
+  const url = appendV1 ? normalizeBaseUrl(value) : (/^https?:\/\//i.test(value) ? value : "");
   if (!url) throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
   let parsed;
   try {
@@ -41,26 +40,18 @@ export function validateBaseUrl(raw) {
   return url;
 }
 
+// Only https and loopback http are acceptable: the gate is a local service and a
+// custom endpoint must never point it at an arbitrary LAN or internet target.
+export function validateBaseUrl(raw) {
+  return validateEndpoint(raw, { appendV1: true });
+}
+
 // Scheme/host validation without the /v1 completion. The models endpoint lives
 // directly under the base URL the user entered (OpenRouter/DeepSeek keep
 // /v1/models at the v1 level), so the list call must not rewrite the path; the
 // Responses probe below still completes /v1 before appending /responses.
 function validateEndpointBase(raw) {
-  const value = String(raw || "").trim().replace(/\/+$/, "");
-  if (!/^https?:\/\//i.test(value)) {
-    throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
-  }
-  let parsed;
-  try {
-    parsed = new URL(value);
-  } catch {
-    throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
-  }
-  const loopback = isLoopbackHost(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
-    throw new CustomEndpointError("connect", "Only https and loopback http endpoints are allowed.");
-  }
-  return value;
+  return validateEndpoint(raw);
 }
 
 function connectError(url, error) {

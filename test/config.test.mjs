@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { loadConfig, hasChatGptLogin, tokenFromCodexToml, encodePersistedModelRef, decodePersistedModelRef } from "../src/config.mjs";
+import { credentialProfiles } from "../src/profiles.mjs";
 
 test("reads an OpenCode bearer token only from a supported provider section", () => {
   const source = `
@@ -24,6 +25,24 @@ test("does not treat an unrelated provider token as OpenCode Go", () => {
   assert.equal(tokenFromCodexToml('[model_providers.openai]\nexperimental_bearer_token = "secret"\n'), "");
 });
 
+test("loadConfig reads every direct provider credential from the provider registry", () => {
+  const profiles = credentialProfiles();
+  const previous = new Map(profiles.map((profile) => [profile.tokenEnvName, process.env[profile.tokenEnvName]]));
+  try {
+    for (const profile of profiles) process.env[profile.tokenEnvName] = `registry-token-${profile.id}`;
+    const config = loadConfig();
+    for (const profile of profiles) {
+      assert.equal(config.tokens[profile.id], `registry-token-${profile.id}`,
+        `${profile.id} must not require a second loader branch`);
+    }
+  } finally {
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
 test("canonicalizes loopback host spellings the SDK's Host guard would not recognize", () => {
   // createMcpExpressApp enables DNS-rebinding Host validation only for the
   // exact spellings "127.0.0.1" | "localhost" | "::1". isLoopbackHost also
@@ -40,6 +59,24 @@ test("canonicalizes loopback host spellings the SDK's Host guard would not recog
   } finally {
     if (previous === undefined) delete process.env.MODELDOCK_HOST;
     else process.env.MODELDOCK_HOST = previous;
+  }
+});
+
+test("an unknown configured provider never borrows the OpenCode Go profile", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-provider-"));
+  const keys = ["MODELDOCK_CODEX_HOME", "MODELDOCK_ENV_FILE", "MODELDOCK_PROFILE"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    process.env.MODELDOCK_CODEX_HOME = home;
+    process.env.MODELDOCK_ENV_FILE = path.join(home, "isolated.env");
+    process.env.MODELDOCK_PROFILE = "removed-provider";
+    assert.throws(() => loadConfig(), /Unknown MODELDOCK_PROFILE: removed-provider/);
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

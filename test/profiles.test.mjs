@@ -5,6 +5,8 @@ import {
   DEEPSEEK_OFFICIAL_PROFILE,
   OLLAMA_PROFILE,
   publishedSlugFor,
+  modelEntryFor,
+  providerForModel,
   profileById,
   profileOptions,
   applyCustomProfile,
@@ -35,7 +37,19 @@ test("exposes every registered profile through the registry", () => {
   assert.equal(profileById("opencode-go"), OPENCODE_GO_PROFILE);
   assert.equal(profileById("deepseek-official"), DEEPSEEK_OFFICIAL_PROFILE);
   assert.equal(profileById("ollama"), OLLAMA_PROFILE);
-  assert.equal(profileById("unknown-profile"), OPENCODE_GO_PROFILE, "unknown ids fall back to opencode-go");
+  assert.equal(profileById("unknown-profile"), null, "unknown ids never borrow another provider");
+});
+
+test("model metadata and routing never resolve a bare id through different providers", () => {
+  const unregistered = {
+    profileId: "shadow-provider",
+    profile: { id: "shadow-provider", availableModels: [{ id: "shadow-model", supportsVision: true }] },
+  };
+  assert.equal(providerForModel(unregistered, "shadow-model"), "opencode-go");
+  assert.equal(modelEntryFor(unregistered, "shadow-model"), null,
+    "an unregistered active profile cannot lend metadata to the default route");
+  assert.equal(modelEntryFor(unregistered, "shadow-model@shadow-provider"), null,
+    "an unknown qualified owner cannot lend metadata either");
 });
 
 test("provider discovery publishes only transports the gateway implements", () => {

@@ -20,7 +20,7 @@ const NEW_TASK_RE = /Message Type:\s*NEW_TASK\b[\s\S]*?Payload:\s*\n?([\s\S]+)/i
 // Same Fernet-shaped gate as gateway.mjs: whitespace-free gAAAA... tokens stay
 // opaque. Codex's collaboration channel puts the spawn `message` in a sibling
 // encrypted_content part that is actually plaintext.
-function isOpaqueEncryptedContent(value) {
+export function isOpaqueEncryptedContent(value) {
   return typeof value === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(value);
 }
 

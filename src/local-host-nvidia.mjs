@@ -7,10 +7,7 @@
 
 import path from "node:path";
 import { KV_ELEMENT_BYTES } from "./gguf.mjs";
-import {
-  LOCAL_HOST_MIN_HEADROOM_BYTES,
-  selectLocalHostLaneProfile,
-} from "./local-host-profile.mjs";
+import { LOCAL_HOST_MIN_HEADROOM_BYTES } from "./local-host-profile.mjs";
 
 const GiB = 1024 ** 3;
 
@@ -132,25 +129,17 @@ function sampleGpuById(sample, allocation) {
   return found;
 }
 
-function sampleUsedBytes(sample, allocation) {
-  return Number(sampleGpuById(sample, allocation).usedBytes);
-}
-
-function sampleFreeBytes(sample, allocation) {
+export function sampleGpuMetrics(sample, allocation) {
   const gpu = sampleGpuById(sample, allocation);
-  const reported = Number(gpu?.freeBytes);
-  if (Number.isSafeInteger(reported) && reported >= 0) return reported;
-  return Math.max(0, Number(gpu.totalBytes || allocation.totalBytes) - Number(gpu.usedBytes));
-}
-
-function sampleCapacityBytes(sample, allocation) {
-  const gpu = sampleGpuById(sample, allocation);
+  const usedBytes = Number(gpu.usedBytes);
   const free = Number(gpu?.freeBytes);
-  const used = Number(gpu?.usedBytes);
-  if (Number.isSafeInteger(free) && free >= 0 && Number.isSafeInteger(used) && used >= 0) {
-    return free + used;
-  }
-  return allocation.totalBytes;
+  const freeBytes = Number.isSafeInteger(free) && free >= 0
+    ? free
+    : Math.max(0, Number(gpu.totalBytes || allocation.totalBytes) - usedBytes);
+  const capacityBytes = Number.isSafeInteger(free) && free >= 0
+    ? freeBytes + usedBytes
+    : allocation.totalBytes;
+  return { gpu, usedBytes, freeBytes, capacityBytes };
 }
 
 function roundContext(contextTokens, target) {
@@ -206,8 +195,8 @@ export function createCalibratedNvidiaProfileInput({
   }
   const contextTokens = positiveInteger(calibrationContextTokens, "The calibration context");
   const gpus = target.gpus.map((allocation) => {
-    const baselineUsedBytes = sampleUsedBytes(baselineSample, allocation);
-    const calibrationUsedBytes = sampleUsedBytes(calibrationSample, allocation);
+    const baselineUsedBytes = sampleGpuMetrics(baselineSample, allocation).usedBytes;
+    const calibrationUsedBytes = sampleGpuMetrics(calibrationSample, allocation).usedBytes;
     const kvBytesPerToken = allocation.kvBytesPerToken;
     const expectedWithoutRuntime = baselineUsedBytes
       + allocation.weightBytes
@@ -259,9 +248,13 @@ export function estimateNvidiaRuntimeCapacity({
   if (slopeContext <= bootstrap) throw new TypeError("The slope calibration context must exceed the bootstrap context.");
   const headroom = positiveInteger(headroomBytes, "The GPU headroom");
   const perGpu = target.gpus.map((allocation) => {
-    const bootstrapFreeBytes = sampleFreeBytes(bootstrapSample, allocation);
-    const slopeFreeBytes = sampleFreeBytes(slopeSample, allocation);
-    const capacityBytes = sampleCapacityBytes(bootstrapSample, allocation);
+    const bootstrapMetrics = sampleGpuMetrics(bootstrapSample, allocation);
+    const slopeMetrics = sampleGpuMetrics(slopeSample, allocation);
+    const { bootstrapFreeBytes, slopeFreeBytes, capacityBytes } = {
+      bootstrapFreeBytes: bootstrapMetrics.freeBytes,
+      slopeFreeBytes: slopeMetrics.freeBytes,
+      capacityBytes: bootstrapMetrics.capacityBytes,
+    };
     const observedSlope = Math.ceil((bootstrapFreeBytes - slopeFreeBytes) / (slopeContext - bootstrap));
     // A desktop can become quieter during a measurement. Never let that make
     // the model appear cheaper than its GGUF-derived Q4 KV lower bound.
@@ -286,8 +279,9 @@ export function estimateNvidiaRuntimeCapacity({
   const estimateForLanes = (lanes) => {
     const sample = lanes === 1 ? bootstrapSample : parallelSamples[lanes];
     if (!sample) return null;
-    const nominal = Math.min(...perGpu.map((allocation) => {
-      const freeAtBootstrap = sampleFreeBytes(sample, allocation);
+    const metrics = perGpu.map((allocation) => sampleGpuMetrics(sample, allocation));
+    const nominal = Math.min(...perGpu.map((allocation, index) => {
+      const freeAtBootstrap = metrics[index].freeBytes;
       const available = freeAtBootstrap - headroom;
       const addedPerLane = lanes * allocation.bytesPerToken;
       return bootstrap + Math.floor(Math.max(0, available) / addedPerLane);
@@ -298,7 +292,7 @@ export function estimateNvidiaRuntimeCapacity({
       laneCount: lanes,
       nominalContextTokens,
       safeContextTokens,
-      bootstrapFreeBytes: Object.freeze(perGpu.map((allocation) => sampleFreeBytes(sample, allocation))),
+      bootstrapFreeBytes: Object.freeze(metrics.map((metric) => metric.freeBytes)),
     });
   };
   return Object.freeze({
@@ -359,20 +353,5 @@ export function backoffNvidiaRuntimeProfile(estimate, current) {
   return runtimeProfile(target, current.laneCount, context, `calculated-p${current.laneCount}-c${context}-backoff`, {
     ...runtimeEvidence(estimate, estimate.lanes.find((lane) => lane?.laneCount === current.laneCount), "nearby_backoff"),
     from: current.profileId,
-  });
-}
-
-export function selectNvidiaManagedProfile(options = {}) {
-  const input = createNvidiaProfileInput(options);
-  return selectNvidiaProfileFromInput(input);
-}
-
-export function selectNvidiaProfileFromInput(input) {
-  const profile = selectLocalHostLaneProfile(input);
-  if (!profile.laneCount) throw new TypeError("No managed llama.cpp profile fits the selected NVIDIA cards with the required operating reserve.");
-  return Object.freeze({
-    ...profile,
-    deviceIndices: input.deviceIndices,
-    tensorSplit: input.tensorSplit,
   });
 }

@@ -5,8 +5,8 @@
 // this one is the gateway's notes. Mixing them would mean a hand edit of a
 // preference could disturb the clock the rule runs on, and a reset of the
 // clock could lose a preference.
-import path from "node:path";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 const VERSION = 1;
@@ -41,9 +41,6 @@ export function readLifecycle(file = modelLifecyclePath()) {
 }
 
 export function writeLifecycle(file, lifecycle) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ ...emptyLifecycle(), ...lifecycle, version: VERSION }, null, 2), "utf8");
-  renameSync(tmp, file);
+  atomicWriteJsonSync(file, { ...emptyLifecycle(), ...lifecycle, version: VERSION });
   return file;
 }

@@ -71,10 +71,8 @@ test("a native vision model reaches the ChatGPT backend through the real service
     port: 0,
     profile: { ...OPENCODE_GO_PROFILE },
     profileId: OPENCODE_GO_PROFILE.id,
-    goBaseUrl: "https://go.example.com/v1",
     opencodeBaseUrl: "https://go.example.com/v1",
     deepseekBaseUrl: "https://ds.example.com",
-    goToken: "go-token",
     // The only provider credential configured. If the native leg ever falls back
     // to the routed path this is what it would spend, so its absence from the
     // captured request is the assertion that matters.

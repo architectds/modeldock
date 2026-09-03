@@ -22,10 +22,8 @@ function baseConfig() {
     port: 0,
     profile: TEST_PROFILE,
     profileId: TEST_PROFILE.id,
-    goBaseUrl: "https://go.example.com/v1",
     opencodeBaseUrl: "https://go.example.com/v1",
     deepseekBaseUrl: "https://ds.example.com",
-    goToken: "go-token",
     tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
@@ -47,6 +45,7 @@ async function startApp(configOverrides = {}) {
   const config = { ...baseConfig(), ...configOverrides };
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-gateway-test-"));
   config.summariesFile = path.join(dir, "summaries.json");
+  config.envFile = path.join(dir, ".env");
   config.codexCatalogFile = path.join(dir, "codex-model-catalog.json");
   config.nativeCatalogFile = path.join(dir, "native-catalog.json");
   config.usageEventsFile = path.join(dir, "usage-events.jsonl");
@@ -110,7 +109,7 @@ test("gateway: image turns escalate to the vision model; an explicit client mode
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   const imageTurn = await fetch(`${instance.base}/v1/responses`, {
@@ -200,7 +199,7 @@ test("gateway: SSE bytes pass through verbatim and usage reaches the meter", asy
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   const response = await fetch(`${instance.base}/v1/responses`, {
@@ -233,7 +232,7 @@ test("gateway: hosted tool schemas are stripped before reaching the upstream", a
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   await fetch(`${instance.base}/v1/responses`, {
@@ -266,7 +265,7 @@ test("gateway: historical images are replaced with refs, current images stay for
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   // Turn 1: image in the current turn -> escalated to the vision model, image bytes kept.
@@ -313,7 +312,7 @@ test("caller-key routes: correct key relays, wrong key and enforced bare path 40
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
   const body = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
   const headers = { "content-type": "application/json" };
@@ -353,7 +352,7 @@ test("caller-key enforcement defaults to on: bare paths 401 without an explicit 
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
   const body = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
   const headers = { "content-type": "application/json" };
@@ -370,7 +369,7 @@ test("caller-key enforcement defaults to on: bare paths 401 without an explicit 
 });
 
 test("mutating /api requires the caller key when enforcement is on", async (t) => {
-  const instance = await startApp({ goToken: null });
+  const instance = await startApp();
   t.after(instance.stop);
   process.env.MODELDOCK_REQUIRE_CALLER_KEY = "1";
   t.after(() => { process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0"; });
@@ -382,7 +381,8 @@ test("mutating /api requires the caller key when enforcement is on", async (t) =
     headers: { ...headers, "x-modeldock-key": instance.services.callerKey },
     body: "{}",
   });
-  assert.equal(withKey.status, 200, "the caller key header passes the mutating guard");
+  const withKeyBody = await withKey.clone().text();
+  assert.equal(withKey.status, 200, `the caller key header passes the mutating guard: ${withKeyBody}`);
 });
 
 test("zstd-encoded request bodies are decompressed before the relay", { skip: typeof (await import("node:zlib")).zstdCompressSync !== "function" }, async (t) => {
@@ -395,7 +395,7 @@ test("zstd-encoded request bodies are decompressed before the relay", { skip: ty
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
   const payload = JSON.stringify({ model: "deepseek-v4-flash", stream: true, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] });
   // Codex sends zstd-compressed bodies on some requests (remote compact tasks);
@@ -426,7 +426,7 @@ test("gateway: remote compaction v1/v2 is synthesized for routed models", async 
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   const keyedCompactV1 = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/responses/compact`, {
@@ -494,7 +494,6 @@ test("gateway: nativeMerge=false hides native models from /v1/models but the rel
     models: [{ slug: "gpt-5.6-luna", display_name: "GPT-5.6-Luna", visibility: "list", priority: 3 }],
   }), "utf8");
   const instance = await startApp({
-    goBaseUrl: `http://127.0.0.1:${port}`,
     opencodeBaseUrl: `http://127.0.0.1:${port}`,
     nativeCatalogFile,
     nativeMerge: false,
@@ -534,7 +533,6 @@ test("gateway: a selected zen-free model relays to the zen base", async (t) => {
   const port = await listen(upstream);
   t.after(() => upstream.close());
   const instance = await startApp({
-    goBaseUrl: `http://127.0.0.1:${port}`,
     opencodeBaseUrl: `http://127.0.0.1:${port}`,
     zenBaseUrl: `http://127.0.0.1:${port}/v1`,
     mainModel: "deepseek-v4-flash-free",
@@ -605,7 +603,6 @@ test("gateway: captures zen free 200+empty output as a quota error on both wires
   const port = await listen(upstream);
   t.after(() => upstream.close());
   const instance = await startApp({
-    goBaseUrl: `http://127.0.0.1:${port}`,
     opencodeBaseUrl: `http://127.0.0.1:${port}`,
     zenBaseUrl: `http://127.0.0.1:${port}/v1`,
   });
@@ -672,7 +669,7 @@ test("gateway frames sparse parallel send_message streams over HTTP", async (t) 
   });
   const port = await listen(upstream);
   t.after(() => upstream.close());
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${port}`, opencodeBaseUrl: `http://127.0.0.1:${port}` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
   t.after(instance.stop);
 
   const response = await fetch(`${instance.base}/v1/responses`, {
@@ -787,7 +784,8 @@ test("POST /api/models accepts a native vision model once signed in", async (t) 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ visionModel: "gpt-5.6-luna" }),
   });
-  assert.equal(response.status, 200, "native vision selection must not 400");
+  const responseBody = await response.clone().text();
+  assert.equal(response.status, 200, `native vision selection must not 400: ${responseBody}`);
   const body = await response.json();
   assert.equal(body.selected?.visionModel, "gpt-5.6-luna");
 });

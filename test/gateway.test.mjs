@@ -8,8 +8,10 @@ import { gunzipSync } from "node:zlib";
 import { MediaStore, describeImageUrl } from "../src/media-store.mjs";
 import { CodexAttachmentIndex } from "../src/codex-attachment-index.mjs";
 import { baseInstructionsFor } from "../src/catalog.mjs";
-import { applyLocalEngineProfile } from "../src/profiles.mjs";
+import { applyCustomProfile, applyLocalEngineProfile } from "../src/profiles.mjs";
+import { createDerivedFallback } from "../src/derived-fallback.mjs";
 import { currentTurnStartIndex } from "../src/router.mjs";
+import { isOpaqueEncryptedContent } from "../src/subagent-guidance.mjs";
 import {
   RouteAffinity,
   adaptImageUrlShape,
@@ -65,10 +67,21 @@ function configStub() {
     visionModel: "gpt-5.6-luna",
     opencodeBaseUrl: "https://opencode.ai/zen/go/v1",
     deepseekBaseUrl: "https://api.deepseek.com",
-    goToken: "go-token",
     tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
     profileId: "opencode-go",
   };
+}
+
+function customConfig({ modelId, baseUrl, contextWindow, supportsVision = false, apiKey = "local-key" }) {
+  const config = {
+    ...configStub(),
+    profileId: "custom",
+    mainModel: `${modelId}@custom`,
+    customEndpoints: [{ modelId, baseUrl, contextWindow, supportsVision, apiKey }],
+    tokens: { ...configStub().tokens, ...(apiKey ? { custom: apiKey } : {}) },
+  };
+  config.profile = applyCustomProfile(config);
+  return config;
 }
 
 test("sessionIdsFrom extracts Codex ids with stable header precedence", () => {
@@ -1157,13 +1170,11 @@ test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () =
 
 test("isLocalBackend identifies loopback custom/ollama backends only", () => {
   const base = configStub();
-  const customCfg = (baseUrl, ctx) => ({
-    ...base,
-    profileId: "custom",
-    tokens: { ...base.tokens, custom: "k" },
-    customBaseUrl: baseUrl,
-    customModel: "qwen3.8:27b",
-    profile: { id: "custom", availableModels: [{ id: "qwen3.8:27b", contextWindow: ctx }] },
+  const customCfg = (baseUrl, contextWindow) => customConfig({
+    modelId: "qwen3.8:27b",
+    baseUrl,
+    contextWindow,
+    apiKey: "k",
   });
   assert.equal(
     isLocalBackend(customCfg("http://127.0.0.1:11435/v1", 80_000), "qwen3.8:27b@custom"),
@@ -1286,14 +1297,11 @@ test("relayResponses strips dead-weight sections from instructions for an 80K cu
       ...compactServices(),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 81920,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -1333,14 +1341,12 @@ test("relayResponses keeps hyperframes for a 128K custom model", async () => {
       ...compactServices(),
       mainModel: "big-model@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "big-model@custom",
-        customBaseUrl: "https://api.example.com/v1",
-        customModel: "big-model",
-        profile: { availableModels: [{ id: "big-model", contextWindow: 128000 }] },
-        tokens: { ...configStub().tokens, custom: "big-key" },
-      },
+      config: customConfig({
+        modelId: "big-model",
+        baseUrl: "https://api.example.com/v1",
+        contextWindow: 128000,
+        apiKey: "big-key",
+      }),
       knownModels: new Set(["big-model@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -1371,14 +1377,11 @@ test("relayResponses keeps codex_apps office tools for small-context custom mode
       ...compactServices(),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 81920,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -1427,14 +1430,11 @@ test("relayResponses keeps goal tools for small-context custom models", async ()
       ...compactServices(),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 81920,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -1479,14 +1479,11 @@ test("relayResponses keeps speak, hear, and request_user_input for small-context
       ...compactServices(),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 81920,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -1734,6 +1731,11 @@ test("upstreamTargetFor routes by owning provider", () => {
   assert.equal(legacyUnderDeepseekProfile.provider, "opencode-go");
   assert.equal(legacyUnderDeepseekProfile.url, "https://opencode.ai/zen/go/v1/responses");
   assert.equal(legacyUnderDeepseekProfile.token, "go-token");
+
+  const removed = upstreamTargetFor(config, "model@removed-provider");
+  assert.equal(removed.provider, "removed-provider");
+  assert.equal(removed.url, "", "an unknown explicit owner never borrows the default provider endpoint");
+  assert.equal(removed.token, "", "an unknown explicit owner never borrows the default provider credential");
 });
 
 test("upstreamTargetFor routes zen free models to the zen/v1 responses endpoint", () => {
@@ -2379,7 +2381,6 @@ test("relayResponses rejects requests without a configured upstream token", asyn
   const res = responseStub(sink);
   const config = configStub();
   config.tokens = { "opencode-go": "" };
-  config.goToken = "";
   const result = await relayResponses(
     { model: "deepseek-v4-flash", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }] },
     res,
@@ -2473,38 +2474,38 @@ test("normalizeNativeInput strips non-opaque reasoning and expands summaries", (
     { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
   ];
   const out = normalizeNativeInput(input);
-  assert.equal(out[0].encrypted_content, undefined, "non-opaque reasoning blob is stripped");
-  assert.equal(out[0].summary, "kept");
-  assert.equal(out[1].encrypted_content, "gAAAAABopaque_token_without_spaces", "opaque native token passes through");
-  assert.equal(out[2].type, "message");
-  assert.match(out[2].content[0].text, /earlier context/);
-  assert.equal(out[3].encrypted_content, "gAAAAABopaque_fernettoken", "opaque compaction token passes through");
-  assert.equal(out[4], input[4]);
+  assert.equal(out.length, 4, "non-native reasoning is removed rather than replayed as an unpersisted rs_* reference");
+  assert.equal(out[0].encrypted_content, "gAAAAABopaque_token_without_spaces", "opaque native token passes through");
+  assert.equal(out[1].type, "message");
+  assert.match(out[1].content[0].text, /earlier context/);
+  assert.equal(out[2].encrypted_content, "gAAAAABopaque_fernettoken", "opaque compaction token passes through");
+  assert.equal(out[3], input[4]);
 });
 
-test("normalizeNativeInput keeps replayable reasoning content on ordinary native turns", () => {
+test("normalizeNativeInput drops routed reasoning without native continuation state", () => {
   const reasoning = {
     type: "reasoning",
-    id: "reasoning_routed_turn",
+    id: "rs_3bd02046d4075154e2a421b66af0b819b57678b0b2a9a983",
     summary: [],
     content: [{ type: "reasoning_text", text: "Inspect the current state." }],
+    encrypted_content: "",
   };
-  const normalized = normalizeNativeInput([reasoning])[0];
-  assert.deepEqual(normalized.content, reasoning.content);
-  assert.match(normalized.id, /^rs_/, "the native item id is normalized without discarding replayable reasoning");
+  assert.deepEqual(normalizeNativeInput([reasoning]), []);
 });
 
-test("normalizeNativeInput removes routed reasoning content only for native compaction", () => {
+test("normalizeNativeInput keeps opaque native reasoning and removes content only for native compaction", () => {
   const reasoning = {
     type: "reasoning",
-    id: "chatcmpl-routed-reasoning",
+    id: "rs_native_reasoning",
     summary: [],
     content: [{ type: "reasoning_text", text: "Inspect the current state." }],
+    encrypted_content: "gAAAAABnative_reasoning_state",
     internal_chat_message_metadata_passthrough: { source: "routed-chat" },
   };
   const normalized = normalizeNativeInput([reasoning], { compaction: true })[0];
   assert.equal(normalized.content, undefined);
-  assert.match(normalized.id, /^rs_/);
+  assert.equal(normalized.id, reasoning.id);
+  assert.equal(normalized.encrypted_content, reasoning.encrypted_content);
   assert.deepEqual(normalized.internal_chat_message_metadata_passthrough, { source: "routed-chat" });
 });
 
@@ -2627,13 +2628,13 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
       { type: "function", name: "mcp__modeldock__preview_images" },
       { type: "namespace", name: "mcp__modeldock__", tools: [{ name: "hear" }] },
     ], "native keeps its hosted search and complementary ModelDock tools, but not Exa or delegated vision");
-    assert.equal(calls[0].body.input[0].encrypted_content, undefined, "non-opaque reasoning is stripped");
-    assert.equal(calls[0].body.input[1].content[0].text, "hi");
-    assert.deepEqual(calls[0].body.input[2].content[0], {
+    assert.equal(calls[0].body.input.length, 3, "non-native reasoning is not forwarded as an unpersisted item id");
+    assert.equal(calls[0].body.input[0].content[0].text, "hi");
+    assert.deepEqual(calls[0].body.input[1].content[0], {
       type: "input_text",
       text: "Run the probe and report back.",
     }, "malformed encrypted agent content is repaired before the native fetch");
-    assert.deepEqual(calls[0].body.input[3].tools, [{
+    assert.deepEqual(calls[0].body.input[2].tools, [{
       type: "namespace",
       name: "mcp__modeldock__",
       tools: [{ name: "image_gen" }],
@@ -2646,6 +2647,64 @@ test("relayNativeResponses forwards native GPT traffic to the ChatGPT backend", 
     assert.ok(finished.at(-1).upstreamRequestBytes > 0, "native trace records its serialized upstream request");
     assert.equal(transforms.at(-1).report.imageTransfer.received.images, 0);
     assert.equal(usages.at(-1).upstreamBytes, Buffer.byteLength(forwarded));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a native model switch becomes the same session's no-model fallback", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), body: JSON.parse(options.body) });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(Buffer.from('event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_switch","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'));
+          controller.close();
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+  };
+  const sessionId = "session-routed-native-fallback";
+  const services = {
+    config: configStub(),
+    metrics: { begin: () => () => {}, recordResponseTransform: () => {}, recordResponseUsage: () => {} },
+    recordUsage: () => {},
+    mediaStore: null,
+    routeAffinity: new RouteAffinity(),
+    knownModels: new Set(["deepseek-v4-flash@opencode-go"]),
+    nativeSlugs: new Set(["gpt-5.6-luna"]),
+    derivedFallback: createDerivedFallback(),
+    incomingHeaders: {
+      authorization: "Bearer native-session",
+      "x-codex-session-id": sessionId,
+    },
+    requestUrl: "/c/key123/v1/responses",
+  };
+  const send = (model) => relayResponses(
+    {
+      model,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }],
+      tools: [],
+      stream: true,
+    },
+    responseStub(collectStream()),
+    services,
+  );
+  try {
+    await send("deepseek-v4-flash@opencode-go");
+    await send("gpt-5.6-luna");
+    const resumed = await send("");
+    assert.equal(services.derivedFallback.resolve(sessionId, ""), "gpt-5.6-luna");
+    assert.equal(resumed.route.model, "gpt-5.6-luna");
+    assert.deepEqual(calls.map((call) => new URL(call.url).hostname), [
+      "opencode.ai",
+      "chatgpt.com",
+      "chatgpt.com",
+    ]);
+    assert.equal(calls[2].body.model, "gpt-5.6-luna");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3455,14 +3514,11 @@ test("relayCompaction hands the CPU extract straight back for a local backend (n
       ...compactServices(),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 26214 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 26214,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -3497,14 +3553,11 @@ test("local CPU compaction preserves image refs instead of silently dropping vis
     const services = {
       ...compactServices(),
       mainModel: "qwen-vl@custom",
-      config: {
-        ...configStub(),
-        mainModel: "qwen-vl@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen-vl",
-        profile: { availableModels: [{ id: "qwen-vl", supportsVision: true }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen-vl",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        supportsVision: true,
+      }),
       knownModels: new Set(["qwen-vl@custom"]),
       mediaStore: {
         put: (url) => {
@@ -3548,6 +3601,19 @@ test("a local visual model receives its compacted image again on the next turn",
     calls.push(JSON.parse(options.body));
     return summaryResponse("continued visual review");
   };
+  const config = {
+    ...configStub(),
+    mainModel: "qwen-vl@custom",
+    customEndpoints: [{
+      providerId: "custom",
+      modelId: "qwen-vl",
+      baseUrl: "http://127.0.0.1:11435/v1",
+      apiKey: "local-key",
+      supportsVision: true,
+    }],
+    tokens: { ...configStub().tokens, custom: "local-key" },
+  };
+  applyCustomProfile(config);
   try {
     const result = await relayResponses(
       {
@@ -3562,14 +3628,7 @@ test("a local visual model receives its compacted image again on the next turn",
       {
         ...compactServices(),
         mainModel: "qwen-vl@custom",
-        config: {
-          ...configStub(),
-          mainModel: "qwen-vl@custom",
-          customBaseUrl: "http://127.0.0.1:11435/v1",
-          customModel: "qwen-vl",
-          profile: { availableModels: [{ id: "qwen-vl", supportsVision: true }] },
-          tokens: { ...configStub().tokens, custom: "local-key" },
-        },
+        config,
         knownModels: new Set(["qwen-vl@custom"]),
         mediaStore: { get: (ref) => (ref === "img_local_visual" ? { imageUrl: dataUrl } : undefined) },
         requestUrl: "/v1/responses",
@@ -3580,6 +3639,7 @@ test("a local visual model receives its compacted image again on the next turn",
     assert.ok(image, "the visual model receives the attachment that compact_v2 represented by reference");
     assert.equal(image.image_url, dataUrl);
   } finally {
+    applyCustomProfile({ customEndpoints: [] });
     globalThis.fetch = originalFetch;
   }
 });
@@ -3604,14 +3664,12 @@ test("relayCompaction applies local normalization on a large-context custom mode
       ...compactServices(),
       mainModel: "big-model@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "big-model@custom",
-        customBaseUrl: "https://api.example.com/v1",
-        customModel: "big-model",
-        profile: { availableModels: [{ id: "big-model", contextWindow: 128000 }] },
-        tokens: { ...configStub().tokens, custom: "big-key" },
-      },
+      config: customConfig({
+        modelId: "big-model",
+        baseUrl: "https://api.example.com/v1",
+        contextWindow: 128000,
+        apiKey: "big-key",
+      }),
       knownModels: new Set(["big-model@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -3697,14 +3755,11 @@ test("relayCompaction returns the CPU-compressed extract directly for a large lo
       recordUsage: (event) => usageEvents.push(event),
       mainModel: "qwen3.8:27b@custom",
       visionModel: "gpt-5.6-luna",
-      config: {
-        ...configStub(),
-        mainModel: "qwen3.8:27b@custom",
-        customBaseUrl: "http://127.0.0.1:11435/v1",
-        customModel: "qwen3.8:27b",
-        profile: { availableModels: [{ id: "qwen3.8:27b", contextWindow: 81920 }] },
-        tokens: { ...configStub().tokens, custom: "local-key" },
-      },
+      config: customConfig({
+        modelId: "qwen3.8:27b",
+        baseUrl: "http://127.0.0.1:11435/v1",
+        contextWindow: 81920,
+      }),
       knownModels: new Set(["qwen3.8:27b@custom", "deepseek-v4-flash@opencode-go", "gpt-5.6-luna@opencode-go"]),
       requestUrl: "/v1/responses",
     };
@@ -3998,15 +4053,8 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     assert.equal(calls.length, 2, "one routed attempt and one native fallback are made");
     assert.equal(calls[0].body.model, "deepseek-v4-flash");
     assert.equal(calls[1].body.model, "gpt-5.6-luna", "the fallback is native Luna, never Luna or Qwen at OpenCode Go");
-    const nativeReasoning = calls[1].body.input.find((item) => item.type === "reasoning");
-    assert.equal(nativeReasoning.content, undefined, "routed reasoning_text is removed from the native compact request");
-    assert.equal(nativeReasoning.encrypted_content, undefined, "the existing native sanitizer also removes the null routed blob");
-    assert.match(nativeReasoning.id, /^rs_/, "routed reasoning receives a native item id");
-    assert.deepEqual(
-      nativeReasoning.internal_chat_message_metadata_passthrough,
-      { source: "routed-chat" },
-      "reasoning metadata survives the fallback rewrite",
-    );
+    assert.equal(calls[1].body.input.some((item) => item.type === "reasoning"), false,
+      "routed reasoning without opaque native state is removed before the store:false fallback");
     const nativeFunction = calls[1].body.input.find((item) => item.type === "function_call" && item.call_id === "call_compact");
     assert.match(nativeFunction.id, /^fc_/, "Chat function calls receive native item ids while their call ids stay stable");
     assert.ok(calls[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_compact"));
@@ -4041,6 +4089,9 @@ test("a direct native compact accepts the complete captured Voxel Chat history",
   assert.equal(fixture.capture.inputItems, 1659);
   assert.equal(fixture.input[41].type, "function_call");
   assert.match(fixture.input[41].id, /^call_/, "the captured routed history carries the invalid native item id");
+  const foreignReasoningCount = fixture.input.filter((item) => item?.type === "reasoning"
+    && !isOpaqueEncryptedContent(item.encrypted_content)).length;
+  assert.equal(foreignReasoningCount, 432);
 
   const sink = collectStream();
   const calls = [];
@@ -4049,7 +4100,8 @@ test("a direct native compact accepts the complete captured Voxel Chat history",
     const body = JSON.parse(options.body);
     calls.push({ url: String(url), body });
     assert.equal(body.model, "gpt-5.6-terra");
-    assert.equal(body.input.length, fixture.input.length, "the direct native boundary preserves the complete captured history");
+    assert.equal(body.input.length, fixture.input.length - foreignReasoningCount,
+      "the direct native boundary removes only reasoning that store:false cannot retrieve");
     const prefixes = new Map([
       ["message", "msg_"],
       ["reasoning", "rs_"],
@@ -4061,12 +4113,17 @@ test("a direct native compact accepts the complete captured Voxel Chat history",
     for (const [index, item] of body.input.entries()) {
       assert.ok(!Array.isArray(item?.content) || item.type !== "reasoning" || item.content.length === 0,
         `direct native compact input[${index}] retains routed reasoning content`);
+      if (item?.type === "reasoning") {
+        assert.ok(isOpaqueEncryptedContent(item.encrypted_content),
+          `direct native compact input[${index}] keeps an unpersisted reasoning id`);
+      }
       const prefix = prefixes.get(item?.type);
       if (prefix && typeof item.id === "string") {
         assert.ok(item.id.startsWith(prefix), `direct native compact input[${index}] ${item.type} has invalid id ${item.id}`);
       }
     }
-    const repaired = body.input[41];
+    const repaired = body.input.find((item) => item?.type === "function_call"
+      && item.call_id === fixture.input[41].call_id);
     assert.match(repaired.id, /^fc_/, "the exact Voxel failure item is rewritten for native Responses");
     assert.equal(repaired.call_id, fixture.input[41].call_id, "the tool call/output join key is unchanged");
     return new Response(JSON.stringify({
@@ -4110,6 +4167,9 @@ test("captured Voxel Chat history compacts through native and resumes a native t
   assert.equal(fixture.capture.originalFailureIndex, 41);
   assert.equal(fixture.input[41].type, "function_call");
   assert.match(fixture.input[41].id, /^call_/, "the fixture retains the exact invalid Chat item-id dialect");
+  const foreignReasoningCount = fixture.input.filter((item) => item?.type === "reasoning"
+    && !isOpaqueEncryptedContent(item.encrypted_content)).length;
+  assert.equal(foreignReasoningCount, 432);
 
   const compactSink = collectStream();
   const calls = [];
@@ -4135,6 +4195,10 @@ test("captured Voxel Chat history compacts through native and resumes a native t
       for (const [index, item] of body.input.entries()) {
         assert.ok(!Array.isArray(item?.content) || item.type !== "reasoning" || item.content.length === 0,
           `native compact input[${index}] retains routed reasoning content`);
+        if (item?.type === "reasoning") {
+          assert.ok(isOpaqueEncryptedContent(item.encrypted_content),
+            `native compact input[${index}] keeps an unpersisted reasoning id`);
+        }
         const prefix = prefixes.get(item?.type);
         if (prefix && typeof item.id === "string") {
           assert.ok(item.id.startsWith(prefix), `native compact input[${index}] ${item.type} has invalid id ${item.id}`);
@@ -4190,7 +4254,8 @@ test("captured Voxel Chat history compacts through native and resumes a native t
     );
     assert.equal(compactResult.ok, true);
     assert.equal(calls.length, 2, "the routed rejection falls back exactly once");
-    assert.equal(calls[1].body.input.length, fixture.input.length, "normalization removes no captured history items");
+    assert.equal(calls[1].body.input.length, fixture.input.length - foreignReasoningCount,
+      "normalization removes only the captured routed reasoning that native cannot retrieve");
     const compacted = JSON.parse(Buffer.concat(compactSink.chunks).toString("utf8"));
     assert.equal(compacted.output[0].type, "compaction");
 

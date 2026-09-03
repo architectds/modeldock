@@ -2,16 +2,7 @@
 // llama.cpp: callers provide the already-normalized operation, while the
 // scheduler owns only fairness, capacity, and waiting cancellation.
 
-function requiredText(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
-}
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
-  return value;
-}
+import { positiveInteger, requiredText } from "./local-host-validation.mjs";
 
 function conversationKey(principalId, conversationId) {
   return `${principalId.length}:${principalId}${conversationId.length}:${conversationId}`;

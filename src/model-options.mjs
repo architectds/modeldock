@@ -6,10 +6,22 @@
 // one subject - the enabled providers, the models they publish, and the
 // native GPT catalog merge - so they moved here as-is. server.mjs owns HTTP;
 // this module owns the model set.
-import { bareModelId, openCodeTransportForModel, profileById, profileOptions, providerForModel, publishedSlugFor } from "./profiles.mjs";
+import {
+  bareModelId,
+  DEFAULT_PROFILE_ID,
+  enabledProviderOptions,
+  profileById,
+  profileOptions,
+  modelRefParts,
+  providerForModel,
+  providerRouteConfigured,
+  publishedSlugFor,
+  routedModelInventory,
+} from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { catalogFor } from "./catalog.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 
 export const VISION_TIER_LABELS = { strong: "High", medium: "Mid", basic: "Low", poor: "Weak" };
 export const SPEED_SCORES = { fast: 1.0, medium: 0.6, slow: 0.2 };
@@ -49,7 +61,7 @@ export function withTierLabel(model) {
 // excluded because its bare id belongs to the native GPT pipeline, not to us.
 export function legacyBareIds(config) {
   const ids = new Set();
-  const defaultProfile = profileById("opencode-go");
+  const defaultProfile = profileById(DEFAULT_PROFILE_ID);
   for (const model of defaultProfile?.availableModels || []) {
     if (model?.id && !model.ownerQualified && model.status !== "unavailable") ids.add(model.id);
   }
@@ -58,7 +70,8 @@ export function legacyBareIds(config) {
 
 // The slugs this gate can serve: every provider's published catalog plus the
 // legacy bare ids above. Used to decide whether a client-chosen model is one this
-// gate can route (anything else is native GPT traffic). The legacy bare ids keep
+// gate can route. An unknown bare id may be native GPT traffic; an explicit
+// unknown @provider address is a configuration error. The legacy bare ids keep
 // an old thread selection on the routed path (providerForModel sends it to
 // opencode-go) instead of letting isNativeModel misroute it to ChatGPT.
 export function publishedModelIds(config) {
@@ -71,68 +84,49 @@ export function publishedModelIds(config) {
 }
 
 export function modelOptions(config, profileId) {
-  const all = [];
-  for (const entry of enabledProviders(config)) {
-    const profile = profileById(entry.id);
-    for (const model of profile?.availableModels || []) {
-      if (model.status === "unavailable") continue;
-      const id = publishedSlugFor(entry.id, model);
-      if (all.some((existing) => existing.id === id)) continue;
-      all.push({ ...withTierLabel(model), id, provider: entry.id });
-    }
-  }
-  // Config ids may be published slugs or bare legacy ids. Only add an id when
-  // its real owner is enabled and actually catalogs that model; assigning a
-  // stale OpenCode fallback to the active DeepSeek profile would manufacture a
-  // vision route that DeepSeek does not provide.
-  for (const id of [config.mainModel, config.visionModel]) {
-    if (!id) continue;
-    const owner = providerForModel(config, id);
-    if (!enabledProviders(config).some((provider) => provider.id === owner)) continue;
-    const known = profileById(owner)?.availableModels?.find((model) => model.id === bareModelId(id));
-    if (!known || known.status === "unavailable") continue;
-    const resolved = publishedSlugFor(owner, known);
-    if (all.some((existing) => existing.id === resolved)) continue;
-    all.push({ ...withTierLabel(known), id: resolved, provider: owner });
-  }
-  return appendNativeModels(all, config);
+  return modelInventory(config)
+    .filter((entry) => entry.serviceable && entry.selectable)
+    .map(({ serviceable, selectable, ...entry }) => entry);
 }
 
-// One published model set, shared by every picker: the routed profiles plus
-// the native GPT catalog while signed in. Without a sign-in the native backend
-// would 401 on every call, so native models stay out (every picker fails
-// closed). input_modalities carries vision support, so the vision picker's
-// supportsVision filter picks the right native entries.
-export function appendNativeModels(options, config) {
-  if (!hasChatGptLogin(config.codexHome)) return options;
+// One directory owns identity, labels and capabilities. Consumers may project
+// different wire shapes, but they do not rediscover which models exist.
+export function modelInventory(config) {
+  const serviceableProviders = new Set(enabledProviderOptions(config).map((entry) => entry.id));
+  const inventory = [];
+  const seen = new Set();
+  for (const item of routedModelInventory()) {
+      const { id, provider, model } = item;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      inventory.push({
+        ...withTierLabel(model),
+        id,
+        provider,
+        serviceable: serviceableProviders.has(provider),
+        selectable: model.status !== "unavailable",
+      });
+  }
+  const nativeServiceable = config.nativeMerge !== false && hasChatGptLogin(config.codexHome);
   for (const model of readNativeCatalog(config)?.models || []) {
-    if (typeof model?.slug !== "string" || !model.slug) continue;
-    // The same test the Codex catalog applies, in the same spelling: a model
-    // Codex marks "hide" is one it does not offer, and offering it here only
-    // in our own pickers puts a choice in front of people that their own App
-    // will not show them. gpt-5.4, gpt-5.4-mini and codex-auto-review are
-    // hidden today; the review model in particular is internal machinery that
-    // happens to read images, not a vision model anyone was given.
-    if (model.visibility !== "list") continue;
-    if (options.some((entry) => entry.id === model.slug)) continue;
-    options.push({
+    if (typeof model?.slug !== "string" || !model.slug || seen.has(model.slug)) continue;
+    seen.add(model.slug);
+    inventory.push({
       id: model.slug,
       label: model.display_name || model.slug,
-      provider: "openai",
+      provider: NATIVE_PROVIDER_ID,
       native: true,
       supportsVision: Array.isArray(model.input_modalities) && model.input_modalities.includes("image"),
-      // The native catalog states its own window; dropping it here left these
-      // models inheriting our 250,000 fallback while Codex used the real one.
-      // Same override the catalog file honours, so the page and the file
-      // cannot disagree about a number the page lets you edit.
       contextWindow: Number(config.contextOverrides?.[model.slug])
         || Number(model.context_window) || undefined,
       contextSource: config.contextOverrides?.[model.slug]
         ? "user"
         : (Number(model.context_window) > 0 ? "native" : ""),
+      serviceable: nativeServiceable,
+      selectable: model.visibility === "list",
     });
   }
-  return options;
+  return inventory;
 }
 
 export function modelCatalogModels(config, profileId) {
@@ -148,19 +142,7 @@ export function providerOptions(config) {
 // its token from the Codex config backup) are shown in the picker and published in
 // the catalog. A provider with no key cannot serve requests, so it stays hidden.
 export function enabledProviders(config) {
-  const all = profileOptions();
-  const active = config.profileId || "opencode-go";
-  return all.filter((entry) => {
-    if (entry.id === active) return true;
-    // A keyless engine has no credential to check, so "connected" is the only
-    // test that means anything: it publishes once it has models. The routing
-    // property is deliberate: xAI also has no environment variable, but its
-    // OAuth access token is still required on every request.
-    const profile = profileById(entry.id);
-    if (profile?.keyless) return Boolean(profile.availableModels?.length);
-    const token = config.tokens?.[entry.id];
-    return Boolean(token);
-  });
+  return enabledProviderOptions(config);
 }
 
 export function providerModels(providerId) {
@@ -168,10 +150,7 @@ export function providerModels(providerId) {
     .filter((model) => model.status !== "unavailable");
 }
 
-export function providerRouteConfigured(config, providerId) {
-  const profile = profileById(providerId);
-  return Boolean(providerModels(providerId).length && (profile.keyless || config.tokens?.[providerId]));
-}
+export { providerRouteConfigured };
 
 export function anyProviderRouteConfigured(config) {
   return profileOptions().some((provider) => providerRouteConfigured(config, provider.id));
@@ -188,11 +167,28 @@ export function visionOptionsAcrossProviders(config, providerId) {
 }
 
 
-// The provider that owns a published model id, or "" when the catalog cannot
-// place it. Returning a placeholder here instead made every `modelProviderOf(...)
-// || config.profileId` fallback dead code, since the placeholder is truthy.
-export function modelProviderOf(options, modelId) {
-  return options.find((entry) => entry.id === modelId)?.provider || "";
+// Resolve ownership from the same inventory used by the picker and catalog.
+// In particular, a native GPT id is a bare id and must not be reinterpreted
+// through whichever routed profile happens to be active.
+export function modelOwnerOf(config, modelId) {
+  const id = String(modelId || "").trim();
+  if (!id) return "";
+  const exact = modelInventory(config).find((entry) => entry.id === id);
+  if (exact?.provider) return exact.provider;
+  const parts = modelRefParts(id);
+  return parts.qualified ? parts.provider : providerForModel(config, id);
+}
+
+// Convert a legacy bare routed selection only when the shared inventory proves
+// that the default routed provider owns it. Native bare ids remain untouched;
+// this is the narrow persistence repair needed when an older config updates
+// only its other selector.
+export function canonicalModelRefOf(config, modelId) {
+  const id = String(modelId || "").trim();
+  if (!id || modelRefParts(id).qualified) return id;
+  const inventory = modelInventory(config);
+  if (inventory.some((entry) => entry.id === id && entry.native)) return id;
+  return inventory.find((entry) => !entry.native && entry.provider === DEFAULT_PROFILE_ID && bareModelId(entry.id) === id)?.id || id;
 }
 
 
@@ -206,11 +202,5 @@ export function labelForModelId(id) {
     .split(/[-_]/)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-}
-
-// Kept as the historical public helper for callers outside the provider
-// registry. The registry owns the actual OpenCode protocol contract.
-export function modelEndpoint(modelId) {
-  return openCodeTransportForModel(modelId);
 }
 

@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile, profileById } from "../src/profiles.mjs";
-import { dpapiSupported } from "../src/secrets.mjs";
+import { decryptSecret } from "../src/secrets.mjs";
 import {
   ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
   ZSTD_DECODED_HARD_LIMIT_BYTES,
@@ -28,8 +28,8 @@ function baseConfig() {
     port: 0,
     profile: TEST_PROFILE,
     profileId: TEST_PROFILE.id,
-    goBaseUrl: "https://go.example.com/v1",
-    goToken: "test-token",
+    opencodeBaseUrl: "https://go.example.com/v1",
+    tokens: { "opencode-go": "test-token" },
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
     visionFallbackModel: "kimi-k2.5",
@@ -55,7 +55,6 @@ async function listen(server) {
 
 async function startApp(configOverrides = {}) {
   const config = { ...baseConfig(), ...configOverrides };
-  if (configOverrides.goToken === null) delete config.goToken;
   // Temp directories this call created, and only those: a caller that passed
   // its own summariesFile or catalog paths owns them and cleans them itself.
   // stop() removes what is listed here, which every caller registers with
@@ -131,7 +130,7 @@ function sendSse(res, type, data) {
 const okResponse = { id: "resp_1", object: "response", status: "completed", output: [], usage: { input_tokens: 111, output_tokens: 22 } };
 
 test("without token: healthz and responses return 503, local models catalog still works", async (t) => {
-  const instance = await startApp({ goToken: null });
+  const instance = await startApp({ tokens: {} });
   t.after(instance.stop);
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 503);
   const models = await fetch(`${instance.base}/v1/models`);
@@ -301,6 +300,24 @@ test("connecting Ollama publishes local models without changing the selected mai
   assert.equal(after.selected.mainModel, "deepseek-v4-flash", "connect never rewrites the selected main model");
   const ollamaEntry = after.options.find((model) => model.provider === "ollama");
   assert.equal(ollamaEntry.id, "qwen3.8-27b@ollama", "Ollama models publish as owner-qualified candidates");
+
+  const selected = await fetch(`${instance.base}/api/models`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mainModel: ollamaEntry.id }),
+  });
+  assert.equal(selected.status, 200);
+  assert.equal((await selected.json()).selected.mainModel, ollamaEntry.id);
+
+  const disconnected = await fetch(`${instance.base}/api/ollama/disconnect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  assert.equal(disconnected.status, 200);
+  const afterDisconnect = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(afterDisconnect.selected.mainModel, "deepseek-v4-flash@opencode-go",
+    "disconnect derives a serviceable fallback instead of retaining Ollama or hardcoding another provider");
 });
 
 test("switching the main provider keeps a vision model owned by another enabled provider", async (t) => {
@@ -467,6 +484,21 @@ test("api/status returns expected shape", async (t) => {
   assert.equal(body.runtime.migrationRequired, Number(process.versions.node.split(".", 1)[0]) < 24);
 });
 
+test("api/status derives provider, base URL, and wire from one Command Code route", async (t) => {
+  const instance = await startApp({
+    mainModel: "Qwen/Qwen3.8-Flash@commandcode",
+    commandcodeBaseUrl: "https://command.example/provider/v1",
+    tokens: { "opencode-go": "test-token", commandcode: "user_test-token" },
+  });
+  t.after(instance.stop);
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.config.mainProvider, "commandcode");
+  assert.equal(status.config.routeProvider, "commandcode");
+  assert.equal(status.config.mainProviderLabel, "Command Code");
+  assert.equal(status.config.mainUpstreamUrl, "https://command.example/provider/v1");
+  assert.equal(status.config.mainWire, "chat");
+});
+
 test("api/status restores the latest primary model from the durable usage stream", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-latest-model-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -481,6 +513,7 @@ test("api/status restores the latest primary model from the durable usage stream
 
   const status = await (await fetch(`${instance.base}/api/status`)).json();
   assert.equal(status.config.routeModel, "Qwen/Qwen3.8-Flash@commandcode");
+  assert.equal(status.config.routeProvider, "commandcode");
   assert.equal(status.config.routeProviderLabel, "Command Code");
   assert.equal(status.models.selected.mainModel, "deepseek-v4-flash",
     "the latest-model projection does not rewrite the gateway routing fallback");
@@ -739,7 +772,7 @@ test("onboarding endpoint prefills, completes, and persists the flag across mode
   assert.equal(prefill.onboarded, false);
   assert.equal(prefill.nativeMerge, true, "defaults to the subscriber-native merge");
   assert.equal(prefill.mode, "off");
-  assert.deepEqual(prefill.tokenConfigured, { "opencode-go": true, "deepseek-official": false },
+  assert.deepEqual(prefill.tokenConfigured, { "opencode-go": true, "deepseek-official": false, commandcode: false },
     "prefill reports the configured test token");
   assert.equal(typeof prefill.autostart.enabled, "boolean");
 
@@ -773,14 +806,14 @@ test("a just-saved OpenCode token is visible to the wizard's onboarding check in
   t.after(() => rm(dir, { recursive: true, force: true }));
   const envFile = path.join(dir, "modeldock.env");
   const instance = await startApp({
-    goToken: null,
+    tokens: {},
     envFile,
     settingsEventsFile: path.join(dir, "settings-events.jsonl"),
   });
   t.after(instance.stop);
 
   const before = await (await fetch(`${instance.base}/api/onboarding`)).json();
-  assert.deepEqual(before.tokenConfigured, { "opencode-go": false, "deepseek-official": false },
+  assert.deepEqual(before.tokenConfigured, { "opencode-go": false, "deepseek-official": false, commandcode: false },
     "onboarding starts token-less so the wizard blocks apply");
   assert.equal(before.anyTokenConfigured, false);
 
@@ -805,7 +838,7 @@ test("a just-saved OpenCode token is visible to the wizard's onboarding check in
   // The wizard re-polls /api/onboarding when the settings dialog closes; the
   // token must be visible immediately, not only after a gateway restart.
   const after = await (await fetch(`${instance.base}/api/onboarding`)).json();
-  assert.deepEqual(after.tokenConfigured, { "opencode-go": true, "deepseek-official": false },
+  assert.deepEqual(after.tokenConfigured, { "opencode-go": true, "deepseek-official": false, commandcode: false },
     "a just-saved OpenCode token is visible to the wizard's token check");
   assert.equal(after.anyTokenConfigured, true);
 });
@@ -829,7 +862,7 @@ test("DeepSeek-only onboarding selects a working DeepSeek main route with no vis
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const instance = await startApp({
-    goToken: null,
+    tokens: {},
     codexHome: dir,
     envFile,
     deepseekBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
@@ -846,7 +879,7 @@ test("DeepSeek-only onboarding selects a working DeepSeek main route with no vis
   assert.equal((await saved.json()).tokenConfigured, true);
 
   const onboard = await (await fetch(`${instance.base}/api/onboarding`)).json();
-  assert.deepEqual(onboard.tokenConfigured, { "opencode-go": false, "deepseek-official": true });
+  assert.deepEqual(onboard.tokenConfigured, { "opencode-go": false, "deepseek-official": true, commandcode: false });
   assert.equal(onboard.anyTokenConfigured, true,
     "a DeepSeek-only install still unlocks ON mode in the wizard's apply gate");
 
@@ -912,7 +945,7 @@ test("Grok-only onboarding selects a working xAI main and vision route", async (
   await writeFile(path.join(dir, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
 
   const instance = await startApp({
-    goToken: null,
+    tokens: {},
     codexHome: dir,
     envFile: path.join(dir, "modeldock.env"),
     xaiAuthFile: path.join(dir, "xai-auth.json"),
@@ -956,7 +989,7 @@ test("local-only onboarding selects a connected Ollama route without a token", a
   await writeFile(path.join(dir, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
 
   const instance = await startApp({
-    goToken: null,
+    tokens: {},
     codexHome: dir,
     envFile: path.join(dir, "modeldock.env"),
     ollamaSnapshotFile: path.join(dir, "ollama-models.json"),
@@ -1147,7 +1180,7 @@ test("zstd aggregate budget shrinks to parsed-body weight and releases after the
   });
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
   t.after(instance.stop);
   const logical = Buffer.from(JSON.stringify({
     model: "deepseek-v4-flash",
@@ -1193,7 +1226,7 @@ test("zstd aggregate budget fails fast, authenticates first, and recovers after 
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
   const instance = await startApp({
-    goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+    opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
     zstdMemoryBudgetBytes: 70 * 1024 * 1024,
   });
   t.after(instance.stop);
@@ -1301,7 +1334,7 @@ test("zstd Responses requests retain both ingress byte measurements through the 
   });
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
-  const instance = await startApp({ goBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
+  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}/v1` });
   t.after(instance.stop);
 
   const logical = Buffer.from(JSON.stringify({
@@ -1607,14 +1640,11 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     assert.ok(!JSON.stringify(listed).includes("sk-test"), "a key must never leave the machine in a response");
 
     const stored = JSON.parse(await readFile(instance.services.customEndpointsFile, "utf8"));
-    if (dpapiSupported()) {
-      // The key keeps the DPAPI protection it had in .env; moving out of that
-      // file must not mean moving out of encryption.
-      assert.match(stored[0].apiKey, /^dpapi:/);
-      assert.ok(!stored[0].apiKey.includes("sk-test"));
-    } else {
-      assert.equal(stored[0].apiKey, "sk-test");
-    }
+    // Persistence owns the encryption/fallback policy; this flow only proves
+    // that moving the key out of .env preserves a usable secret without
+    // returning it over HTTP. Dedicated secret tests cover DPAPI itself.
+    assert.equal(decryptSecret(stored[0].apiKey), "sk-test");
+    if (stored[0].apiKey.startsWith("dpapi:")) assert.ok(!stored[0].apiKey.includes("sk-test"));
 
     // Published to the catalog under the Custom provider.
     const catalog = await (await fetch(`${instance.base}/v1/models`)).json();
@@ -1699,6 +1729,12 @@ test("settings save persists well-formed direct-provider tokens without an infer
     assert.equal(body.providers[0].tokenConfigured, true);
     assert.equal(body.providers[1].tokenConfigured, true);
     assert.equal(body.providers[2].tokenConfigured, true);
+    const onboarding = await (await fetch(`${instance.base}/api/onboarding`)).json();
+    assert.deepEqual(onboarding.tokenConfigured, {
+      "opencode-go": true,
+      "deepseek-official": true,
+      commandcode: true,
+    }, "onboarding consumes the same credential-provider registry as Settings");
 
     const env = await readFile(envFile, "utf8");
     assert.match(env, /^OPENCODE_GO_TOKEN=/m);

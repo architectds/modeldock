@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
+import { modelOptions, modelOwnerOf } from "../src/model-options.mjs";
 import { DEEPSEEK_OFFICIAL_PROFILE, modelEntryFor, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
 import { RouteAffinity, routeResponsesRequest } from "../src/router.mjs";
@@ -16,7 +17,6 @@ function configStub() {
     profileId: "opencode-go",
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
-    goToken: "go-token",
     tokens: { "opencode-go": "go-token", "deepseek-official": "" },
     // Never read a real ~/.modeldock/native-catalog.json capture in tests.
     nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
@@ -146,6 +146,38 @@ test("native catalog instructions use native web search instead of advertising E
     assert.ok(native && routed);
     assert.doesNotMatch(native.base_instructions, /`search <query>`/, "native GPT does not advertise the Exa CLI fallback");
     assert.match(routed.base_instructions, /`search <query>`/, "routed models retain ModelDock web search");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a native bare selection keeps its owner when a routed profile has the same model id", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-owner-"));
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  const routed = catalogFor(configStub()).models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
+  writeFileSync(nativeCatalogFile, JSON.stringify({
+    captured_with: "0.149.0",
+    models: [{
+      ...routed,
+      slug: "gpt-5.6-luna",
+      display_name: "GPT-5.6 Luna",
+      visibility: "list",
+    }],
+  }), "utf8");
+  try {
+    const config = { ...configStub(), mainModel: "gpt-5.6-luna", nativeCatalogFile };
+    const catalog = catalogFor(config);
+    assert.equal(catalog.models[0].slug, "gpt-5.6-luna", "the selected native id stays bare");
+    assert.equal(catalog.models[0].provider, "openai", "the catalog records the native owner");
+    assert.ok(catalog.models.some((entry) => entry.slug === "gpt-5.6-luna@opencode-go"), "the routed copy remains explicitly qualified");
+    assert.equal(modelOwnerOf(config, "gpt-5.6-luna"), "openai", "picker ownership agrees with catalog ownership");
+    assert.equal(modelOwnerOf(config, "gpt-5.6-luna@opencode-go"), "opencode-go", "an explicitly routed copy keeps its owner");
+    assert.equal(modelOwnerOf(config, "vendor-model@retired-provider"), "retired-provider", "an unknown explicit suffix is not reassigned");
+    const optedOut = catalogFor({ ...config, nativeMerge: false });
+    assert.notEqual(optedOut.models[0].slug, "gpt-5.6-luna@opencode-go",
+      "opting out of native publishing must not turn the selected native id into the routed main entry");
+    assert.ok(!modelOptions({ ...config, nativeMerge: false }).some((entry) => entry.native),
+      "the picker and catalog consume the same native opt-out state");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

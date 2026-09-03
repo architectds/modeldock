@@ -227,21 +227,21 @@
                   <span data-i18n="settings.goLabel">OpenCode Go token</span>
                   <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-go-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                <input id="settings-go-token" data-provider-token="opencode-go" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
               </label>
               <label class="field" id="commandcode-field">
                 <div class="field-head">
                   <span data-i18n="settings.ccLabel">Command Code API key</span>
                   <a href="https://commandcode.ai/provider" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-commandcode-token" type="password" placeholder="user_..." autocomplete="off" spellcheck="false" />
+                <input id="settings-commandcode-token" data-provider-token="commandcode" type="password" placeholder="user_..." autocomplete="off" spellcheck="false" />
               </label>
               <label class="field" id="deepseek-field">
                 <div class="field-head">
                   <span data-i18n="settings.dsLabel">DeepSeek API key</span>
                   <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-deepseek-token" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                <input id="settings-deepseek-token" data-provider-token="deepseek-official" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
               </label>
             </div>
             <div class="settings-actions">
@@ -376,7 +376,7 @@
         </div>
         <label class="field">
           <div class="field-head"><span data-i18n="local.port">Port on this machine</span></div>
-          <input id="local-config-port" class="lang-select" type="number" min="1" max="65535" inputmode="numeric" placeholder="11435" />
+          <input id="local-config-port" class="lang-select" type="number" min="1" max="65535" inputmode="numeric" />
         </label>
         <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
         <ul id="local-warnings" class="engine-warnings" hidden></ul>
@@ -423,12 +423,12 @@
           </div>
           <div class="custom-row">
             <button id="local-host-unmanage" type="button" class="custom-action" data-i18n="host.leave" hidden>Leave management</button>
+            <button id="local-config-start" type="button" class="custom-action primary" data-i18n="local.restart" hidden>Start service</button>
           </div>
         </section>
         <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
         <p id="local-config-start-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Starts this service from its saved command. Settings passed through environment variables are not captured.</p>
         <div class="custom-row local-config-actions">
-          <button id="local-config-start" type="button" class="custom-action primary" data-i18n="local.restart" hidden>Start service</button>
           <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
           <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
         </div>

@@ -1,6 +1,8 @@
 
 import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
-import { customEndpointFor } from "./custom-endpoints.mjs";
+import { localEngineDefinition } from "./local-engine-definitions.mjs";
+import { customEndpointFor } from "./custom-endpoint-routing.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
@@ -153,21 +155,20 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
   // catalog is cross-provider, so it is resolved per entry from the slug's
   // owner rather than taken from whichever profile is writing the file.
   const patchToolTypeFor = (slug) => {
-    const at = String(slug || "").lastIndexOf(PROVIDER_SEPARATOR);
-    if (at <= 0) return applyPatchToolType;
-    return PROFILES[String(slug).slice(at + 1)]?.applyPatchToolType || applyPatchToolType;
+    const reference = modelRefParts(slug);
+    if (!reference.qualified) return applyPatchToolType;
+    return profileById(reference.provider)?.applyPatchToolType || applyPatchToolType;
   };
   // The selected main model may belong to a provider other than the active
   // profile (e.g. a dashboard-added custom endpoint set as main). Label its
   // catalog entry "Provider - Model" like every other entry; the caller's
   // displayName stays the fallback for bare ids owned by the active profile.
   const ownerQualifiedDisplayName = (id) => {
-    const at = String(id || "").lastIndexOf(PROVIDER_SEPARATOR);
-    if (at <= 0) return null;
-    const owner = String(id).slice(at + 1);
-    const profile = profileById(owner);
+    const reference = modelRefParts(id);
+    if (!reference.qualified) return null;
+    const profile = profileById(reference.provider);
     if (!profile?.label) return null;
-    const modelLabel = (profile.availableModels || []).find((m) => m.id === bareModelId(id))?.label || bareModelId(id);
+    const modelLabel = modelEntryFor(null, id)?.label || reference.model;
     return `${profile.label} - ${modelLabel}`;
   };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
@@ -175,31 +176,23 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
   // another provider (custom endpoint or a connected Ollama) reads its window and
   // vision capability from that provider's catalog entry instead of the active
   // profile's list, so a text-only Ollama model never advertises image input.
-  const ownerEntryFor = (id) => {
-    const bare = bareModelId(id);
-    const at = String(id).lastIndexOf(PROVIDER_SEPARATOR);
-    const owner = at > 0 ? String(id).slice(at + 1) : profileId;
-    return profileById(owner).availableModels?.find((model) => model.id === bare)
-      || availableModels.find((model) => model.id === bare);
-  };
-  const mainEntry = ownerEntryFor(mainModel);
+  const mainEntry = modelEntryFor(null, qualifiedMain)
+    || availableModels.find((model) => model.id === bareModelId(qualifiedMain));
   const mainModalities = mainEntry?.supportsVision ? ["text", "image"] : ["text"];
   // Every provider's models in one list, each labelled with its source, so the picker
   // can switch upstream as well as model. The bare id stays with the default profile so
   // existing Codex configs keep resolving; another provider's copy of the same id is
   // published under an explicit owner suffix.
   const rest = [];
-  for (const entry of profileOptions()) {
-    const profile = profileById(entry.id);
-    for (const model of profile.availableModels || []) {
-      if (!model?.id || model.status === "unavailable") continue;
-      const slug = publishedSlugFor(entry.id, model);
-      if (slug === qualifiedMain || rest.some((m) => m.slug === slug)) continue;
-      rest.push({
-        slug,
-        displayName: `${entry.label} - ${model.label || model.id}`,
+  for (const item of routedModelInventory()) {
+    const { model } = item;
+    if (model.status === "unavailable") continue;
+    if (item.id === qualifiedMain || rest.some((entry) => entry.slug === item.id)) continue;
+    rest.push({
+        slug: item.id,
+        displayName: `${item.providerLabel} - ${model.label || model.id}`,
         supportsVision: Boolean(model.supportsVision),
-        providerLabel: entry.label,
+        providerLabel: item.providerLabel,
         contextWindow: model.contextWindow || CONTEXT_WINDOW,
         // Carried, not defaulted: a model that states its own rungs has
         // them measured or published, and the active profile's ladder is
@@ -207,8 +200,7 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         supportedReasoningLevels: model.supportedReasoningLevels,
         defaultReasoningLevel: model.defaultReasoningLevel,
         reasoningSource: model.reasoningSource || "",
-      });
-    }
+    });
   }
   return {
     models: [
@@ -221,11 +213,11 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
         inputModalities: mainModalities,
         priority: 1,
         supportedReasoningLevels:
-          ownerEntryFor(qualifiedMain)?.supportedReasoningLevels || mainEntry?.supportedReasoningLevels || base.supportedReasoningLevels,
+          mainEntry?.supportedReasoningLevels || base.supportedReasoningLevels,
         defaultReasoningLevel:
-          ownerEntryFor(qualifiedMain)?.defaultReasoningLevel || mainEntry?.defaultReasoningLevel || base.defaultReasoningLevel,
-        contextWindow: ownerEntryFor(qualifiedMain)?.contextWindow || mainEntry?.contextWindow || CONTEXT_WINDOW,
-        autoCompactTokenLimit: ownerEntryFor(qualifiedMain)?.autoCompactTokenLimit || mainEntry?.autoCompactTokenLimit,
+          mainEntry?.defaultReasoningLevel || base.defaultReasoningLevel,
+        contextWindow: mainEntry?.contextWindow || CONTEXT_WINDOW,
+        autoCompactTokenLimit: mainEntry?.autoCompactTokenLimit,
       }),
       ...rest.map((model, index) => catalogEntry({
         ...base,
@@ -252,6 +244,9 @@ const OPENCODE_GO_PROFILE = {
   label: "OpenCode Go",
   baseUrl: "https://opencode.ai/zen/go/v1",
   tokenEnvName: "OPENCODE_GO_TOKEN",
+  settingsField: "opencodeGoToken",
+  settingsErrorCode: "invalid_opencode_go_token",
+  settingsInvalidMessage: "A valid OpenCode Go token is required.",
   modelDiscovery: true,
   discoveryTransports: new Set(["responses", "chat"]),
   discoveryTransportFor: openCodeTransportForModel,
@@ -351,6 +346,9 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   label: "DeepSeek",
   baseUrl: "https://api.deepseek.com",
   tokenEnvName: "DEEPSEEK_API_KEY",
+  settingsField: "deepseekApiKey",
+  settingsErrorCode: "invalid_deepseek_api_key",
+  settingsInvalidMessage: "A valid DeepSeek API key is required.",
   modelDiscovery: true,
   discoveryTransports: new Set(["responses"]),
 
@@ -493,8 +491,10 @@ function localEngineProfile(id, label, defaultBaseUrl, compHash, transport = "re
   return profile;
 }
 
-const LLAMACPP_PROFILE = localEngineProfile("llamacpp", "llama.cpp (local)", "http://127.0.0.1:8080", "modeldock-llamacpp-v1", "chat");
-const VLLM_PROFILE = localEngineProfile("vllm", "vLLM (local)", "http://127.0.0.1:8000", "modeldock-vllm-v1");
+const LLAMACPP_ENGINE = localEngineDefinition("llamacpp");
+const VLLM_ENGINE = localEngineDefinition("vllm");
+const LLAMACPP_PROFILE = localEngineProfile("llamacpp", `${LLAMACPP_ENGINE.label} (local)`, `http://127.0.0.1:${LLAMACPP_ENGINE.defaultPort}`, "modeldock-llamacpp-v1", "chat");
+const VLLM_PROFILE = localEngineProfile("vllm", `${VLLM_ENGINE.label} (local)`, `http://127.0.0.1:${VLLM_ENGINE.defaultPort}`, "modeldock-vllm-v1");
 
 // Grok through a Grok subscription rather than through metered API credits.
 //
@@ -636,6 +636,9 @@ const COMMAND_CODE_PROFILE = {
   label: "Command Code",
   baseUrl: "https://api.commandcode.ai/provider/v1",
   tokenEnvName: "COMMANDCODE_API_KEY",
+  settingsField: "commandcodeApiKey",
+  settingsErrorCode: "invalid_commandcode_api_key",
+  settingsInvalidMessage: "A valid Command Code API key is required.",
   modelDiscovery: true,
   // Chat only: Messages-dialect models are filtered out of discovery below.
   discoveryTransports: new Set(["chat"]),
@@ -673,16 +676,16 @@ const COMMAND_CODE_PROFILE = {
   },
 };
 
-const PROFILES = {
-  "opencode-go": OPENCODE_GO_PROFILE,
-  "deepseek-official": DEEPSEEK_OFFICIAL_PROFILE,
-  custom: CUSTOM_PROFILE,
-  xai: XAI_PROFILE,
-  commandcode: COMMAND_CODE_PROFILE,
-  ollama: OLLAMA_PROFILE,
-  llamacpp: LLAMACPP_PROFILE,
-  vllm: VLLM_PROFILE,
-};
+const PROFILES = Object.fromEntries([
+  OPENCODE_GO_PROFILE,
+  DEEPSEEK_OFFICIAL_PROFILE,
+  CUSTOM_PROFILE,
+  XAI_PROFILE,
+  COMMAND_CODE_PROFILE,
+  OLLAMA_PROFILE,
+  LLAMACPP_PROFILE,
+  VLLM_PROFILE,
+].map((profile) => [profile.id, profile]));
 
 // Everything a provider needs to answer about itself lives on the provider.
 //
@@ -738,18 +741,18 @@ defineRouting(OPENCODE_GO_PROFILE, {
     const zen = entry?.zen || upstream.endsWith("-free") || upstream === "big-pickle";
     return zen
       ? trimBase(config?.zenBaseUrl || "https://opencode.ai/zen/v1")
-      : trimBase(config?.opencodeBaseUrl || config?.goBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
+      : trimBase(config?.opencodeBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
   },
   target(config, model) {
     const upstream = bareModelId(model);
     const entry = modelEntryFor(config, upstream);
     const transport = entry?.endpoint === "chat" ? "chat" : "responses";
     return {
-      provider: "opencode-go",
+      provider: OPENCODE_GO_PROFILE.id,
       model: upstream,
       url: `${OPENCODE_GO_PROFILE.baseUrlFor(config, model)}/${transport === "chat" ? "chat/completions" : "responses"}`,
       transport,
-      token: config?.tokens?.["opencode-go"] || "",
+      token: config?.tokens?.[OPENCODE_GO_PROFILE.id] || "",
       // Zen free tier: failure copy should carry free-tier guidance instead of
       // the generic hint (see error-translation.mjs FREE_HINTS).
       free: Boolean(entry?.free),
@@ -770,11 +773,11 @@ defineRouting(COMMAND_CODE_PROFILE, {
   tokenPattern: /^user_/,
   tokenHint: "A Command Code Provider API key must start with user_ (create one at https://commandcode.ai/provider).",
   target: (config, model) => ({
-    provider: "commandcode",
+    provider: COMMAND_CODE_PROFILE.id,
     model: bareModelId(model),
     url: `${COMMAND_CODE_PROFILE.baseUrlFor(config, model)}/chat/completions`,
     transport: "chat",
-    token: config?.tokens?.commandcode || "",
+    token: config?.tokens?.[COMMAND_CODE_PROFILE.id] || "",
   }),
 });
 
@@ -783,10 +786,10 @@ defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
   tokenHint: "A DeepSeek API key must start with sk- (create one at https://platform.deepseek.com/api_keys).",
   baseUrlFor: (config) => trimBase(config?.deepseekBaseUrl || DEEPSEEK_OFFICIAL_PROFILE.baseUrl),
   target: (config, model) => ({
-    provider: "deepseek-official",
+    provider: DEEPSEEK_OFFICIAL_PROFILE.id,
     model: bareModelId(model),
     url: `${DEEPSEEK_OFFICIAL_PROFILE.baseUrlFor(config)}/responses`,
-    token: config?.tokens?.["deepseek-official"] || config?.deepseekToken || "",
+    token: config?.tokens?.[DEEPSEEK_OFFICIAL_PROFILE.id] || "",
   }),
 });
 
@@ -795,16 +798,14 @@ defineRouting(CUSTOM_PROFILE, {
   // One profile, many endpoints: each model can sit on a different host with
   // its own key, so the lookup is per model rather than per provider. Nothing
   // outside this profile needs to know that.
-  baseUrlFor: (config, model) => trimBase(
-    customEndpointFor(config?.customEndpoints, model)?.baseUrl || config?.customBaseUrl || "",
-  ),
+  baseUrlFor: (config, model) => trimBase(customEndpointFor(config?.customEndpoints, model)?.baseUrl || ""),
   target: (config, model) => {
     const endpoint = customEndpointFor(config?.customEndpoints, model);
     return {
-      provider: "custom",
+      provider: CUSTOM_PROFILE.id,
       model: bareModelId(model),
       url: `${CUSTOM_PROFILE.baseUrlFor(config, model)}/responses`,
-      token: endpoint?.apiKey || config?.tokens?.custom || config?.customApiKey || "",
+      token: endpoint?.apiKey || "",
     };
   },
 });
@@ -817,7 +818,7 @@ defineRouting(OLLAMA_PROFILE, {
   // root, so the routed base is not the address the user configured.
   baseUrlFor: (config) => `${normalizeOllamaBase(config?.ollamaBaseUrl || OLLAMA_DEFAULT_BASE)}/v1`,
   target: (config, model) => ({
-    provider: "ollama",
+    provider: OLLAMA_PROFILE.id,
     // The published id is colon-free but Ollama only serves the original tag
     // (a tag may contain a colon the slug cannot carry), so the wire id comes
     // from the profile entry.
@@ -863,18 +864,40 @@ defineRouting(LLAMACPP_PROFILE, {
   local: true,
   normalizesPayload: true,
   baseUrlFor: (config) => trimBase(LLAMACPP_PROFILE.baseUrl),
-  target: localWireTarget("llamacpp"),
+  target: localWireTarget(LLAMACPP_PROFILE.id),
 });
 defineRouting(VLLM_PROFILE, {
   keyless: true,
   local: true,
   normalizesPayload: true,
   baseUrlFor: (config) => trimBase(VLLM_PROFILE.baseUrl),
-  target: localWireTarget("vllm"),
+  target: localWireTarget(VLLM_PROFILE.id),
 });
 
 export function profileById(id) {
-  return PROFILES[id] || OPENCODE_GO_PROFILE;
+  return PROFILES[id] || null;
+}
+
+// Resolve the complete provider-owned request target once. Every caller - main
+// relay, compaction, and delegated vision - consumes this same projection.
+export function upstreamTargetFor(config, model) {
+  const provider = providerForModel(config, model);
+  const profile = profileById(provider);
+  if (profile) {
+    return {
+      baseUrl: profile.baseUrlFor?.(config, model) || "",
+      ...profile.target(config, model),
+    };
+  }
+  return {
+    provider,
+    model: bareModelId(model),
+    baseUrl: "",
+    url: "",
+    transport: "responses",
+    token: "",
+    tokenRequired: true,
+  };
 }
 
 // Every registered profile, for passes that have to touch all of them
@@ -885,6 +908,39 @@ export function allProfiles() {
 
 export function profileOptions() {
   return Object.values(PROFILES).map((profile) => ({ id: profile.id, label: profile.label }));
+}
+
+export function credentialProfiles() {
+  return allProfiles().filter((profile) => profile.tokenEnvName && profile.settingsField);
+}
+
+export function routedModelInventory() {
+  const inventory = [];
+  for (const profile of Object.values(PROFILES)) {
+    for (const model of profile.availableModels || []) {
+      if (!model?.id) continue;
+      inventory.push({
+        id: publishedSlugFor(profile.id, model),
+        provider: profile.id,
+        providerLabel: profile.label,
+        model,
+      });
+    }
+  }
+  return inventory;
+}
+
+// Provider availability is a registry fact. Catalog, pickers and routing
+// controls must ask this one function rather than inferring keyless operation
+// from unrelated metadata such as an empty tokenEnvName.
+export function providerRouteConfigured(config, providerId) {
+  const profile = PROFILES[providerId];
+  return Boolean(profile?.availableModels?.length && (profile.keyless || config?.tokens?.[providerId]));
+}
+
+export function enabledProviderOptions(config) {
+  const active = config?.profileId || DEFAULT_PROFILE_ID;
+  return profileOptions().filter((entry) => entry.id === active || providerRouteConfigured(config, entry.id));
 }
 
 // Populate the custom profile from config so the catalog and per-model routing
@@ -1089,17 +1145,14 @@ export function applyLocalEngineProfile(engineId, snapshot) {
     : [];
   return profile;
 }
-// Resolve which provider owns a model id. The currently active profile wins, then any
-// profile whose curated catalog lists the model. Used to route per-model upstream calls
-// (main model on DeepSeek, vision on OpenCode Go) to the right base URL and token.
-// A few ids (deepseek-v4-flash, deepseek-v4-pro) exist in more than one catalog, so the
-// published slug carries its owner when the bare id would be ambiguous:
-// "deepseek-v4-flash@deepseek-official". The suffix is a routing address only - it is
-// stripped before the id reaches an upstream.
+// Published routed ids carry their owner in a suffix such as
+// "deepseek-v4-flash@deepseek-official". The suffix is a routing address only
+// and is stripped before the id reaches an upstream. A bare id survives only
+// as a legacy OpenCode Go reference.
 export const PROVIDER_SEPARATOR = "@";
 // The profile whose ids are published bare, so ids already written into Codex configs
 // keep resolving without a suffix.
-const DEFAULT_PROFILE_ID = "opencode-go";
+export const DEFAULT_PROFILE_ID = "opencode-go";
 
 // The slug under which a model id is published in the Codex catalog. Every model a
 // profile owns is published owner-qualified: the @provider suffix is a routing
@@ -1113,23 +1166,28 @@ export function publishedSlugFor(profileId, model) {
   const id = typeof model === "string" ? model : model?.id;
   if (!id) return model;
   const pid = profileId || DEFAULT_PROFILE_ID;
-  const owned = profileById(pid).availableModels?.some((candidate) => candidate.id === id);
+  const owned = PROFILES[pid]?.availableModels?.some((candidate) => candidate.id === id);
   return owned ? `${id}${PROVIDER_SEPARATOR}${pid}` : id;
 }
 
+export function modelRefParts(model) {
+  const raw = String(model || "");
+  const at = raw.lastIndexOf(PROVIDER_SEPARATOR);
+  return at > 0
+    ? { raw, model: raw.slice(0, at), provider: raw.slice(at + 1), qualified: true }
+    : { raw, model: raw, provider: "", qualified: false };
+}
+
 export function bareModelId(model) {
-  const at = String(model || "").lastIndexOf(PROVIDER_SEPARATOR);
-  return at > 0 ? String(model).slice(0, at) : model;
+  const parts = modelRefParts(model);
+  return parts.qualified ? parts.model : model;
 }
 
 export function providerForModel(config, model) {
-  if (!model) return config?.profileId || "opencode-go";
+  if (!model) return config?.profileId || DEFAULT_PROFILE_ID;
   // An explicit owner in the slug outranks every heuristic below.
-  const at = String(model).lastIndexOf(PROVIDER_SEPARATOR);
-  if (at > 0) {
-    const tagged = String(model).slice(at + 1);
-    if (PROFILES[tagged]) return tagged;
-  }
+  const parts = modelRefParts(model);
+  if (parts.qualified) return parts.provider;
   // Bare id: legacy compatibility only. Bare ids were never published by any
   // provider other than the default one, so a bare id left over from an older
   // config or a stored thread selection routes there unconditionally instead of
@@ -1143,13 +1201,13 @@ export function providerForModel(config, model) {
 export function modelEntryFor(config, model) {
   const provider = providerForModel(config, model);
   const bare = bareModelId(model);
-  const owned = profileById(provider).availableModels?.find((entry) => entry.id === bare);
+  const owned = PROFILES[provider]?.availableModels?.find((entry) => entry.id === bare);
   if (owned) return owned;
-  const passed = config?.profile;
-  const current = passed?.availableModels
-    ? passed
-    : profileById(passed?.id || config?.profileId || "") || passed || null;
-  return current?.availableModels?.find((entry) => entry.id === bare) || null;
+  // The address owner is authoritative. Falling through to config.profile here
+  // made metadata and routing disagree: a bare or misspelled id could borrow an
+  // entry from the active profile while providerForModel still sent it to the
+  // default provider. Dynamic profiles must register before this lookup.
+  return null;
 }
 
 // The window a model actually runs with. Most catalog entries leave
@@ -1168,17 +1226,15 @@ export function effectiveContextWindow(model) {
 //
 // Native models carry no suffix at all, so they never match here: a bare id is
 // the one case that still falls back.
-export function ownedProviderOf(model) {
-  const slug = String(model || "");
-  const separator = slug.lastIndexOf(PROVIDER_SEPARATOR);
-  if (separator <= 0) return "";
-  const suffix = slug.slice(separator + PROVIDER_SEPARATOR.length);
-  return allProfiles().some((profile) => profile.id === suffix) ? suffix : "";
+export function addressedProviderOf(model) {
+  const parts = modelRefParts(model);
+  return parts.qualified && parts.provider !== NATIVE_PROVIDER_ID ? parts.provider : "";
 }
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);
-  const profile = profileById(provider);
+  const profile = PROFILES[provider];
+  if (!profile) return "";
   // A keyless provider has no credential to look up; "local" is a sentinel
   // that keeps the healthz and readiness gates honest about a connected
   // engine being usable. Not connected means not ready, same as no token.

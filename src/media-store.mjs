@@ -56,6 +56,18 @@ export class MediaStore {
   #batchDepth = 0;
   #dirty = false;
 
+  #originalScreenshotPreview(ref, original) {
+    return {
+      ...original,
+      ref,
+      sourceRef: ref,
+      transformed: false,
+      originalBytes: original.size,
+      previewBytes: original.size,
+      cached: false,
+    };
+  }
+
   constructor({ ttlMs, maxBytes, maxEntries, maxStoredBytes = 256 * 1024 * 1024, stateDir = null, externalRoots = [] }) {
     this.ttlMs = ttlMs;
     this.maxBytes = maxBytes;
@@ -255,15 +267,7 @@ export class MediaStore {
       const target = Math.floor(Number(targetBytes));
       const hardMax = Math.floor(Number(hardMaxBytes));
       if (original.size <= target) {
-        return {
-          ...original,
-          ref,
-          sourceRef: ref,
-          transformed: false,
-          originalBytes: original.size,
-          previewBytes: original.size,
-          cached: false,
-        };
+        return this.#originalScreenshotPreview(ref, original);
       }
       const policy = `screenshot-preview-v1-${target}-${hardMax}`;
       const source = this.#items.get(ref);
@@ -303,15 +307,7 @@ export class MediaStore {
       const target = Math.floor(Number(targetBytes));
       const hardMax = Math.floor(Number(hardMaxBytes));
       if (!converted?.transformed) {
-        return {
-          ...original,
-          ref,
-          sourceRef: ref,
-          transformed: false,
-          originalBytes: original.size,
-          previewBytes: original.size,
-          cached: false,
-        };
+        return this.#originalScreenshotPreview(ref, original);
       }
       const described = describeImageUrl(converted.imageUrl);
       if (!described.isDataUrl || described.size > hardMax || converted.originalBytes !== original.size) {

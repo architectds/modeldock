@@ -72,6 +72,23 @@ function waitHealthy(port, timeoutMs = 15000) {
   });
 }
 
+function trackChild(child, children, closePromises) {
+  const closed = new Promise((resolve) => child.once("close", resolve));
+  closePromises.set(child, closed);
+  children.add(child);
+  child.once("close", () => children.delete(child));
+  return child;
+}
+
+async function stopAndWait(child, closePromises) {
+  if (!child) return;
+  const closed = closePromises.get(child);
+  if (child.exitCode === null && child.signalCode === null) {
+    try { child.kill(); } catch { /* the child may have exited between the check and kill */ }
+  }
+  await closed;
+}
+
 test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
   const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
   const serverEntry = existsSync(bundle) ? bundle : path.join(repoRoot, "src", "server.mjs");
@@ -87,8 +104,12 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
 
   const port = await freePort();
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-autostart-lifecycle-"));
+  const children = new Set();
+  const closePromises = new WeakMap();
   t.after(() => {
-    rmSync(stateDir, { recursive: true, force: true });
+    return Promise.all([...children].map((child) => stopAndWait(child, closePromises))).then(() => {
+      rmSync(stateDir, { recursive: true, force: true });
+    });
   });
 
   const env = {
@@ -99,11 +120,11 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
   };
 
   function launch() {
-    return spawn(nodeBin, [entry], {
+    return trackChild(spawn(nodeBin, [entry], {
       env,
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
-    });
+    }), children, closePromises);
   }
 
   const first = launch();
@@ -111,7 +132,6 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
   first.stderr.on("data", (chunk) => firstStderr.push(chunk.toString()));
   let firstError = "";
   first.on("error", (error) => (firstError = error.message));
-  t.after(() => first.kill());
   try {
     await waitHealthy(port);
   } catch (error) {
@@ -122,12 +142,10 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
 
   // Simulate a crash: launchd sees the process exit and, with KeepAlive, runs
   // the same command again. The gateway must come back healthy with a new pid.
-  first.kill();
-  await new Promise((resolve) => first.once("exit", resolve));
+  await stopAndWait(first, closePromises);
   const second = launch();
   const secondStderr = [];
   second.stderr.on("data", (chunk) => secondStderr.push(chunk.toString()));
-  t.after(() => second.kill());
   try {
     await waitHealthy(port);
   } catch (error) {
@@ -136,5 +154,4 @@ test("macOS plist lifecycle: launch, healthy, kill, relaunch", async (t) => {
   }
   assert.ok(second.pid, "relaunch should have a pid");
   assert.notEqual(second.pid, first.pid, "KeepAlive relaunch should be a fresh process");
-  second.kill();
 });

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { ownedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel } from "./profiles.mjs";
+import { addressedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -12,11 +12,13 @@ import { translateUpstreamError, freeEmptyOutputError } from "./error-translatio
 import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
-import { customEndpointFor } from "./custom-endpoints.mjs";
-import { historicalImageSpawnHint, hasOpaqueCollaboration, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
+import { customEndpointFor } from "./custom-endpoint-routing.mjs";
+import { historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
+import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
+import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 
 // Re-exported so the existing import path keeps working: the tee is SSE
 // machinery and lives with the rest of the framing rules in sse.mjs.
@@ -141,9 +143,9 @@ export function isLocalBackend(config, model) {
   const profile = profileById(provider);
   // A local engine says so about itself. A custom endpoint cannot: the same
   // provider serves both a laptop and a datacentre, so its address decides.
-  if (profile.local) return true;
+  if (profile?.local) return true;
   if (provider !== "custom") return false;
-  const baseUrl = profile.baseUrlFor(config, model);
+  const baseUrl = profile?.baseUrlFor?.(config, model);
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
@@ -277,7 +279,7 @@ function writeCompactFailureReport(report) {
 // backend with the client's signed-in headers. That is what keeps native GPT
 // usable in the same picker as our catalog models while the openai_base_url
 // managed config is active. Same shape as codex-router's native leg.
-const NATIVE_BASE = process.env.CODEX_NATIVE_BASE_URL || "https://chatgpt.com/backend-api/codex";
+const NATIVE_BASE = NATIVE_CODEX_BASE;
 
 export const NATIVE_IMAGE_PATHS = new Set([
   "/images/edits",
@@ -423,7 +425,7 @@ function mainModelFor(services, sessionId) {
 }
 
 function recordDerivedFallback(services, sessionId, route) {
-  if (!route || (route.reason !== "client_selected" && route.reason !== "default_main")) return;
+  if (!route || !["client_selected", "default_main", "native_passthrough"].includes(route.reason)) return;
   services.derivedFallback?.record?.(sessionId, route.model);
 }
 
@@ -455,15 +457,8 @@ export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
   // provider, whether or not it still resolves. "Unknown means native" is right
   // for a bare Codex slug and wrong here: it sent a request for a removed
   // custom endpoint to chatgpt.com, which has never heard of the model.
-  if (ownedProviderOf(requestedModel)) return false;
+  if (addressedProviderOf(requestedModel)) return false;
   return !(knownModels && knownModels.has(requestedModel));
-}
-
-function isOpaqueEncryptedContent(value) {
-  // OpenAI encrypted content is a URL-safe Fernet token. Treating any
-  // whitespace-free string as encrypted lets malformed harness output reach
-  // the native backend, which then aborts the turn during decryption.
-  return typeof value === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(value);
 }
 
 // Remote compaction (v1/v2) is Codex's client-side protocol for context-full
@@ -512,16 +507,15 @@ export function isCompactV2Request(payload) {
   return Array.isArray(payload?.input) && payload.input.at(-1)?.type === "compaction_trigger";
 }
 
-// OpenAI-issued reasoning encrypted_content is an opaque Fernet-style token with
-// no whitespace. Local providers that mimic the shape with a plain-text summary
-// must be stripped before replay to the native backend, which rejects the blob
-// with "Encrypted content could not be decrypted or parsed." The item's summary
-// still carries the readable reasoning.
+// OpenAI-issued reasoning encrypted_content is the stateless continuation for a
+// store:false response. A routed provider can emit the same `rs_*` item shape,
+// but its empty/plain-text encrypted_content is not native state. Forwarding
+// that item makes the native backend interpret its id as a stored OpenAI item
+// and fail with "Item ... not found". Only genuine opaque native reasoning is
+// replayable across this boundary; routed reasoning is already represented by
+// the assistant result and tool history, so drop the foreign reasoning item.
 function sanitizeReasoningForNative(item) {
-  if (item?.encrypted_content === undefined) return item;
-  if (isOpaqueEncryptedContent(item.encrypted_content)) return item;
-  const { encrypted_content, ...rest } = item;
-  return rest;
+  return isOpaqueEncryptedContent(item?.encrypted_content) ? item : null;
 }
 
 function sanitizeMessageContentForNative(item) {
@@ -585,11 +579,12 @@ function nativeResponsesItemId(item, index) {
 // it is the call/output join key. Opaque native compact tokens pass through.
 export function normalizeNativeInput(input, { compaction = false } = {}) {
   if (!Array.isArray(input)) return input;
-  return input.map((item, index) => {
+  return input.flatMap((item, index) => {
     if (!item || typeof item !== "object") return item;
     let next;
     if (item.type === "reasoning") {
       next = sanitizeReasoningForNative(item);
+      if (!next) return [];
       if (compaction && Array.isArray(next.content) && next.content.length > 0) {
         const { content: _routedReasoningContent, ...withoutContent } = next;
         next = withoutContent;
@@ -613,7 +608,7 @@ export function normalizeNativeInput(input, { compaction = false } = {}) {
     if (id !== next.id) {
       next = { ...next, id };
     }
-    return next;
+    return [next];
   });
 }
 
@@ -1206,13 +1201,10 @@ export function normalizeOllamaInput(input) {
 // item - Codex can emit one after compaction or a tool turn. Merge every
 // system item's text into a single leading system message and drop the
 // originals, so local backends (llama.cpp / Ollama) always see system first.
-export function hoistLocalSystem(input) {
-  if (!Array.isArray(input)) return input;
+function splitLocalSystem(input) {
   const texts = [];
   const rest = [];
   for (const item of input) {
-    // Codex sends its system guidance as role "developer"; llama.cpp's
-    // template treats both developer and system as leading system messages.
     if (item?.role === "system" || item?.role === "developer") {
       const text = Array.isArray(item.content)
         ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
@@ -1222,6 +1214,14 @@ export function hoistLocalSystem(input) {
     }
     rest.push(item);
   }
+  return { texts, rest };
+}
+
+export function hoistLocalSystem(input) {
+  if (!Array.isArray(input)) return input;
+  // Codex sends its system guidance as role "developer"; llama.cpp's
+  // template treats both developer and system as leading system messages.
+  const { texts, rest } = splitLocalSystem(input);
   if (!texts.length) return input;
   return [{ role: "system", content: [{ type: "input_text", text: texts.join("\n") }] }, ...rest];
 }
@@ -1253,18 +1253,7 @@ export function normalizeLocalPayload(payload) {
       ? payload.instructions.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
       : "";
   if (instructions) {
-    const texts = [];
-    const rest = [];
-    for (const item of payload.input) {
-      if (item?.role === "system" || item?.role === "developer") {
-        const text = Array.isArray(item.content)
-          ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
-          : "";
-        if (text) texts.push(text);
-        continue;
-      }
-      rest.push(item);
-    }
+    const { texts, rest } = splitLocalSystem(payload.input);
     const input = normalizeOllamaInput(rest);
     return {
       ...payload,
@@ -1384,6 +1373,21 @@ function stripLocalInstructionText(text) {
   return out;
 }
 
+function mapInstructionText(instructions, transform) {
+  if (Array.isArray(instructions)) {
+    let changed = false;
+    const out = instructions.map((part) => {
+      if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
+      const text = transform(part.text);
+      if (text === part.text) return part;
+      changed = true;
+      return { ...part, text };
+    });
+    return changed ? out : instructions;
+  }
+  return typeof instructions === "string" ? transform(instructions) : instructions;
+}
+
 // A text-only picker entry may admit an attachment so the gateway can select a
 // vision model for a fresh user turn. That one upstream request contains real
 // pixels, so forwarding the picker's TEXT-ONLY instruction is contradictory:
@@ -1391,20 +1395,7 @@ function stripLocalInstructionText(text) {
 // Keep the instruction for ordinary and agentic text-model turns, where images
 // are deliberately represented by vision_inspect refs instead.
 function stripTextOnlyVisionGuidance(instructions) {
-  if (Array.isArray(instructions)) {
-    let changed = false;
-    const out = instructions.map((part) => {
-      if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
-      const text = part.text.replace(VERBOSE_VISION_GUIDANCE, "");
-      if (text === part.text) return part;
-      changed = true;
-      return { ...part, text };
-    });
-    return changed ? out : instructions;
-  }
-  return typeof instructions === "string"
-    ? instructions.replace(VERBOSE_VISION_GUIDANCE, "")
-    : instructions;
+  return mapInstructionText(instructions, (text) => text.replace(VERBOSE_VISION_GUIDANCE, ""));
 }
 
 // Remove the dead-weight sections from the payload instructions for
@@ -1412,18 +1403,7 @@ function stripTextOnlyVisionGuidance(instructions) {
 // string or as an array of input_text parts; both shapes are handled and
 // unchanged input is returned as-is so the upstream prefix cache is stable.
 export function stripLocalInstructions(instructions) {
-  if (Array.isArray(instructions)) {
-    let changed = false;
-    const out = instructions.map((part) => {
-      if (!part || typeof part !== "object" || typeof part.text !== "string") return part;
-      const text = stripLocalInstructionText(part.text);
-      if (text === part.text) return part;
-      changed = true;
-      return { ...part, text };
-    });
-    return changed ? out : instructions;
-  }
-  return stripLocalInstructionText(instructions);
+  return mapInstructionText(instructions, stripLocalInstructionText);
 }
 
 function appendLocalHostSafety(instructions) {
@@ -1628,7 +1608,7 @@ export const PAYLOAD_NORMALIZERS = {
 function inputNormalizerFor(config, model) {
   const profile = profileById(providerForModel(config, model));
   const entry = modelEntryFor(config, model);
-  return INPUT_NORMALIZERS[entry?.inputNormalizer || profile.inputNormalizer] || null;
+  return INPUT_NORMALIZERS[entry?.inputNormalizer || profile?.inputNormalizer] || null;
 }
 
 // Applied to the outgoing payload (after the generic passes), everywhere a
@@ -1636,7 +1616,7 @@ function inputNormalizerFor(config, model) {
 // summarize call alike. Identity when the profile declares nothing.
 function normalizePayloadForRoute(config, model, payload) {
   const profile = profileById(providerForModel(config, model));
-  const normalize = PAYLOAD_NORMALIZERS[profile.payloadNormalizer];
+  const normalize = PAYLOAD_NORMALIZERS[profile?.payloadNormalizer];
   return normalize ? normalize(payload) : payload;
 }
 
@@ -1648,6 +1628,38 @@ function normalizeInputForRoute(config, model, input, localPayload = null) {
   const normalize = inputNormalizerFor(config, model);
   if (normalize) return normalize(input);
   return localPayload ? localPayload.input : normalizeGatewayInput(input);
+}
+
+// Compaction and ordinary relay have different image and response contracts,
+// but they start from the same provider-owned input. Resolve opaque native
+// collaboration first, then build the local payload from that resolved input;
+// the old duplicated paths normalized the original payload first, so a local
+// route silently discarded the resolved collaboration history.
+async function prepareRoutedInput(payload, services, route, signal) {
+  const { config } = services;
+  const routedProvider = providerForModel(config, route.model);
+  let input = payload.input;
+  if (hasOpaqueCollaboration(input)) {
+    try {
+      input = await relayOpaqueCollaboration(input, services, { signal });
+    } catch (error) {
+      console.error(`[modeldock] collaboration relay failed: ${error.message}`);
+    }
+  }
+  const resolvedPayload = input === payload.input ? payload : { ...payload, input };
+  const localPayload = profileById(routedProvider)?.normalizesPayload
+    ? normalizeLocalPayload(resolvedPayload)
+    : null;
+  return {
+    routedProvider,
+    localPayload,
+    normalizedInput: promoteToolOutputImages(normalizeInputForRoute(
+      config,
+      route.model,
+      input,
+      localPayload,
+    )),
+  };
 }
 
 // Replace input_image parts with a lightweight image_ref placeholder only when
@@ -2330,9 +2342,7 @@ export function restoreCustomToolOutput(output, customToolNames) {
 // to live here was a second registry maintained by hand, and llamacpp and
 // vllm were missing from it while having perfectly good profiles - so they
 // fell through to OpenCode Go carrying the OpenCode token.
-export function upstreamTargetFor(config, model) {
-  return profileById(providerForModel(config, model)).target(config, model);
-}
+export { upstreamTargetFor };
 
 export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision }) {
   return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision });
@@ -3179,6 +3189,30 @@ function sendJsonError(res, status, body) {
   return true;
 }
 
+function imageTransportError(res, route, error) {
+  const body = { error: { type: "image_transport_error", message: error.message } };
+  sendJsonError(res, 413, body);
+  return { ok: false, httpStatus: 413, route, error: body };
+}
+
+function unavailableTargetError(route, target) {
+  if (/^https?:\/\//i.test(String(target?.url || ""))) return null;
+  return {
+    error: {
+      type: "configuration_error",
+      message: `No endpoint is configured for ${route?.model || target?.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
+    },
+  };
+}
+
+function beginUpstreamStream(res, upstream) {
+  if (res.headersSent) return;
+  res.statusCode = upstream.status;
+  res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.flushHeaders();
+}
+
 // The relay threw: one exit shape for the client, the telemetry finisher, and
 // the returned result. These used to disagree - the client body was redacted
 // while finish?.() and the returned result carried error.message raw, so a
@@ -3263,7 +3297,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const finish = metrics?.begin?.("responses", {
     operation: "native_passthrough",
     model: payload.model,
-    upstream: "openai",
+    upstream: NATIVE_PROVIDER_ID,
     routeReason: "native_passthrough",
     sessionId,
     threadId,
@@ -3271,7 +3305,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   const markFirstResponse = () => finish?.markFirstResponse?.();
   const startedAt = Date.now();
   const recordUsage = usageRecorder(services, { startedAt, sessionId, threadId });
-  const nativeRoute = { model: payload.model, provider: "openai", route: "native_passthrough" };
+  const nativeRoute = { model: payload.model, provider: NATIVE_PROVIDER_ID, route: "native_passthrough" };
   let usage;
   let responseCompleted = false;
   let responseFailure = "";
@@ -3303,7 +3337,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       finish?.({
         ok: false,
         httpStatus: upstream.status,
-        upstream: "openai",
+        upstream: NATIVE_PROVIDER_ID,
         error: redactBearer(raw).slice(0, 400),
         ingressWireBytes: transfer.wireBytes,
         ingressLogicalBytes: transfer.logicalBytes,
@@ -3318,12 +3352,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       return { ok: false, httpStatus: upstream.status, route: { model: payload.model, reason: "native_passthrough" }, error: raw.slice(0, 400), upstreamBytes };
     }
 
-    if (!res.headersSent) {
-      res.statusCode = upstream.status;
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.flushHeaders();
-    }
+    beginUpstreamStream(res, upstream);
     const piped = await pipeGatewayStream(upstream.body, res, tee, markFirstResponse);
     const bytesOut = piped.bytes;
     // Codex closes the HTTP response as soon as it consumes the terminal SSE
@@ -3336,7 +3365,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
     finish?.({
       ok: !interrupted && !semanticFailed,
       httpStatus: interrupted ? 499 : upstream.status,
-      upstream: "openai",
+      upstream: NATIVE_PROVIDER_ID,
       error: interrupted ? "client disconnected" : responseFailure || undefined,
       bytesOut,
       inputTokens: usage?.input_tokens || 0,
@@ -3368,7 +3397,7 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
       bytesOut,
       upstreamBytes,
       latencyMs: Date.now() - startedAt,
-      upstream: "openai",
+      upstream: NATIVE_PROVIDER_ID,
     };
   } catch (error) {
     return relayThrowExit(res, error, { finish, resultFields: { route: { model: payload.model, reason: "native_passthrough" } } });
@@ -3603,20 +3632,12 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // for isLocalBackend. Skipping the adaptation made compact_v2
   // fail with "System message must be at the beginning" whenever the compacted
   // history carried a mid-history system item.
-  const routedProvider = providerForModel(config, route.model);
-  const localPayload =
-    profileById(routedProvider).normalizesPayload ? normalizeLocalPayload(payload) : null;
-  // A delegated subagent task in Codex's opaque collaboration channel can
-  // only be read by the native backend; relay it through a native model first.
-  let routeInput = payload.input;
-  if (hasOpaqueCollaboration(routeInput)) {
-    try {
-      routeInput = await relayOpaqueCollaboration(routeInput, services, { signal });
-    } catch (error) {
-      console.error(`[modeldock] collaboration relay failed: ${error.message}`);
-    }
-  }
-  const normalizedInput = promoteToolOutputImages(normalizeInputForRoute(config, route.model, routeInput, localPayload));
+  const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(
+    payload,
+    services,
+    route,
+    signal,
+  );
   const localBackend = isLocalBackend(config, route.model);
   const compactModelEntry = modelEntryFor(config, route.model);
   const targetSupportsVision = Boolean(compactModelEntry?.supportsVision);
@@ -3647,9 +3668,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
         sessionId,
       });
     } catch (error) {
-      const body = { error: { type: "image_transport_error", message: error.message } };
-      sendJsonError(res, 413, body);
-      return { ok: false, httpStatus: 413, route, error: body };
+      return imageTransportError(res, route, error);
     }
   }
   const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId, compactImageRefs);
@@ -3755,13 +3774,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     // and Codex still lists it because its catalog is read at startup. Without
     // this the URL is "/responses" with no host and fetch fails as if the
     // network were at fault.
-    if (!/^https?:\/\//i.test(String(target.url || ""))) {
-      const gone = {
-        error: {
-          type: "configuration_error",
-          message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
-        },
-      };
+    const gone = unavailableTargetError(route, target);
+    if (gone) {
       sendJsonError(res, 503, gone);
       return { ok: false, httpStatus: 503, route, error: gone };
     }
@@ -3934,6 +3948,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
+    recordDerivedFallback(services, sessionId, { model: requestedModel, reason: "native_passthrough" });
     return relayNativeResponses(payload, res, services, { signal });
   }
   // An address of ours that no longer resolves. The model was published by this
@@ -3945,12 +3960,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   //
   // Only owned addresses. A bare id may be one of Codex's own models, and
   // those carry no provider at all - that is the one case that still falls back.
-  const ownedProvider = ownedProviderOf(requestedModel);
-  if (ownedProvider && !knownModels?.has?.(requestedModel)) {
+  const addressedProvider = addressedProviderOf(requestedModel);
+  if (addressedProvider && !knownModels?.has?.(requestedModel)) {
     const error = {
       error: {
         type: "configuration_error",
-        message: `${requestedModel} is no longer configured. Its ${ownedProvider} endpoint was removed; pick another model, or restart Codex to drop it from the picker.`,
+        message: `${requestedModel} is no longer configured. Its ${addressedProvider} endpoint was removed; pick another model, or restart Codex to drop it from the picker.`,
       },
     };
     sendJsonError(res, 503, error);
@@ -4004,18 +4019,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
   // Pro additionally needs the id, assistant-content, tool-history and stream
   // repairs; official and custom routes keep the generic path.
-  const routedProvider = providerForModel(config, route.model);
-  const localPayload =
-    profileById(routedProvider).normalizesPayload ? normalizeLocalPayload(payload) : null;
-  let routeInput = payload.input;
-  if (hasOpaqueCollaboration(routeInput)) {
-    try {
-      routeInput = await relayOpaqueCollaboration(routeInput, services, { signal });
-    } catch (error) {
-      console.error(`[modeldock] collaboration relay failed: ${error.message}`);
-    }
-  }
-  const normalizedInput = promoteToolOutputImages(normalizeInputForRoute(config, route.model, routeInput, localPayload));
+  const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(
+    payload,
+    services,
+    route,
+    signal,
+  );
   const routedModelEntry = modelEntryFor(config, route.model);
   const imageTransportLimit = Number(routedModelEntry?.imageTransportMaxWireBytes) || 0;
   const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
@@ -4037,9 +4046,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         sessionId,
       });
     } catch (error) {
-      const body = { error: { type: "image_transport_error", message: error.message } };
-      sendJsonError(res, 413, body);
-      return { ok: false, httpStatus: 413, route, error: body };
+      return imageTransportError(res, route, error);
     }
   }
   let normalizedPayload = {
@@ -4054,7 +4061,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
   // closest accepted value, and drop anything else so local routes never trip
   // the template validator.
-  if (profileById(routedProvider).normalizesPayload) {
+  if (profileById(routedProvider)?.normalizesPayload) {
     normalizedPayload = {
       ...normalizedPayload,
       reasoning: normalizeLocalReasoning(normalizedPayload).reasoning,
@@ -4078,7 +4085,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // Trim tools only for small-context local backends (llama.cpp etc.).
   // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
   const trimLocalTools = isLocalBackend(config, route.model);
-  const routedProfile = profileById(routedProvider);
+  const routedProfile = profileById(routedProvider) || {};
   // A mixed provider can expose models backed by different downstream APIs.
   // Let a measured model narrow its tool dialect without weakening the other
   // models on the same provider. Undefined fields inherit the provider policy.
@@ -4138,13 +4145,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // and Codex still lists it because its catalog is read at startup. Without
   // this the URL is "/responses" with no host and fetch fails as if the
   // network were at fault.
-  if (!/^https?:\/\//i.test(String(target.url || ""))) {
-    const gone = {
-      error: {
-        type: "configuration_error",
-        message: `No endpoint is configured for ${route?.model || target.model || "this model"}. It was removed; restart Codex to drop it from the picker.`,
-      },
-    };
+  const gone = unavailableTargetError(route, target);
+  if (gone) {
     sendJsonError(res, 503, gone);
     return { ok: false, httpStatus: 503, route, error: gone };
   }
@@ -4306,12 +4308,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamBody = Readable.toWeb(Readable.from([Buffer.from(raw)]));
     }
 
-    if (!res.headersSent) {
-      res.statusCode = upstream.status;
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "text/event-stream; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.flushHeaders();
-    }
+    beginUpstreamStream(res, upstream);
     if (chatBridge) {
       if (normalizedPayload.stream === true) {
         const piped = await pipeChatCompletionStream(upstreamBody, res, {

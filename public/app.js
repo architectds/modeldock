@@ -167,6 +167,35 @@ function visiblePoints(history) {
   return sessionFilter ? history.filter((point) => point.session === sessionFilter) : history;
 }
 
+// Every dashboard wave is the same bounded projection of completed response
+// records. The projector owns only the metric-specific value; dedupe, ordering,
+// retention and session identity stay here so one card cannot quietly retain a
+// different request set from the others.
+function appendResponseMetric(history, recent, project) {
+  const seen = new Set(history.map((point) => point.id));
+  for (const item of recent) {
+    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+    const point = project(item);
+    if (!point) continue;
+    history.push({
+      id: item.id,
+      t: item.startedAt || 0,
+      session: sessionKeyOf(item),
+      ...point,
+    });
+    seen.add(item.id);
+  }
+  history.sort((a, b) => a.t - b.t);
+  if (history.length > WAVE_MAX_POINTS) history.splice(0, history.length - WAVE_MAX_POINTS);
+  return history;
+}
+
+function appendBoundedPoint(history, point) {
+  history.push(point);
+  history.sort((a, b) => a.t - b.t);
+  if (history.length > WAVE_MAX_POINTS) history.splice(0, history.length - WAVE_MAX_POINTS);
+}
+
 function shortModel(model) {
   return String(model || "—").split("@")[0];
 }
@@ -174,38 +203,14 @@ function shortModel(model) {
 function renderContextWave(recent) {
   const canvas = $("context-wave");
   if (!canvas) return;
-  const responseLatencies = recent
-    .filter(
-      (item) =>
-        item.kind === "responses" &&
-        Number.isFinite(Number(item.firstResponseLatencyMs)) &&
-        (!sessionFilter || sessionKeyOf(item) === sessionFilter),
-    )
-    .sort((a, b) => (a.finishedAt || a.startedAt || 0) - (b.finishedAt || b.startedAt || 0));
-  const seen = new Set(waveHistory.map((point) => point.id));
-  for (const item of recent) {
-    // Only sample completed responses. In-flight (active) records carry no usage
-    // yet and would otherwise pin the newest sample at 0; skipping them here means
-    // a record is first added when it finishes with a real input-token count.
-    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
-    waveHistory.push({
-      id: item.id,
-      t: item.startedAt || 0,
-      v: Number(item.inputTokens) || 0,
-      firstResponseLatencyMs: Number(item.firstResponseLatencyMs) || 0,
-      session: sessionKeyOf(item),
-    });
-  }
-  waveHistory.sort((a, b) => a.t - b.t);
-  if (waveHistory.length > WAVE_MAX_POINTS) waveHistory.splice(0, waveHistory.length - WAVE_MAX_POINTS);
+  appendResponseMetric(waveHistory, recent, (item) => ({
+    v: Number(item.inputTokens) || 0,
+    firstResponseLatencyMs: Number(item.firstResponseLatencyMs) || 0,
+  }));
   const visible = visiblePoints(waveHistory);
   visibleContextHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : 0;
-  const lastLatency = responseLatencies.length
-    ? Number(responseLatencies[responseLatencies.length - 1].firstResponseLatencyMs)
-    : visible.length
-      ? visible[visible.length - 1].firstResponseLatencyMs
-      : 0;
+  const lastLatency = visible.length ? visible[visible.length - 1].firstResponseLatencyMs : 0;
   wavePeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
   set("wave-last", number(last));
   set("wave-peak", number(wavePeakState.peak));
@@ -390,22 +395,13 @@ let cacheWavePoints = [];
 function renderCacheWave(recent) {
   const canvas = $("cache-wave");
   if (!canvas) return;
-  const seen = new Set(cacheHistory.map((point) => point.id));
-  for (const item of recent) {
-    // Only sample completed responses that carry input-token usage; in-flight
-    // records have none yet and would pin the newest sample at 0.
-    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+  appendResponseMetric(cacheHistory, recent, (item) => {
     const input = Number(item.inputTokens) || 0;
-    if (input <= 0) continue;
-    cacheHistory.push({
-      id: item.id,
-      t: item.startedAt || 0,
+    if (input <= 0) return null;
+    return {
       v: Math.min(1, Math.max(0, (Number(item.cachedTokens) || 0) / input)),
-      session: sessionKeyOf(item),
-    });
-  }
-  cacheHistory.sort((a, b) => a.t - b.t);
-  if (cacheHistory.length > WAVE_MAX_POINTS) cacheHistory.splice(0, cacheHistory.length - WAVE_MAX_POINTS);
+    };
+  });
   const visible = visiblePoints(cacheHistory);
   visibleCacheHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : null;
@@ -413,122 +409,7 @@ function renderCacheWave(recent) {
   set("cache-last", percent(last));
   set("cache-avg", percent(avg));
   set("cache-count", number(visible.length));
-  drawCacheWave(canvas, visible, cacheHoverState.hover);
-}
-
-function drawCacheWave(canvas, history, hoverIndex = -1) {
-  const ctx = canvas.getContext("2d");
-  const dpr = window.devicePixelRatio || 1;
-  // The CSS box, and only the CSS box. This used to fall back to the bitmap
-  // size, which defeated the very check below it: a hidden canvas measures zero
-  // but has a bitmap, so `clientWidth || width` handed back the bitmap and the
-  // guard never fired. Every poll that arrived while the dashboard was on
-  // another tab then re-entered the resize with width = the current bitmap,
-  // multiplied it by the device pixel ratio again, and assigning canvas.width
-  // wipes the canvas. Measured at 125% scaling: 345 -> 431 -> 539 -> 674, and
-  // 279239x93075 after about seven minutes away - a bitmap no browser will
-  // allocate, from a card that was 276 CSS pixels wide.
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  // A hidden view measures zero. Returning leaves the last good frame in
-  // place instead of clearing it to nothing.
-  if (!width || !height) return;
-  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-  }
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const pad = 4;
-  const plotW = width - pad * 2;
-  const plotH = height - pad * 2;
-  const n = history.length;
-  // Clear in place, never reassign: attachAreaWaveHover holds this array by
-  // reference for its hit-test, and a reassignment would strand it on the old
-  // empty array - the cache wave's hover silently never fires.
-  cacheWavePoints.length = 0;
-  const xFor = (index) => pad + (n === 1 ? plotW / 2 : (plotW * index) / (n - 1));
-  const yFor = (value) => pad + plotH - Math.min(1, Math.max(0, value)) * plotH;
-
-  // Gridlines (3 horizontal ticks on the fixed 0-100% scale).
-  ctx.strokeStyle = rgba(WAVE_BLUE, 0.08);
-  ctx.lineWidth = 1;
-  for (let i = 1; i <= 3; i += 1) {
-    const y = pad + (plotH / 3) * i;
-    ctx.beginPath();
-    ctx.moveTo(pad, y);
-    ctx.lineTo(width - pad, y);
-    ctx.stroke();
-  }
-
-  if (n === 0) return;
-
-  // Area fill under the curve.
-  const gradient = ctx.createLinearGradient(0, pad, 0, pad + plotH);
-  gradient.addColorStop(0, rgba(WAVE_BLUE, 0.35));
-  gradient.addColorStop(1, rgba(WAVE_BLUE, 0));
-  ctx.beginPath();
-  ctx.moveTo(pad, pad + plotH);
-  history.forEach((point, index) => {
-    const x = xFor(index);
-    const y = yFor(point.v);
-    cacheWavePoints.push({ x, y, v: point.v, t: point.t });
-    ctx.lineTo(x, y);
-  });
-  ctx.lineTo(xFor(n - 1), pad + plotH);
-  ctx.closePath();
-  ctx.fillStyle = gradient;
-  ctx.fill();
-
-  // Line with a soft glow.
-  ctx.beginPath();
-  history.forEach((point, index) => {
-    const x = xFor(index);
-    const y = yFor(point.v);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.strokeStyle = rgba(WAVE_BLUE, 0.9);
-  ctx.lineWidth = 2;
-  ctx.shadowColor = rgba(WAVE_BLUE, 0.5);
-  ctx.shadowBlur = 8;
-  ctx.stroke();
-  ctx.shadowBlur = 0;
-
-  // Hover guide: vertical rule + highlighted sample.
-  if (hoverIndex >= 0 && cacheWavePoints[hoverIndex]) {
-    const p = cacheWavePoints[hoverIndex];
-    ctx.strokeStyle = rgba(WAVE_BLUE, 0.55);
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(p.x, pad);
-    ctx.lineTo(p.x, pad + plotH);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = WAVE_BLUE;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(8,16,24,.8)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-
-  // Peak marker dot (highest hit rate).
-  if (n > 0) {
-    let peakIndex = 0;
-    history.forEach((point, index) => { if (point.v >= history[peakIndex].v) peakIndex = index; });
-    const px = xFor(peakIndex);
-    const py = yFor(history[peakIndex].v);
-    ctx.beginPath();
-    ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = WAVE_BLUE;
-    ctx.fill();
-  }
+  drawWave(canvas, visible, 1, cacheHoverState.hover, WAVE_BLUE, cacheWavePoints);
 }
 
 // Transfer waveform on the green card: per-call response bytes (bytesOut) over
@@ -543,17 +424,10 @@ const dataWavePoints = [];
 function renderDataWave(recent) {
   const canvas = $("data-wave");
   if (!canvas) return;
-  const seen = new Set(dataHistory.map((point) => point.id));
-  for (const item of recent) {
-    // Sample completed responses that actually streamed bytes; failed relays
-    // and in-flight records carry no bytesOut and would pin a flat zero.
-    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+  appendResponseMetric(dataHistory, recent, (item) => {
     const value = Number(item.bytesOut) || 0;
-    if (value <= 0) continue;
-    dataHistory.push({ id: item.id, t: item.startedAt || 0, v: value, session: sessionKeyOf(item) });
-  }
-  dataHistory.sort((a, b) => a.t - b.t);
-  if (dataHistory.length > WAVE_MAX_POINTS) dataHistory.splice(0, dataHistory.length - WAVE_MAX_POINTS);
+    return value > 0 ? { v: value } : null;
+  });
   const visible = visiblePoints(dataHistory);
   visibleDataHistory = visible;
   dataPeakState.peak = visible.reduce((max, point) => Math.max(max, point.v), 0);
@@ -574,23 +448,14 @@ const tpsWavePoints = [];
 function renderTpsWave(recent) {
   const canvas = $("tps-wave");
   if (!canvas) return;
-  const seen = new Set(tpsHistory.map((point) => point.id));
-  for (const item of recent) {
-    // Only completed responses with real output tokens and a wall-clock
-    // duration carry a usable rate; in-flight and failed records have neither.
-    if (item.kind !== "responses" || item.status !== "ok" || seen.has(item.id)) continue;
+  appendResponseMetric(tpsHistory, recent, (item) => {
     const output = Number(item.outputTokens) || 0;
     const latencyMs = Number(item.latencyMs) || 0;
-    if (output <= 0 || latencyMs <= 0) continue;
-    tpsHistory.push({
-      id: item.id,
-      t: item.startedAt || 0,
+    if (output <= 0 || latencyMs <= 0) return null;
+    return {
       v: output / (latencyMs / 1000),
-      session: sessionKeyOf(item),
-    });
-  }
-  tpsHistory.sort((a, b) => a.t - b.t);
-  if (tpsHistory.length > WAVE_MAX_POINTS) tpsHistory.splice(0, tpsHistory.length - WAVE_MAX_POINTS);
+    };
+  });
   const visible = visiblePoints(tpsHistory);
   visibleTpsHistory = visible;
   const last = visible.length ? visible[visible.length - 1].v : null;
@@ -614,9 +479,17 @@ function buildSessionList(recent) {
     if (item.kind !== "responses") continue;
     const key = sessionKeyOf(item);
     if (!key) continue;
-    const entry = map.get(key) || { id: key, model: "", lastAt: 0 };
-    if (item.model) entry.model = item.model;
-    entry.lastAt = Math.max(entry.lastAt, Number(item.finishedAt || item.startedAt || 0));
+    const entry = map.get(key) || { id: key, model: "", lastAt: 0, lastStartedAt: 0 };
+    const startedAt = Number(item.startedAt || 0);
+    const at = Number(item.finishedAt || startedAt);
+    // Metrics are newest-first today, but ordering is not this projection's
+    // contract. Pick model and timestamp together so a later storage/order
+    // change cannot make the session chip report its oldest model.
+    if (!entry.model || at > entry.lastAt || (at === entry.lastAt && startedAt > entry.lastStartedAt)) {
+      if (item.model) entry.model = item.model;
+      entry.lastAt = at;
+      entry.lastStartedAt = startedAt;
+    }
     map.set(key, entry);
   }
   return [...map.values()].sort((a, b) => b.lastAt - a.lastAt);
@@ -682,12 +555,6 @@ const HOSTDASH_SWIM_STATE = {
   hot: "hot",
   failed: "failed",
 };
-
-function hostDashPush(history, point) {
-  history.push(point);
-  history.sort((a, b) => a.t - b.t);
-  if (history.length > WAVE_MAX_POINTS) history.splice(0, history.length - WAVE_MAX_POINTS);
-}
 
 function hostDashAvg(history) {
   if (!history.length) return 0;
@@ -822,16 +689,19 @@ function renderLocalHostDashboard(data) {
     const cachedTokens = Math.min(inTokens, Number(item.cachedTokens) || 0);
     const prefillTokens = Math.max(0, inTokens - cachedTokens);
     if (prefillTokens > 0 && prefillMs > 0) {
-      hostDashPush(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: prefillTokens / (prefillMs / 1000) });
+      appendBoundedPoint(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: prefillTokens / (prefillMs / 1000) });
     }
     const outTokens = Number(item.outputTokens) || 0;
     const decodeMs = Math.max(0, (Number(item.latencyMs) || 0) - firstMs);
     if (outTokens > 0 && decodeMs > 0) {
-      hostDashPush(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: outTokens / (decodeMs / 1000) });
+      appendBoundedPoint(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: outTokens / (decodeMs / 1000) });
     }
   }
 
-  const prefillVisible = visiblePoints(hostDash.prefill);
+  // The dashboard session filter belongs to gateway traces. Managed-host lanes
+  // are host-wide telemetry and intentionally carry no Codex session identity;
+  // filtering them by a UI selection made both host plots disappear.
+  const prefillVisible = hostDash.prefill;
   hostDash.prefillPeak.peak = prefillVisible.reduce((max, point) => Math.max(max, point.v), 0);
   const prefillCanvas = $("hostdash-prefill-wave");
   if (prefillCanvas) drawWave(prefillCanvas, prefillVisible, hostDash.prefillPeak.peak, -1, WAVE_BLUE, hostDash.prefillPoints);
@@ -839,7 +709,7 @@ function renderLocalHostDashboard(data) {
   set("hostdash-prefill-avg", prefillVisible.length ? number(Math.round(hostDashAvg(prefillVisible))) : "—");
   set("hostdash-prefill-count", number(prefillVisible.length));
 
-  const decodeVisible = visiblePoints(hostDash.decode);
+  const decodeVisible = hostDash.decode;
   hostDash.decodePeak.peak = decodeVisible.reduce((max, point) => Math.max(max, point.v), 0);
   const decodeCanvas = $("hostdash-decode-wave");
   if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, -1, WAVE_VIOLET, hostDash.decodePoints);
@@ -920,11 +790,12 @@ function render(data) {
   const status = $("live-status");
   status.className = `status-pill ${ready ? "ready" : "error"}`;
   status.querySelector("strong").textContent = ready ? t("status.ready") : t("status.tokenMissing");
-  renderModelOptions(data);
+  const currentRoute = currentRouteView(data);
+  renderModelOptions(data, currentRoute);
   renderSubagent(data.subagent);
   set("uptime", "v" + (data.update?.currentVersion || "") + " " + t("status.uptime") + " " + uptime(data.uptimeMs));
-  set("main-model", data.config.routeModel || data.config.mainModel);
-  if (data.config.routeProviderLabel || data.config.mainProviderLabel) set("route-provider", data.config.routeProviderLabel || data.config.mainProviderLabel);
+  set("main-model", currentRoute.modelId);
+  if (currentRoute.providerLabel) set("route-provider", currentRoute.providerLabel);
   if (data.config.mainWire) set("route-wire", data.config.mainWire === "chat" ? "chat/completions" : "responses");
 
   const responses = data.responses;
@@ -951,7 +822,7 @@ function render(data) {
   set("stream-count", number(responses.streaming));
 
   set("cfg-bind", data.config.bind);
-  const mainUpstream = data.config.mainUpstreamUrl || data.config.goBaseUrl;
+  const mainUpstream = data.config.mainUpstreamUrl || data.config.opencodeBaseUrl;
   set("cfg-go", mainUpstream);
   const upstreamDd = $("cfg-go");
   if (upstreamDd) upstreamDd.title = mainUpstream;
@@ -1044,12 +915,36 @@ let lastModelSignature = "";
 function modelSignature(models) {
   const selected = models?.selected || {};
   const options = models?.options || [];
-  const key = (model) => `${model.id}|${model.provider}|${model.tierLabel || ""}|${model.visionTier || ""}`;
+  const providers = models?.providers || [];
+  const visionProviders = models?.visionProviders || providers;
+  // This signature is a render cache key, so it must include every option fact
+  // the render consumes. Keying only identity left a changed label, context or
+  // supportsVision flag stuck in the old DOM until some unrelated field moved.
+  const key = (model) => [
+    model.id,
+    model.provider,
+    model.label,
+    model.supportsVision,
+    model.tierLabel,
+    model.visionTier,
+    model.balanceScore,
+    model.contextWindow,
+    model.contextSource,
+    model.free,
+    model.status,
+  ].join("|");
+  const providerKey = (provider) => [
+    provider.id,
+    provider.label,
+    provider.tokenConfigured,
+  ].join("|");
   return [
     selected.mainModel,
     selected.visionModel,
     models?.selectedProvider,
     models?.selectedVisionProvider,
+    providers.map(providerKey).join("|"),
+    visionProviders.map(providerKey).join("|"),
     options.map(key).join("|"),
   ].join("\u0001");
 }
@@ -1059,38 +954,48 @@ let lastModelData = null;
 // one the server reports. Cleared once the saved selection catches up.
 let visionProviderOverride = "";
 
-function renderCurrentModel(data) {
+function currentRouteView(data) {
   const models = data?.models || {};
   const selected = models.selected || {};
   const providers = models.providers || [];
-  // The route header and this read-only model block describe the same fact.
-  // Using models.selected here created a second pipeline that stayed on the
-  // catalog default while config.routeModel already followed real Codex calls.
   const modelId = data?.config?.routeModel || selected.mainModel || "";
-  const providerId = models.options?.find((model) => model.id === modelId)?.provider
+  const option = models.options?.find((model) => model.id === modelId);
+  const providerId = data?.config?.routeProvider
+    || option?.provider
     || models.selectedProvider
     || "other";
   const providerLabel = data?.config?.routeProviderLabel
     || providers.find((provider) => provider.id === providerId)?.label
     || providerId;
-  const modelLabel = models.options?.find((model) => model.id === modelId)?.label || modelId;
+  return {
+    modelId,
+    modelLabel: option?.label || modelId,
+    providerId,
+    providerLabel,
+  };
+}
+
+function renderCurrentModel(data, route = currentRouteView(data)) {
+  // The route header and this read-only model block describe the same fact and
+  // therefore consume the same projection. `models.selected` remains a separate
+  // configured/catalog default, not a competing definition of current traffic.
   const providerDisplay = $("main-provider-display");
   const modelDisplay = $("main-model-display-name");
-  if (providerDisplay) providerDisplay.textContent = providerLabel;
-  if (modelDisplay) modelDisplay.textContent = modelLabel;
+  if (providerDisplay) providerDisplay.textContent = route.providerLabel;
+  if (modelDisplay) modelDisplay.textContent = route.modelLabel;
   const mainModelStatic = document.querySelector(".model-static");
   if (mainModelStatic) mainModelStatic.classList.toggle("busy", modelBusy);
   if (modelDisplay) modelDisplay.classList.toggle("busy", modelBusy);
   if (providerDisplay) providerDisplay.classList.toggle("busy", modelBusy);
 }
 
-function renderModelOptions(data) {
+function renderModelOptions(data, currentRoute = currentRouteView(data)) {
   const models = data.models;
   if (!models?.options) return;
   lastModelData = data;
   // This must run on every status event. The selectable model set changes
   // rarely, but the latest real route can change from one request to the next.
-  renderCurrentModel(data);
+  renderCurrentModel(data, currentRoute);
   const signature = modelSignature(models);
   if (signature === lastModelSignature) {
     // Models did not change since the last SSE event; keep the current DOM.
@@ -1385,7 +1290,7 @@ events.onerror = () => {
   };
 
   attachAreaWaveHover({ canvasId: "context-wave", tooltipId: "wave-tooltip", pointsRef: wavePoints, hoverState: waveHoverState, draw: (canvas, hover) => drawWave(canvas, visibleContextHistory, wavePeakState.peak, hover, WAVE_AMBER, wavePoints), formatValue: number });
-  attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawCacheWave(canvas, visibleCacheHistory, hover), formatValue: percent });
+  attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawWave(canvas, visibleCacheHistory, 1, hover, WAVE_BLUE, cacheWavePoints), formatValue: percent });
   attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, visibleDataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
   attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, visibleTpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
 
@@ -1494,19 +1399,13 @@ function maybePromptSettings(config) {
 let lastSettings = null;
 
 function renderProviderTokenFields(data) {
-  // One table per keyed provider, so adding an endpoint cannot mean editing this
-  // function again. Never echo a stored token back into the field: the
+  // The field owns its public form key; the provider registry owns identity and
+  // configured state. Never echo a stored token back into the field: the
   // placeholder reports whether one is set, and submitting an empty field leaves
   // it alone.
-  const tokenFields = [
-    { element: "settings-go-token", provider: "opencode-go" },
-    { element: "settings-deepseek-token", provider: "deepseek-official" },
-    { element: "settings-commandcode-token", provider: "commandcode" },
-  ];
-  for (const field of tokenFields) {
-    const input = $(field.element);
-    if (!input) continue;
-    const provider = (data.providers || []).find((entry) => entry.id === field.provider);
+  for (const input of document.querySelectorAll("[data-provider-token]")) {
+    const provider = (data.providers || []).find((entry) => entry.id === input.dataset.providerToken);
+    input.dataset.settingsField = provider?.settingsField || "";
     input.value = "";
     input.placeholder = provider?.tokenConfigured
       ? t("settings.configured")
@@ -2388,13 +2287,13 @@ function renderStats(data) {
 
   const hourly = statsRangeDays === 1;
   // The server builds one complete projection per range: aggregate, model
-  // ranking and buckets all share the same legend. Falling back keeps the
-  // public API readable from an older gateway during an in-place update.
-  const days = [...(data.series?.[periodKey]
-    || (hourly ? data.hours || [] : (data.days || []).slice(-statsRangeDays)))];
+  // ranking and buckets all share the same legend. Resolve that projection
+  // once; every plot below consumes these exact arrays.
+  const days = [...(data.series?.[periodKey] || [])];
   const labelFor = hourly ? (entry) => statsHourLabel(entry.hour) : (entry) => statsDayLabel(entry.day);
-  const modelPeriod = data.modelPeriods?.[periodKey];
-  buildStatsPalette(data, modelPeriod?.models || data.models);
+  const modelPeriod = data.modelPeriods?.[periodKey] || { models: [], modelCount: 0 };
+  const periodModels = modelPeriod.models || [];
+  buildStatsPalette(data, periodModels);
   // The snapshot replaces every node the hover layer can point at.
   statsTipHide();
   statsFocusModel(null);
@@ -2414,7 +2313,7 @@ function renderStats(data) {
     labelFor,
     renderZero: true,
   });
-  renderModelShare(modelPeriod?.models || data.models, modelPeriod?.modelCount ?? data.modelCount, `${statsRangeDays}D`);
+  renderModelShare(periodModels, modelPeriod.modelCount || 0, `${statsRangeDays}D`);
   const error = $("stats-error");
   if (error) error.hidden = true;
 }
@@ -2515,6 +2414,10 @@ async function renderLocalEngines() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Discover ${response.status}`);
     const engines = data.engines || [];
+    localEngineDefinitions.clear();
+    for (const definition of data.engineDefinitions || []) {
+      if (definition?.id) localEngineDefinitions.set(definition.id, definition);
+    }
     localKvDirectoryDefault = String(data.kvDirectoryDefault || "");
     localKvBudgetDefaultGiB = Number(data.kvBudgetDefaultGiB) || 0;
     localNativeHostPicker = Boolean(data.nativeLocalHostPicker);
@@ -3117,7 +3020,7 @@ function preferKnownEngine(next, current) {
   return preferEngine(next, current);
 }
 const localConnectedState = new Map();
-const localDefaultPorts = { ollama: 11434, llamacpp: 8080, vllm: 8000 };
+const localEngineDefinitions = new Map();
 let localConfigEngine = "";
 // Server-computed manage-form default (the install's own state dir): the
 // server knows the platform and the directory it owns; the frontend does not
@@ -3132,7 +3035,7 @@ let localKvBudgetDefaultGiB = 0;
 let localNativeHostPicker = false;
 
 function localEngineLabel(engine) {
-  return { ollama: "Ollama", llamacpp: "llama.cpp", vllm: "vLLM" }[engine] || engine;
+  return localEngineDefinitions.get(engine)?.label || localKnownEngines.get(engine)?.label || engine;
 }
 
 function paintEngineButton(engine) {
@@ -3327,7 +3230,7 @@ function localEnginePort(found, engine) {
       // An empty or malformed observation falls through to the normal hint.
     }
   }
-  return localDefaultPorts[engine] || 8080;
+  return Number(localEngineDefinitions.get(engine)?.defaultPort) || 0;
 }
 
 async function openLocalConfig(engine) {
@@ -3338,7 +3241,7 @@ async function openLocalConfig(engine) {
   // completes. A managed host must not open as a blank editable form merely
   // because that scan is still in flight: finish the one read, then show its
   // durable paths read-only.
-  if (engine === "llamacpp" && !localKnownEngines.has(engine)) await renderLocalEngines();
+  if (!localKnownEngines.has(engine) && !localEngineDefinitions.has(engine)) await renderLocalEngines();
   const found = localKnownEngines.get(engine) || localDiscovery.get(engine);
   if (engine === "llamacpp") {
     const model = $("local-host-model-file");
@@ -3359,7 +3262,7 @@ async function openLocalConfig(engine) {
   if (port) {
     port.readOnly = false;
     port.value = found ? String(localEnginePort(found, engine)) : "";
-    port.placeholder = String(localDefaultPorts[engine] || 8080);
+    port.placeholder = String(localEngineDefinitions.get(engine)?.defaultPort || "");
   }
 
   // Read-only proof that the pre-filled port is the right one: the model file
@@ -3835,12 +3738,10 @@ async function saveSettings() {
   status.textContent = t("settings.saving");
   try {
     const body = {};
-    const go = $("settings-go-token").value.trim();
-    const deepseek = $("settings-deepseek-token").value.trim();
-    const commandcode = $("settings-commandcode-token").value.trim();
-    if (go) body.opencodeGoToken = go;
-    if (deepseek) body.deepseekApiKey = deepseek;
-    if (commandcode) body.commandcodeApiKey = commandcode;
+    for (const input of document.querySelectorAll("[data-provider-token][data-settings-field]")) {
+      const value = input.value.trim();
+      if (value) body[input.dataset.settingsField] = value;
+    }
     if (!Object.keys(body).length) {
       closeSettings();
       return;
@@ -3940,7 +3841,7 @@ function redrawWaves() {
   paint("data-wave", visibleDataHistory, dataPeakState, dataHoverState, WAVE_GREEN, dataWavePoints);
   paint("tps-wave", visibleTpsHistory, tpsPeakState, tpsHoverState, WAVE_VIOLET, tpsWavePoints);
   const cache = $("cache-wave");
-  if (cache) drawCacheWave(cache, visibleCacheHistory, cacheHoverState.hover);
+  if (cache) drawWave(cache, visibleCacheHistory, 1, cacheHoverState.hover, WAVE_BLUE, cacheWavePoints);
 }
 // Hash routing across the left rail. Views stay mounted and are toggled with a
 // class, so the SSE stream, poll timers, and every listener registered below

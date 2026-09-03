@@ -3,23 +3,13 @@
 // sees only the window that one admitted request can reliably use.
 
 import { LOCAL_HOST_ADAPTERS } from "./local-hosts.mjs";
-
-function positiveInteger(value, label) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive integer.`);
-  return value;
-}
+import { positiveInteger, requiredText as text } from "./local-host-validation.mjs";
 
 function ratio(value, label) {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
     throw new TypeError(`${label} must be greater than zero and less than one.`);
   }
   return value;
-}
-
-function text(value, label) {
-  const result = typeof value === "string" ? value.trim() : "";
-  if (!result) throw new TypeError(`${label} is required.`);
-  return result;
 }
 
 export function createLocalHostCapacityContract({
@@ -49,9 +39,9 @@ export function createLocalHostCapacityContract({
   });
 }
 
-// The profile calculator owns the static per-GPU arithmetic. This adapter is
-// deliberately narrow: the catalog and scheduler receive only the one honest
-// per-lane window and its fixed lane count, never total context or VRAM facts.
+// The adapter's measured runtime calculator owns per-GPU arithmetic. This
+// contract is deliberately narrow: the catalog and scheduler receive only the
+// one honest per-lane window and its fixed lane count, never raw VRAM facts.
 export function createLocalHostCapacityFromLaneProfile(profile, {
   outputReserveTokens,
   autoCompactRatio = 0.8,

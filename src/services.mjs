@@ -6,7 +6,7 @@
 // module owns building it. Moved as-is from server.mjs.
 import path from "node:path";
 import os from "node:os";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.mjs";
 import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
@@ -111,14 +111,6 @@ export function createServices(config = loadConfig()) {
   // loadConfig always supplies `tokens`; test fixtures build config objects by
   // hand, so make the runtime copy self-consistent before routes mutate it.
   mutableConfig.tokens = mutableConfig.tokens || {};
-  // Provider tokens have a single source of truth: the per-provider map.
-  // The legacy boot-time goToken mirror (hand-built test configs, older
-  // persisted shapes) is folded into it here and dropped, so no reader can
-  // disagree with the just-saved token again.
-  if (mutableConfig.goToken && !mutableConfig.tokens["opencode-go"]) {
-    mutableConfig.tokens["opencode-go"] = mutableConfig.goToken;
-  }
-  delete mutableConfig.goToken;
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
   const zstdMemoryBudget = new WeightedByteBudget(
     mutableConfig.zstdMemoryBudgetBytes || DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
@@ -257,13 +249,10 @@ export function createServices(config = loadConfig()) {
         // fold should carry the order that fold implies.
         usageByModel: rollupTotals(readRollup(rollupFile)),
       });
-      mkdirSync(path.dirname(catalogFile), { recursive: true });
       // Atomic replace: Codex reads this file on its own schedule, so a
       // half-written JSON must never be observable. Same-directory rename is
       // atomic on both Windows and POSIX.
-      const tmp = `${catalogFile}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify(catalog, null, 2), "utf8");
-      renameSync(tmp, catalogFile);
+      atomicWriteJsonSync(catalogFile, catalog);
       return catalog.models?.length || 0;
     } catch (error) {
       console.log(`[gate] model catalog file write failed: ${error.message}`);
