@@ -911,6 +911,7 @@ async function relayGatewayRequest(req, res, services) {
       routeAffinity,
       knownModels: publishedModelIds(config),
       nativeSlugs: services.nativeSlugs,
+      modelSelection,
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
       // The native passthrough leg forwards these to ChatGPT's backend untouched.

@@ -81,6 +81,28 @@ export function hasOpaqueCollaboration(input) {
   return null;
 }
 
+// Kimi and other routed providers reject Codex's agent_message item type.
+// Convert readable collaboration-channel content into a plain user message.
+export function agentMessageToUserMessage(item) {
+  if (item?.type !== "agent_message") return item;
+  const text = itemPlainText(item);
+  const payload = newTaskPayloadFromText(text);
+  if (payload) {
+    return {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: payload }],
+    };
+  }
+  if (/Message Type:\s*NEW_TASK\b/i.test(text)) return null;
+  if (!text.trim()) return null;
+  return {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  };
+}
+
 export function promoteCollaborationNewTask(input) {
   if (!Array.isArray(input)) return input;
   let payload = "";

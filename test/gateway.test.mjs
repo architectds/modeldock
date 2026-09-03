@@ -16,6 +16,7 @@ import {
   applyToolPolicy,
   compactFailureReport,
   collaborationRelayCacheSnapshot,
+  compactModelForRelay,
   constrainImagesForTransport,
   createUsageTee,
   decodeCompactionSummary,
@@ -55,6 +56,7 @@ import {
   rewriteHistoricalImages,
   routeGatewayRequest,
   sessionIdsFrom,
+  syncModelSelectionFromPayload,
   stripLocalInstructions,
   upstreamTargetFor,
 } from "../src/gateway.mjs";
@@ -177,8 +179,58 @@ test("normalizeGatewayInput promotes the live split NEW_TASK agent_message shape
     },
     { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>\nCanva\n" }] },
   ]);
-  assert.equal(normalized.at(-1).role, "user");
-  assert.equal(normalized.at(-1).content[0].text, payload);
+  assert.equal(normalized.some((item) => item.type === "agent_message"), false);
+  const users = normalized.filter((item) => item.type === "message" && item.role === "user");
+  assert.equal(users.at(-2).content[0].text, payload);
+});
+
+test("normalizeGatewayInput converts agent_message items for routed upstream replay", () => {
+  const normalized = normalizeGatewayInput([
+    {
+      type: "agent_message",
+      content: [{ type: "input_text", text: "status probe complete" }],
+    },
+  ]);
+  assert.deepEqual(normalized, [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "status probe complete" }],
+  }]);
+});
+
+test("syncModelSelectionFromPayload updates modelSelection for compact and chat requests", () => {
+  const knownModels = new Set(["k3@kimi", "glm-5.3@zai"]);
+  const services = { modelSelection: { mainModel: "glm-5.3@zai", visionModel: "none" }, mainModel: "glm-5.3@zai" };
+  assert.equal(
+    syncModelSelectionFromPayload(services, { model: "k3@kimi" }, knownModels),
+    "k3@kimi",
+  );
+  assert.equal(services.modelSelection.mainModel, "k3@kimi");
+});
+
+test("compactModelForRelay keeps an explicit vision pick but prefers the active text main over stale payload", () => {
+  const config = configStub();
+  const knownModels = new Set(["deepseek-v4-flash@opencode-go", "mimo-v2.5@opencode-go", "glm-5.3@zai", "k3@kimi"]);
+  assert.equal(
+    compactModelForRelay({
+      config: { ...config, mainModel: "deepseek-v4-flash@opencode-go" },
+      knownModels,
+      activeModel: "deepseek-v4-flash@opencode-go",
+      requestedModel: "mimo-v2.5@opencode-go",
+      fallbackModel: "deepseek-v4-flash@opencode-go",
+    }),
+    "mimo-v2.5@opencode-go",
+  );
+  assert.equal(
+    compactModelForRelay({
+      config: { ...config, mainModel: "deepseek-v4-flash@opencode-go" },
+      knownModels,
+      activeModel: "k3@kimi",
+      requestedModel: "glm-5.3@zai",
+      fallbackModel: "deepseek-v4-flash@opencode-go",
+    }),
+    "k3@kimi",
+  );
 });
 
 test("compaction summaries round-trip through the kcr1 payload", () => {
@@ -3357,6 +3409,92 @@ test("relayCompaction keeps a picked vision model and its image evidence", async
     assert.equal(imagePuts, 1, "compaction derives the image reference once instead of decoding and hashing the same pixels again");
     const compacted = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
     assert.match(decodeCompactionSummary(compacted.output[0].encrypted_content), /Image attachment img_compact_visual/, "the compaction handoff keeps a durable image ref");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayCompaction follows the active main model instead of Codex's stale payload.model", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("kimi compact ok");
+  };
+  try {
+    const result = await relayCompaction(
+      {
+        model: "glm-5.3@zai",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "long task" }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        config: {
+          ...configStub(),
+          mainModel: "deepseek-v4-flash@opencode-go",
+          tokens: { "opencode-go": "go-token", zai: "zai-token", kimi: "kimi-token" },
+        },
+        knownModels: new Set(["glm-5.3@zai", "k3@kimi", "deepseek-v4-flash@opencode-go"]),
+        mainModel: "k3@kimi",
+        modelSelection: { mainModel: "k3@kimi", visionModel: "none" },
+      },
+      {},
+      true,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "k3@kimi", "compact must follow the active main model");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].body.model, "k3");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses syncs modelSelection on compact_v2 before summarizing", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const modelSelection = { mainModel: "deepseek-v4-flash@deepseek-official", visionModel: "none" };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return summaryResponse("kimi compact ok");
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "k3@kimi",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "long task" }] },
+          { type: "compaction_trigger" },
+        ],
+      },
+      res,
+      {
+        ...compactServices(),
+        config: {
+          ...configStub(),
+          mainModel: "deepseek-v4-flash@deepseek-official",
+          tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token", kimi: "kimi-token" },
+        },
+        knownModels: new Set(["deepseek-v4-flash@deepseek-official", "k3@kimi"]),
+        mainModel: modelSelection.mainModel,
+        modelSelection,
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.route.model, "k3@kimi");
+    assert.equal(modelSelection.mainModel, "k3@kimi");
+    assert.equal(calls[0].body.model, "k3");
   } finally {
     globalThis.fetch = originalFetch;
   }
