@@ -620,6 +620,152 @@ function isToolOutputItem(item) {
   return item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
 }
 
+function chatToolCallId(call) {
+  if (!call || typeof call !== "object") return undefined;
+  const id = call.id ?? call.call_id;
+  return typeof id === "string" && id ? id : undefined;
+}
+
+function chatToolResultText(item) {
+  if (typeof item?.output === "string") return item.output;
+  if (item?.output !== undefined) return JSON.stringify(item.output);
+  if (typeof item?.content === "string") return item.content;
+  if (Array.isArray(item?.content)) {
+    return item.content
+      .map((part) => (typeof part?.text === "string" ? part.text : ""))
+      .join("");
+  }
+  return "";
+}
+
+// Codex reuses short call_ids across turns (exec_command_0, exec_command_1, ...).
+// Pairing helpers keyed by call_id then keep every call but only the first output
+// per id, so later turns reach strict upstreams as unpaired assistant.tool_calls.
+// Suffix a reused id only after its earlier call/output pair has already closed.
+export function uniquifyReusedToolCallIds(input) {
+  if (!Array.isArray(input)) return input;
+  const completedOriginals = new Set();
+  const reuseCounts = new Map();
+  const pendingByOriginal = new Map();
+  let changed = false;
+  const out = [];
+
+  function uniqueCallId(original) {
+    if (!completedOriginals.has(original)) return original;
+    const n = (reuseCounts.get(original) || 1) + 1;
+    reuseCounts.set(original, n);
+    return `${original}__${n}`;
+  }
+
+  function enqueueOriginal(original, unique) {
+    if (!pendingByOriginal.has(original)) pendingByOriginal.set(original, []);
+    pendingByOriginal.get(original).push(unique);
+  }
+
+  function dequeueOriginal(original) {
+    const queue = pendingByOriginal.get(original);
+    return queue?.length ? queue.shift() : original;
+  }
+
+  for (const item of input) {
+    if (isToolCallItem(item) && typeof item.call_id === "string" && item.call_id) {
+      const original = item.call_id;
+      const unique = uniqueCallId(original);
+      if (unique !== original) changed = true;
+      enqueueOriginal(original, unique);
+      out.push(unique === item.call_id ? item : { ...item, call_id: unique });
+      continue;
+    }
+    if (isToolOutputItem(item) && typeof item.call_id === "string" && item.call_id) {
+      const original = item.call_id;
+      const unique = dequeueOriginal(original);
+      if (unique !== item.call_id) changed = true;
+      out.push(unique === item.call_id ? item : { ...item, call_id: unique });
+      completedOriginals.add(original);
+      continue;
+    }
+    if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls) && item.tool_calls.length) {
+      let toolChanged = false;
+      const tool_calls = item.tool_calls.map((call) => {
+        const original = chatToolCallId(call);
+        if (!original) return call;
+        const unique = uniqueCallId(original);
+        if (unique !== original) {
+          toolChanged = true;
+          changed = true;
+        }
+        enqueueOriginal(original, unique);
+        if (unique === original) return call;
+        if (call.id !== undefined) return { ...call, id: unique };
+        return { ...call, call_id: unique };
+      });
+      out.push(toolChanged ? { ...item, tool_calls } : item);
+      continue;
+    }
+    if (item?.type === "message" && item?.role === "tool" && typeof item.tool_call_id === "string" && item.tool_call_id) {
+      const original = item.tool_call_id;
+      const unique = dequeueOriginal(original);
+      if (unique !== item.tool_call_id) changed = true;
+      out.push(unique === item.tool_call_id ? item : { ...item, tool_call_id: unique });
+      completedOriginals.add(original);
+      continue;
+    }
+    out.push(item);
+  }
+  return changed ? out : input;
+}
+
+// Some Responses translators validate chat-style tool history strictly.
+// Codex frequently replays tool turns as assistant.tool_calls plus either
+// role:"tool" rows or top-level function_call_output items. Flatten those
+// turns into Responses function_call/output pairs and drop orphan calls.
+export function flattenChatToolCallsToResponses(input) {
+  if (!Array.isArray(input)) return input;
+  const outputByCallId = new Map();
+  for (const item of input) {
+    if (isToolOutputItem(item) && typeof item.call_id === "string" && item.call_id) {
+      outputByCallId.set(item.call_id, item);
+    }
+    if (item?.type === "message" && item?.role === "tool" && typeof item.tool_call_id === "string" && item.tool_call_id) {
+      outputByCallId.set(item.tool_call_id, item);
+    }
+  }
+  const consumedOutputs = new Set();
+  const out = [];
+  for (const item of input) {
+    if (item?.type === "message" && item?.role === "tool") continue;
+    if (item?.type === "message" && item?.role === "assistant" && Array.isArray(item.tool_calls) && item.tool_calls.length) {
+      const { tool_calls, ...assistant } = item;
+      out.push(assistant);
+      for (const call of tool_calls) {
+        const id = chatToolCallId(call);
+        const source = id ? outputByCallId.get(id) : undefined;
+        if (!id || !source) continue;
+        out.push({
+          type: "function_call",
+          call_id: id,
+          name: call?.function?.name || call?.name || "function",
+          arguments: call?.function?.arguments || call?.arguments || "{}",
+        });
+        out.push({
+          type: "function_call_output",
+          call_id: id,
+          output: chatToolResultText(source),
+        });
+        consumedOutputs.add(id);
+      }
+      continue;
+    }
+    if (isToolOutputItem(item)) {
+      if (consumedOutputs.has(item.call_id)) continue;
+      out.push(item);
+      continue;
+    }
+    out.push(item);
+  }
+  return out;
+}
+
 // Go (Console Go) validates tool pairing strictly and rejects the whole request
 // when a tool call has no matching output ("No tool output found for tool call
 // ..."). Codex genuinely produces such orphans - a remote compact task slices
@@ -1066,7 +1212,7 @@ export async function relayOpaqueCollaboration(input, services, { signal } = {})
 
 export function normalizeGatewayInput(input) {
   if (!Array.isArray(input)) return input;
-  const rewritten = dedupeToolCalls(dropUnpairedToolItems(input))
+  const rewritten = dedupeToolCalls(dropUnpairedToolItems(uniquifyReusedToolCallIds(input)))
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
@@ -1110,7 +1256,7 @@ function normalizeStandardToolItem(item) {
 // The response path restores custom_tool_call before the item reaches Codex.
 export function normalizeXaiInput(input) {
   if (!Array.isArray(input)) return input;
-  return normalizeGatewayInput(input).map(normalizeStandardToolItem).map(normalizeXaiReasoningItem);
+  return normalizeGatewayInput(flattenChatToolCallsToResponses(input)).map(normalizeStandardToolItem).map(normalizeXaiReasoningItem);
 }
 
 // A reasoning item Codex replays carries `content: null`, and xAI reads a null
