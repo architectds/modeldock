@@ -65,7 +65,10 @@ test("installed Codex replays bridged Chat reasoning and a custom tool on the ne
   const codexHome = path.join(root, "codex-home");
   const workspace = path.join(root, "workspace");
   await Promise.all([mkdir(stateDir, { recursive: true }), mkdir(codexHome, { recursive: true }), mkdir(workspace, { recursive: true })]);
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Current Codex builds can briefly leave their plugin-clone helper holding a
+  // file after the CLI exits. Let Node retry that transient Windows lock rather
+  // than turning a successful wire round trip into a teardown failure.
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 100, retryDelay: 100 }));
 
   const requests = [];
   const patchInput = "*** Begin Patch\n*** Add File: reasoning-round-trip.txt\n+CUSTOM_TOOL_OK\n*** End Patch";
