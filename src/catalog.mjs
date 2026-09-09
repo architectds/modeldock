@@ -201,33 +201,24 @@ export function catalogFor(config) {
 export function mergeNativeCatalog(catalog, config, nativeCatalog = null) {
   const native = nativeCatalog || readNativeCatalog(config);
   if (!native?.models?.length) return catalog;
-  const allowed = allowedEffortsFor(native.captured_with);
   const published = new Set((catalog.models || []).map((entry) => entry?.slug));
   const extra = native.models.filter((model) => (
     model?.slug
     && model.visibility === "list"
     && !published.has(model.slug)
-  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model, allowed), config?.contextOverrides));
+  )).map((model) => nativeEntryForCatalog(sanitizeNativeReasoningLevels(model, native.captured_with), config?.contextOverrides));
   if (!extra.length) return catalog;
   return { ...catalog, models: [...(catalog.models || []), ...extra] };
 }
 
 // Codex releases before 0.138.0 parse reasoning_effort as a CLOSED serde enum
-// whose variants stop at `xhigh`. A single `max` anywhere in model_catalog_json
-// makes those builds exit 1 and publish NO models. 0.138.0 switched to an open
-// enum that accepts `max`. Bundled native catalogs started advertising `ultra`
-// around 0.144/0.145; gate it separately so 0.138-0.143 clients keep `max`
-// without a picker rung older stacks may still reject upstream.
+// whose variants stop at `xhigh`. A single newer value anywhere in
+// model_catalog_json makes those builds exit 1 and publish NO models. From
+// 0.138.0 onward the enum is open, so preserve every value the same installed
+// Codex binary advertised. Enumerating later rungs here would make every model
+// update require a ModelDock release.
 const BASE_REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
-const MAX_EFFORT_MIN_VERSION = "0.138.0";
-const ULTRA_EFFORT_MIN_VERSION = "0.144.0";
-
-export function allowedEffortsFor(codexVersion) {
-  const levels = new Set(BASE_REASONING_LEVELS);
-  if (versionAtLeast(codexVersion, MAX_EFFORT_MIN_VERSION)) levels.add("max");
-  if (versionAtLeast(codexVersion, ULTRA_EFFORT_MIN_VERSION)) levels.add("ultra");
-  return levels;
-}
+const OPEN_REASONING_LEVELS_MIN_VERSION = "0.138.0";
 
 function versionAtLeast(version, minimum) {
   const parse = (value) => {
@@ -246,12 +237,17 @@ function versionAtLeast(version, minimum) {
   return !actual.prerelease;
 }
 
-function sanitizeNativeReasoningLevels(model, allowed = allowedEffortsFor(null)) {
+function sanitizeNativeReasoningLevels(model, codexVersion) {
   if (!model || typeof model !== "object") return model;
+  const preserveAdvertisedLevels = versionAtLeast(codexVersion, OPEN_REASONING_LEVELS_MIN_VERSION);
+  const allowed = new Set(BASE_REASONING_LEVELS);
   const levels = Array.isArray(model.supported_reasoning_levels)
-    ? model.supported_reasoning_levels.filter((level) => allowed.has(level?.effort))
+    ? (preserveAdvertisedLevels
+        ? model.supported_reasoning_levels
+        : model.supported_reasoning_levels.filter((level) => allowed.has(level?.effort)))
     : model.supported_reasoning_levels;
-  const defaultLevel = allowed.has(model.default_reasoning_level)
+  const defaultLevel = (preserveAdvertisedLevels && typeof model.default_reasoning_level === "string")
+      || allowed.has(model.default_reasoning_level)
     ? model.default_reasoning_level
     : Array.isArray(levels) && levels.length > 0
       ? levels[levels.length - 1].effort

@@ -19,6 +19,7 @@ import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } f
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
+import { readCodexAuth } from "./codex-auth.mjs";
 
 // Re-exported so the existing import path keeps working: the tee is SSE
 // machinery and lives with the rest of the framing rules in sse.mjs.
@@ -281,11 +282,15 @@ function writeCompactFailureReport(report) {
 // managed config is active. Same shape as codex-router's native leg.
 const NATIVE_BASE = NATIVE_CODEX_BASE;
 
-export const NATIVE_IMAGE_PATHS = new Set([
+// Auxiliary Codex endpoints use the same configured openai_base_url as
+// Responses. When that URL points at ModelDock they must follow the same native
+// passthrough, otherwise client-owned tools fail locally before reaching
+// ChatGPT. The versioned /v1 tree is relayed generically by server.mjs; these
+// are only the unversioned legacy spellings older configs may still call.
+export const NATIVE_AUXILIARY_PATHS = new Set([
+  "/alpha/search",
   "/images/edits",
   "/images/generations",
-  "/v1/images/edits",
-  "/v1/images/generations",
 ]);
 
 // A stream that already sent headers cannot carry a JSON error. Terminate a
@@ -352,18 +357,47 @@ const NATIVE_FORWARD_HEADERS = new Set([
   "x-openai-subagent",
   "x-responsesapi-include-timing-metrics",
 ]);
+const NATIVE_FORWARD_HEADER_PREFIXES = ["x-codex-", "x-openai-", "x-oai-", "x-responsesapi-"];
 
-function nativeHeaders(incoming) {
+function nativeHeaders(incoming, auth = null) {
   const headers = {
     "Content-Type": "application/json",
     "Accept-Encoding": "identity",
     "User-Agent": "modeldock-gateway/0.1",
   };
-  for (const name of NATIVE_FORWARD_HEADERS) {
-    const value = incoming?.[name];
+  for (const [name, value] of Object.entries(incoming || {})) {
+    if (!NATIVE_FORWARD_HEADERS.has(name)
+        && !NATIVE_FORWARD_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
     if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
+  // The standalone web-search client does not copy the model request's auth
+  // headers to /alpha/search. Use the same Codex sign-in reader as the other
+  // native capabilities, but never replace an explicit client header.
+  if (!headers.authorization && auth?.accessToken) headers.authorization = `Bearer ${auth.accessToken}`;
+  if (!headers.authorization && auth?.apiKey) headers.authorization = `Bearer ${auth.apiKey}`;
+  if (!headers["chatgpt-account-id"] && auth?.accountId) headers["chatgpt-account-id"] = auth.accountId;
   return headers;
+}
+
+const NATIVE_RESPONSE_HEADERS = new Set([
+  "cache-control",
+  "content-disposition",
+  "content-type",
+  "location",
+  "retry-after",
+]);
+
+// Preserve capability metadata owned by the native endpoint. In particular,
+// Codex image generation reads x-codex-imagegen-request-id and future endpoint
+// families may add their own x-codex/x-openai response headers. Do not forward
+// framing or content-encoding: fetch has already decoded the upstream stream.
+function copyNativeResponseHeaders(upstream, res) {
+  for (const [name, value] of upstream.headers.entries()) {
+    if (!NATIVE_RESPONSE_HEADERS.has(name)
+        && !NATIVE_FORWARD_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix))
+        && name !== "x-request-id") continue;
+    res.setHeader(name, value);
+  }
 }
 
 function splitRequestUrl(url) {
@@ -401,13 +435,20 @@ export function sessionIdsFrom(headers) {
 // applies (e.g. what ON mode selected); only when there is no routed selection
 // does the native config default apply, so a fresh session behaves exactly as
 // Codex would without ModelDock.
-const NATIVE_DEFAULT_MODEL = "gpt-5.6-sol";
+function nativeFallbackModel(services) {
+  const available = Array.isArray(services.nativeSelectableModels)
+    ? services.nativeSelectableModels
+    : [];
+  for (const candidate of [services.visionModel, services.subagentModel, services.mainModel]) {
+    if (available.includes(candidate)) return candidate;
+  }
+  return available[0] || "";
+}
+
 // A routed provider can expire between turns. Compaction is the one request that
-// must still succeed before Codex can move the task onto another model, so it has
-// one explicit failover target on the signed-in native leg. This is deliberately
-// a bare native slug; the @opencode-go Luna is a different provider and would
-// reproduce the same quota failure we are escaping.
-const NATIVE_COMPACTION_FALLBACK_MODEL = "gpt-5.6-luna";
+// must still succeed before Codex can move the task onto another model, so use a
+// selectable native model captured from this Codex installation. No native
+// model name is compiled into the gateway.
 const NATIVE_COMPACTION_FALLBACK_CLASSES = new Set([
   "quota_exhausted",
   "auth_failed",
@@ -418,10 +459,10 @@ function mainModelFor(services, sessionId) {
   const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
   if (sessionModel) return sessionModel;
   const selected = services.mainModel || services.config?.mainModel || "";
-  // A routed selection is provider-qualified or a known legacy bare id; a bare
-  // native slug (gpt-5.6-sol) is not published in the routed catalog.
+  // A routed selection is provider-qualified or a known legacy bare id; native
+  // slugs are bare and are published from Codex's captured catalog.
   if (selected && (selected.includes("@") || services.knownModels?.has?.(selected))) return selected;
-  return NATIVE_DEFAULT_MODEL;
+  return nativeFallbackModel(services);
 }
 
 function recordDerivedFallback(services, sessionId, route) {
@@ -3404,37 +3445,44 @@ export async function relayNativeResponses(payload, res, services, { signal } = 
   }
 }
 
-// Native passthrough for the image endpoints the built-in image_gen tool posts
-// to (the openai_base_url redirect lands them here). The body is forwarded as
-// received; the native backend and the client's subscription do the rest.
-export async function relayNativeImage(payload, res, services, { signal } = {}) {
+// Native passthrough for auxiliary endpoints used by client-owned tools such as
+// web__run and image_gen. The openai_base_url redirect lands them here, so the
+// body and response must cross unchanged; the native backend and the client's
+// subscription own their protocol.
+export async function relayNativeAuxiliary(payload, res, services, { signal } = {}) {
   const { incomingHeaders, requestUrl } = services;
+  const method = String(services.method || "POST").toUpperCase();
   const { pathname, search } = splitRequestUrl(requestUrl);
   const target = nativeTarget(pathname, search);
-  const body = typeof payload === "string" || Buffer.isBuffer(payload)
-    ? payload
-    : JSON.stringify(payload || {});
+  const auth = services.codexHome ? readCodexAuth(services.codexHome) : null;
+  const canHaveBody = method !== "GET" && method !== "HEAD";
+  const body = !canHaveBody || payload === undefined
+    ? undefined
+    : (typeof payload === "string" || Buffer.isBuffer(payload) ? payload : JSON.stringify(payload));
   let forwardedBytes = 0;
   try {
-    const upstream = await fetch(target, {
-      method: "POST",
-      headers: nativeHeaders(incomingHeaders),
-      body,
+    const request = {
+      method,
+      headers: nativeHeaders(incomingHeaders, auth),
       signal,
-    });
+    };
+    if (body !== undefined) request.body = body;
+    const upstream = await fetch(target, request);
     if (!upstream.ok) {
       const raw = await upstream.text();
       if (!res.headersSent) {
         res.statusCode = upstream.status;
-        res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
+        copyNativeResponseHeaders(upstream, res);
+        if (!res.getHeader?.("Content-Type")) res.setHeader("Content-Type", "application/json");
         res.end(raw);
       }
       return { ok: false, httpStatus: upstream.status, error: raw.slice(0, 400) };
     }
     if (!res.headersSent) {
       res.statusCode = upstream.status;
-      res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
+      copyNativeResponseHeaders(upstream, res);
+      if (!res.getHeader?.("Content-Type")) res.setHeader("Content-Type", "application/json");
+      if (!res.getHeader?.("Cache-Control")) res.setHeader("Cache-Control", "no-cache, no-transform");
       res.flushHeaders();
     }
     const piped = await pipeGatewayStream(upstream.body, res, null, null, (size) => {
@@ -3821,7 +3869,10 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       // 502) must reach translateUpstreamError and writeCompactFailureReport, not
       // throw out of a JSON.parse into the generic catch below.
       const translated = translateUpstreamError({ provider: target.provider, status: upstream.status, bodyText: redactBearer(bytes.toString("utf8")), free: target.free });
-      if (NATIVE_COMPACTION_FALLBACK_CLASSES.has(translated.classification)) {
+      const fallbackModel = NATIVE_COMPACTION_FALLBACK_CLASSES.has(translated.classification)
+        ? nativeFallbackModel(services)
+        : "";
+      if (fallbackModel) {
         // The selected model remains unchanged. Only this compact request moves
         // to native Luna, once, so an expired routed subscription cannot trap a
         // long task before the user's newly selected native turn can begin.
@@ -3832,14 +3883,14 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
           error: translated.body.error.message.slice(0, 400),
           requestShape: describeInputShape(payload.input),
           compression: compressionInfo,
-          fallbackModel: NATIVE_COMPACTION_FALLBACK_MODEL,
+          fallbackModel,
         });
         metrics?.recordResponseTransform?.(noTransform(), transferMetrics(transfer, { streaming: false, routeReason: operation, upstreamRequestBytes: upstreamRequest.bytes }));
         recordUsage({ ...compactRoute, status: upstream.status });
         return relayNativeResponses(
           {
             ...payload,
-            model: NATIVE_COMPACTION_FALLBACK_MODEL,
+            model: fallbackModel,
           },
           res,
           services,
@@ -4007,11 +4058,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     return { ok: false, httpStatus: 503, route, error };
   }
   recordDerivedFallback(services, sessionId, route);
-  // A no-model request can fall back to the native default (gpt-5.6-sol) until
-  // the session has seen a routed main request. That model must reach the
-  // ChatGPT backend like any other native slug, not the external upstream.
+  // A no-model request can fall back to the current Codex catalog's native
+  // default until the session has seen a routed main request. That model must
+  // reach ChatGPT like any other native slug, not the external upstream.
   const routedNative = !payload.model
-    && (services.nativeSlugs?.has?.(route.model) || route.model === NATIVE_DEFAULT_MODEL);
+    && isNativeModel(route.model, knownModels, services.nativeSlugs);
   if (routedNative) {
     return relayNativeResponses({ ...payload, model: route.model }, res, services, { signal });
   }

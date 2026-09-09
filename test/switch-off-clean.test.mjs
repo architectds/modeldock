@@ -225,6 +225,15 @@ test("a non-default native model from the off state survives enable untouched", 
   assert.match(managed, /^model = "gpt-5.6-luna"$/m, "the off-state native model is kept, not replaced by the default");
 });
 
+test("a retired native top-level model follows the current Codex catalog", () => {
+  const managed = buildManagedCodexConfig('model = "gpt-retired"\napproval_policy = "on-request"\n', {
+    baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
+    nativeModels: ["gpt-future-default"],
+  });
+  assert.match(managed, /^model = "gpt-future-default"$/m);
+  assert.doesNotMatch(managed, /gpt-retired/);
+});
+
 test("a routed config model is rewritten to a native slug", () => {
   // A previous ModelDock build wrote a routed slug into the top-level model.
   // Enabling again must repair that, not preserve it: the routed slug lives
@@ -257,6 +266,27 @@ test("a non-native top-level model never survives into the managed config", () =
     },
   );
   assert.match(managed, /^model = "gpt-5.6-sol"$/m, "a custom/routed top-level model is replaced by native");
+});
+
+test("a routed top-level model uses the current Codex catalog instead of a compiled fallback", () => {
+  const managed = buildManagedCodexConfig(
+    'model = "old-route@custom"\napproval_policy = "on-request"\n',
+    {
+      baseUrl: "http://127.0.0.1:4097/c/KEY/v1",
+      nativeModels: ["gpt-future-default", "gpt-future-secondary"],
+    },
+  );
+  assert.match(managed, /^model = "gpt-future-default"$/m);
+  assert.doesNotMatch(managed, /gpt-5\.6-sol/, "the source contains no retired native fallback");
+});
+
+test("a missing native catalog lets Codex choose its own built-in default", () => {
+  const managed = buildManagedCodexConfig(
+    'model = "old-route@custom"\napproval_policy = "on-request"\n',
+    { baseUrl: "http://127.0.0.1:4097/c/KEY/v1", nativeModels: [] },
+  );
+  assert.doesNotMatch(managed, /^model\s*=/m, "ModelDock does not invent a native model when discovery is unavailable");
+  assert.match(managed, /^openai_base_url\s*=/m, "the transparent route remains enabled");
 });
 
 test("connecting a custom endpoint publishes a model without becoming the default", async (t) => {

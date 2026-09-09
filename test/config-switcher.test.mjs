@@ -35,9 +35,9 @@ async function fixture(t) {
 test("the switcher's model view follows the live selection without writing it to config.toml", async (t) => {
   // Codex's own picker moves the selection without going through the switcher.
   // The switcher still reports the live selection for the dashboard, but the
-  // top-level config.toml model must stay a native slug: a routed slug exists
-  // only in the published catalog, so writing it there makes Codex startup
-  // depend on ModelDock being healthy.
+  // top-level config.toml model must never become a routed slug. With no native
+  // catalog and no prior config, omitting the key lets Codex choose its own
+  // current built-in default.
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-live-model-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));
   const selection = { mainModel: "deepseek-v4-flash" };
@@ -54,7 +54,7 @@ test("the switcher's model view follows the live selection without writing it to
   await switcher.enable();
   const written = await readFile(path.join(codexHome, "config.toml"), "utf8");
   assert.doesNotMatch(written, /^model = "glm-5\.2@opencode-go"$/m, "the routed selection is not written as the top-level model");
-  assert.match(written, /^model = "gpt-5\.6-sol"$/m, "the top-level model stays the native fallback");
+  assert.doesNotMatch(written, /^model\s*=/m, "ModelDock does not invent a native fallback when discovery is unavailable");
 });
 
 test("managed config keeps the built-in provider and redirects its base URL", () => {

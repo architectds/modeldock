@@ -193,6 +193,7 @@ test("MODELDOCK_VISION_MODEL=none persists a provider with no vision route", () 
     assert.equal(config.profileId, "deepseek-official");
     assert.equal(config.mainModel, "deepseek-v4-flash@deepseek-official");
     assert.equal(config.visionModel, "");
+    assert.equal(config.visionModelConfigured, true);
   } finally {
     for (const key of keys) {
       if (previous[key] === undefined) delete process.env[key];
@@ -212,6 +213,38 @@ test("persisted model references keep the provider identity separate from the Co
     "the legacy bare native value is migrated without changing its owner");
   assert.equal(decodePersistedModelRef("kimi-k2.5", { nativeSlugs: native }), "kimi-k2.5@opencode-go",
     "a legacy bare routed value resolves through its historical owner, not the active profile");
+});
+
+test("the first-run native vision default comes from the current Codex catalog", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-native-default-"));
+  const envFile = path.join(home, "isolated.env");
+  const nativeCatalogFile = path.join(home, "native-catalog.json");
+  const keys = ["MODELDOCK_CODEX_HOME", "MODELDOCK_ENV_FILE", "MODELDOCK_NATIVE_CATALOG_FILE", "MODELDOCK_VISION_MODEL", "MODELDOCK_NATIVE_MERGE"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    writeFileSync(nativeCatalogFile, JSON.stringify({
+      captured_with: "0.200.0",
+      models: [
+        { slug: "gpt-future-text", visibility: "list", input_modalities: ["text"] },
+        { slug: "gpt-future-vision", visibility: "list", input_modalities: ["text", "image"] },
+      ],
+    }), "utf8");
+    writeFileSync(envFile, "MODELDOCK_NATIVE_MERGE=1\n", "utf8");
+    process.env.MODELDOCK_CODEX_HOME = home;
+    process.env.MODELDOCK_ENV_FILE = envFile;
+    process.env.MODELDOCK_NATIVE_CATALOG_FILE = nativeCatalogFile;
+    delete process.env.MODELDOCK_VISION_MODEL;
+    delete process.env.MODELDOCK_NATIVE_MERGE;
+    const config = loadConfig();
+    assert.equal(config.visionModel, "gpt-future-vision");
+    assert.equal(config.visionModelConfigured, false);
+  } finally {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("a native vision choice reloads as native even while OpenCode Go is the default profile", () => {

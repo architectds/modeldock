@@ -637,6 +637,88 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     assert.deepEqual(nameless, [], `#${tab} has controls with no accessible name`);
   }
 
+  // Catalog refresh is a live event, not a page-load detail. Keep Models open
+  // while adding a model, then keep Stats open while changing its label: both
+  // views must refetch the same server projections without a browser reload.
+  await evaluate(`location.hash = '#models'`);
+  await sleep(250);
+  const originalModels = OPENCODE_GO_PROFILE.availableModels;
+  const refreshProbe = {
+    id: "catalog-refresh-probe",
+    label: "Catalog Refresh Probe",
+    endpoint: "responses",
+    supportsVision: false,
+    status: "available",
+  };
+  OPENCODE_GO_PROFILE.availableModels = [...originalModels, refreshProbe];
+  t.after(() => { OPENCODE_GO_PROFILE.availableModels = originalModels; });
+  const rollup = JSON.parse(readFileSync(services.usageRollupFile, "utf8"));
+  const refreshNow = new Date();
+  const refreshDay = refreshNow.toISOString().slice(0, 10);
+  const refreshHour = `${refreshNow.toISOString().slice(0, 13)}:00:00.000Z`;
+  const refreshUsage = {
+    requests: 9,
+    ok: 9,
+    in: 90_000_000_000,
+    out: 9_000_000_000,
+    cached: 45_000_000_000,
+    ms: 9_000,
+    okOut: 9_000_000_000,
+    okMs: 9_000,
+  };
+  rollup.days[refreshDay] = {
+    ...(rollup.days[refreshDay] || {}),
+    "catalog-refresh-probe@opencode-go": refreshUsage,
+  };
+  rollup.hours[refreshHour] = {
+    ...(rollup.hours[refreshHour] || {}),
+    "catalog-refresh-probe@opencode-go": refreshUsage,
+  };
+  writeFileSync(services.usageRollupFile, JSON.stringify(rollup), "utf8");
+  const revisionBefore = services.modelCatalogRevision;
+  services.writeCatalogFile();
+  assert.ok(services.modelCatalogRevision > revisionBefore, "a changed catalog advances the shared revision");
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes('Catalog Refresh Probe')`)) break;
+    await sleep(50);
+  }
+  assert.equal(await evaluate(`document.getElementById('roster-groups')?.textContent.includes('Catalog Refresh Probe')`), true,
+    "an open Models view refetches when the canonical catalog changes");
+
+  await evaluate(`location.hash = '#stats'`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`document.getElementById('stats-model-chart')?.textContent.includes('Catalog Refresh Probe')`)) break;
+    await sleep(50);
+  }
+  assert.equal(await evaluate(`document.getElementById('stats-model-chart')?.textContent.includes('Catalog Refresh Probe')`), true,
+    "Stats drops its ten-minute cache after the same catalog revision changes");
+
+  refreshProbe.label = "Catalog Refresh Probe Renamed";
+  services.writeCatalogFile();
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`document.getElementById('stats-model-chart')?.textContent.includes('Catalog Refresh Probe Renamed')`)) break;
+    await sleep(50);
+  }
+  assert.equal(await evaluate(`document.getElementById('stats-model-chart')?.textContent.includes('Catalog Refresh Probe Renamed')`), true,
+    "an already-open Stats view refetches corrected catalog labels");
+
+  await evaluate(`(() => {
+    const original = window.fetch.bind(window);
+    window.__catalogFetches = [];
+    window.fetch = (...args) => {
+      const url = String(args[0] || '');
+      if (url.includes('/api/models/roster') || url.includes('/api/stats')) window.__catalogFetches.push(url);
+      return original(...args);
+    };
+  })()`);
+  for (let index = 0; index < 20; index += 1) {
+    const finish = services.metrics.begin("responses", { model: "qwen3.8-flash@opencode-go" });
+    finish({ ok: true });
+  }
+  await sleep(600);
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(window.__catalogFetches)`)), [],
+    "ordinary status events never refetch Models or Stats when the catalog revision is unchanged");
+
   // Installed bookmarks and older installer links still point at these two
   // hashes. They now converge on Cloud instead of falling back to Dashboard.
   for (const legacy of ["subscriptions", "api"]) {

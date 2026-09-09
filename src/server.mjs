@@ -14,7 +14,7 @@ import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
-import { NATIVE_IMAGE_PATHS, localWarmBaseFromSessionOpening, relayNativeImage, relayResponses as relayGatewayResponses } from "./gateway.mjs";
+import { NATIVE_AUXILIARY_PATHS, localWarmBaseFromSessionOpening, relayNativeAuxiliary, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
@@ -37,7 +37,7 @@ import { createServices } from "./services.mjs";
 // Re-exported: tests and embedders construct the service bag through
 // server.mjs, and that path stays stable across the services split.
 export { createServices };
-import { anyProviderRouteConfigured, canonicalModelRefOf, codexModelCatalog, modelCatalogModels, modelInventory, modelOptions, modelOwnerOf, providerModels, providerOptions, providerRouteConfigured, publishedModelIds, visionOptionsAcrossProviders } from "./model-options.mjs";
+import { anyProviderRouteConfigured, canonicalModelRefOf, codexModelCatalog, labelForModelId, modelCatalogModels, modelInventory, modelOptions, modelOwnerOf, providerModels, providerOptions, providerRouteConfigured, publishedModelIds, visionOptionsAcrossProviders } from "./model-options.mjs";
 import { SUBAGENT_DEFAULT_MODEL, readSubagentModel, subagentModelOptions, subagentProviders, writeSubagentAgentFile } from "./subagent-config.mjs";
 import { NATIVE_PROVIDER } from "./native-provider.mjs";
 // Re-exported: tests and the config switcher import the catalog through
@@ -386,9 +386,31 @@ function onModeSelection(services) {
   };
 }
 
+function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
+  const native = !String(id).includes(PROVIDER_SEPARATOR);
+  return {
+    id,
+    label: `${labelForModelId(bareModelId(id))} (saved - currently unavailable)`,
+    provider: native ? NATIVE_PROVIDER.id : modelOwnerOf(config, id),
+    native,
+    supportsVision,
+    status: "unavailable",
+  };
+}
+
+function canShowUnavailableSavedModel(config, id) {
+  return String(id).includes(PROVIDER_SEPARATOR) || hasChatGptLogin(config.codexHome);
+}
+
 function modelsPayload(services) {
-  const options = modelOptions(services.config, services.config.profileId);
+  let options = modelOptions(services.config, services.config.profileId);
   const selected = services.modelSelection;
+  if (selected.visionModel
+      && !options.some((entry) => entry.id === selected.visionModel)
+      && canShowUnavailableSavedModel(services.config, selected.visionModel)) {
+    options = [unavailableSavedModel(services.config, selected.visionModel, { supportsVision: true }), ...options];
+  }
+  const selectedVisionEntry = options.find((entry) => entry.id === selected.visionModel);
   const visionOptions = options.filter((entry) => entry.supportsVision);
   const visionProviders = providerOptions(services.config).filter((provider) => visionOptions.some((model) => model.provider === provider.id));
   // Native vision models are only published while signed in; without their
@@ -399,6 +421,10 @@ function modelsPayload(services) {
   return {
     selected,
     options,
+    // Monotonic within one gateway process and reset-safe across restarts: an
+    // open dashboard only compares it with the last status frame it received.
+    // The value changes exclusively when the canonical catalog file changes.
+    catalogRevision: services.modelCatalogRevision || 0,
     providers: providerOptions(services.config),
     // Derive the provider from the model actually selected, the same way the
     // vision and subagent pickers do. Reporting config.profileId here let the two
@@ -408,7 +434,7 @@ function modelsPayload(services) {
     // catalog cannot place.
     selectedProvider: modelOwnerOf(services.config, selected.mainModel) || services.config.profileId || DEFAULT_PROFILE_ID,
     visionProviders,
-    selectedVisionProvider: selected.visionModel ? modelOwnerOf(services.config, selected.visionModel) || services.config.profileId : "",
+    selectedVisionProvider: selected.visionModel ? selectedVisionEntry?.provider || services.config.profileId : "",
   };
 }
 
@@ -433,6 +459,7 @@ function reconcileModelSelection(services) {
   config.visionModel = visionModel;
   if (visionChanged) {
     writeEnvFile({ MODELDOCK_VISION_MODEL: visionModel ? encodePersistedModelRef(visionModel) : "none" }, config.envFile);
+    config.visionModelConfigured = true;
   }
   return { mainModel, visionModel, visionChanged };
 }
@@ -510,9 +537,14 @@ function statsModelLabels(directory, stats) {
 }
 
 function subagentPayload(services) {
-  const options = subagentModelOptions(services.config);
-  const selected = readSubagentModel(services.config) || SUBAGENT_DEFAULT_MODEL;
-  const selectedEntry = options.find((entry) => entry.id === selected);
+  let options = subagentModelOptions(services.config);
+  const saved = readSubagentModel(services.config);
+  const selected = saved || SUBAGENT_DEFAULT_MODEL;
+  let selectedEntry = options.find((entry) => entry.id === selected);
+  if (saved && !selectedEntry && canShowUnavailableSavedModel(services.config, saved)) {
+    selectedEntry = unavailableSavedModel(services.config, saved);
+    options = [selectedEntry, ...options];
+  }
   return {
     selected: selectedEntry ? selected : (options[0]?.id || SUBAGENT_DEFAULT_MODEL),
     options,
@@ -967,6 +999,7 @@ async function relayGatewayRequest(req, res, services) {
       routeAffinity,
       knownModels: publishedModelIds(config),
       nativeSlugs: services.nativeSlugs,
+      nativeSelectableModels: services.nativeSelectableModels,
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
       // The native passthrough leg forwards these to ChatGPT's backend untouched.
@@ -1003,11 +1036,11 @@ function isCallerKeyEnforced() {
 }
 
 function protectedRelayPath(pathname) {
-  return pathname === "/v1/responses"
+  return pathname.startsWith("/v1/")
+    || pathname === "/v1"
     || pathname === "/responses"
-    || pathname === "/v1/responses/compact"
     || pathname === "/responses/compact"
-    || [...NATIVE_IMAGE_PATHS].includes(pathname);
+    || [...NATIVE_AUXILIARY_PATHS].includes(pathname);
 }
 
 function payloadTooLargeDiagnostics({
@@ -1290,14 +1323,21 @@ export function createApp(services = createServices()) {
   app.post(`${CALLER_PATH_PREFIX}/:key/v1/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.post(`${CALLER_PATH_PREFIX}/:key/responses/compact`, requireCallerKey, (req, res) => relayGatewayRequest(req, res, services));
   app.get(`${CALLER_PATH_PREFIX}/:key/v1/models`, requireCallerKey, (req, res) => serveModels(req, res, services));
-  // The built-in image_gen tool posts to the openai_base_url's images endpoints;
-  // with the transparent config those land here and go straight to the native
-  // backend on the client's subscription (no Platform API key needed).
-  const nativeImageRelay = (req, res) => relayNativeImage(req.body, res, {
+  // Client-owned web search and image generation post auxiliary requests to the
+  // configured openai_base_url. Those requests land here and go straight to the
+  // native backend on the client's subscription (no Platform API key needed).
+  const nativeAuxiliaryRelay = (req, res) => relayNativeAuxiliary(req.body, res, {
     incomingHeaders: req.headers,
     requestUrl: req.originalUrl,
+    codexHome: config.codexHome,
+    method: req.method,
   });
-  app.post([...NATIVE_IMAGE_PATHS].map((item) => `${CALLER_PATH_PREFIX}/:key${item}`), requireCallerKey, nativeImageRelay);
+  app.post([...NATIVE_AUXILIARY_PATHS].map((item) => `${CALLER_PATH_PREFIX}/:key${item}`), requireCallerKey, nativeAuxiliaryRelay);
+  // The managed base URL ends in /v1. Exact ModelDock routes above keep their
+  // behavior; every other current or future Codex endpoint under that base is
+  // an opaque native request. A new client-owned capability therefore does not
+  // need a ModelDock path allowlist release.
+  app.use(`${CALLER_PATH_PREFIX}/:key/v1`, requireCallerKey, nativeAuxiliaryRelay);
   // Bare paths stay for compatibility with configs written before the caller key
   // existed. Enforcement is ON by default: a hostile local web page can POST to
   // loopback without reading ~/.modeldock, so an unkeyed path would let it burn
@@ -1312,16 +1352,17 @@ export function createApp(services = createServices()) {
     }
     return relayGatewayRequest(req, res, services);
   };
-  const bareNativeImageRelay = (req, res) => {
+  const bareNativeAuxiliaryRelay = (req, res) => {
     if (callerKeyEnforced()) {
       return res.status(401).json({ error: { type: "caller_key_required", message: "This gateway requires the keyed base URL; re-enable the Codex switch." } });
     }
-    return nativeImageRelay(req, res);
+    return nativeAuxiliaryRelay(req, res);
   };
   app.post(["/v1/responses", "/responses"], bareRelay);
   app.post(["/v1/responses/compact", "/responses/compact"], bareRelay);
-  app.post([...NATIVE_IMAGE_PATHS], bareNativeImageRelay);
+  app.post([...NATIVE_AUXILIARY_PATHS], bareNativeAuxiliaryRelay);
   app.get(["/v1/models", "/models"], (req, res) => serveModels(req, res, services));
+  app.use("/v1", bareNativeAuxiliaryRelay);
   app.get("/healthz", (req, res) => {
     const tokenReady = Boolean(tokenFor(config, services.modelSelection?.mainModel));
     return res.status(tokenReady ? 200 : 503).json({ ok: tokenReady });
@@ -1451,6 +1492,7 @@ export function createApp(services = createServices()) {
           };
           if (nativeMerge !== undefined) onEnv.MODELDOCK_NATIVE_MERGE = nativeMerge ? "1" : "0";
           writeEnvFile(onEnv, config.envFile);
+          config.visionModelConfigured = true;
           if (nativeMerge !== undefined) config.nativeMerge = nativeMerge;
           services.writeCatalogFile();
         }
@@ -1535,6 +1577,7 @@ export function createApp(services = createServices()) {
     services.modelSelection.mainModel = nextMain;
     services.modelSelection.visionModel = nextVision;
     config.visionModel = nextVision;
+    config.visionModelConfigured = true;
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
   });

@@ -911,6 +911,17 @@ function fillSelect(select, items, { value = "", label, data, placeholder = true
 }
 
 let lastModelSignature = "";
+let lastCatalogRevision = null;
+
+function refreshCatalogConsumers() {
+  // Stats deliberately keeps a bounded snapshot for ten minutes, but a model
+  // directory change invalidates its labels immediately. Models is also a
+  // server projection, so an already-open page must not wait for navigation.
+  statsLoadedAt = 0;
+  const active = document.querySelector(".view.is-active")?.dataset.view || "";
+  if (active === "models") renderModelRoster().catch(() => {});
+  if (active === "stats") loadStats({ force: true }).catch(() => {});
+}
 
 function modelSignature(models) {
   const selected = models?.selected || {};
@@ -993,6 +1004,11 @@ function renderModelOptions(data, currentRoute = currentRouteView(data)) {
   const models = data.models;
   if (!models?.options) return;
   lastModelData = data;
+  const catalogRevision = Number(models.catalogRevision) || 0;
+  if (lastCatalogRevision !== null && catalogRevision !== lastCatalogRevision) {
+    refreshCatalogConsumers();
+  }
+  lastCatalogRevision = catalogRevision;
   // This must run on every status event. The selectable model set changes
   // rarely, but the latest real route can change from one request to the next.
   renderCurrentModel(data, currentRoute);
@@ -3872,6 +3888,7 @@ function currentView() {
   if (view === "dashboard") redrawWaves();
   if (view === "hostmonitor" && lastData) renderLocalHostDashboard(lastData);
   if (view === "stats") loadStats().catch(() => {});
+  if (view === "models") renderModelRoster().catch(() => {});
   return view;
 }
 

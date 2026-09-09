@@ -1074,6 +1074,85 @@ test("image generation posts pass through to the native backend", async (t) => {
   assert.match(await response.text(), /b64_json/);
 });
 
+test("keyed Codex web search posts pass through to the native backend", async (t) => {
+  const callerKey = "test-caller-key-0123456789abcdefghij";
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "modeldock-native-search-auth-"));
+  await writeFile(path.join(codexHome, "auth.json"), JSON.stringify({
+    tokens: { access_token: "chatgpt-token", account_id: "acct-1" },
+  }), "utf8");
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const instance = await startApp({ callerKey, codexHome });
+  t.after(instance.stop);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).startsWith("http://127.0.0.1:")) return originalFetch(url, options);
+    calls.push({
+      url,
+      method: options.method,
+      headers: options.headers,
+      body: options.body === undefined ? undefined : JSON.parse(options.body),
+    });
+    return new Response(JSON.stringify({ results: [{ title: "Codex", url: "https://developers.openai.com/codex/" }] }), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "x-codex-future-result": "kept",
+      },
+    });
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const body = {
+    search_query: [{ q: "site:developers.openai.com Codex" }],
+    response_length: "short",
+  };
+  const response = await fetch(`${instance.base}/c/${callerKey}/v1/alpha/search`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://chatgpt.com/backend-api/codex/alpha/search");
+  assert.equal(calls[0].headers.authorization, "Bearer chatgpt-token");
+  assert.equal(calls[0].headers["chatgpt-account-id"], "acct-1");
+  assert.deepEqual(calls[0].body, body);
+  assert.match(await response.text(), /developers\.openai\.com/);
+
+  const memoryBody = { input: [{ type: "message", role: "user", content: "summarize" }] };
+  const memory = await fetch(`${instance.base}/c/${callerKey}/v1/memories/trace_summarize`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-codex-future-capability": "enabled" },
+    body: JSON.stringify(memoryBody),
+  });
+  assert.equal(memory.status, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, "https://chatgpt.com/backend-api/codex/memories/trace_summarize");
+  assert.equal(calls[1].headers["x-codex-future-capability"], "enabled");
+  assert.deepEqual(calls[1].body, memoryBody);
+
+  const future = await fetch(`${instance.base}/c/${callerKey}/v1/future/capability?mode=current`);
+  assert.equal(future.status, 200);
+  assert.equal(future.headers.get("x-codex-future-result"), "kept");
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].method, "GET");
+  assert.equal(calls[2].url, "https://chatgpt.com/backend-api/codex/future/capability?mode=current");
+  assert.equal(calls[2].body, undefined);
+
+  const wrong = await fetch(`${instance.base}/c/wrong-key/v1/alpha/search`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(wrong.status, 401);
+  assert.equal(calls.length, 3, "an invalid caller key never reaches ChatGPT");
+});
+
 test("api/status exposes debug flags without dump path leaks", async (t) => {
   const instance = await startApp({ debug: { enabled: true, noReasoning: true, dumpDir: "" } });
   t.after(instance.stop);

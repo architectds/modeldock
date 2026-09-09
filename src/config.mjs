@@ -16,7 +16,7 @@ import { recordSettingsEvent } from "./settings-events.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
-import { nativeModelSlugs } from "./native-catalog.mjs";
+import { nativeModelSlugs, nativeVisionModelSlugs } from "./native-catalog.mjs";
 import {
   DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
   MIN_ZSTD_MEMORY_BUDGET_BYTES,
@@ -487,11 +487,11 @@ export function loadConfig() {
   // task has selected a model. It does not own or reinterpret any saved model
   // reference; those are decoded independently above.
   const mainModel = publishedSlugFor(profileId, "deepseek-v4-flash");
-  // Mode-aware default vision model. ON mode (paid native-GPT merge) defaults to
-  // Luna so image turns never route to the zen free endpoint, whose empty-output
-  // bug burns the whole output budget and returns nothing (200 + output:[] or a
-  // bare response.completed). OFF has no native GPT to fall back on, so it keeps
-  // the free vision model unless explicitly overridden via MODELDOCK_VISION_MODEL.
+  // Mode-aware default vision model. In native mode the current Codex catalog,
+  // not a model name compiled into ModelDock, owns the default. A new native
+  // vision model can therefore appear after a Codex update without a ModelDock
+  // release. OFF has no native GPT to fall back on, so it keeps the free route
+  // unless explicitly overridden via MODELDOCK_VISION_MODEL.
   // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
   // subscription so the picker never advertises models that 401 on request.
   // Defaults to the signed-in state when the env key is unset: a detected
@@ -502,7 +502,10 @@ export function loadConfig() {
     if (raw) return !["0", "false", "off"].includes(raw);
     return hasChatGptLogin(codexHome);
   })();
-  const defaultVisionModel = !nativeMerge ? "mimo-v2.5-free" : "gpt-5.6-luna@openai";
+  const currentNativeVision = nativeVisionModelSlugs({ nativeCatalogFile })[0] || "";
+  const defaultVisionModel = !nativeMerge
+    ? "mimo-v2.5-free"
+    : (currentNativeVision ? encodePersistedModelRef(currentNativeVision) : "");
   const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
   // "none" is the durable representation for a provider with no vision model.
   // An empty env value cannot represent this because it intentionally falls back
@@ -549,6 +552,11 @@ export function loadConfig() {
     ollamaSnapshotFile,
     mainModel,
     visionModel,
+    // Distinguish an explicit user choice (including "none") from the empty
+    // first-boot state before the asynchronous native catalog capture finishes.
+    // The refresh path may fill only the latter; upgrades must never replace a
+    // saved vision provider/model choice with a newly discovered default.
+    visionModelConfigured: Boolean(configuredVision),
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).

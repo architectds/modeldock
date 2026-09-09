@@ -9,6 +9,7 @@ import { atomicWriteJsonSync } from "./atomic-file.mjs";
 // loop of a live relay: `codex debug models` can take seconds (or hang to its
 // timeout), and a synchronous call would stall every in-flight SSE stream.
 const execFileAsync = promisify(execFile);
+const nativeCatalogCache = new Map();
 
 // The Codex App's picker list is a replacement, not a merge: with
 // `model_catalog_json` set it shows exactly that file, otherwise it shows the
@@ -22,8 +23,10 @@ const execFileAsync = promisify(execFile);
 // The desktop app bundles its CLI in different places per platform. Windows puts
 // it under a version-hashed directory (%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\
 // codex.exe); the hash changes on every app update, so scan for the newest
-// installed version instead of pinning one. macOS ships it inside the app bundle
-// (currently ChatGPT.app/Contents/Resources/codex).
+// installed version instead of pinning one. macOS ships it inside the app bundle.
+// Keep the current and legacy names as direct candidates, then scan the two
+// standard Applications directories for any future app rename that still uses
+// the same Resources/codex contract.
 function newestCodexInDir(binDir, binaryName) {
   try {
     const matches = readdirSync(binDir, { withFileTypes: true })
@@ -37,6 +40,18 @@ function newestCodexInDir(binDir, binaryName) {
   }
 }
 
+export function codexAppCandidates(applicationsDir) {
+  try {
+    return readdirSync(applicationsDir, { withFileTypes: true })
+      .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && entry.name.endsWith(".app"))
+      .map((entry) => path.join(applicationsDir, entry.name, "Contents", "Resources", "codex"))
+      .filter((candidate) => existsSync(candidate))
+      .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  } catch {
+    return [];
+  }
+}
+
 export function desktopCodexCandidates(platform = process.platform) {
   if (platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA;
@@ -45,13 +60,18 @@ export function desktopCodexCandidates(platform = process.platform) {
     return bundled ? [bundled] : [];
   }
   if (platform === "darwin") {
-    return [
+    const userApplications = path.join(os.homedir(), "Applications");
+    return [...new Set([
       newestCodexInDir(path.join(os.homedir(), "Library", "Application Support", "OpenAI", "Codex", "bin"), "codex"),
+      "/Applications/Codex.app/Contents/Resources/codex",
       "/Applications/ChatGPT.app/Contents/Resources/codex",
       "/Applications/OpenAI Codex.app/Contents/Resources/codex",
-      path.join(os.homedir(), "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
-      path.join(os.homedir(), "Applications", "OpenAI Codex.app", "Contents", "Resources", "codex"),
-    ].filter(Boolean);
+      path.join(userApplications, "Codex.app", "Contents", "Resources", "codex"),
+      path.join(userApplications, "ChatGPT.app", "Contents", "Resources", "codex"),
+      path.join(userApplications, "OpenAI Codex.app", "Contents", "Resources", "codex"),
+      ...codexAppCandidates("/Applications"),
+      ...codexAppCandidates(userApplications),
+    ].filter(Boolean))];
   }
   return [];
 }
@@ -102,13 +122,27 @@ export function nativeCatalogPath(config) {
 // they can consult. Refreshes happen at gateway startup and on the model
 // refresh timer.
 export function readNativeCatalog(config) {
+  const file = nativeCatalogPath(config);
+  let signature = "";
   try {
-    const file = nativeCatalogPath(config);
-    if (!existsSync(file)) return null;
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    if (!Array.isArray(parsed?.models)) return null;
-    return parsed;
+    const stat = statSync(file, { bigint: true });
+    signature = `${stat.size}:${stat.mtimeNs}`;
   } catch {
+    nativeCatalogCache.delete(file);
+    return null;
+  }
+  const cached = nativeCatalogCache.get(file);
+  if (cached?.signature === signature) return cached.value;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    const value = Array.isArray(parsed?.models) ? parsed : null;
+    nativeCatalogCache.set(file, { signature, value });
+    return value;
+  } catch {
+    // Cache an invalid file at this exact version too. A corrupt external edit
+    // should fail closed once, not be reparsed on every status frame; replacing
+    // it changes the stat signature and makes the next read retry normally.
+    nativeCatalogCache.set(file, { signature, value: null });
     return null;
   }
 }
@@ -122,6 +156,24 @@ export function nativeModelSlugs(config) {
     if (typeof model?.slug === "string" && model.slug) slugs.add(model.slug);
   }
   return slugs;
+}
+
+export function nativeSelectableModelSlugs(config) {
+  return (readNativeCatalog(config)?.models || [])
+    .filter((model) => typeof model?.slug === "string" && model.slug && model.visibility === "list")
+    .map((model) => model.slug);
+}
+
+export function nativeVisionModelSlugs(config) {
+  return (readNativeCatalog(config)?.models || [])
+    .filter((model) => (
+      typeof model?.slug === "string"
+      && model.slug
+      && model.visibility === "list"
+      && Array.isArray(model.input_modalities)
+      && model.input_modalities.includes("image")
+    ))
+    .map((model) => model.slug);
 }
 
 // `codex --version` prints a banner - "codex-cli 0.145.0" - so the version is
@@ -146,7 +198,10 @@ async function codexVersion() {
 // next refresh. Returns the captured models, or null when the CLI is missing
 // or the capture failed (the catalog then simply keeps the last good cache).
 export async function refreshNativeCatalog(config) {
-  if (!(await resolveCodexBinary())) return null;
+  if (!(await resolveCodexBinary())) {
+    console.log("[gate] native model catalog refresh skipped: Codex CLI not found");
+    return null;
+  }
   try {
     const output = await runCodex(["debug", "models", "--bundled"]);
     const parsed = JSON.parse(output);

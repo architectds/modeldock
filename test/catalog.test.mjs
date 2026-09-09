@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { allowedEffortsFor, baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
+import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
 import { modelOptions, modelOwnerOf } from "../src/model-options.mjs";
 import { DEEPSEEK_OFFICIAL_PROFILE, modelEntryFor, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
@@ -190,18 +190,29 @@ test("the generated catalog is accepted by the installed Codex parser", (t) => {
     return;
   }
   assert.equal(probe.status, 0, probe.stderr || probe.stdout);
+  const bundled = spawnSync("codex", ["debug", "models", "--bundled"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 30_000,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  assert.equal(bundled.status, 0, bundled.stderr || bundled.stdout);
+  const captured = JSON.parse(bundled.stdout);
+  const visibleNative = (captured.models || []).filter((model) => model?.slug && model.visibility === "list");
+  assert.ok(visibleNative.length > 0, "the installed Codex must expose at least one picker model");
 
   const home = mkdtempSync(path.join(os.tmpdir(), "modeldock-codex-catalog-"));
   const catalogFile = path.join(home, "model-catalog.json");
   const nativeCatalogFile = path.join(home, "native-catalog.json");
   writeFileSync(nativeCatalogFile, JSON.stringify({
-    captured_with: "0.149.0",
-    models: [staleNativeEntry()],
+    captured_with: /\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/.exec(probe.stdout)?.[0] || "",
+    models: captured.models,
   }), "utf8");
-  writeFileSync(catalogFile, JSON.stringify(catalogFor({ ...configStub(), nativeCatalogFile })), "utf8");
+  writeFileSync(path.join(home, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  writeFileSync(catalogFile, JSON.stringify(catalogFor({ ...configStub(), codexHome: home, nativeCatalogFile, nativeMerge: true })), "utf8");
   writeFileSync(
     path.join(home, "config.toml"),
-    `model = "gpt-5.6-sol"\nmodel_catalog_json = ${JSON.stringify(catalogFile.replace(/\\/g, "/"))}\n`,
+    `model = ${JSON.stringify(visibleNative[0].slug)}\nmodel_catalog_json = ${JSON.stringify(catalogFile.replace(/\\/g, "/"))}\n`,
     "utf8",
   );
   try {
@@ -214,7 +225,9 @@ test("the generated catalog is accepted by the installed Codex parser", (t) => {
     assert.equal(parsed.status, 0, parsed.stderr || parsed.stdout);
     const models = JSON.parse(parsed.stdout).models || [];
     assert.ok(models.some((model) => model.slug === "deepseek-v4-flash@opencode-go"));
-    assert.ok(models.some((model) => model.slug === "gpt-5.6-sol"));
+    for (const native of visibleNative) {
+      assert.ok(models.some((model) => model.slug === native.slug), `${native.slug} disappeared from the merged catalog`);
+    }
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -440,7 +453,7 @@ test("mergeNativeCatalog caps native reasoning levels for an old catalog version
   }
 });
 
-test("mergeNativeCatalog keeps max but withholds ultra on catalog versions 0.138-0.143", () => {
+test("mergeNativeCatalog preserves every reasoning level advertised by an open-enum Codex build", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-test-"));
   const file = path.join(dir, "native-catalog.json");
   writeFileSync(file, JSON.stringify({
@@ -456,6 +469,7 @@ test("mergeNativeCatalog keeps max but withholds ultra on catalog versions 0.138
         { effort: "high", description: "High" },
         { effort: "max", description: "Max" },
         { effort: "ultra", description: "Ultra" },
+        { effort: "future", description: "Future" },
       ],
     }],
   }), "utf8");
@@ -465,8 +479,8 @@ test("mergeNativeCatalog keeps max but withholds ultra on catalog versions 0.138
     assert.ok(entry, "native entry is published");
     assert.deepEqual(
       entry.supported_reasoning_levels.map((level) => level.effort),
-      ["low", "high", "max"],
-      "0.138+ keeps max while ultra waits for 0.144",
+      ["low", "high", "max", "ultra", "future"],
+      "0.138+ trusts the same installed Codex binary's bundled catalog",
     );
     assert.equal(entry.default_reasoning_level, "max");
   } finally {
@@ -506,17 +520,6 @@ test("mergeNativeCatalog publishes native max and ultra on a current catalog ver
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-test("allowedEffortsFor gates max at 0.138 and ultra at 0.144", () => {
-  assert.ok(!allowedEffortsFor("0.137.9").has("max"));
-  assert.ok(!allowedEffortsFor("0.137.9").has("ultra"));
-  assert.ok(!allowedEffortsFor("0.138.0-alpha.1").has("max"), "a prerelease sorts below its release");
-  assert.ok(allowedEffortsFor("0.138.0").has("max"));
-  assert.ok(!allowedEffortsFor("0.138.0").has("ultra"));
-  assert.ok(!allowedEffortsFor("0.143.9").has("ultra"));
-  assert.ok(allowedEffortsFor("0.144.0").has("ultra"));
-  assert.ok(allowedEffortsFor("0.145.0").has("ultra"));
 });
 
 test("catalogFor orders the picker by use, with sequential priorities", () => {

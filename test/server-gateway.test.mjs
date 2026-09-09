@@ -8,6 +8,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { readLatestMainRoute } from "../src/usage-events.mjs";
+import { writeSubagentAgentFile } from "../src/subagent-config.mjs";
 
 // Bare-path relay tests exercise the routed gateway, not the caller-key guard.
 // Enforcement is ON by default since 0.1.10, so these tests opt out explicitly;
@@ -363,6 +364,10 @@ test("caller-key enforcement defaults to on: bare paths 401 without an explicit 
   assert.equal(bare.status, 401, "the bare path is refused by default");
   const bareImages = await fetch(`${instance.base}/images/generations`, { method: "POST", headers, body });
   assert.equal(bareImages.status, 401, "the bare native-image path is refused by default");
+  const bareSearch = await fetch(`${instance.base}/v1/alpha/search`, { method: "POST", headers, body });
+  assert.equal(bareSearch.status, 401, "the bare native-search path is refused by default");
+  const bareFuture = await fetch(`${instance.base}/v1/memories/trace_summarize`, { method: "POST", headers, body });
+  assert.equal(bareFuture.status, 401, "a future bare native path is protected without an allowlist update");
   const keyed = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/responses`, { method: "POST", headers, body });
   assert.equal(keyed.status, 200, "the keyed path still relays by default");
   await keyed.text();
@@ -752,6 +757,21 @@ test("vision picker offers native models once signed in, like subagent", async (
   assert.equal(visionLuna.native, true);
   assert.equal(visionLuna.supportsVision, true);
   assert.ok(status.models.visionProviders.some((provider) => provider.id === "openai"), "the native provider appears for vision");
+});
+
+test("a transiently missing native catalog does not visually replace saved picker choices", async (t) => {
+  const instance = await startApp({ visionModel: "gpt-future-native" });
+  t.after(instance.stop);
+  await writeFile(path.join(instance.services.config.codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "test-token" } }), "utf8");
+  writeSubagentAgentFile(instance.services.config, "gpt-future-native");
+
+  const status = await (await fetch(`${instance.base}/api/status`)).json();
+  assert.equal(status.models.selected.visionModel, "gpt-future-native");
+  assert.equal(status.models.selectedVisionProvider, "openai");
+  assert.equal(status.models.options.find((entry) => entry.id === "gpt-future-native")?.status, "unavailable");
+  assert.equal(status.subagent.selected, "gpt-future-native");
+  assert.equal(status.subagent.selectedProvider, "openai");
+  assert.equal(status.subagent.options.find((entry) => entry.id === "gpt-future-native")?.status, "unavailable");
 });
 
 test("signing out hides native models from the vision picker too", async (t) => {

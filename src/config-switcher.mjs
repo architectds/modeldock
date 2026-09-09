@@ -223,17 +223,18 @@ export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], ca
   // pointed at a model that no longer exists. A native model starts under every
   // condition. The picker, not this file, is where a routed model gets chosen.
   const existingModel = topLevelString(source, "model");
-  // A native slug is any id without the provider separator: Codex recognizes
-  // native GPT ids unconditionally, so an existing native choice is kept as-is
-  // instead of being normalized to a fixed default.
+  // A native slug is any id without the provider separator. Keep an existing
+  // choice when the current catalog still owns it; if discovery is unavailable,
+  // preserving the bare value is safer than guessing.
   const existingIsNative = Boolean(existingModel) && !existingModel.includes(PROVIDER_SEPARATOR);
-  // The fallback is a native slug too, not the routed managed model: Codex
-  // recognizes native GPT ids even when the captured catalog is missing or
-  // empty (logged-out installs), while a routed slug exists only in the
-  // published catalog and would leave Codex unable to start without it.
+  // The fallback is a native slug captured from this Codex installation, not a
+  // model name compiled into ModelDock. If discovery is unavailable, omit the
+  // key and let Codex choose its own built-in default instead of pinning an old
+  // native name that OpenAI may have retired.
   const natives = Array.isArray(nativeModels) ? nativeModels : [];
-  const nativeFallback = natives.includes("gpt-5.6-sol") ? "gpt-5.6-sol" : (natives[0] || "gpt-5.6-sol");
-  const chosen = existingIsNative ? existingModel : nativeFallback;
+  const nativeFallback = natives[0] || "";
+  const existingIsCurrent = existingIsNative && (!natives.length || natives.includes(existingModel));
+  const chosen = existingIsCurrent ? existingModel : nativeFallback;
   let lines = removeManagedRoute(source.replace(/\r\n/g, "\n").split("\n"));
   while (lines.length && !lines.at(-1).trim()) lines.pop();
   if (chosen) lines = setTopLevel(lines, "model", chosen);
@@ -337,8 +338,7 @@ export class CodexConfigSwitcher {
   }
 
   // Empty when the caller never supplied a list: buildManagedCodexConfig then
-  // falls back to the managed model, the only one this route can serve without
-  // a native catalog (logged out of ChatGPT).
+  // leaves the top-level model unset so Codex chooses its own native default.
   get nativeModels() {
     const value = typeof this.#nativeModels === "function" ? this.#nativeModels() : this.#nativeModels;
     return Array.isArray(value) ? value : [];

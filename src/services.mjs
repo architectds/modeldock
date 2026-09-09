@@ -6,10 +6,11 @@
 // module owns building it. Moved as-is from server.mjs.
 import path from "node:path";
 import os from "node:os";
+import { readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.mjs";
-import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
+import { nativeModelSlugs, nativeSelectableModelSlugs, nativeVisionModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
@@ -103,6 +104,22 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
     return { changed: false, discovered: 0, error };
   }
 }
+
+// First boot has no cached native catalog when loadConfig runs. Once the
+// asynchronous Codex capture lands, fill that one genuinely unconfigured
+// state from the captured catalog. This is deliberately the same catalog
+// projection used everywhere else: no compiled model name and no second table.
+export function applyNativeVisionDefault(config, modelSelection) {
+  if (config.nativeMerge === false
+      || config.visionModelConfigured
+      || modelSelection.visionModel) return false;
+  const visionModel = nativeVisionModelSlugs(config)[0] || "";
+  if (!visionModel) return false;
+  config.visionModel = visionModel;
+  modelSelection.visionModel = visionModel;
+  return true;
+}
+
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
   const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
@@ -213,7 +230,7 @@ export function createServices(config = loadConfig()) {
     // can always start on. Routed slugs never go into config.toml's top-level
     // model - they exist only in the published catalog, so writing one there
     // makes Codex startup depend on ModelDock being healthy.
-    nativeModels: () => [...nativeModelSlugs(mutableConfig)],
+    nativeModels: () => nativeSelectableModelSlugs(mutableConfig),
     catalogFile,
   });
   const autostart = createAutostart();
@@ -234,6 +251,7 @@ export function createServices(config = loadConfig()) {
   // cannot name locally. It does read a catalog file named by `model_catalog_json`, so
   // publish the same catalog we serve over HTTP to disk and point the managed Codex
   // config at it. The CLI keeps using /v1/models; both then see one list.
+  let modelCatalogRevision = 0;
   const writeCatalogFile = () => {
     try {
       const catalog = codexModelCatalog({
@@ -249,10 +267,21 @@ export function createServices(config = loadConfig()) {
         // fold should carry the order that fold implies.
         usageByModel: rollupTotals(readRollup(rollupFile)),
       });
+      const serialized = JSON.stringify(catalog, null, 2);
+      let previous = "";
+      try { previous = readFileSync(catalogFile, "utf8"); } catch { /* first write */ }
       // Atomic replace: Codex reads this file on its own schedule, so a
       // half-written JSON must never be observable. Same-directory rename is
       // atomic on both Windows and POSIX.
-      atomicWriteJsonSync(catalogFile, catalog);
+      if (previous !== serialized) {
+        atomicWriteJsonSync(catalogFile, catalog);
+        // The catalog file is the canonical published projection. Its revision
+        // travels through the existing status/SSE stream so every open consumer
+        // invalidates together; Models and Stats must not maintain their own
+        // discovery timers or stale copies of the model directory.
+        modelCatalogRevision += 1;
+        metrics.emit("change");
+      }
       return catalog.models?.length || 0;
     } catch (error) {
       console.log(`[gate] model catalog file write failed: ${error.message}`);
@@ -271,6 +300,7 @@ export function createServices(config = loadConfig()) {
             for (const model of models) {
               if (typeof model?.slug === "string" && model.slug) nativeSlugs.add(model.slug);
             }
+            applyNativeVisionDefault(mutableConfig, modelSelection);
           }
           return models;
         }),
@@ -379,6 +409,14 @@ export function createServices(config = loadConfig()) {
     modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
+  });
+  Object.defineProperty(services, "modelCatalogRevision", {
+    enumerable: true,
+    get: () => modelCatalogRevision,
+  });
+  Object.defineProperty(services, "nativeSelectableModels", {
+    enumerable: true,
+    get: () => nativeSelectableModelSlugs(mutableConfig),
   });
   services.latestMainRoute = () => latestMainRoute;
   services.recordLatestMainRoute = (result) => {

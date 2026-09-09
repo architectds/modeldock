@@ -50,7 +50,7 @@ import {
   restoreNamespaceCall,
   redactBearer,
   relayCompaction,
-  relayNativeImage,
+  relayNativeAuxiliary,
   relayNativeResponses,
   relayOpaqueCollaboration,
   relayResponses,
@@ -2451,10 +2451,11 @@ test("isNativeModel distinguishes catalog slugs from native GPT ids", () => {
 });
 
 test("isNativeModel sends published native slugs to the native leg even when in the catalog", () => {
-  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna", "gpt-5.6-sol"]);
-  const nativeSlugs = new Set(["gpt-5.6-luna", "gpt-5.6-sol"]);
+  const known = new Set(["deepseek-v4-flash", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-future-native"]);
+  const nativeSlugs = new Set(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-future-native"]);
   assert.equal(isNativeModel("gpt-5.6-luna", known, nativeSlugs), true, "captured native slug routes native");
   assert.equal(isNativeModel("gpt-5.6-sol", known, nativeSlugs), true, "captured native slug routes native");
+  assert.equal(isNativeModel("gpt-future-native", known, nativeSlugs), true, "a newly captured slug needs no compiled model rule");
   assert.equal(isNativeModel("deepseek-v4-flash", known, nativeSlugs), false, "catalog model stays routed");
   assert.equal(isNativeModel("", known, nativeSlugs), false, "empty id stays on the routed path");
 });
@@ -2462,6 +2463,7 @@ test("isNativeModel sends published native slugs to the native leg even when in 
 test("nativeTarget strips the keyed and bare /v1 prefixes", () => {
   assert.equal(nativeTarget("/c/k123/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
   assert.equal(nativeTarget("/v1/responses", ""), "https://chatgpt.com/backend-api/codex/responses");
+  assert.equal(nativeTarget("/c/k123/v1/alpha/search", "?limit=8"), "https://chatgpt.com/backend-api/codex/alpha/search?limit=8");
   assert.equal(nativeTarget("/v1/images/generations", "?model=x"), "https://chatgpt.com/backend-api/codex/images/generations?model=x");
 });
 
@@ -3138,7 +3140,7 @@ test("relayResponses drops orphaned tool calls and previous_response_id on the r
   }
 });
 
-test("relayNativeImage forwards image generation to the native backend", async () => {
+test("relayNativeAuxiliary forwards image generation to the native backend", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -3151,7 +3153,7 @@ test("relayNativeImage forwards image generation to the native backend", async (
     });
   };
   try {
-    const result = await relayNativeImage(
+    const result = await relayNativeAuxiliary(
       { model: "gpt-image-2", prompt: "a dashboard mockup", size: "1536x1024" },
       res,
       {
@@ -3170,7 +3172,57 @@ test("relayNativeImage forwards image generation to the native backend", async (
   }
 });
 
-test("relayNativeImage resets a JSON response after partial bytes were forwarded", async () => {
+test("relayNativeAuxiliary forwards Codex web search with signed-in headers", async () => {
+  const codexHome = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-search-auth-"));
+  writeFileSync(path.join(codexHome, "auth.json"), JSON.stringify({
+    tokens: { access_token: "chatgpt-token", account_id: "acct-1" },
+  }), "utf8");
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ results: [{ title: "OpenAI", url: "https://developers.openai.com/" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const payload = {
+      search_query: [{ q: "site:developers.openai.com Codex" }],
+      response_length: "short",
+    };
+    const result = await relayNativeAuxiliary(
+      payload,
+      res,
+      {
+        incomingHeaders: {
+          "x-codex-window-id": "window-1",
+          "x-codex-future-capability": "enabled",
+          "x-provider-secret": "must-not-leak",
+        },
+        requestUrl: "/c/key123/v1/alpha/search?source=code_mode",
+        codexHome,
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://chatgpt.com/backend-api/codex/alpha/search?source=code_mode");
+    assert.equal(calls[0].headers.authorization, "Bearer chatgpt-token");
+    assert.equal(calls[0].headers["chatgpt-account-id"], "acct-1");
+    assert.equal(calls[0].headers["x-codex-window-id"], "window-1");
+    assert.equal(calls[0].headers["x-codex-future-capability"], "enabled", "future Codex headers pass without an allowlist update");
+    assert.equal(calls[0].headers["x-provider-secret"], undefined, "unrelated headers are not forwarded to ChatGPT");
+    assert.deepEqual(calls[0].body, payload);
+    assert.match(Buffer.concat(sink.chunks).toString("utf8"), /developers\.openai\.com/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("relayNativeAuxiliary resets a JSON response after partial bytes were forwarded", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const originalFetch = globalThis.fetch;
@@ -3187,7 +3239,7 @@ test("relayNativeImage resets a JSON response after partial bytes were forwarded
     );
   };
   try {
-    const result = await relayNativeImage(
+    const result = await relayNativeAuxiliary(
       { model: "gpt-image-2", prompt: "boom", size: "1024x1024" },
       res,
       { incomingHeaders: {}, requestUrl: "/c/key123/v1/images/generations" },
@@ -3202,7 +3254,7 @@ test("relayNativeImage resets a JSON response after partial bytes were forwarded
   }
 });
 
-test("relayNativeImage emits a valid JSON error when upstream fails before body bytes", async () => {
+test("relayNativeAuxiliary emits a valid JSON error when upstream fails before body bytes", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const originalFetch = globalThis.fetch;
@@ -3211,7 +3263,7 @@ test("relayNativeImage emits a valid JSON error when upstream fails before body 
     { status: 200, headers: { "content-type": "application/json" } },
   );
   try {
-    const result = await relayNativeImage(
+    const result = await relayNativeAuxiliary(
       { model: "gpt-image-2", prompt: "boom", size: "1024x1024" },
       res,
       { incomingHeaders: {}, requestUrl: "/c/key123/v1/images/generations" },
@@ -3268,6 +3320,7 @@ function compactServices() {
     mainModel: "deepseek-v4-flash",
     visionModel: "gpt-5.6-luna",
     nativeSlugs: new Set(),
+    nativeSelectableModels: ["gpt-5.6-luna"],
   };
 }
 
@@ -3944,7 +3997,7 @@ test("transfer-out counts the bytes that were actually sent upstream", async () 
   assert.equal(result.upstreamBytes, Buffer.byteLength(sentBodies[0]), "measured what went on the wire");
 });
 
-test("relayCompaction falls back once to native Luna when the routed provider rejects compaction", async () => {
+test("relayCompaction falls back once to a native model discovered from the current Codex catalog", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const finishes = [];
@@ -4022,7 +4075,7 @@ test("relayCompaction falls back once to native Luna when the routed provider re
         id: "resp_native_compact",
         object: "response",
         status: "completed",
-        model: "gpt-5.6-luna",
+        model: "gpt-future-native",
         output: [{ type: "compaction", id: "cmp_native", encrypted_content: "native-token" }],
       }),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -4044,6 +4097,8 @@ test("relayCompaction falls back once to native Luna when the routed provider re
         },
         requestUrl: "/v1/responses",
         incomingHeaders: { authorization: "Bearer native-session" },
+        visionModel: "gpt-future-native",
+        nativeSelectableModels: ["gpt-future-native"],
       },
       {},
       true,
@@ -4052,25 +4107,25 @@ test("relayCompaction falls back once to native Luna when the routed provider re
     assert.equal(result.httpStatus, 200);
     assert.equal(calls.length, 2, "one routed attempt and one native fallback are made");
     assert.equal(calls[0].body.model, "deepseek-v4-flash");
-    assert.equal(calls[1].body.model, "gpt-5.6-luna", "the fallback is native Luna, never Luna or Qwen at OpenCode Go");
+    assert.equal(calls[1].body.model, "gpt-future-native", "the fallback comes from Codex's catalog, not a compiled model name");
     assert.equal(calls[1].body.input.some((item) => item.type === "reasoning"), false,
       "routed reasoning without opaque native state is removed before the store:false fallback");
     const nativeFunction = calls[1].body.input.find((item) => item.type === "function_call" && item.call_id === "call_compact");
     assert.match(nativeFunction.id, /^fc_/, "Chat function calls receive native item ids while their call ids stay stable");
     assert.ok(calls[1].body.input.some((item) => item.type === "function_call_output" && item.call_id === "call_compact"));
     assert.ok(calls[1].body.input.some((item) => item.type === "custom_tool_call" && item.id.startsWith("ctc_") && item.call_id === "call_patch"));
-    assert.ok(calls[1].body.input.some((item) => item.type === "compaction_trigger"), "native Luna receives the real compact request");
+    assert.ok(calls[1].body.input.some((item) => item.type === "compaction_trigger"), "the native model receives the real compact request");
     assert.match(calls[1].url, /chatgpt\.com\/backend-api\/codex\/responses$/);
     assert.equal(finishes.length, 2, "the routed failure and native success each close their trace");
     assert.equal(finishes[0].httpStatus, 401);
-    assert.equal(finishes[0].fallbackModel, "gpt-5.6-luna");
+    assert.equal(finishes[0].fallbackModel, "gpt-future-native");
     assert.deepEqual(
       finishes[0].requestShape.itemTypes,
       { message: 2, reasoning: 1, function_call: 1, function_call_output: 1, custom_tool_call: 1, custom_tool_call_output: 1, compaction_trigger: 1 },
       "the request shape rides the failure telemetry",
     );
     const body = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
-    assert.equal(body.model, "gpt-5.6-luna");
+    assert.equal(body.model, "gpt-future-native");
     assert.equal(body.output[0].type, "compaction");
   } finally {
     globalThis.fetch = originalFetch;
