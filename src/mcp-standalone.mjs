@@ -12,6 +12,12 @@
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { createMcpServer } from "./mcp.mjs";
 import { callMcpTool, callMcpToolResult, gatewayBaseUrl } from "./mcp-client.mjs";
+import {
+  callerKeyFromGatewayUrl,
+  canonicalMemoryScope,
+  memoryScopeHeaders,
+  sameMemoryScope,
+} from "./memory-scope.mjs";
 import { loadConfig } from "./config.mjs";
 import {
   createScreenshotPreview,
@@ -64,13 +70,21 @@ const grokVideoAvailable = xaiCapabilities.video;
 // the scope entirely and turns on strict isolation: stores land in that one
 // bucket and recalls never fall back to global memory, so a disposable test
 // memory can never read or pollute the user's real vault.
-const sessionScope = process.env.MODELDOCK_MEMORY_SCOPE || process.cwd();
+const sessionScope = canonicalMemoryScope(process.env.MODELDOCK_MEMORY_SCOPE || process.cwd());
 const strictMemory = Boolean(process.env.MODELDOCK_MEMORY_SCOPE);
-const withSessionScope = (args) => (args.scope_dir ? args : { ...args, scope_dir: sessionScope });
 const recallScope = (args) => {
-  const scoped = withSessionScope(args);
-  return strictMemory && !scoped.scope_only ? { ...scoped, scope_only: true } : scoped;
+  if (strictMemory && args.scope_dir && !sameMemoryScope(args.scope_dir, sessionScope)) {
+    throw new Error("Strict memory recall cannot target a scope outside the configured project.");
+  }
+  return strictMemory
+    ? { ...args, scope_dir: sessionScope, scope_only: true }
+    : (args.scope_dir ? args : { ...args, scope_dir: sessionScope });
 };
+const memoryRequest = config.memoryEnabled
+  ? {
+      headers: memoryScopeHeaders(sessionScope, callerKeyFromGatewayUrl(baseUrl)),
+    }
+  : {};
 
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
@@ -90,9 +104,9 @@ const upstreams = {
     : {}),
   ...(config.memoryEnabled
     ? {
-        recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl),
-        storeMemory: (args) => callMcpTool("store_memory", withSessionScope(args), baseUrl),
-        learnMemory: (args) => callMcpTool("learn", withSessionScope(args), baseUrl),
+        recallMemory: (args) => callMcpTool("recall_memory", recallScope(args), baseUrl, memoryRequest),
+        storeMemory: (args) => callMcpTool("store_memory", args, baseUrl, memoryRequest),
+        learnMemory: (args) => callMcpTool("learn", args, baseUrl, memoryRequest),
       }
     : {}),
 };

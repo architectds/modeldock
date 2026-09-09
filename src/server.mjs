@@ -1,5 +1,6 @@
 import path from "node:path";
 import os from "node:os";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, statfsSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,7 @@ import { NATIVE_IMAGE_PATHS, localWarmBaseFromSessionOpening, relayNativeImage, 
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
+import { bindMemoryScope, verifiedMemoryScope, withoutMemoryMutations } from "./memory-scope.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
 import { createUpdater, localVersion } from "./update.mjs";
@@ -1258,8 +1260,13 @@ export function createApp(services = createServices()) {
   // they are unaffected; the route-level guards add the same rule to /mcp.
   app.use("/api", crossOriginGuard(config));
 
-  const mcpHandler = createMcpNodeHandler({
-    upstreams,
+  const mcpScope = new AsyncLocalStorage();
+  const readOnlyMcpHandler = createMcpNodeHandler({
+    upstreams: withoutMemoryMutations(upstreams),
+    onError: (error) => recordMcpError(metrics, error),
+  });
+  const scopedMcpHandler = createMcpNodeHandler({
+    upstreams: bindMemoryScope(upstreams, () => mcpScope.getStore()),
     onError: (error) => recordMcpError(metrics, error),
   });
 
@@ -1271,7 +1278,11 @@ export function createApp(services = createServices()) {
     return res.status(401).json({ error: { type: "invalid_caller_key", message: "Unknown caller key; re-enable the Codex switch to refresh the URL." } });
   };
   const guardMcpOrigin = crossOriginGuard(config);
-  app.all(`${CALLER_PATH_PREFIX}/:key/mcp`, guardMcpOrigin, requireCallerKey, (req, res) => mcpHandler(req, res, req.body));
+  app.all(`${CALLER_PATH_PREFIX}/:key/mcp`, guardMcpOrigin, requireCallerKey, (req, res) => {
+    const scope = verifiedMemoryScope(req.headers, services.callerKey);
+    if (!scope) return readOnlyMcpHandler(req, res, req.body);
+    return mcpScope.run(scope, () => scopedMcpHandler(req, res, req.body));
+  });
   app.all("/mcp", guardMcpOrigin, (_req, res) => res.status(401).json({
     error: { type: "caller_key_required", message: "This MCP endpoint requires the keyed URL; re-enable the Codex switch." },
   }));
@@ -3024,7 +3035,16 @@ export function createApp(services = createServices()) {
       `JSON request body exceeds the ${limit}-byte limit`,
     );
   });
-  return { app: outer, close: () => mcpHandler.close?.(), services };
+  return {
+    app: outer,
+    close: async () => {
+      await Promise.all([
+        readOnlyMcpHandler.close?.(),
+        scopedMcpHandler.close?.(),
+      ]);
+    },
+    services,
+  };
 }
 
 // New installs, and every version change (reinstall or self-update), default to

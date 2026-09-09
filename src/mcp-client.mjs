@@ -15,10 +15,10 @@ export function gatewayBaseUrl() {
     || `${DEFAULT_GATEWAY_URL}${callerRootPath(loadOrCreateCallerKey())}`;
 }
 
-async function requestMcp(baseUrl, method, params) {
+async function requestMcp(baseUrl, method, params, { headers = {} } = {}) {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const text = await response.text();
@@ -43,8 +43,8 @@ async function requestMcp(baseUrl, method, params) {
 
 // Returns the tool result text; when that text is itself JSON the parsed value
 // is returned so callers can work with the object directly.
-export async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
-  const result = await callMcpToolResult(name, args, baseUrl);
+export async function callMcpTool(name, args, baseUrl = gatewayBaseUrl(), options = {}) {
+  const result = await callMcpToolResult(name, args, baseUrl, options);
   const text = (result.content || []).find((item) => item.type === "text")?.text ?? "";
   try {
     return JSON.parse(text);
@@ -53,6 +53,6 @@ export async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
   }
 }
 
-export function callMcpToolResult(name, args, baseUrl = gatewayBaseUrl()) {
-  return requestMcp(baseUrl, "tools/call", { name, arguments: args });
+export function callMcpToolResult(name, args, baseUrl = gatewayBaseUrl(), options = {}) {
+  return requestMcp(baseUrl, "tools/call", { name, arguments: args }, options);
 }

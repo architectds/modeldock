@@ -1571,7 +1571,8 @@ cat > "$MCP_CALL_SH" <<'EOF'
 #   sh scripts/mcp-call.sh preview <path> [path ...]
 #   sh scripts/mcp-call.sh image "prompt"
 #   sh scripts/mcp-call.sh recall "query" [scope_dir]
-#   sh scripts/mcp-call.sh store "content" [scope_dir] [kind]
+#   sh scripts/mcp-call.sh store "content" [kind]
+#   sh scripts/mcp-call.sh learn <path>
 #
 # The tool list is identical to scripts/mcp-call.mjs; this wrapper only locates
 # the runtime and forwards the arguments.
@@ -1626,8 +1627,8 @@ cat > "$MCP_CALL_MJS" <<'EOF'
 //   node scripts/mcp-call.mjs speak <text>
 //   node scripts/mcp-call.mjs hear <file>
 //   node scripts/mcp-call.mjs recall <query> [scope_dir] [limit]
-//   node scripts/mcp-call.mjs store <content> [scope_dir] [kind]
-//   node scripts/mcp-call.mjs learn <path> [scope_dir]
+//   node scripts/mcp-call.mjs store <content> [kind]
+//   node scripts/mcp-call.mjs learn <path>
 //
 // This file is self-contained ON PURPOSE: it is shipped to installed layouts
 // (via install.sh) that have no src/ directory at all, so it must not import
@@ -1635,8 +1636,8 @@ cat > "$MCP_CALL_MJS" <<'EOF'
 // minimal faithful copy of those two modules (keyed base URL + stateless MCP
 // client); keep them in lockstep when either changes.
 
-import { randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHmac, randomBytes } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -1685,10 +1686,34 @@ function gatewayBaseUrl() {
   return `http://127.0.0.1:4097/c/${loadOrCreateCallerKey()}`;
 }
 
-async function requestMcp(baseUrl, method, params) {
+function canonicalMemoryScope(value = process.cwd()) {
+  const resolved = path.resolve(String(value || process.cwd()));
+  try {
+    return realpathSync.native(resolved).replace(/^\\\\\?\\/, "");
+  } catch {
+    return resolved.replace(/^\\\\\?\\/, "");
+  }
+}
+
+function memoryHeaders(baseUrl) {
+  const match = /\/c\/([^/]+)(?:\/|$)/.exec(new URL(baseUrl).pathname);
+  if (!match) return {};
+  const callerKey = decodeURIComponent(match[1]);
+  const scope = canonicalMemoryScope(process.env.MODELDOCK_MEMORY_SCOPE || process.cwd());
+  const encoded = Buffer.from(scope, "utf8").toString("base64url");
+  const proof = createHmac("sha256", callerKey)
+    .update(`modeldock-memory-scope:v1:${encoded}`)
+    .digest("hex");
+  return {
+    "x-modeldock-memory-scope": encoded,
+    "x-modeldock-memory-scope-proof": proof,
+  };
+}
+
+async function requestMcp(baseUrl, method, params, { headers = memoryHeaders(baseUrl) } = {}) {
   const response = await fetch(`${baseUrl}/mcp`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
   });
   const text = await response.text();
@@ -1795,14 +1820,12 @@ if (command === "tools") {
   console.log(await callMcpTool("recall_memory", args));
 } else if (command === "store") {
   const args = { content: rest[0] };
-  args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
-  if (rest[2]) args.kind = rest[2];
+  if (rest[2]) throw new Error("store no longer accepts scope_dir; it always writes to the current project");
+  if (rest[1]) args.kind = rest[1];
   console.log(JSON.stringify(await callMcpTool("store_memory", args), null, 2));
 } else if (command === "learn") {
-  // Same scope contract as recall and store: an explicit scope wins, then the
-  // pinned one, then wherever the shell is.
+  if (rest[1]) throw new Error("learn no longer accepts scope_dir; it always writes to the current project");
   const args = { path: rest[0] };
-  args.scope_dir = process.env.MODELDOCK_MEMORY_SCOPE || rest[1] || process.cwd();
   console.log(JSON.stringify(await callMcpTool("learn", args), null, 2));
 } else if (command === "vision") {
   const args = { path: rest[0], question: rest[1] };
@@ -1852,8 +1875,8 @@ function exampleFor(toolName) {
     speak: 'speak "text"',
     hear: "hear <file>",
     recall_memory: 'recall "query" [scope_dir]',
-    store_memory: 'store "content" [scope_dir] [kind]',
-    learn: "learn <path> [scope_dir]",
+    store_memory: 'store "content" [kind]',
+    learn: "learn <path>",
   };
   return examples[toolName] || `${toolName} <args>`;
 }

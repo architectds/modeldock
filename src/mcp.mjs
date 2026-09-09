@@ -279,9 +279,8 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
             title: "Store Memory",
             description:
               "Persist a fact, decision, preference, correction, or baseline into this project's long-term memory vault so future sessions can recall it with recall_memory. Call this when something reusable happened in this conversation: a stable preference, a hard-won fix, a frozen baseline, a project fact, or a correction. Do not store one-off task details or transient state. To correct or replace an earlier memory, recall it first and reuse its key from the result - storing under the same key supersedes the old revision.",
-            inputSchema: z.object({
+            inputSchema: z.strictObject({
               content: z.string().min(1).describe("What to remember, one short paragraph"),
-              scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to use the session working directory"),
               kind: z
                 .enum(["decision", "preference", "baseline", "knowledge", "correction"])
                 .optional()
@@ -307,9 +306,8 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
             title: "Learn Knowledge",
             description:
               "Ingest a local knowledge file or every markdown/text file directly under a directory into this project's persistent memory, chunked by `#` heading. Call this to bulk-load a knowledge base, frozen baseline, or reference material before reasoning from it. Unchanged files are skipped and changed files supersede their previous revision, so the newest version wins recall. This tool reads text only: for pdf/docx/pptx/xlsx, first extract the text with the bundled Python from load_workspace_dependencies (pdfplumber / python-docx / python-pptx / openpyxl), then pass the extracted text file here; for scanned pages, use vision_inspect with mode=ocr instead.",
-            inputSchema: z.object({
+            inputSchema: z.strictObject({
               path: z.string().min(1).describe("Absolute path to a file or directory of markdown/text/json files to ingest"),
-              scope_dir: z.string().optional().describe("Absolute working directory this memory applies to; omit to use the session working directory"),
             }),
             annotations: { readOnlyHint: false, openWorldHint: false },
           },

@@ -11,7 +11,8 @@
 #   sh scripts/mcp-call.sh preview <path> [path ...]
 #   sh scripts/mcp-call.sh image "prompt"
 #   sh scripts/mcp-call.sh recall "query" [scope_dir]
-#   sh scripts/mcp-call.sh store "content" [scope_dir] [kind]
+#   sh scripts/mcp-call.sh store "content" [kind]
+#   sh scripts/mcp-call.sh learn <path>
 #
 # The tool list is identical to scripts/mcp-call.mjs; this wrapper only locates
 # the runtime and forwards the arguments.

@@ -7,17 +7,21 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { canonicalMemoryScope, verifiedMemoryScope } from "../src/memory-scope.mjs";
 
 const STANDALONE = fileURLToPath(new URL("../src/mcp-standalone.mjs", import.meta.url));
+const CALLER_KEY = "test-caller-key-0123456789-abcdef";
 
 function startMockGateway() {
   const calls = [];
+  const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
       const message = JSON.parse(body);
       calls.push(message);
+      requests.push({ message, headers: req.headers });
       let result = {};
       if (message.method === "tools/call") {
         result.content = message.params.name === "preview_images"
@@ -38,17 +42,19 @@ function startMockGateway() {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       resolve({
-        url: `http://127.0.0.1:${server.address().port}`,
+        url: `http://127.0.0.1:${server.address().port}/c/${CALLER_KEY}`,
         calls,
+        requests,
         close: () => new Promise((done) => server.close(done)),
       });
     });
   });
 }
 
-function startBridge(gatewayUrl, extraEnv = {}) {
+function startBridge(gatewayUrl, extraEnv = {}, cwd = process.cwd()) {
   const child = spawn(process.execPath, [STANDALONE], {
     env: { ...process.env, MODELDOCK_GATEWAY_URL: gatewayUrl, MODELDOCK_MEMORY: "0", ...extraEnv },
+    cwd,
     stdio: ["pipe", "pipe", "pipe"],
   });
   let stderr = "";
@@ -196,6 +202,10 @@ test("stdio bridge exposes recall_memory when memory is enabled and forwards cal
       "scope_only must not be advertised to the model through the bridge tools/list",
     );
     assert.ok(recallSchema.properties?.scope_dir, "scope_dir stays visible for explicit project recalls");
+    const storeSchema = listed.result.tools.find((tool) => tool.name === "store_memory")?.inputSchema || {};
+    const learnSchema = listed.result.tools.find((tool) => tool.name === "learn")?.inputSchema || {};
+    assert.equal(storeSchema.properties?.scope_dir, undefined, "store scope is owned by the session bridge");
+    assert.equal(learnSchema.properties?.scope_dir, undefined, "learn scope is owned by the session bridge");
 
     const called = await rpc(bridge, 3, "tools/call", {
       name: "recall_memory",
@@ -208,15 +218,23 @@ test("stdio bridge exposes recall_memory when memory is enabled and forwards cal
     assert.equal(forward.params.name, "recall_memory");
     assert.deepEqual(forward.params.arguments, { query: "qcm baseline", scope_dir: "D:\\projects\\stockscan", limit: 5 });
 
-    const stored = await rpc(bridge, 4, "tools/call", {
+    const rejected = await rpc(bridge, 4, "tools/call", {
       name: "store_memory",
       arguments: { content: "Remember the DIVO baseline.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" },
     });
+    assert.equal(rejected.result.isError, true, "an old caller cannot override the write scope");
+
+    const stored = await rpc(bridge, 5, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "Remember the DIVO baseline.", kind: "baseline" },
+    });
     const storedParsed = JSON.parse(stored.result.content[0].text);
     assert.equal(storedParsed.forwarded, "store_memory");
-    assert.deepEqual(storedParsed.args, { content: "Remember the DIVO baseline.", kind: "baseline", scope_dir: "D:\\projects\\stockscan" });
+    assert.deepEqual(storedParsed.args, { content: "Remember the DIVO baseline.", kind: "baseline" });
     const storedForward = gateway.calls.filter((m) => m.method === "tools/call").find((m) => m.params.name === "store_memory");
     assert.equal(storedForward.params.name, "store_memory");
+    const storedRequest = gateway.requests.find((request) => request.message.params?.name === "store_memory");
+    assert.equal(verifiedMemoryScope(storedRequest.headers, CALLER_KEY), canonicalMemoryScope(process.cwd()));
   } finally {
     await stopBridge(bridge);
     await gateway.close();
@@ -239,17 +257,66 @@ test("stdio bridge defaults recall and store to the session working directory", 
       arguments: { query: "baseline" },
     });
     const parsed = JSON.parse(called.result.content[0].text);
-    assert.equal(parsed.args.scope_dir, process.cwd(), "recall defaults to the session working directory");
+    assert.equal(parsed.args.scope_dir, canonicalMemoryScope(process.cwd()), "recall defaults to the canonical session working directory");
 
     const stored = await rpc(bridge, 3, "tools/call", {
       name: "store_memory",
       arguments: { content: "Remember the DIVO baseline.", kind: "baseline" },
     });
     const storedParsed = JSON.parse(stored.result.content[0].text);
-    assert.equal(storedParsed.args.scope_dir, process.cwd(), "store defaults to the session working directory");
+    assert.equal(storedParsed.args.scope_dir, undefined, "write scope travels as authenticated boundary metadata, not a model argument");
+    const storedRequest = gateway.requests.find((request) => request.message.params?.name === "store_memory");
+    assert.equal(verifiedMemoryScope(storedRequest.headers, CALLER_KEY), canonicalMemoryScope(process.cwd()));
   } finally {
     await stopBridge(bridge);
     await gateway.close();
+  }
+});
+
+test("two project bridges authenticate distinct write scopes and reject model overrides", async () => {
+  const gateway = await startMockGateway();
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-projects-"));
+  const projectA = path.join(root, "project-a");
+  const projectB = path.join(root, "project-b");
+  mkdirSync(projectA);
+  mkdirSync(projectB);
+  const bridgeA = startBridge(gateway.url, { MODELDOCK_MEMORY: "1" }, projectA);
+  const bridgeB = startBridge(gateway.url, { MODELDOCK_MEMORY: "1" }, projectB);
+  try {
+    for (const bridge of [bridgeA, bridgeB]) {
+      await rpc(bridge, 1, "initialize", {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "1.0.0" },
+      });
+      notify(bridge, "notifications/initialized", {});
+    }
+    await Promise.all([
+      rpc(bridgeA, 2, "tools/call", { name: "store_memory", arguments: { content: "project A" } }),
+      rpc(bridgeB, 2, "tools/call", { name: "store_memory", arguments: { content: "project B" } }),
+    ]);
+
+    const scopes = gateway.requests
+      .filter((request) => request.message.params?.name === "store_memory")
+      .map((request) => verifiedMemoryScope(request.headers, CALLER_KEY))
+      .sort();
+    assert.deepEqual(scopes, [canonicalMemoryScope(projectA), canonicalMemoryScope(projectB)].sort());
+
+    const rejectedLearn = await rpc(bridgeA, 3, "tools/call", {
+      name: "learn",
+      arguments: { path: path.join(projectA, "notes.md"), scope_dir: projectB },
+    });
+    assert.equal(rejectedLearn.result.isError, true, "learn cannot assign content to another project");
+    assert.equal(
+      gateway.calls.some((message) => message.params?.name === "learn"),
+      false,
+      "rejected learn calls never reach the gateway",
+    );
+  } finally {
+    await stopBridge(bridgeA);
+    await stopBridge(bridgeB);
+    await gateway.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -272,7 +339,10 @@ test("MODELDOCK_MEMORY_SCOPE injects the bucket scope and strict recall", async 
       arguments: { content: "benchmark fact" },
     });
     const storeParsed = JSON.parse(store.result.content[0].text);
-    assert.deepEqual(storeParsed.args, { content: "benchmark fact", scope_dir: "D:\\bench\\deepswe" });
+    assert.deepEqual(storeParsed.args, { content: "benchmark fact" });
+    const fixedScope = canonicalMemoryScope("D:\\bench\\deepswe");
+    const storeRequest = gateway.requests.find((request) => request.message.params?.name === "store_memory");
+    assert.equal(verifiedMemoryScope(storeRequest.headers, CALLER_KEY), fixedScope);
 
     const recall = await rpc(bridge, 3, "tools/call", {
       name: "recall_memory",
@@ -281,9 +351,15 @@ test("MODELDOCK_MEMORY_SCOPE injects the bucket scope and strict recall", async 
     const recallParsed = JSON.parse(recall.result.content[0].text);
     assert.deepEqual(recallParsed.args, {
       query: "benchmark fact",
-      scope_dir: "D:\\bench\\deepswe",
+      scope_dir: fixedScope,
       scope_only: true,
     });
+
+    const rejectedRecall = await rpc(bridge, 4, "tools/call", {
+      name: "recall_memory",
+      arguments: { query: "benchmark fact", scope_dir: "D:\\another-project" },
+    });
+    assert.equal(rejectedRecall.result.isError, true, "strict recall cannot escape the configured scope");
   } finally {
     await stopBridge(bridge);
     await gateway.close();

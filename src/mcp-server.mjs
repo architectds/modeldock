@@ -6,6 +6,7 @@ import { Metrics } from "./metrics.mjs";
 import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { memoryStoreFor } from "./memory.mjs";
+import { bindMemoryScope, canonicalMemoryScope } from "./memory-scope.mjs";
 import { urlHost } from "./loopback.mjs";
 
 // Standalone MCP sidecar. Serves only /mcp (streamable HTTP) plus /healthz, so
@@ -17,6 +18,7 @@ export async function startMcpServer(config = loadConfig(), {
   upstreams: injectedUpstreams = null,
   metrics: injectedMetrics = null,
   mediaStore: injectedMediaStore = null,
+  memoryScope = process.env.MODELDOCK_MEMORY_SCOPE || process.cwd(),
 } = {}) {
   const metrics = injectedMetrics || new Metrics({ recentLimit: config.recentLimit });
   const attachmentIndex = new CodexAttachmentIndex({ codexHome: config.codexHome });
@@ -40,8 +42,11 @@ export async function startMcpServer(config = loadConfig(), {
   const app = createMcpExpressApp({ host: config.host, jsonLimit: "25mb" });
   app.disable("x-powered-by");
 
+  const scopedUpstreams = bindMemoryScope(upstreams, canonicalMemoryScope(memoryScope), {
+    strictRecall: Boolean(process.env.MODELDOCK_MEMORY_SCOPE),
+  });
   const mcpHandler = createMcpNodeHandler({
-    upstreams,
+    upstreams: scopedUpstreams,
     onError: (error) => recordMcpError(metrics, error),
   });
 

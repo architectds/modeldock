@@ -36,8 +36,8 @@ export function baseInstructionsFor(config, { supportsVision = false, nativeWebS
     visualFallback,
     ...(nativeWebSearch ? [] : ["`search <query>` (web search)"]),
     "`recall <query> [scope_dir]` (recall memory)",
-    "`store <content> [scope_dir] [kind]` (store memory)",
-    "`learn <path> [scope_dir]` (bulk-ingest a file or directory into memory)",
+    "`store <content> [kind]` (store memory in the current project)",
+    "`learn <path>` (bulk-ingest a file or directory into the current project's memory)",
   ].join(", ");
   return [
     "You are Codex, a coding agent collaborating with the user in their workspace.",

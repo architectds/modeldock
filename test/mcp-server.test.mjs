@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { startMcpServer } from "../src/mcp-server.mjs";
+import { canonicalMemoryScope } from "../src/memory-scope.mjs";
 
 function configStub() {
   return {
@@ -88,9 +89,9 @@ test("MCP sidecar returns bounded local previews as image content", async () => 
 test("MCP sidecar registers recall_memory when memory is enabled", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-memory-"));
   const config = { ...configStub(), memoryEnabled: true, memoryDir: dir };
-  const instance = await startMcpServer(config, { port: 0 });
   const project = path.join(dir, "proj-mcp");
   mkdirSync(project);
+  const instance = await startMcpServer(config, { port: 0, memoryScope: project });
   try {
     const { status, parsed } = await rpc(instance.url, "tools/list");
     assert.equal(status, 200);
@@ -98,11 +99,15 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
     assert.ok(names.includes("recall_memory"), `recall_memory missing from ${names.join(",")}`);
     assert.ok(names.includes("store_memory"), `store_memory missing from ${names.join(",")}`);
     const recallSchema = parsed.result.tools.find((tool) => tool.name === "recall_memory")?.inputSchema || {};
+    const storeSchema = parsed.result.tools.find((tool) => tool.name === "store_memory")?.inputSchema || {};
+    const learnSchema = parsed.result.tools.find((tool) => tool.name === "learn")?.inputSchema || {};
     assert.equal(
       recallSchema.properties?.scope_only?.type,
       "boolean",
       "gateway-side schema keeps scope_only so bridge-injected calls survive validation",
     );
+    assert.equal(storeSchema.properties?.scope_dir, undefined);
+    assert.equal(learnSchema.properties?.scope_dir, undefined);
 
     const call = await rpc(instance.url, "tools/call", {
       name: "recall_memory",
@@ -114,12 +119,18 @@ test("MCP sidecar registers recall_memory when memory is enabled", async () => {
 
     const store = await rpc(instance.url, "tools/call", {
       name: "store_memory",
-      arguments: { content: "A test baseline for the vault.", kind: "baseline", scope_dir: project },
+      arguments: { content: "A test baseline for the vault.", kind: "baseline" },
     });
     assert.equal(store.status, 200);
     const stored = JSON.parse(store.parsed.result?.content?.[0]?.text || "{}");
     assert.equal(stored.stored, true);
-    assert.equal(stored.scope, project);
+    assert.equal(stored.scope, canonicalMemoryScope(project));
+
+    const escapedStore = await rpc(instance.url, "tools/call", {
+      name: "store_memory",
+      arguments: { content: "wrong project", scope_dir: path.join(dir, "other") },
+    });
+    assert.equal(escapedStore.parsed.result?.isError, true, "model-visible schema rejects scope overrides");
 
     const recalled = await rpc(instance.url, "tools/call", {
       name: "recall_memory",

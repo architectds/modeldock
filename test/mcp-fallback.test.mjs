@@ -85,3 +85,12 @@ test("the installer ships the same CLI the repo tests", () => {
   }
   assert.ok(cli.includes('command === "learn"'), "learn is the command this test was written for");
 });
+
+test("CLI memory mutations are bound to the shell project, not a positional scope", () => {
+  const cli = read("scripts/mcp-call.mjs");
+  assert.match(cli, /store <content> \[kind\]/);
+  assert.match(cli, /learn <path>/);
+  assert.doesNotMatch(cli, /store <content> \[scope_dir\]/);
+  assert.doesNotMatch(cli, /learn <path> \[scope_dir\]/);
+  assert.match(cli, /x-modeldock-memory-scope-proof/);
+});

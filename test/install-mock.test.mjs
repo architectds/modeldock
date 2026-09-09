@@ -219,9 +219,11 @@ async function assertGatewayMcpTools(port, callerKey) {
   assert.equal(init.status, 200, "MCP initialize should succeed against the installed gateway");
   const listed = await rpcMcp(gatewayMcpBase, "tools/list", {});
   const names = (listed.parsed?.result?.tools || []).map((tool) => tool.name);
-  for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory", "store_memory"]) {
+  for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory"]) {
     assert.ok(names.includes(name), `${name} missing from installed gateway MCP tools: ${names.join(",")}`);
   }
+  assert.ok(!names.includes("store_memory"), "unscoped HTTP MCP must not expose project memory writes");
+  assert.ok(!names.includes("learn"), "unscoped HTTP MCP must not expose project ingestion");
 }
 
 async function assertBridgeTools(bridgePath, gatewayUrl, memoryDir) {
@@ -239,6 +241,8 @@ async function assertBridgeTools(bridgePath, gatewayUrl, memoryDir) {
     for (const name of ["web_search_exa", "vision_inspect", "speak", "hear", "recall_memory", "store_memory"]) {
       assert.ok(names.includes(name), `${name} missing from installed bridge tools: ${names.join(",")}`);
     }
+    const storeSchema = listed.result.tools.find((tool) => tool.name === "store_memory")?.inputSchema || {};
+    assert.equal(storeSchema.properties?.scope_dir, undefined, "installed bridge owns the memory write scope");
     const call = await bridgeRpc(bridge, 3, "tools/call", {
       name: "recall_memory",
       arguments: { query: "baseline" },
