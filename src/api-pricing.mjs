@@ -50,8 +50,10 @@ const RATES = new Map([
   ["Qwen/Qwen3.8-Flash@commandcode", { input: 0.15, cached: 0.016, output: 0.47 }],
   ["qwen3.8-max@opencode-go", { input: 2, cached: 0.25, output: 6 }],
 
-  // OpenAI direct API base rates for native Codex traffic, checked on
-  // 2026-08-29. Do not apply an OpenRouter-only promotional discount here.
+  // OpenAI direct API standard short-context rates for native Codex traffic,
+  // checked on 2026-09-08. Do not apply an OpenRouter-only promotional
+  // discount here.
+  ["gpt-6-astra@openai", { input: 10, cached: 1, output: 50 }],
   ["gpt-5.6-sol@openai", { input: 4, cached: 0.4, output: 20 }],
   ["gpt-5.6-terra@openai", { input: 2, cached: 0.2, output: 12 }],
   ["gpt-5.6-luna@openai", { input: 0.2, cached: 0.02, output: 1.2 }],

@@ -33,6 +33,14 @@ test("native Sol uses OpenAI direct pricing rather than an OpenRouter promotion"
   });
 });
 
+test("native Astra uses OpenAI direct standard short-context pricing", () => {
+  assert.deepEqual(apiRate("gpt-6-astra", "openai"), {
+    input: 10,
+    cached: 1,
+    output: 50,
+  });
+});
+
 test("equivalent cost discounts cached input separately from new input", () => {
   const result = estimateApiCost({
     model: "gpt-5.6-sol",

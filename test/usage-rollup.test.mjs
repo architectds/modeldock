@@ -297,6 +297,25 @@ test("stats keep unknown provider traffic visible without inventing a price", ()
   assert.equal(stats.periods.today.costCoverage, 0);
 });
 
+test("native Astra contributes priced cost through the complete stats projection", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-09-08T13:00:00.000Z", {
+      model: "gpt-6-astra",
+      provider: "openai",
+      inputTokens: 1_000_000,
+      cachedTokens: 800_000,
+      outputTokens: 100_000,
+    }),
+  ], { now: "2026-09-08T14:00:00.000Z" });
+  const stats = usageStats(rollup, "2026-09-08T14:30:00.000Z");
+
+  assert.equal(stats.periods.hours24.estimatedApiCostUsd, 7.8);
+  assert.equal(stats.periods.hours24.pricedTokens, 1_100_000);
+  assert.equal(stats.periods.hours24.unpricedTokens, 0);
+  assert.equal(stats.periods.hours24.costCoverage, 1);
+  assert.equal(stats.series.hours24.at(-2).byModel["gpt-6-astra"].cost, 7.8);
+});
+
 test("stats keep model share bounded and aggregate the tail", () => {
   const rollup = emptyRollup();
   const day = "2026-08-18";
