@@ -47,6 +47,7 @@ export class LocalHostRuntime {
   #transition = null;
   #restartPreparation = null;
   #refreshing = null;
+  #requestControllers = new Set();
 
   constructor({ registryFile, manifestDirectory, fetchImpl = fetch, onDiagnostic = () => {} } = {}) {
     if (!registryFile || !manifestDirectory) throw new TypeError("Local host runtime paths are required.");
@@ -170,12 +171,12 @@ export class LocalHostRuntime {
     return this.#coordinator.primeWarmBase(warmBase, { signal });
   }
 
-  // The outer gateway restart script cannot safely infer which Codex session
-  // owns which llama.cpp slot. It asks the live runtime to close admission,
-  // drain the already admitted turn, then checkpoint every hot lane while
-  // that mapping still exists. Admission stays closed briefly so a request
-  // cannot slip in between the checkpoint and the script stopping Node.
-  async prepareGatewayRestart({ timeoutMs = 120_000, holdMs = 45_000 } = {}) {
+  // Restart means stop now, not wait for an unbounded local generation. Close
+  // admission first, cancel every admitted/waiting request, and give abort a
+  // short opportunity to release its lane. Only completed hot lanes are safe
+  // to checkpoint: an active lane can contain assistant tokens the Codex
+  // client never received, so persisting it would corrupt a later retry.
+  async prepareGatewayRestart({ timeoutMs = 3_000, holdMs = 45_000 } = {}) {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new TypeError("A positive restart checkpoint timeout is required.");
     if (!Number.isSafeInteger(holdMs) || holdMs <= 0) throw new TypeError("A positive restart checkpoint hold is required.");
     if (this.#restartPreparation) return { ...this.#restartPreparation.result, alreadyPrepared: true };
@@ -184,14 +185,20 @@ export class LocalHostRuntime {
 
     const releaseTransition = this.beginTransition();
     try {
+      const interrupted = this.#requestControllers.size;
+      for (const controller of this.#requestControllers) {
+        controller.abort(new Error("Local model request interrupted by ModelDock restart."));
+      }
       const idle = await this.drain({ timeoutMs });
-      if (!idle) throw new Error("Timed out waiting for local model requests to finish before restart.");
-      const checkpoint = await this.checkpointHotStates();
-      if (checkpoint.failed) throw new Error("Could not checkpoint active local conversations before restart.");
+      // If an upstream ignores cancellation, the outer restart still proceeds.
+      // Do not enter the coordinator mutation lock behind a stuck request.
+      const checkpoint = idle ? await this.checkpointHotStates() : { saved: 0, failed: 0 };
       const result = Object.freeze({
         managed: true,
         saved: checkpoint.saved,
         failed: checkpoint.failed,
+        interrupted,
+        idle,
         holdMs,
       });
       const release = () => {
@@ -253,7 +260,22 @@ export class LocalHostRuntime {
     while (this.#transition) await this.#transition;
     const conversationId = String(sessionId || threadId || "").trim();
     if (!this.#coordinator || !conversationId) return run({ cache: { tier: "unmanaged" }, slot: null });
-    return this.#coordinator.run({ principalId: "local", conversationId, signal, warmBase, run });
+    const controller = new AbortController();
+    const requestSignal = signal
+      ? AbortSignal.any([signal, controller.signal])
+      : controller.signal;
+    this.#requestControllers.add(controller);
+    try {
+      return await this.#coordinator.run({
+        principalId: "local",
+        conversationId,
+        signal: requestSignal,
+        warmBase,
+        run: (context) => run({ ...context, signal: requestSignal }),
+      });
+    } finally {
+      this.#requestControllers.delete(controller);
+    }
   }
 }
 

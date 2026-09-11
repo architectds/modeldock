@@ -4128,7 +4128,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const localWarmBase = target.provider === "llamacpp" && target.transport === "chat"
     ? localWarmBaseFor({ payload: relayPayload, target, upstreamModel })
     : null;
-  const executeRelay = async ({ slot = null, cache = null, warmBase = null } = {}) => {
+  const executeRelay = async ({ slot = null, cache = null, warmBase = null, signal: requestSignal = signal } = {}) => {
     // The KV tier this request rides on (gpu_hot / ssd_restore / cold_prefill
     // / llama_auto) is the one fact that lets the dashboard show what the SSD
     // cache is buying. Annotated onto the live metrics record rather than
@@ -4163,8 +4163,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     const routed = serializedBody({ ...(localChatPayload || normalizedPayload), model: upstreamModel });
     const upstreamBytes = routed.bytes;
     const upstreamController = new AbortController();
-    const upstreamSignal = signal
-      ? AbortSignal.any([signal, upstreamController.signal])
+    const upstreamSignal = requestSignal
+      ? AbortSignal.any([requestSignal, upstreamController.signal])
       : upstreamController.signal;
     const upstream = await fetch(target.url, {
       method: "POST",
@@ -4247,7 +4247,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           onEvent: (event) => tee.push(Buffer.from(`data: ${JSON.stringify(event)}\r\n\r\n`)),
           onFirstResponse: markFirstResponse,
           restoreCall: restoreChatCall,
-          signal,
+          signal: requestSignal,
           completeOnFinishReason: target.provider === "llamacpp",
           onTerminal: () => upstreamController.abort(),
         });

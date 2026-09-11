@@ -599,7 +599,8 @@ function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
 
 # A gateway restart normally has no idea which Codex conversation owns a
 # llama.cpp slot. Before this script stops Node, ask the still-running gateway
-# to close local admission, drain the active request, and save its hot slots.
+# to close local admission, cancel active requests, and save only completed hot
+# slots. In-flight partial output is never checkpointed as a resumable turn.
 # This endpoint was added after the first shipped restart scripts, so a 404 is
 # a compatible old-gateway handoff. Checkpointing is an optimization, not a
 # restart lock: an unhealthy local lane must never prevent replacing the
@@ -621,7 +622,7 @@ function Invoke-LocalRestartCheckpoint {
     $payload = $null
     try { $payload = $response.Content | ConvertFrom-Json } catch {}
     if ($payload -and $payload.managed) {
-      Write-Status "restart.ps1: checkpointed $($payload.saved) local session state(s); handing off gateway"
+      Write-Status "restart.ps1: interrupted $($payload.interrupted) local request(s), checkpointed $($payload.saved) completed state(s); handing off gateway"
     }
     return $true
   } catch {
@@ -1127,8 +1128,9 @@ NODE
 }
 
 # The gateway knows the private Codex-session-to-slot mapping; this shell
-# script does not. Ask it to drain and checkpoint hot local slots before a
-# restart. A 404 is an older installed gateway that cannot do this yet, which
+# script does not. Ask it to cancel active work and checkpoint completed hot
+# local slots before a restart. A 404 is an older installed gateway that cannot
+# do this yet, which
 # must remain upgrade-compatible. Checkpointing is an optimization, not a
 # restart lock: a failed or stuck local lane cannot strand an upgrade. Forced
 # restarts still try the save, but wait no more than five seconds.

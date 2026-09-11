@@ -2670,14 +2670,21 @@ export function createApp(services = createServices()) {
   // The process-level restart scripts call this while the old gateway is
   // still alive. The runtime, unlike the script, knows the private mapping
   // from a Codex session hash to its llama.cpp slot and can make a durable
-  // checkpoint before Node is stopped. It deliberately keeps local admission
-  // closed for a short handoff window; the companion release route reopens it
+  // checkpoint of completed lanes before Node is stopped. Active requests are
+  // cancelled; partial assistant output is never persisted as a valid turn.
+  // Admission stays closed briefly; the companion release route reopens it
   // when the outer script cannot stop the gateway.
   app.post("/api/local/restart-checkpoint", mutateConfig, async (_req, res) => {
     try {
       const result = await services.localHostRuntime?.prepareGatewayRestart?.();
-      recordConfigAction(metrics, "local_restart_checkpoint", { ok: true, managed: Boolean(result?.managed), saved: result?.saved || 0 });
-      return res.json(result || { managed: false, saved: 0, failed: 0, holdMs: 0 });
+      recordConfigAction(metrics, "local_restart_checkpoint", {
+        ok: true,
+        managed: Boolean(result?.managed),
+        saved: result?.saved || 0,
+        interrupted: result?.interrupted || 0,
+        idle: result?.idle !== false,
+      });
+      return res.json(result || { managed: false, saved: 0, failed: 0, interrupted: 0, idle: true, holdMs: 0 });
     } catch (error) {
       recordConfigAction(metrics, "local_restart_checkpoint", { ok: false, error: error.message });
       return res.status(503).json({ error: { type: "local_restart_checkpoint_failed", message: error.message } });

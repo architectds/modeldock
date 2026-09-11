@@ -200,8 +200,9 @@ NODE
 }
 
 # The gateway knows the private Codex-session-to-slot mapping; this shell
-# script does not. Ask it to drain and checkpoint hot local slots before a
-# restart. A 404 is an older installed gateway that cannot do this yet, which
+# script does not. Ask it to cancel active work and checkpoint completed hot
+# local slots before a restart. A 404 is an older installed gateway that cannot
+# do this yet, which
 # must remain upgrade-compatible. Checkpointing is an optimization, not a
 # restart lock: a failed or stuck local lane cannot strand an upgrade. Forced
 # restarts still try the save, but wait no more than five seconds.
