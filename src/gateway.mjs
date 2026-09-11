@@ -4162,11 +4162,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     try {
     const routed = serializedBody({ ...(localChatPayload || normalizedPayload), model: upstreamModel });
     const upstreamBytes = routed.bytes;
+    const upstreamController = new AbortController();
+    const upstreamSignal = signal
+      ? AbortSignal.any([signal, upstreamController.signal])
+      : upstreamController.signal;
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target),
       body: routed.body,
-      signal,
+      signal: upstreamSignal,
     });
     if (!upstream.ok) {
       markFirstResponse();
@@ -4243,6 +4247,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           onEvent: (event) => tee.push(Buffer.from(`data: ${JSON.stringify(event)}\r\n\r\n`)),
           onFirstResponse: markFirstResponse,
           restoreCall: restoreChatCall,
+          signal,
+          completeOnFinishReason: target.provider === "llamacpp",
+          onTerminal: () => upstreamController.abort(),
         });
         tee.end();
         bytesOut = piped.bytes;

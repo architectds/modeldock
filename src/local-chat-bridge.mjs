@@ -535,7 +535,14 @@ export function chatChunksToResponseEvents(chunks, options) {
   return events;
 }
 
-export async function pipeChatCompletionStream(body, res, { onEvent, onFirstResponse, restoreCall } = {}) {
+export async function pipeChatCompletionStream(body, res, {
+  onEvent,
+  onFirstResponse,
+  restoreCall,
+  signal,
+  completeOnFinishReason = false,
+  onTerminal,
+} = {}) {
   if (!body) {
     res.end();
     return { bytes: 0, upstreamBytes: 0, interrupted: false, failure: "Local Chat upstream returned no response body." };
@@ -547,7 +554,11 @@ export async function pipeChatCompletionStream(body, res, { onEvent, onFirstResp
   let buffer = "";
   let reader;
   let interrupted = false;
+  let responseError = null;
+  let upstreamTerminal = false;
   let first = false;
+  let resolveInterruption;
+  const interruption = new Promise((resolve) => { resolveInterruption = resolve; });
   const write = async (event) => {
     const text = responseSse(event);
     bytes += Buffer.byteLength(text);
@@ -565,6 +576,10 @@ export async function pipeChatCompletionStream(body, res, { onEvent, onFirstResp
       const block = buffer.slice(0, match.index);
       buffer = buffer.slice(match.index + match[0].length);
       for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("data:") && line.slice(5).trim() === "[DONE]") {
+          upstreamTerminal = true;
+          continue;
+        }
         const chunk = parseSseData(line);
         if (chunk === undefined) continue;
         if (!first) {
@@ -572,25 +587,56 @@ export async function pipeChatCompletionStream(body, res, { onEvent, onFirstResp
           onFirstResponse?.();
         }
         for (const event of assembler.push(chunk)) await write(event);
+        if (completeOnFinishReason && chunk?.choices?.some((choice) => choice?.finish_reason)) {
+          upstreamTerminal = true;
+        }
       }
     }
   };
-  const onClose = () => {
-    if (!res.writableFinished) {
-      interrupted = true;
-      reader?.cancel?.().catch(() => {});
-    }
+  const interrupt = (error = null) => {
+    if (res.writableFinished || interrupted) return;
+    interrupted = true;
+    if (error) responseError = error;
+    resolveInterruption({ interrupted: true });
+    reader?.cancel?.().catch(() => {});
   };
+  const onClose = () => interrupt();
+  const onError = (error) => interrupt(error);
+  const onAbort = () => interrupt();
   res.once("close", onClose);
+  res.once("error", onError);
+  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     reader = body.getReader();
+    if (signal?.aborted) interrupt();
     while (!interrupted) {
-      const { done, value } = await reader.read();
+      const outcome = await Promise.race([
+        reader.read().then(
+          (value) => ({ type: "read", value }),
+          (error) => ({ type: "error", error }),
+        ),
+        interruption,
+      ]);
+      if (outcome?.interrupted) break;
+      if (outcome.type === "error") {
+        if (interrupted) break;
+        throw outcome.error;
+      }
+      const { done, value } = outcome.value;
       if (done) break;
       upstreamBytes += value.byteLength || Buffer.byteLength(value);
       buffer += decoder.write(Buffer.from(value));
       await process();
+      // Chat Completions defines data: [DONE] as the transport terminator.
+      // llama.cpp also reports a semantic finish_reason after it releases its
+      // slot, and its managed route opts into accepting that terminal boundary.
+      // Do not wait for a dangling HTTP body after either signal: doing so keeps
+      // the gateway lease, and every queued local conversation, alive forever.
+      if (upstreamTerminal) {
+        break;
+      }
     }
+    if (responseError) throw responseError;
     if (!interrupted) {
       buffer += decoder.end();
       await process();
@@ -602,6 +648,21 @@ export async function pipeChatCompletionStream(body, res, { onEvent, onFirstResp
     }
   } finally {
     res.removeListener("close", onClose);
+    res.removeListener("error", onError);
+    signal?.removeEventListener("abort", onAbort);
+    if (upstreamTerminal) {
+      try {
+        reader?.releaseLock?.();
+      } catch {
+        // The terminal response is already complete; network cleanup below is
+        // owned by the fetch layer even if this reader cannot release cleanly.
+      }
+      try {
+        onTerminal?.();
+      } catch {
+        // Closing an already-finished upstream must not change the response.
+      }
+    }
     if (interrupted) reader?.cancel?.().catch(() => {});
   }
   return { bytes, upstreamBytes, interrupted, failure: "", completedResponse: undefined };

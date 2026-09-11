@@ -7,6 +7,7 @@ import { Writable } from "node:stream";
 import { gunzipSync } from "node:zlib";
 import { chatChunksToResponseEvents, chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "../src/local-chat-bridge.mjs";
 import { localWarmBaseFromSessionOpening, relayResponses } from "../src/gateway.mjs";
+import { LocalHostScheduler } from "../src/local-host-scheduler.mjs";
 import { applyLocalEngineProfile } from "../src/profiles.mjs";
 
 const fullCodexFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
@@ -421,6 +422,206 @@ test("Chat stream pipe emits only Responses events and completes", async () => {
   const complete = observed.find((event) => event.type === "response.completed");
   assert.equal(complete.response.output[0].content[0].text, "LOCAL_OK");
   assert.equal(complete.response.usage.input_tokens_details.cached_tokens, 8);
+});
+
+test("Chat stream pipe releases a completed llama slot when the body stays open after DONE", async () => {
+  let upstreamCancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from([
+        'data: {"id":"chatcmpl_done","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"DONE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":1}}\n\n',
+        "data: [DONE]\n\n",
+      ].join("")));
+      // Intentionally do not close. This is the observed failure shape: the
+      // llama slot is idle, but its chunked HTTP body never reports EOF.
+    },
+    cancel() {
+      upstreamCancelled = true;
+    },
+  });
+  const res = new EventEmitter();
+  res.writableFinished = false;
+  res.writes = [];
+  res.write = (value) => { res.writes.push(value); return true; };
+  res.end = () => { res.writableFinished = true; res.emit("finish"); };
+  const observed = [];
+  const piping = pipeChatCompletionStream(body, res, {
+    onEvent: (event) => observed.push(event),
+    onTerminal: () => { upstreamCancelled = true; },
+  });
+  let timer;
+  try {
+    const result = await Promise.race([
+      piping,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          res.emit("close");
+          reject(new Error("Chat pipe waited for HTTP EOF after data: [DONE]."));
+        }, 500);
+      }),
+    ]);
+    assert.equal(result.interrupted, false);
+    assert.equal(result.completedResponse?.output?.[0]?.content?.[0]?.text, "DONE");
+    assert.equal(upstreamCancelled, true, "the dangling upstream body is cancelled after its terminal sentinel");
+    assert.equal(observed.some((event) => event.type === "response.completed"), true);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test("managed llama finish_reason releases the lane even when DONE and HTTP EOF are both missing", async () => {
+  let upstreamCancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from(
+        'data: {"id":"chatcmpl_finish","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"FINISHED"},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":1}}\n\n',
+      ));
+    },
+    cancel() {
+      upstreamCancelled = true;
+    },
+  });
+  const res = new EventEmitter();
+  res.writableFinished = false;
+  res.write = () => true;
+  res.end = () => { res.writableFinished = true; res.emit("finish"); };
+  const result = await pipeChatCompletionStream(body, res, {
+    completeOnFinishReason: true,
+    onTerminal: () => { upstreamCancelled = true; },
+  });
+  assert.equal(result.interrupted, false);
+  assert.equal(result.completedResponse?.output?.[0]?.content?.[0]?.text, "FINISHED");
+  assert.equal(result.completedResponse?.usage?.input_tokens, 30);
+  assert.equal(upstreamCancelled, true);
+});
+
+test("Chat stream pipe settles immediately when the gateway abort signal fires", async () => {
+  const controller = new AbortController();
+  const body = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      return new Promise(() => {});
+    },
+  });
+  const res = new EventEmitter();
+  res.writableFinished = false;
+  res.write = () => true;
+  res.end = () => { res.writableFinished = true; res.emit("finish"); };
+  const piping = pipeChatCompletionStream(body, res, { signal: controller.signal });
+  controller.abort();
+  const result = await piping;
+  assert.equal(result.interrupted, true);
+  assert.equal(res.writableFinished, false, "an abandoned client is not written to after cancellation");
+});
+
+test("a dangling completed Chat stream releases the managed lane for the same-session retry", async () => {
+  const scheduler = new LocalHostScheduler({ hostId: "managed-llama", maxActiveRequests: 1 });
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from([
+        'data: {"id":"chatcmpl_release","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"FIRST"},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+      ].join("")));
+    },
+  });
+  const res = new EventEmitter();
+  res.writableFinished = false;
+  res.write = () => true;
+  res.end = () => { res.writableFinished = true; res.emit("finish"); };
+  let retryStarted = false;
+  const first = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "same-session",
+    run: () => pipeChatCompletionStream(body, res),
+  });
+  const retry = scheduler.enqueue({
+    principalId: "local",
+    conversationId: "same-session",
+    run: async () => { retryStarted = true; return "retry-ok"; },
+  });
+  const firstResult = await first;
+  assert.equal(firstResult.interrupted, false);
+  assert.equal(await retry, "retry-ok");
+  assert.equal(retryStarted, true);
+  assert.equal(scheduler.snapshot().activeCount, 0);
+  assert.equal(scheduler.snapshot().pendingCount, 0);
+});
+
+test("P1 serializes two real Codex Chat streams and starts the waiter after terminal", async () => {
+  const scheduler = new LocalHostScheduler({ hostId: "managed-p1", maxActiveRequests: 1 });
+  const started = [];
+  const controllers = new Map();
+  const runStream = (conversationId) => scheduler.enqueue({
+    principalId: "local",
+    conversationId,
+    run: () => {
+      started.push(conversationId);
+      const body = new ReadableStream({ start(controller) { controllers.set(conversationId, controller); } });
+      const res = new EventEmitter();
+      res.writableFinished = false;
+      res.write = () => true;
+      res.end = () => { res.writableFinished = true; res.emit("finish"); };
+      return pipeChatCompletionStream(body, res, { completeOnFinishReason: true });
+    },
+  });
+  const finish = (conversationId) => controllers.get(conversationId).enqueue(Buffer.from(
+    `data: {"id":"chatcmpl_${conversationId}","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"${conversationId}"},"finish_reason":"stop"}]}\n\n`,
+  ));
+
+  const first = runStream("first");
+  const second = runStream("second");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["first"]);
+  assert.equal(scheduler.snapshot().activeCount, 1);
+  assert.equal(scheduler.snapshot().pendingCount, 1);
+  finish("first");
+  await first;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["first", "second"]);
+  finish("second");
+  await second;
+  assert.equal(scheduler.snapshot().activeCount, 0);
+  assert.equal(scheduler.snapshot().pendingCount, 0);
+});
+
+test("P2 runs two different Codex Chat streams together but still serializes one conversation", async () => {
+  const scheduler = new LocalHostScheduler({ hostId: "managed-p2", maxActiveRequests: 2 });
+  const started = [];
+  const controllers = new Map();
+  const runStream = (jobId, conversationId) => scheduler.enqueue({
+    principalId: "local",
+    conversationId,
+    run: () => {
+      started.push(jobId);
+      const body = new ReadableStream({ start(controller) { controllers.set(jobId, controller); } });
+      const res = new EventEmitter();
+      res.writableFinished = false;
+      res.write = () => true;
+      res.end = () => { res.writableFinished = true; res.emit("finish"); };
+      return pipeChatCompletionStream(body, res, { completeOnFinishReason: true });
+    },
+  });
+  const finish = (jobId) => controllers.get(jobId).enqueue(Buffer.from(
+    `data: {"id":"chatcmpl_${jobId}","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"${jobId}"},"finish_reason":"stop"}]}\n\n`,
+  ));
+
+  const a = runStream("a", "conversation-a");
+  const b = runStream("b", "conversation-b");
+  const sameConversation = runStream("a2", "conversation-a");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["a", "b"], "two distinct conversations occupy both P2 lanes");
+  assert.equal(scheduler.snapshot().activeCount, 2);
+  finish("a");
+  await a;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["a", "b", "a2"], "the second stream for conversation A waits for A's first stream");
+  finish("b");
+  finish("a2");
+  await Promise.all([b, sameConversation]);
+  assert.equal(scheduler.snapshot().activeCount, 0);
+  assert.equal(scheduler.snapshot().pendingCount, 0);
 });
 
 test("full original Codex package reaches local Chat as functions and returns a Codex tool lifecycle", async (t) => {
