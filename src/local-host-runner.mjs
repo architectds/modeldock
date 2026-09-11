@@ -189,13 +189,33 @@ export async function calibrateAndApplyLocalHostPlan(record, {
     if (!final?.desiredSpec || !final?.desiredProfile) {
       throw new TypeError("Target calibration did not produce a final managed profile.");
     }
-    const applied = await applyLocalHostPlan(current, { ...final, capabilities: targetCapabilities, policy }, suppliedOperations);
-    if (applied.outcome !== "recovered" || typeof createFallbackPlan !== "function") return applied;
-    const fallback = await createFallbackPlan({ baseline, measurements, final, record: applied.record, failure: applied.failure });
-    if (!fallback?.desiredSpec || !fallback?.desiredProfile) return applied;
-    // The only retry is a mathematically adjacent backoff from the calculated
-    // profile. It is not a scan through a product-wide P/C ladder.
-    return applyLocalHostPlan(applied.record, { ...fallback, capabilities: targetCapabilities, policy }, suppliedOperations);
+    let candidate = final;
+    let applied = await applyLocalHostPlan(current, { ...candidate, capabilities: targetCapabilities, policy }, suppliedOperations);
+    // The target measurements can still miss nonlinear CUDA graph/workspace
+    // growth at the final context. Keep recovery bounded and deterministic:
+    // one nearby context backoff, then (for a multi-lane candidate) the P1
+    // profile already derived from the same measurements. This is not a P/C
+    // scan, and it prevents a usable host from being abandoned merely because
+    // the first parallel calculation landed too close to physical capacity.
+    const fallbackLimit = Math.max(1, Math.min(3, Number(final.desiredProfile?.laneCount) || 1));
+    for (let fallbackAttempt = 0;
+      fallbackAttempt < fallbackLimit && applied.outcome === "recovered" && typeof createFallbackPlan === "function";
+      fallbackAttempt += 1) {
+      const fallback = await createFallbackPlan({
+        baseline,
+        measurements,
+        final: candidate,
+        record: applied.record,
+        failure: applied.failure,
+        fallbackAttempt,
+      });
+      if (!fallback?.desiredSpec || !fallback?.desiredProfile) return applied;
+      if (JSON.stringify(fallback.desiredSpec) === JSON.stringify(candidate.desiredSpec)
+          && JSON.stringify(fallback.desiredProfile) === JSON.stringify(candidate.desiredProfile)) return applied;
+      candidate = fallback;
+      applied = await applyLocalHostPlan(applied.record, { ...candidate, capabilities: targetCapabilities, policy }, suppliedOperations);
+    }
+    return applied;
   } catch (error) {
     const failure = failureText(error);
     try {

@@ -95,9 +95,22 @@ function managedHostSnapshot() {
   };
 }
 
-async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false } = {}) {
+async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false, nativeVision = false } = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const port = await availablePort();
+  const nativeCatalogFile = path.join(dir, "native-catalog.json");
+  if (nativeVision) {
+    writeFileSync(path.join(dir, "auth.json"), JSON.stringify({ tokens: { access_token: "browser-native-test" } }), "utf8");
+    writeFileSync(nativeCatalogFile, JSON.stringify({
+      captured_with: "browser-test",
+      models: [{
+        slug: "gpt-5.6-luna",
+        display_name: "GPT-5.6-Luna",
+        visibility: "list",
+        input_modalities: ["text", "image"],
+      }],
+    }), "utf8");
+  }
   const services = createServices({
     host: "127.0.0.1",
     port,
@@ -106,7 +119,8 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     opencodeBaseUrl: "https://go.example.com/v1",
     tokens: { "opencode-go": "tab-render-test" },
     mainModel: "deepseek-v4-flash",
-    visionModel: "gpt-5.6-luna",
+    visionModel: nativeVision ? "qwen3.8-flash@opencode-go" : "gpt-5.6-luna",
+    ...(nativeVision ? { codexHome: dir, nativeMerge: true } : {}),
     mediaTtlMs: 60_000,
     mediaMaxBytes: 1024 * 1024,
     mediaMaxEntries: 8,
@@ -118,7 +132,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     settingsEventsFile: path.join(dir, "settings-events.jsonl"),
     summariesFile: path.join(dir, "summaries.json"),
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
-    nativeCatalogFile: path.join(dir, "native-catalog.json"),
+    nativeCatalogFile,
     usageRollupFile: path.join(dir, "usage-rollup.json"),
     usageEventsFile: path.join(dir, "usage-events.jsonl"),
   });
@@ -264,6 +278,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     "hostmonitor-narrow": 900,
     "managed-drawer": 1200,
     "managed-drawer-offline": 1800,
+    "vision-persistence": 2400,
   }[instance] ?? 1500;
   const port = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
@@ -851,6 +866,51 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       .filter((id) => seen.has(id) ? true : (seen.add(id), false)));
   })()`));
   assert.deepEqual(duplicateIds, [], "the dashboard has duplicate ids that can direct live data to the wrong card");
+});
+
+test("changing only the vision provider persists its selected model across refresh", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const { base, services } = await startDashboard(t, { nativeVision: true });
+  const { evaluate } = await openBrowser(t, chromePath, { instance: "vision-persistence" });
+  await evaluate(`location.href = ${JSON.stringify(base)}`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(250);
+    if (await evaluate(`document.querySelector('#vision-provider-select option[value="openai"]') !== null`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    if (skip) skip.click();
+    return true;
+  })()`);
+  assert.equal(await evaluate(`document.getElementById('vision-provider-select').value`), "opencode-go");
+  await evaluate(`(() => {
+    const select = document.getElementById('vision-provider-select');
+    select.value = 'openai';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(50);
+    if (!existsSync(services.config.envFile)) continue;
+    const persisted = readFileSync(services.config.envFile, "utf8");
+    if (/^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m.test(persisted)) break;
+  }
+  assert.match(readFileSync(services.config.envFile, "utf8"), /^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m,
+    "the provider-only interaction writes the provider-qualified native selection");
+
+  await evaluate(`location.reload()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && document.getElementById('vision-provider-select')?.value === 'openai'`)) break;
+  }
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify({
+    provider: document.getElementById('vision-provider-select').value,
+    model: document.getElementById('vision-model-select').value,
+  })`)), { provider: "openai", model: "gpt-5.6-luna" });
 });
 
 // The monitor redraws whenever an SSE status snapshot arrives. At fractional

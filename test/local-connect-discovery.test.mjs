@@ -515,6 +515,8 @@ test("a failed first takeover restores observation without leaving managed autho
   const body = await response.json();
   assert.equal(response.status, 502, JSON.stringify(body));
   assert.equal(body.outcome, "recovered");
+  assert.equal(body.error?.type, "managed_profile_unverified");
+  assert.match(body.error?.message || "", /restored the exact pre-takeover command line/);
   assert.equal(body.management, null);
   assert.equal(discovered.cmdline, originalCmdline, "recovery used the exact command seen before takeover");
   const registry = await readLocalHostRegistry(services.localHostRegistryFile);

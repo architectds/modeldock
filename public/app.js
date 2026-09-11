@@ -1338,7 +1338,7 @@ $("settings-autostart-toggle").addEventListener("change", (event) => {
 });
 
 $("vision-model-select").addEventListener("change", setModels);
-$("vision-provider-select").addEventListener("change", () => {
+$("vision-provider-select").addEventListener("change", async () => {
   // Re-render the whole vision list for the newly picked provider instead of
   // filtering the options already in the DOM: those were built for the previous
   // provider, so switching (e.g. custom -> opencode-go) found no match and left
@@ -1348,6 +1348,11 @@ $("vision-provider-select").addEventListener("change", () => {
   visionProviderOverride = $("vision-provider-select").value;
   lastModelSignature = "";
   renderModelOptions(lastModelData);
+  // Choosing a provider is already a complete user choice: renderModelOptions
+  // selects that provider's first available vision model. Programmatic select
+  // updates do not emit a second change event, so persist the resulting model
+  // here instead of showing an unsaved choice that disappears on refresh.
+  await setModels();
 });
 
 $("subagent-model-select").addEventListener("change", saveSubagent);
@@ -3603,7 +3608,7 @@ async function submitLocalManage() {
       }),
     });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Manage ${response.status}`);
+    if (!response.ok) throw new Error(body.error?.message || body.message || `Manage ${response.status}`);
     await renderLocalEngines();
     openLocalConfig("llamacpp");
     showLocalHostManageStatus(managedPlanSummary(body.management?.profile));

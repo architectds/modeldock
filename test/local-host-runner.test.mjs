@@ -163,6 +163,38 @@ test("a calculated final profile gets one nearby backoff instead of a P/C scan",
   assert.equal(fake.calls.filter((entry) => entry === "stop").length, 4, "bootstrap, calculated attempt, recovery, nearby backoff");
 });
 
+test("a parallel profile gets a measured P1 fallback after its nearby backoff also fails", async () => {
+  const fake = operations({ verifyResults: [true, false, true, false, true, true] });
+  const calibrationSpec = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "calibration"] };
+  const calculated = { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calculated-p2-c221696", laneCount: 2, laneContextTokens: 221_696, totalContextTokens: 443_392 };
+  const nearby = { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calculated-p2-c199424-backoff", laneCount: 2, laneContextTokens: 199_424, totalContextTokens: 398_848 };
+  const p1 = { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calculated-p1-c235776", laneCount: 1, laneContextTokens: 235_776, totalContextTokens: 235_776 };
+  const spec = (profile) => ({ binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, profile.profileId] });
+  const fallbacks = [nearby, p1];
+  const result = await calibrateAndApplyLocalHostPlan(readyHost(), {
+    calibrationSpec,
+    calibrationProfile: { adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calibration-p1-c8192", laneCount: 1, laneContextTokens: 8_192, totalContextTokens: 8_192 },
+    measureBaseline: async () => ({ gpu0: 1 }),
+    measureCalibration: async () => ({ gpu0: 2 }),
+    createFinalPlan: async () => ({ desiredSpec: spec(calculated), desiredProfile: calculated }),
+    createFallbackPlan: async ({ fallbackAttempt, final }) => {
+      assert.equal(final.desiredProfile, fallbackAttempt === 0 ? calculated : nearby);
+      const profile = fallbacks[fallbackAttempt];
+      return { desiredSpec: spec(profile), desiredProfile: profile };
+    },
+  }, fake);
+  assert.equal(result.outcome, "applied");
+  assert.deepEqual(result.record.activeProfile, p1);
+  assert.deepEqual(fake.calls.filter((entry) => entry.startsWith("start:")), [
+    "start:calibration",
+    "start:calculated-p2-c221696",
+    "start:262144",
+    "start:calculated-p2-c199424-backoff",
+    "start:262144",
+    "start:calculated-p1-c235776",
+  ]);
+});
+
 test("a target-calibration derivation failure restores the immutable pre-takeover argv", async () => {
   const fake = operations({ verifyResults: [true, true] });
   const calibrationSpec = { binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, "-c", "8192"] };

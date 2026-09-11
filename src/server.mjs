@@ -2543,8 +2543,14 @@ export function createApp(services = createServices()) {
           // facts so a later explicit recovery can identify the process safely.
           await services.localHostRuntime?.refresh?.(null);
         }
+        const message = ok
+          ? `Host control is active at ${profile.laneCount} lane(s) x ${profile.laneContextTokens} tokens. Session placement and SSD state are automatic.`
+          : restored
+            ? `The managed profile did not verify. ModelDock restored the exact pre-takeover command line. ${result.failure || ""}`.trim()
+            : `Neither the managed profile nor the pre-takeover command verified. Host control remains in degraded recovery state. ${result.recoveryFailure || result.failure || ""}`.trim();
         recordConfigAction(metrics, "local_manage_llamacpp", {
           ok,
+          error: ok ? "" : message,
           outcome: result.outcome,
           lanes: result.record.activeProfile?.laneCount || 0,
           contextWindow: result.record.activeProfile?.laneContextTokens || 0,
@@ -2553,11 +2559,8 @@ export function createApp(services = createServices()) {
         return res.status(ok ? 200 : 502).json({
           outcome: result.outcome,
           management: ok || !restored ? managedHostSummary(result.record, current) : null,
-          message: ok
-            ? `Host control is active at ${profile.laneCount} lane(s) x ${profile.laneContextTokens} tokens. Session placement and SSD state are automatic.`
-            : restored
-              ? `The managed profile did not verify. ModelDock restored the exact pre-takeover command line. ${result.failure || ""}`.trim()
-              : `Neither the managed profile nor the pre-takeover command verified. Host control remains in degraded recovery state. ${result.recoveryFailure || result.failure || ""}`.trim(),
+          ...(ok ? {} : { error: { type: restored ? "managed_profile_unverified" : "managed_host_degraded", message } }),
+          message,
           ...(ok ? { warmBase } : {}),
         });
       } finally {
