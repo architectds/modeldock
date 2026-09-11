@@ -20,6 +20,9 @@ test("the Windows model picker runs a fixed native dialog and returns its select
   assert.deepEqual(call.args.slice(0, 3), ["-NoProfile", "-STA", "-Command"]);
   assert.match(call.args[3], /OpenFileDialog/);
   assert.match(call.args[3], /GGUF model files/);
+  assert.match(call.args[3], /TopMost/);
+  assert.match(call.args[3], /ShowDialog\(\$owner\)/);
+  assert.match(call.args[3], /Dispose/);
 });
 
 test("the Windows KV picker is a folder dialog and cancellation is harmless", async () => {
@@ -33,8 +36,33 @@ test("the Windows KV picker is a folder dialog and cancellation is harmless", as
   });
   assert.equal(selected, "");
   assert.match(script, /FolderBrowserDialog/);
+  assert.match(script, /ShowDialog\(\$owner\)/);
   assert.equal(nativeLocalHostPickerAvailable("win32"), true);
   assert.equal(nativeLocalHostPickerAvailable("linux"), false);
+});
+
+test("only one native picker can wait for a selection at a time", async () => {
+  let finish;
+  const first = pickLocalHostPath("model", {
+    platform: "win32",
+    run: async () => new Promise((resolve) => { finish = resolve; }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(
+    pickLocalHostPath("kv_directory", {
+      platform: "win32",
+      run: async () => { throw new Error("must not run"); },
+    }),
+    (error) => error instanceof LocalHostPickerError && error.code === "picker_busy",
+  );
+
+  finish(JSON.stringify({ accepted: false, path: "" }));
+  assert.equal(await first, "");
+  assert.equal(await pickLocalHostPath("kv_directory", {
+    platform: "win32",
+    run: async () => JSON.stringify({ accepted: false, path: "" }),
+  }), "", "the guard releases after the first picker closes");
 });
 
 test("the picker rejects unknown kinds and non-Windows requests without opening a command", async () => {

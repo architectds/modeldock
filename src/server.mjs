@@ -2255,7 +2255,7 @@ export function createApp(services = createServices()) {
       return res.json({ path: selected });
     } catch (error) {
       const status = error instanceof LocalHostPickerError
-        ? (error.code === "picker_unsupported" ? 409 : 400)
+        ? (error.code === "picker_timeout" ? 408 : (["picker_unsupported", "picker_busy"].includes(error.code) ? 409 : 400))
         : 502;
       return res.status(status).json({ error: { type: error.code || "picker_failed", message: error.message } });
     }

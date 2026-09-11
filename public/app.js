@@ -3049,6 +3049,7 @@ let localKvBudgetDefaultGiB = 0;
 // The browser still permits typing an absolute path anywhere. Browse appears
 // only when this local gateway can open a Windows-native dialog for it.
 let localNativeHostPicker = false;
+let localHostPickerBusy = false;
 
 function localEngineLabel(engine) {
   return localEngineDefinitions.get(engine)?.label || localKnownEngines.get(engine)?.label || engine;
@@ -3208,7 +3209,7 @@ function renderLocalHostControl(engine, found) {
     const browse = $(id);
     if (browse) {
       browse.hidden = !localNativeHostPicker;
-      browse.disabled = managedReadonly;
+      browse.disabled = managedReadonly || localHostPickerBusy;
     }
   }
   // Translate GiB into sessions: the default budget is deliberately small, and
@@ -3532,8 +3533,9 @@ function showLocalHostVisionProjector() {
 }
 
 async function browseLocalHostPath(kind, inputId) {
-  const button = $(kind === "model" ? "local-host-model-browse" : kind === "vision_projector" ? "local-host-vision-browse" : "local-host-kv-browse");
-  if (button) button.disabled = true;
+  if (localHostPickerBusy) return;
+  localHostPickerBusy = true;
+  renderLocalHostControl(localConfigEngine, localDiscovery.get(localConfigEngine));
   showLocalHostManageStatus("");
   try {
     const response = await fetch("/api/local/pick", {
@@ -3548,7 +3550,8 @@ async function browseLocalHostPath(kind, inputId) {
   } catch (error) {
     showLocalHostManageStatus(error.message, true);
   } finally {
-    if (button) button.disabled = false;
+    localHostPickerBusy = false;
+    renderLocalHostControl(localConfigEngine, localDiscovery.get(localConfigEngine));
   }
 }
 

@@ -349,6 +349,8 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     return;
   }
   const { base, services } = await startDashboard(t);
+  let finishPathPick;
+  services.pickLocalHostPath = async () => new Promise((resolve) => { finishPathPick = resolve; });
   services.recordLatestMainRoute({
     route: { model: "qwen3.8-flash@opencode-go", reason: "client_selected" },
     upstream: "opencode-go",
@@ -808,6 +810,35 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     projectorHidden: false,
     projectorPath: "D:/models/previous-connected-projector.gguf",
   }, "a connected local server stays user-owned until the user explicitly enables host control");
+
+  // A native picker is modal outside the browser. While its one request waits,
+  // every Browse action must show the same busy state; leaving the other two
+  // enabled created parallel invisible dialogs and an apparently frozen drawer.
+  await evaluate(`document.getElementById('local-host-model-browse').click()`);
+  for (let attempt = 0; attempt < 40 && typeof finishPathPick !== "function"; attempt += 1) await sleep(25);
+  assert.equal(typeof finishPathPick, "function", "the browser reached the native picker endpoint");
+  const pickerBusy = JSON.parse(await evaluate(`JSON.stringify([
+    'local-host-model-browse',
+    'local-host-vision-browse',
+    'local-host-kv-browse',
+  ].map((id) => document.getElementById(id).disabled))`));
+  assert.deepEqual(pickerBusy, [true, true, true], "one open native picker disables all three Browse actions");
+  finishPathPick("");
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const ready = JSON.parse(await evaluate(`JSON.stringify([
+      'local-host-model-browse',
+      'local-host-vision-browse',
+      'local-host-kv-browse',
+    ].every((id) => !document.getElementById(id).disabled))`));
+    if (ready) break;
+    await sleep(25);
+  }
+  assert.equal(await evaluate(`[
+    'local-host-model-browse',
+    'local-host-vision-browse',
+    'local-host-kv-browse',
+  ].every((id) => !document.getElementById(id).disabled)`), true,
+  "closing or cancelling the native picker restores every Browse action");
 
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
