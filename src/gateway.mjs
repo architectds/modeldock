@@ -35,7 +35,7 @@ const HOSTED_TOOL_TYPES = new Set([
   "browser_use",
   "artifact",
   // Codex sends this one nameless (`{ type: "image_generation" }`). Because the
-  // hidden/allowlist filters below both key off a string name, a hosted type
+  // name filters below key off a string name, while a hosted type
   // that is missing from this set is not merely un-stripped - it is invisible to
   // every other filter and forwarded verbatim, even in slim mode. Observed
   // reaching a local backend on 2026-08-18. ModelDock serves image generation
@@ -64,74 +64,22 @@ const NATIVE_REDUNDANT_TOOL_NAMES = new Set([
 ]);
 const NATIVE_REDUNDANT_NAMESPACE_CHILDREN = new Set(["web_search_exa", "vision_inspect"]);
 
-// Local backends (llama.cpp / Ollama) run on a small context window; Codex
-// sends 150+ tool schemas (mostly MCP) that alone cost ~39K tokens and,
-// together with the system prompt, eat roughly 61K of the window. Whitelist
-// the core tools so the fixed overhead fits and the model keeps real
-// conversation room (a small-context backend would otherwise be left with
-// almost no room for the task).
-export const LOCAL_TOOL_ALLOWLIST = new Set([
-  // The shell, and the tools that only make sense beside it (feed stdin to a
-  // running command, wait on a backgrounded one). Codex ships THREE spellings
-  // and picks by configuration and by the model's own catalog declaration, not
-  // by version - all three are current as of 2026-08-18:
-  //   shell          - sent for qwen3.8:27b@custom, i.e. the actual slim-mode case
-  //   shell_command  - 30877 successful calls in local transcripts
-  //   exec_command   - 6621 successful calls, most recent 2026-08-16
-  // None supersedes another, so all are listed; an entry that matches nothing
-  // costs nothing. Missing the spelling your config happens to use is not a
-  // degraded tool set, it is a local model with no shell at all - which is what
-  // slim mode shipped until 2026-08-18. Verify with the section 18 harness
-  // using the REAL ~/.codex/config.toml before assuming any name is gone.
-  "shell",
-  "shell_command",
-  "exec_command",
-  "write_stdin",
-  "wait",
-  "apply_patch",
-  "update_plan",
-  "read_file",
-  "write_file",
-  "glob",
-  "grep",
-  "task",
-  // ModelDock harness tools that do NOT require the local model to be smart:
-  // memory (external, mitigates the 32K window), web search (Exa), vision
-  // (rerouted to the cloud vision model). The bare hosted "web_search" is a
-  // different tool and is intentionally not whitelisted.
-  "mcp__modeldock__recall_memory",
-  "mcp__modeldock__store_memory",
-  "mcp__modeldock__web_search_exa",
-  "mcp__modeldock__vision_inspect",
-  "mcp__modeldock__preview_images",
-  "mcp__modeldock__image_gen",
-  "mcp__modeldock__speak",
-  "mcp__modeldock__hear",
-  "view_image",
-  // Let the model stop and ask the user when it is stuck; cheap and flat.
-  "request_user_input",
-  // codex_apps document control (Excel / Sheets / Word / PPT sessions): the
-  // only office tools a small local model can usefully drive. Names carry the
-  // plugin's truncated+hashed suffixes; update them if the plugin renames.
-  "mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa",
-  "mcp__codex_apps__codex_document_control___get_docum_83c7f0565c0f",
-  "mcp__codex_apps__codex_document_control___list_document_sessions",
-  // Goal tracking: cheap, flat, and useful for a long-running local session.
-  "get_goal",
-  "create_goal",
-  "update_goal",
-]);
+// Local backends receive every callable tool Codex supplies. Tool names are not
+// a compatibility boundary, and a static allowlist silently disabled project
+// MCP servers such as trading_support. applyToolPolicy still removes only what
+// the selected wire cannot encode: unsupported hosted types, model-specific
+// modality conflicts, and provider-declared blocked types.
 
 // A custom/Ollama backend that runs on this machine (loopback base URL).
 //
-// This is the real signal behind the budget decisions - the tool whitelist,
-// the instruction stripping, and the compact pre-compression - because all
-// three exist for slow local models. The earlier context-window proxy
-// (ctx <= 100K) existed only to avoid trimming remote endpoints like
-// OpenAI/OpenRouter; the loopback check excludes those directly instead of
-// guessing from a token count. A local backend with a large window still gets
-// the budget treatment (it is still a local model), and a remote one never
-// does, whatever it advertises.
+// This is the real signal behind the local instruction compaction and compact
+// pre-compression, because both exist for slow local models. Tool availability
+// is intentionally independent of this budget decision. The earlier
+// context-window proxy (ctx <= 100K) existed only to avoid compacting remote
+// endpoints like OpenAI/OpenRouter; the loopback check excludes those directly
+// instead of guessing from a token count. A local backend with a large window
+// still gets the budget treatment (it is still a local model), and a remote one
+// never does, whatever it advertises.
 //
 // Like its predecessor it does NOT gate the *protocol* adaptation (system
 // hoisting, standard tool rewrite, reasoning mapping): that keys off the
@@ -1305,30 +1253,7 @@ export function normalizeLocalPayload(payload) {
   return { ...payload, input: normalizeLocalInput(payload.input) };
 }
 
-// The skills a small-context local backend keeps in the <skills_instructions>
-// block: the four harness/media skills plus the office skills whose
-// codex_document_control tools ARE whitelisted (their SKILL.md guides how to
-// drive Word/PPT/Spreadsheet sessions). Everything else is dropped - its tools
-// are not whitelisted, so the descriptions are dead weight for a small model.
-const LOCAL_SKILLS_KEEP = new Set([
-  "imagegen",
-  "openai-docs",
-  "content-to-video",
-  "media-use",
-  "documents",
-  "presentations",
-  "spreadsheets", // covers both the spreadsheet skill and excel-live-control
-]);
 const SKILLS_BLOCK_RE = /<skills_instructions>[\s\S]*?<\/skills_instructions>/;
-const APP_CONTEXT_BLOCK_RE = /<app-context>[\s\S]*?<\/app-context>/;
-const APPS_INSTRUCTIONS_RE = /<apps_instructions>[\s\S]*?<\/apps_instructions>\s*/g;
-// The collaboration "/root primary agent" block plus its mode fence describe
-// tools (spawn_agent, send_message, wait_agent...) that are not whitelisted
-// for small local backends, so the whole span is removable.
-const AGENT_BLOCK_RE = /You are `\/root`, the primary agent[\s\S]*?<\/multi_agent_mode>\s*/g;
-// The memory citation ceremony (oai-mem-citation block, rollout ids, format
-// rules) is platform bookkeeping; recall_memory results do not need it.
-const MEMORY_CITATION_RE = /Memory citation requirements:[\s\S]*?(?=Updating memories:)/g;
 // ModelDock's own base instructions are shortened for small local models. The
 // long text-only vision preamble is disproportionate for a small context.
 const VERBOSE_VISION_GUIDANCE =
@@ -1347,17 +1272,12 @@ function stripSkillsBlock(text) {
   if (typeof text !== "string") return text;
   const block = text.match(SKILLS_BLOCK_RE)?.[0];
   if (!block) return text;
-  const kept = block
+  const compacted = block
     .split("\n")
-    .filter((line) => {
-      const entry = line.match(/^\s*-\s*([A-Za-z0-9._-]+)\s*:/);
-      if (!entry) return true;
-      return LOCAL_SKILLS_KEEP.has(entry[1]);
-    })
     .map((line) => (line.match(/^\s*-\s*([A-Za-z0-9._-]+)\s*:/) ? compressSkillLine(line) : line))
     .join("\n");
-  if (kept === block) return text;
-  return text.replace(block, kept);
+  if (compacted === block) return text;
+  return text.replace(block, compacted);
 }
 
 // "name + one sentence + locator": a kept skill's entry is compressed to its
@@ -1381,37 +1301,15 @@ function firstSentenceOf(text) {
   return `${cut.slice(0, lastSpace > 60 ? lastSpace : 90)}...`;
 }
 
-function stripAppContextBlock(text) {
-  if (typeof text !== "string") return text;
-  const block = text.match(APP_CONTEXT_BLOCK_RE)?.[0];
-  if (!block) return text;
-  const dropHeaders = new Set(["### Automations", "### Thread Coordination", "### Workspace Dependencies"]);
-  const lines = block.split("\n");
-  let dropping = false;
-  const kept = lines.filter((line) => {
-    if (line.startsWith("### ")) dropping = dropHeaders.has(line.trim());
-    return !dropping;
-  }).join("\n");
-  if (kept === block) return text;
-  return text.replace(block, kept);
-}
-
 function stripLocalInstructionText(text) {
   if (typeof text !== "string") return text;
-  let out = text;
-  out = stripSkillsBlock(out);
-  out = stripAppContextBlock(out);
-  out = out
+  return stripSkillsBlock(text)
     .replace(VERBOSE_VISION_GUIDANCE, "Vision: you cannot see images; use vision_inspect for any visual task.")
     .replace(VERBOSE_ACTION_RULE, "IMPORTANT: perform any action by emitting a function_call in this turn; never describe an action in text.")
     .replace(VERBOSE_RESTART, (match) => {
       const path = match.match(/"([^"]+\\restart\.ps1)"/)?.[1] || "scripts/restart.ps1";
       return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for the "verified gateway" line.`;
-    })
-    .replace(AGENT_BLOCK_RE, "")
-    .replace(APPS_INSTRUCTIONS_RE, "")
-    .replace(MEMORY_CITATION_RE, "");
-  return out;
+    });
 }
 
 function mapInstructionText(instructions, transform) {
@@ -1554,7 +1452,6 @@ export function localWarmBaseFromSessionOpening({ config, model, opening } = {})
   const profile = profileById(target.provider);
   const modelEntry = modelEntryFor(config, model) || {};
   const policy = applyToolPolicy(payload.tools, {
-    allowToolNames: LOCAL_TOOL_ALLOWLIST,
     hiddenToolNames: hiddenToolNamesForModel({
       supportsVision: Boolean(modelEntry.supportsVision),
       modelHiddenToolNames: modelEntry.hiddenToolNames,
@@ -4133,16 +4030,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     forwarded: describeImageTransfer(normalizedPayload.input),
   };
 
-  // Trim tools only for small-context local backends (llama.cpp etc.).
-  // A custom endpoint pointing at OpenAI/OpenRouter (128K+) keeps everything.
-  const trimLocalTools = isLocalBackend(config, route.model);
+  // Local backends keep the complete callable tool surface. They still receive
+  // a compacted instruction envelope and the protocol/modality denylist below.
+  const localBackend = isLocalBackend(config, route.model);
   const routedProfile = profileById(routedProvider) || {};
   // A mixed provider can expose models backed by different downstream APIs.
   // Let a measured model narrow its tool dialect without weakening the other
   // models on the same provider. Undefined fields inherit the provider policy.
   const modelToolPolicy = routedModelEntry || {};
   const { tools, stripped, namespaces, customToolNames } = applyToolPolicy(normalizedPayload.tools, {
-    allowToolNames: trimLocalTools ? LOCAL_TOOL_ALLOWLIST : undefined,
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
@@ -4164,10 +4060,9 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // The declarations above were flattened; the replayed history has to use the
   // same flat names or the upstream sees calls for tools it was never given.
   normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces);
-  // Same budget logic as the tool whitelist: a small-context local model gets
-  // no value from the hyperframes skill entries, and every stripped line is
-  // tokens the model no longer pays to read on each turn.
-  if (trimLocalTools) {
+  // Compress repeated prose without removing the instructions that govern the
+  // tools now visible to the local model.
+  if (localBackend) {
     normalizedPayload.instructions = appendLocalHostSafety(stripLocalInstructions(normalizedPayload.instructions));
   }
   if (route.reason === "current_turn_image" && route.directVision) {

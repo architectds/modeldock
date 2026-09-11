@@ -42,7 +42,6 @@ import {
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
   pipeGatewayStream,
-  LOCAL_TOOL_ALLOWLIST,
   flattenNamespaceCalls,
   pipeNormalizedStream,
   promoteToolOutputImages,
@@ -1204,7 +1203,7 @@ test("isLocalBackend identifies loopback custom/ollama backends only", () => {
   );
 });
 
-test("stripLocalInstructions keeps the local + office skills, compressed to one line", () => {
+test("stripLocalInstructions compresses every skill without hiding capabilities", () => {
   const instructions = `<skills_instructions>
 ## Skills
 - hyperframes: Mandatory video entry point (file: C:/x/hyperframes/SKILL.md)
@@ -1220,11 +1219,11 @@ test("stripLocalInstructions keeps the local + office skills, compressed to one 
 - github:gh-fix-ci: Use when the user asks to debug CI. (file: C:/x/gh-fix-ci/SKILL.md)
 </skills_instructions>`;
   const out = stripLocalInstructions(instructions);
-  assert.ok(!out.includes("hyperframes"), "every hyperframes-* variant is removed");
-  assert.ok(!out.includes("github"), "skills whose tools are not whitelisted are dropped");
+  assert.ok(out.includes("hyperframes") && out.includes("hyperframes-animation"), "video skills survive");
+  assert.ok(out.includes("github"), "project-specific skills survive");
   assert.ok(out.includes("imagegen"), "imagegen survives");
-  assert.ok(out.includes("openai-docs") && out.includes("content-to-video"), "the four local skills survive");
-  assert.ok(out.includes("documents"), "office skills whose tools are whitelisted survive");
+  assert.ok(out.includes("openai-docs") && out.includes("content-to-video"), "OpenAI and video skills survive");
+  assert.ok(out.includes("documents"), "office skills survive");
   assert.ok(out.includes("presentations") && out.includes("spreadsheets"), "PPT and spreadsheet skills survive");
   assert.ok(out.includes("excel-live-control"), "the excel-live-control entry survives via the spreadsheets prefix");
   assert.ok(!out.includes("brand-new image"), "kept skills are compressed to one sentence (second sentence gone)");
@@ -1232,7 +1231,7 @@ test("stripLocalInstructions keeps the local + office skills, compressed to one 
   assert.ok(out.includes("<skills_instructions>") && out.includes("</skills_instructions>"), "block structure intact");
 });
 
-test("stripLocalInstructions drops dead app-context, agent, and memory-ceremony sections", () => {
+test("stripLocalInstructions preserves guidance for the complete local tool surface", () => {
   const instructions = [
     "You are Codex.",
     "<app-context>\n### Images/Visuals/Files\n- Use markdown image syntax.\n### Automations\n- Use automation_update for reminders.\n### Thread Coordination\n- Use create_thread for threads.\n### Workspace Dependencies\n- Call load_workspace_dependencies for sheets.\n### Inline Code Comments\n- Use ::code-comment directives.\n### Git\n- Branch prefix: codex/.\n</app-context>",
@@ -1240,14 +1239,14 @@ test("stripLocalInstructions drops dead app-context, agent, and memory-ceremony 
     "<apps_instructions>\n- Apps are MCP tool sets.\n</apps_instructions>\nYou are `/root`, the primary agent in a team of agents.\nYou can use spawn_agent and send_message.\n<multi_agent_mode>Do not spawn sub-agents.</multi_agent_mode>",
   ].join("\n");
   const out = stripLocalInstructions(instructions);
-  assert.ok(!out.includes("Automations"), "automation guidance dropped");
-  assert.ok(!out.includes("Thread Coordination"), "thread guidance dropped");
-  assert.ok(!out.includes("Workspace Dependencies"), "workspace-dependencies guidance dropped");
+  assert.ok(out.includes("Automations"), "automation guidance survives with its tools");
+  assert.ok(out.includes("Thread Coordination"), "thread guidance survives with its tools");
+  assert.ok(out.includes("Workspace Dependencies"), "workspace-dependencies guidance survives with its tools");
   assert.ok(out.includes("Images/Visuals/Files") && out.includes("Inline Code Comments") && out.includes("Branch prefix"), "functional app-context survives");
-  assert.ok(!out.includes("oai-mem-citation"), "memory citation ceremony dropped");
+  assert.ok(out.includes("oai-mem-citation"), "memory guidance survives with memory tools");
   assert.ok(out.includes("Updating memories:"), "the updating-memories rule survives");
-  assert.ok(!out.includes("spawn_agent"), "multi-agent guidance for non-whitelisted tools dropped");
-  assert.ok(!out.includes("apps_instructions"), "apps-connector guidance dropped");
+  assert.ok(out.includes("spawn_agent"), "multi-agent guidance survives with collaboration tools");
+  assert.ok(out.includes("apps_instructions"), "apps-connector guidance survives with app tools");
 });
 
 test("stripLocalInstructions handles array-of-parts instructions and leaves no-ops untouched", () => {
@@ -1257,9 +1256,9 @@ test("stripLocalInstructions handles array-of-parts instructions and leaves no-o
   ];
   const out = stripLocalInstructions(parts);
   assert.equal(out[0], parts[0], "parts without the block are untouched");
-  assert.ok(!out[1].text.includes("hyperframes"));
-  assert.ok(!out[1].text.includes("github"), "skills with stripped tools do not survive");
-  assert.ok(out[1].text.includes("imagegen"), "the four local skills survive in array parts");
+  assert.ok(out[1].text.includes("hyperframes"));
+  assert.ok(out[1].text.includes("github"), "every skill remains discoverable");
+  assert.ok(out[1].text.includes("imagegen"), "image generation survives in array parts");
   // No-op inputs are returned by reference so the upstream prefix cache is stable.
   const plain = "no skills block here";
   assert.equal(stripLocalInstructions(plain), plain);
@@ -1283,7 +1282,7 @@ test("stripLocalInstructions compresses the platform action rule and restart tex
   assert.ok(out.includes("wait for the \"verified gateway\" line"), "the verification marker instruction survives");
 });
 
-test("relayResponses strips dead-weight sections from instructions for an 80K custom model", async () => {
+test("relayResponses compacts prose without hiding local capabilities", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -1318,7 +1317,7 @@ test("relayResponses strips dead-weight sections from instructions for an 80K cu
     );
     assert.equal(result.ok, true);
     const sent = calls[0].body;
-    assert.ok(!sent.instructions.includes("hyperframes"), "hyperframes stripped for an 80K custom model");
+    assert.ok(sent.instructions.includes("hyperframes"), "local skills remain available");
     assert.ok(sent.instructions.includes("imagegen"), "other skill entries survive the relay");
     assert.match(sent.instructions, /LOCAL HOST RULE:.*Never stop, restart, unload, or reconfigure/i,
       "a local model is told not to stop the server that generates its next turn");
@@ -1363,7 +1362,7 @@ test("relayResponses keeps hyperframes for a 128K custom model", async () => {
   }
 });
 
-test("relayResponses keeps codex_apps office tools for small-context custom models", async () => {
+test("relayResponses keeps all declared app tools for a local custom model", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -1406,17 +1405,17 @@ test("relayResponses keeps codex_apps office tools for small-context custom mode
     const names = (calls[0].body.tools || []).map((tool) => tool.name);
     assert.ok(
       names.includes("mcp__codex_apps__codex_document_control___execute_d_7437ad2e4ffa"),
-      "office execute tool survives the whitelist",
+      "office execute tool survives the local denylist",
     );
     assert.ok(names.includes("mcp__codex_apps__codex_document_control___list_document_sessions"), "office list survives");
     assert.ok(names.includes("exec_command"), "core tools still survive");
-    assert.ok(!names.some((n) => n.includes("github___create_issue")), "github tools stay stripped");
+    assert.ok(names.some((n) => n.includes("github___create_issue")), "unlisted app tools are not silently stripped");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("relayResponses keeps goal tools for small-context custom models", async () => {
+test("relayResponses keeps goal tools for a local custom model", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -1457,15 +1456,14 @@ test("relayResponses keeps goal tools for small-context custom models", async ()
     assert.equal(result.ok, true);
     const names = (calls[0].body.tools || []).map((tool) => tool.name);
     for (const goal of ["get_goal", "create_goal", "update_goal"]) {
-      assert.ok(names.includes(goal), `${goal} survives the whitelist`);
+      assert.ok(names.includes(goal), `${goal} survives the local denylist`);
     }
-    assert.ok(!names.includes("mcp__node_repl__js"), "other flat tools stay stripped");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("relayResponses keeps speak, hear, and request_user_input for small-context custom models", async () => {
+test("relayResponses keeps ModelDock and arbitrary project tools for a local custom model", async () => {
   const sink = collectStream();
   const res = responseStub(sink);
   const calls = [];
@@ -1505,10 +1503,10 @@ test("relayResponses keeps speak, hear, and request_user_input for small-context
     );
     assert.equal(result.ok, true);
     const names = (calls[0].body.tools || []).map((tool) => tool.name);
-    assert.ok(names.includes("mcp__modeldock__speak"), "speak survives the whitelist");
-    assert.ok(names.includes("mcp__modeldock__hear"), "hear survives the whitelist");
-    assert.ok(names.includes("request_user_input"), "request_user_input survives the whitelist");
-    assert.ok(!names.includes("mcp__node_repl__js"), "node_repl stays stripped");
+    assert.ok(names.includes("mcp__modeldock__speak"), "speak survives the local denylist");
+    assert.ok(names.includes("mcp__modeldock__hear"), "hear survives the local denylist");
+    assert.ok(names.includes("request_user_input"), "request_user_input survives the local denylist");
+    assert.ok(names.includes("mcp__node_repl__js"), "arbitrary project tools are not silently stripped");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4929,10 +4927,10 @@ test("applyToolPolicy reports the namespace split for each flattened tool", () =
   });
 });
 
-test("applyToolPolicy matches the local allowlist against the flat MCP name", () => {
-  // LOCAL_TOOL_ALLOWLIST is written in flat names; the namespace child carries
-  // only "recall_memory". Testing the bare name stripped every MCP tool from
-  // local backends even though the list explicitly whitelists them.
+test("applyToolPolicy matches an explicit allowlist against the flat MCP name", () => {
+  // A caller-provided allowlist is written in flat names; the namespace child
+  // carries only "recall_memory". Test the generic policy helper independently
+  // even though local routing now uses a denylist rather than this option.
   const tools = [{
     type: "namespace",
     name: "mcp__modeldock__",
@@ -5065,30 +5063,39 @@ test("pipeNormalizedStream forwards a stream with no namespaced call untouched",
   assert.ok(!forwarded.includes('"namespace"'), "builtin calls gain no namespace field");
 });
 
-test("the local slim tool set keeps the shell Codex actually sends", () => {
-  // Codex renamed the shell exec_command -> shell_command; the allowlist still
-  // named only the old spelling, so slim mode handed local models a tool set
-  // with no shell in it at all.
-  // Codex uses three interchangeable spellings depending on config and on the
-  // model's catalog declaration. "shell" is what a local custom model actually
-  // receives, and it was the spelling still missing after the first fix.
-  for (const shell of ["shell", "shell_command", "exec_command"]) {
-    const { tools: kept } = applyToolPolicy(
-      [{ type: "function", name: shell }],
-      { allowToolNames: LOCAL_TOOL_ALLOWLIST },
-    );
-    assert.deepEqual(kept.map((tool) => tool.name), [shell], `${shell} must survive slim mode`);
-  }
+test("the local denylist keeps arbitrary callable and project MCP tools", () => {
   const tools = [
+    { type: "function", name: "shell" },
+    { type: "function", name: "shell_command" },
+    { type: "function", name: "exec_command" },
     { type: "function", name: "write_stdin" },
     { type: "function", name: "wait" },
     { type: "function", name: "apply_patch" },
     { type: "function", name: "spawn_agent" },
+    {
+      type: "namespace",
+      name: "mcp__trading_support__",
+      tools: [{ name: "get_market_state" }, { name: "price_option" }, { name: "run_backtest" }],
+    },
+    { type: "web_search" },
+    { type: "function", name: "view_image" },
   ];
-  const { tools: kept } = applyToolPolicy(tools, { allowToolNames: LOCAL_TOOL_ALLOWLIST });
+  const { tools: kept, stripped } = applyToolPolicy(tools);
   const names = kept.map((tool) => tool.name);
-  assert.ok(names.includes("write_stdin") && names.includes("wait"), "the tools that pair with the shell survive");
-  assert.ok(!names.includes("spawn_agent"), "but not the multi-agent surface");
+  for (const name of [
+    "shell",
+    "shell_command",
+    "exec_command",
+    "write_stdin",
+    "wait",
+    "apply_patch",
+    "spawn_agent",
+    "mcp__trading_support__get_market_state",
+    "mcp__trading_support__price_option",
+    "mcp__trading_support__run_backtest",
+  ]) assert.ok(names.includes(name), `${name} survives the local denylist`);
+  assert.ok(!names.includes("view_image"), "a text-only model does not receive the direct pixel viewer");
+  assert.equal(stripped.webSearch, 1, "an unsupported hosted tool is still removed at the wire boundary");
 });
 
 // What xAI accepts on the wire, measured against api.x.ai/v1/responses on

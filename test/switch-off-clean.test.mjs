@@ -292,7 +292,7 @@ test("a missing native catalog lets Codex choose its own built-in default", () =
 test("connecting a custom endpoint publishes a model without becoming the default", async (t) => {
   // MODELDOCK_CUSTOM_MAIN persisted in .env, so ticking "as main" once made a
   // local 27B the default across every later restart - for sessions that never
-  // asked for it. A local model then trips the small-context tool whitelist,
+  // asked for it. A local model then applies the local wire tool policy,
   // which strips Codex from ~150 tools to 23. Connecting publishes a model; it
   // does not select one. The routing fallback is derived per session and
   // bootstrapped from the native default, not from a persisted env slot.

@@ -182,6 +182,11 @@ test("built bundle bridges the complete original Codex package to strict local C
     return text;
   };
   const first = await send(fixture.request.input);
+  const firstToolNames = new Set(requests[0].tools.map((tool) => tool.function.name));
+  for (const name of ["exec_command", "mcp__modeldock__learn", "mcp__node_repl__js", "mcp__codex_apps__github___search_repositories"]) {
+    assert.ok(firstToolNames.has(name), `the complete local tool surface keeps ${name}`);
+  }
+  assert.equal(firstToolNames.has("view_image"), false, "the text-only model still hides the incompatible pixel viewer");
   assert.match(first, /response\.function_call_arguments\.done/);
   assert.match(first, /response\.reasoning_text\.done/);
   assert.match(first, /exec_command/);
@@ -261,6 +266,7 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
       assert.equal(body.messages[1].content, "Reply with exactly BOOTSTRAP_READY. Do not call a tool.");
       assert.equal(body.id_slot, 0);
       assert.ok(Array.isArray(body.tools) && body.tools.length > 0, "bootstrap carries the real Codex-derived tool schema");
+      assert.ok(body.tools.some((tool) => tool.function.name === "mcp__node_repl__js"), "warm base keeps tools outside the former local allowlist");
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ id: "chat_warm_bootstrap", model: "Qwen3.8-27B", choices: [{
         message: { role: "assistant", content: "BOOTSTRAP_READY", reasoning_content: "I should return the required fixed response." },
@@ -275,6 +281,7 @@ test("built bundle preserves full-Codex tools across a mock KV restore after gat
     assert.equal(body.messages[2].reasoning_content, "I should return the required fixed response.");
     assert.equal(body.id_slot, 0);
     assert.ok(Array.isArray(body.tools) && body.tools.length > 0);
+    assert.ok(body.tools.some((tool) => tool.function.name === "mcp__node_repl__js"), "restored sessions keep the same complete tool contract");
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end([
       'data: {"id":"chatcmpl_warm_fixture","created":21,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_warm_fixture","type":"function","function":{"name":"exec_command","arguments":"{\\"cmd\\":\\""}}]}}]}',
