@@ -1143,30 +1143,6 @@ test("applyToolPolicy maps MCP inputSchema onto a type:object parameters schema"
   assert.equal(kept[0].inputSchema, undefined);
 });
 
-test("applyToolPolicy whitelist keeps only allowed tools and counts trims", () => {
-  const tools = [
-    { type: "function", name: "exec_command" },
-    { type: "function", name: "apply_patch" },
-    { type: "function", name: "mcp__modeldock__recall_memory" },
-    { type: "function", name: "mcp__modeldock__web_search_exa" },
-    { type: "function", name: "mcp__github__create_issue" },
-    { type: "function", name: "mcp__node_repl__js" },
-    { type: "namespace", name: "mcp__sites", tools: [{ name: "deploy" }, { name: "create_site" }] },
-  ];
-  // A namespace child is whitelisted by the flat name the model sees, not by
-  // its bare name: two servers can both expose "deploy", and the bare spelling
-  // would silently enable each of them.
-  const { tools: kept, stripped } = applyToolPolicy(tools, {
-    allowToolNames: new Set(["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "mcp__sites__deploy"]),
-  });
-  assert.deepEqual(
-    kept.map((t) => t.name),
-    ["exec_command", "apply_patch", "mcp__modeldock__recall_memory", "mcp__modeldock__web_search_exa", "mcp__sites__deploy"],
-    "only whitelisted survive",
-  );
-  assert.equal(stripped.allowlist, 3, "mcp flat + namespace child counts as trims");
-});
-
 test("isLocalBackend identifies loopback custom/ollama backends only", () => {
   const base = configStub();
   const customCfg = (baseUrl, contextWindow) => customConfig({
@@ -4925,22 +4901,6 @@ test("applyToolPolicy reports the namespace split for each flattened tool", () =
     name: "_search_repositories",
     namespace: "mcp__codex_apps__github",
   });
-});
-
-test("applyToolPolicy matches an explicit allowlist against the flat MCP name", () => {
-  // A caller-provided allowlist is written in flat names; the namespace child
-  // carries only "recall_memory". Test the generic policy helper independently
-  // even though local routing now uses a denylist rather than this option.
-  const tools = [{
-    type: "namespace",
-    name: "mcp__modeldock__",
-    tools: [{ name: "recall_memory" }, { name: "speak" }],
-  }];
-  const { tools: kept, stripped } = applyToolPolicy(tools, {
-    allowToolNames: new Set(["mcp__modeldock__recall_memory"]),
-  });
-  assert.deepEqual(kept.map((tool) => tool.name), ["mcp__modeldock__recall_memory"]);
-  assert.equal(stripped.allowlist, 1, "only the un-whitelisted sibling is dropped");
 });
 
 test("flattenNamespaceCalls collapses replayed Codex tool calls onto the declared name", () => {

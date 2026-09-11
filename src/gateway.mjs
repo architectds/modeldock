@@ -2024,7 +2024,6 @@ function functionForCustomTool(tool) {
 // the subscription pays for.
 export function applyToolPolicy(tools, {
   hiddenToolNames = TEXT_MODEL_HIDDEN_TOOLS,
-  allowToolNames,
   blockedToolTypes,
   hostedToolTypes,
   customToolsAsFunctions,
@@ -2033,11 +2032,10 @@ export function applyToolPolicy(tools, {
 } = {}) {
   if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map(), customToolNames: new Set() };
   const hidden = new Set(hiddenToolNames || []);
-  const allow = allowToolNames ? new Set(allowToolNames) : null;
   const blocked = new Set(blockedToolTypes || []);
   const hostedOk = new Set(hostedToolTypes || []);
   const customFunctions = new Set(customToolsAsFunctions || []);
-  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, allowlist: 0, blockedType: 0 };
+  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 };
   // Reverse map for the flattening below: flat wire name -> { name, namespace }.
   // Codex resolves an incoming function_call by (namespace, name), so the
   // response path has to undo the flattening with the exact pair it was built
@@ -2046,7 +2044,6 @@ export function applyToolPolicy(tools, {
   const namespaces = new Map();
   const customToolNames = new Set();
   const out = [];
-  const allowed = (name) => !allow || allow.has(name);
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
     if (
@@ -2057,18 +2054,11 @@ export function applyToolPolicy(tools, {
       const children = Array.isArray(tool.tools) ? tool.tools : [];
       for (const child of children) {
         if (!child?.name) continue;
-        // The allowlist is written in flat names (mcp__modeldock__recall_memory)
-        // because that is what the model and every other caller see; the child
-        // carries only its bare name, so qualify before testing membership.
         const flatName = safeNamespaceFunctionNames
           ? safeNamespaceFunctionName(tool.name, child.name)
           : joinNamespace(tool.name, child.name);
         if (hidden.has(child.name) || hidden.has(flatName)) {
           stripped.hidden += 1;
-          continue;
-        }
-        if (!allowed(flatName)) {
-          stripped.allowlist += 1;
           continue;
         }
         stripped.namespaceChildren += 1;
@@ -2078,12 +2068,8 @@ export function applyToolPolicy(tools, {
       continue;
     }
     if (tool.type === "custom" && typeof tool.name === "string" && customFunctions.has(tool.name)) {
-      if (allowed(tool.name)) {
-        out.push(functionForCustomTool(tool));
-        customToolNames.add(tool.name);
-      } else {
-        stripped.allowlist += 1;
-      }
+      out.push(functionForCustomTool(tool));
+      customToolNames.add(tool.name);
       continue;
     }
     // Hosted tools are decided first, and keep their own counters. Letting a
@@ -2110,10 +2096,6 @@ export function applyToolPolicy(tools, {
     }
     if (typeof tool.name === "string" && hidden.has(tool.name)) {
       stripped.hidden += 1;
-      continue;
-    }
-    if (typeof tool.name === "string" && !allowed(tool.name)) {
-      stripped.allowlist += 1;
       continue;
     }
     out.push(tool.type === "function" ? normalizeFunctionTool(tool) : tool);
