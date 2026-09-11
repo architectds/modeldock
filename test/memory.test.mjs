@@ -212,6 +212,58 @@ test("recall falls back to permissive OR when the strict AND misses", () => {
   }
 });
 
+test("recall ranks stronger SQLite FTS5 BM25 matches first", () => {
+  const { dir } = memoryDir();
+  const store = storeFor(dir);
+  try {
+    store.storeMemory({
+      content: "alpha appears once among unrelated filler words that dilute relevance",
+      kind: "weak",
+      key: "weak-match",
+    });
+    store.storeMemory({
+      content: "alpha alpha alpha alpha alpha alpha alpha alpha",
+      kind: "strong",
+      key: "strong-match",
+    });
+
+    const hit = store.search({ query: "alpha", limit: 1 });
+    assert.match(hit.text, /key: strong-match/, "FTS5 returns lower BM25 scores for better matches");
+    assert.doesNotMatch(hit.text, /key: weak-match/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("long-query OR fallback keeps the strongest match ahead of the candidate cutoff", () => {
+  const { dir, memories } = memoryDir();
+  const store = storeFor(dir);
+  try {
+    const sections = Array.from({ length: 60 }, (_, index) => [
+      `# distractor ${index}`,
+      "",
+      `${index % 2 ? "alpha" : "beta"} appears once with unrelated filler ${index}`,
+      "",
+    ].join("\n"));
+    sections.push([
+      "# long query target",
+      "",
+      "alpha beta alpha beta alpha beta alpha beta alpha beta",
+      "",
+    ].join("\n"));
+    writeFileSync(path.join(memories, "memory_summary.md"), sections.join("\n"), "utf8");
+    store.captureCodexMemories(dir);
+
+    const hit = store.search({ query: "alpha beta missingterm", limit: 1 });
+    assert.match(hit.text, /\[1\] long query target/,
+      "the best OR match must survive the internal 50-row candidate limit");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("storeMemory dedupes identical content and supersedes via a stable key", () => {
   const { dir } = memoryDir();
   const store = storeFor(dir);

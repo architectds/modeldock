@@ -640,7 +640,7 @@ export class MemoryStore {
       JOIN source_items si ON si.id = sr.source_item_id
       WHERE content_fts MATCH ?
         AND u.memory_state = 'captured'
-      ORDER BY score DESC
+      ORDER BY score ASC
       LIMIT ?
     `;
     let rows = db.prepare(sql).all(exact, limitRows);
