@@ -493,10 +493,9 @@ export class LocalHostKvCoordinator {
             saved += 1;
             this.#recordEvent("checkpointed", { slot: lane.slot });
           } else {
-            // A budget rejection is not a successful handoff. Restarting now
-            // would discard the only hot state and turn a recoverable local
-            // conversation into a full cold prefill, so surface it exactly
-            // like an adapter save failure and keep the old gateway alive.
+            // A budget rejection is not a successful handoff. Surface it as a
+            // failed checkpoint; the outer lifecycle still owns the decision
+            // to restart without this optional hot state.
             failed += 1;
             await this.#diagnose("slot_checkpoint_rejected", new Error("The SSD KV budget cannot hold this local conversation state."));
           }

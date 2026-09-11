@@ -20,6 +20,8 @@ for arg in "$@"; do
     -f|--force|-Force) FORCE=1 ;;
   esac
 done
+CHECKPOINT_TIMEOUT=30
+[ "$FORCE" -eq 0 ] || CHECKPOINT_TIMEOUT=5
 
 status() {
   printf '%s\n' "$*"
@@ -200,7 +202,9 @@ NODE
 # The gateway knows the private Codex-session-to-slot mapping; this shell
 # script does not. Ask it to drain and checkpoint hot local slots before a
 # restart. A 404 is an older installed gateway that cannot do this yet, which
-# must remain upgrade-compatible. Any other failure leaves the old gateway up.
+# must remain upgrade-compatible. Checkpointing is an optimization, not a
+# restart lock: a failed or stuck local lane cannot strand an upgrade. Forced
+# restarts still try the save, but wait no more than five seconds.
 prepare_local_restart_checkpoint() {
   [ -n "$OLD_PID" ] || return 0
   key_file="$STATE_DIR/caller-key"
@@ -217,13 +221,13 @@ prepare_local_restart_checkpoint() {
     status "restart.sh: curl is unavailable; local KV checkpoint is skipped"
     return 0
   fi
-  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 130 \
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time "$CHECKPOINT_TIMEOUT" \
     -X POST -H "x-modeldock-key: $caller_key" -H 'content-type: application/json' \
     --data '{}' "http://127.0.0.1:$PORT/api/local/restart-checkpoint" || true)"
   case "$code" in
     2??) status "restart.sh: local KV checkpoint complete; handing off gateway"; return 0 ;;
     404) status "restart.sh: installed gateway predates local KV checkpoints; continuing without a hot-state dump"; return 0 ;;
-    *) status "ERROR: local KV checkpoint failed (HTTP ${code:-unreachable}); leaving the existing gateway running"; return 1 ;;
+    *) status "WARNING: local KV checkpoint failed (HTTP ${code:-unreachable}); continuing restart without a hot-state dump"; return 0 ;;
   esac
 }
 
@@ -271,9 +275,7 @@ verify_gateway() {
 
 check_owner
 
-if ! prepare_local_restart_checkpoint; then
-  exit 4
-fi
+prepare_local_restart_checkpoint
 
 STARTED_AFTER_MS="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')"
 if try_launchd_restart; then

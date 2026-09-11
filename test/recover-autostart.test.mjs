@@ -62,8 +62,13 @@ test("restart scripts prove the newly launched owner serves the status API", () 
   );
   assert.match(restart, /prepare_local_restart_checkpoint\(\)/, "POSIX restart must checkpoint managed local KV before it stops Node");
   assert.match(restart, /restart-checkpoint/, "POSIX restart must use the protected gateway checkpoint route");
+  assert.match(restart, /CHECKPOINT_TIMEOUT=30/, "POSIX checkpointing needs a bounded normal deadline");
+  assert.match(restart, /CHECKPOINT_TIMEOUT=5/, "POSIX forced restart needs a short kill-switch deadline");
+  assert.match(restart, /continuing restart without a hot-state dump/, "POSIX checkpoint failure must not lock restart");
   assert.match(windows, /Invoke-LocalRestartCheckpoint/, "Windows restart must checkpoint managed local KV before it stops Node");
   assert.match(windows, /restart-checkpoint/, "Windows restart must use the protected gateway checkpoint route");
+  assert.match(windows, /if \(\$forceTakeover\) \{ 5 \} else \{ 30 \}/, "Windows checkpointing needs bounded normal and forced deadlines");
+  assert.match(windows, /continuing restart without a hot-state dump/, "Windows checkpoint failure must not lock restart");
 });
 
 test("install.sh warns loudly when the login agent cannot be loaded", () => {
