@@ -24,6 +24,11 @@ export const LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS = 8_192;
 // carries a 10% buffer and is still verified on its real final context.
 export const LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS = 16_384;
 export const LOCAL_HOST_NVIDIA_CONTEXT_SAFETY_RATIO = 0.9;
+// Small hosts benefit more from one long lane plus SSD session rotation than
+// from spending startup time and fixed CUDA workspace on a speculative P2
+// probe. Physical capacity is the only input: a stale process argv or current
+// allocation must never opt a host into parallel calibration.
+export const LOCAL_HOST_NVIDIA_PARALLEL_MIN_TOTAL_BYTES = 32 * GiB;
 
 function positiveInteger(value, label) {
   const number = Number(value);
@@ -114,6 +119,77 @@ export function createNvidiaProfileInput({
     deviceIndices: Object.freeze(allNvidia.map((gpu, index) => Number.isInteger(gpu.index) ? gpu.index : index)),
     tensorSplit: Object.freeze(ratios),
   };
+}
+
+// The old llama process dominates memory.used and cannot be used to place the
+// replacement. Once it is stopped, however, the per-card baseline is exactly
+// the constraint managed mode needs: Windows, the desktop compositor, browser
+// GPU allocations, and unrelated processes remain visible on the card that
+// owns them. Rebalance the target's model and KV shares against that measured
+// free capacity instead of assuming equal cards have equal availability.
+export function rebalanceNvidiaProfileInput(target, baselineSample, {
+  headroomBytes = LOCAL_HOST_MIN_HEADROOM_BYTES,
+  bootstrapContextTokens = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
+} = {}) {
+  if (!target?.gpus?.length) throw new TypeError("Target rebalancing needs a target NVIDIA capacity ledger.");
+  const headroom = positiveInteger(headroomBytes, "The GPU headroom");
+  const bootstrapContext = positiveInteger(bootstrapContextTokens, "The calibration context");
+  const modelBytes = target.gpus.reduce((sum, gpu) => sum + positiveInteger(gpu.weightBytes, "A target model allocation"), 0);
+  const totalKvBytesPerToken = target.gpus.reduce((sum, gpu) => sum + positiveInteger(gpu.kvBytesPerToken, "A target KV allocation"), 0);
+  const measured = target.gpus.map((gpu) => {
+    const baseline = sampleGpuMetrics(baselineSample, gpu);
+    const runtimeReserveBytes = positiveInteger(gpu.runtimeReserveBytes, "The llama.cpp GPU runtime reserve");
+    const projectorBytes = Number(gpu.projectorBytes) || 0;
+    const variableCapacityBytes = baseline.capacityBytes
+      - baseline.usedBytes
+      - runtimeReserveBytes
+      - projectorBytes
+      - headroom;
+    if (!Number.isSafeInteger(variableCapacityBytes) || variableCapacityBytes <= 0) {
+      throw new TypeError(`The measured baseline leaves no managed capacity on ${gpu.id}.`);
+    }
+    return { baseline, runtimeReserveBytes, projectorBytes, variableCapacityBytes };
+  });
+  const totalVariableCapacityBytes = measured.reduce((sum, item) => sum + item.variableCapacityBytes, 0);
+  const bootstrapVariableBytes = modelBytes + (bootstrapContext * totalKvBytesPerToken);
+  if (bootstrapVariableBytes > totalVariableCapacityBytes) {
+    throw new TypeError("The target model and calibration context do not fit the measured GPU baseline.");
+  }
+  const ratios = measured.map((item) => item.variableCapacityBytes / totalVariableCapacityBytes);
+  const gpus = target.gpus.map((gpu, index) => {
+    const ratio = ratios[index];
+    const baselineUsedBytes = measured[index].baseline.usedBytes;
+    const weightBytes = Math.round(modelBytes * ratio);
+    const kvBytesPerToken = Math.max(1, Math.round(totalKvBytesPerToken * ratio));
+    return Object.freeze({
+      ...gpu,
+      weightBytes,
+      kvBytesPerToken,
+      systemReserveBytes: baselineUsedBytes,
+      runtimeReserveBytes: measured[index].runtimeReserveBytes,
+      staticBytes: baselineUsedBytes + weightBytes + measured[index].projectorBytes + measured[index].runtimeReserveBytes,
+      baseline: Object.freeze({
+        usedBytes: baselineUsedBytes,
+        freeBytes: measured[index].baseline.freeBytes,
+        capacityBytes: measured[index].baseline.capacityBytes,
+        variableCapacityBytes: measured[index].variableCapacityBytes,
+      }),
+    });
+  });
+  return Object.freeze({
+    ...target,
+    gpus: Object.freeze(gpus),
+    tensorSplit: Object.freeze(ratios),
+  });
+}
+
+export function shouldProbeNvidiaParallelism(target) {
+  if (!target?.gpus?.length) throw new TypeError("A target NVIDIA capacity ledger is required.");
+  const totalBytes = target.gpus.reduce((sum, gpu) => {
+    const capacity = positiveInteger(gpu.totalBytes, "A physical GPU byte count");
+    return sum + capacity;
+  }, 0);
+  return totalBytes >= LOCAL_HOST_NVIDIA_PARALLEL_MIN_TOTAL_BYTES;
 }
 
 function sampleGpuById(sample, allocation) {

@@ -290,6 +290,20 @@ export function markHostApplying(record, { at = new Date().toISOString() } = {})
   return managedRecord(record, { state: "applying", updatedAt: text(at) || new Date().toISOString() });
 }
 
+// Calibration can only observe Windows/display VRAM after the previous llama
+// process has stopped. Persist the profile recalculated from that baseline
+// before starting its replacement, so an interrupted transaction still has
+// one unambiguous desired argv and the immutable pre-takeover rollback.
+export function retargetApplyingHost(record, { desiredSpec, desiredProfile = null, capabilities, at = new Date().toISOString() } = {}) {
+  if (assertState(record?.state) !== "applying") throw new TypeError("Only an applying host can replace its measured target.");
+  return managedRecord(record, {
+    desiredSpec: normalizeLaunchSpec(desiredSpec),
+    desiredProfile: normalizeLaneProfile(desiredProfile),
+    capabilities: capabilities === undefined ? record.capabilities : copy(capabilities),
+    updatedAt: text(at) || new Date().toISOString(),
+  });
+}
+
 export function markHostVerifying(record, { at = new Date().toISOString() } = {}) {
   if (!["applying", "recovering"].includes(assertState(record?.state))) {
     throw new TypeError("A host must apply or recover a configuration before verification.");

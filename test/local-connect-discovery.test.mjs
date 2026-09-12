@@ -324,6 +324,71 @@ test("gateway connection and explicit host takeover stay separate", async (t) =>
   assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
 });
 
+test("a sub-32-GiB host never starts a P2 calibration probe", async (t) => {
+  const engine = fakeEngine();
+  engine.listen(0, "127.0.0.1");
+  await new Promise((resolve) => engine.once("listening", resolve));
+  const port = engine.address().port;
+  t.after(() => new Promise((resolve) => engine.close(resolve)));
+  const discovered = {
+    engine: "llamacpp",
+    baseUrl: `http://127.0.0.1:${port}`,
+    port,
+    models: ["qwen"],
+    connectable: true,
+    binary: "D:/llama/llama-server.exe",
+    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
+    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
+    modelFacts: {
+      weightBytes: 2 * 1024 ** 3,
+      attentionLayers: 1,
+      headCountKv: 1,
+      keyLength: 256,
+      valueLength: 256,
+      trainedContext: 262144,
+    },
+  };
+  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
+  services.probeGpus = async () => [0, 1].map((index) => ({
+    index,
+    uuid: `gpu-${index}`,
+    vendor: "nvidia",
+    totalBytes: Math.round(15.9 * 1024 ** 3),
+    usedBytes: 4 * 1024 ** 3,
+    freeBytes: Math.round(11.9 * 1024 ** 3),
+  }));
+  const startedParallels = [];
+  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
+    async persist(record) {
+      const registry = await readLocalHostRegistry(registryFile);
+      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
+    },
+    async drain() {},
+    async stop() {},
+    async start(spec) {
+      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
+      discovered.launch = parseLlamaArgs(discovered.cmdline);
+      startedParallels.push(discovered.launch.parallel);
+    },
+    async verify() { return true; },
+  });
+
+  assert.equal((await fetch(`${base}/api/local/connect`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
+  })).status, 200);
+  const managed = await fetch(`${base}/api/local/manage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 8 }),
+  });
+  const body = await managed.json();
+  assert.equal(managed.status, 200, JSON.stringify(body));
+  assert.equal(body.management.profile.laneCount, 1);
+  assert.ok(startedParallels.length >= 3, "P1 bootstrap, slope, and final profile all started");
+  assert.ok(startedParallels.every((parallel) => parallel === 1),
+    "a small host never pays for a P2 or P3 calibration launch");
+});
+
 test("managed setup applies selected model, projector, and SSD paths as one verified launch", async (t) => {
   const engine = fakeEngine();
   engine.listen(0, "127.0.0.1");

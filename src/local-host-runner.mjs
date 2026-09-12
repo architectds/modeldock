@@ -10,6 +10,7 @@ import {
   markHostDegraded,
   markHostVerified,
   markHostVerifying,
+  retargetApplyingHost,
 } from "./local-hosts.mjs";
 
 const REQUIRED_OPERATIONS = ["drain", "stop", "start", "verify", "persist"];
@@ -94,7 +95,13 @@ export async function applyLocalHostPlan(record, { desiredSpec, desiredProfile =
     await persist(operations, current);
     replacementStarted = true;
     await operations.stop(current);
-    if (typeof afterStop === "function") await afterStop(current);
+    if (typeof afterStop === "function") {
+      const measuredTarget = await afterStop(current);
+      if (measuredTarget?.desiredSpec) {
+        current = retargetApplyingHost(current, measuredTarget);
+        await persist(operations, current);
+      }
+    }
     current = await startAndVerify(current, operations);
     return { outcome: "applied", record: current };
   } catch (error) {
@@ -158,7 +165,7 @@ export async function calibrateAndApplyLocalHostPlan(record, {
   const steps = Array.isArray(calibrationSteps) && calibrationSteps.length
     ? calibrationSteps
     : [{ id: "bootstrap", desiredSpec: calibrationSpec, desiredProfile: calibrationProfile }];
-  if (steps.some((step) => !step?.id || !step?.desiredSpec || !step?.desiredProfile)) {
+  if (steps.some((step) => !step?.id || (typeof step.createPlan !== "function" && (!step?.desiredSpec || !step?.desiredProfile)))) {
     throw new TypeError("Target calibration needs complete named calibration steps.");
   }
   let baseline;
@@ -168,12 +175,24 @@ export async function calibrateAndApplyLocalHostPlan(record, {
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index];
       if (typeof step.shouldRun === "function" && !await step.shouldRun({ baseline, measurements, record: current })) continue;
+      const dynamicPlan = typeof step.createPlan === "function"
+        ? await step.createPlan({ baseline, measurements, record: current })
+        : step;
+      if (!dynamicPlan?.desiredSpec || !dynamicPlan?.desiredProfile) {
+        throw new TypeError(`Target calibration step ${step.id} did not produce a complete plan.`);
+      }
       const result = await applyLocalHostPlan(current, {
-        desiredSpec: step.desiredSpec,
-        desiredProfile: step.desiredProfile,
+        desiredSpec: dynamicPlan.desiredSpec,
+        desiredProfile: dynamicPlan.desiredProfile,
         capabilities: targetCapabilities,
         policy,
-        afterStop: index === 0 ? async (stopped) => { baseline = await measureBaseline(stopped); } : undefined,
+        afterStop: index === 0 ? async (stopped) => {
+          baseline = await measureBaseline(stopped);
+          if (typeof step.replanAfterBaseline === "function") {
+            return step.replanAfterBaseline({ baseline, measurements, record: stopped });
+          }
+          return null;
+        } : undefined,
       }, suppliedOperations);
       if (result.outcome !== "applied") {
         if (step.optional && result.outcome === "recovered") {

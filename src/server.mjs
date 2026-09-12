@@ -67,8 +67,10 @@ import {
   LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
   LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS,
   optimisticNvidiaParallelContext,
+  rebalanceNvidiaProfileInput,
   sampleGpuMetrics,
   selectNvidiaRuntimeProfile,
+  shouldProbeNvidiaParallelism,
 } from "./local-host-nvidia.mjs";
 import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
 import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
@@ -2328,7 +2330,7 @@ export function createApp(services = createServices()) {
       // tensor split for the fixed 8K calibration launch; it does not publish
       // P or context. The final profile comes only after the old server is
       // stopped and the target process has been measured on every card.
-      const target = (services.createNvidiaProfileInput || createNvidiaProfileInput)({
+      let target = (services.createNvidiaProfileInput || createNvidiaProfileInput)({
         gpus,
         targetModelFacts,
         targetModelId: modelPath,
@@ -2337,12 +2339,6 @@ export function createApp(services = createServices()) {
         visionProjectorBytes,
       });
       const bootstrapProfile = calibrationLaneProfile(target);
-      const slopeProfile = calibrationLaneProfile(target, {
-        id: "slope",
-        laneContextTokens: Math.min(LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS, target.modelMaxContextTokens),
-      });
-      const p2BootstrapProfile = calibrationLaneProfile(target, { id: "p2", laneCount: 2 });
-      const p3BootstrapProfile = calibrationLaneProfile(target, { id: "p3", laneCount: 3 });
       await mkdir(String(cacheDirectory).trim(), { recursive: true });
       const specForProfile = (profile) => ({
         binary: launch.binary,
@@ -2415,14 +2411,35 @@ export function createApp(services = createServices()) {
         let runtimeEstimate = null;
         let result = await calibrateAndApplyLocalHostPlan(authorized.record, {
           calibrationSteps: [
-            { id: "bootstrap", desiredSpec: specForProfile(bootstrapProfile), desiredProfile: bootstrapProfile },
-            { id: "slope", desiredSpec: specForProfile(slopeProfile), desiredProfile: slopeProfile },
+            {
+              id: "bootstrap",
+              desiredSpec: specForProfile(bootstrapProfile),
+              desiredProfile: bootstrapProfile,
+              replanAfterBaseline: ({ baseline }) => {
+                target = (services.rebalanceNvidiaProfileInput || rebalanceNvidiaProfileInput)(target, baseline);
+                const measuredBootstrap = calibrationLaneProfile(target);
+                return { desiredSpec: specForProfile(measuredBootstrap), desiredProfile: measuredBootstrap };
+              },
+            },
+            {
+              id: "slope",
+              createPlan: () => {
+                const measuredSlope = calibrationLaneProfile(target, {
+                  id: "slope",
+                  laneContextTokens: Math.min(LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS, target.modelMaxContextTokens),
+                });
+                return { desiredSpec: specForProfile(measuredSlope), desiredProfile: measuredSlope };
+              },
+            },
             {
               id: "p2",
-              desiredSpec: specForProfile(p2BootstrapProfile),
-              desiredProfile: p2BootstrapProfile,
+              createPlan: () => {
+                const measuredP2 = calibrationLaneProfile(target, { id: "p2", laneCount: 2 });
+                return { desiredSpec: specForProfile(measuredP2), desiredProfile: measuredP2 };
+              },
               optional: true,
               shouldRun: ({ measurements }) => {
+                if (!shouldProbeNvidiaParallelism(target)) return false;
                 const interim = estimateNvidiaRuntimeCapacity({
                   target,
                   bootstrapSample: measurements.bootstrap,
@@ -2433,8 +2450,10 @@ export function createApp(services = createServices()) {
             },
             {
               id: "p3",
-              desiredSpec: specForProfile(p3BootstrapProfile),
-              desiredProfile: p3BootstrapProfile,
+              createPlan: () => {
+                const measuredP3 = calibrationLaneProfile(target, { id: "p3", laneCount: 3 });
+                return { desiredSpec: specForProfile(measuredP3), desiredProfile: measuredP3 };
+              },
               optional: true,
               shouldRun: ({ measurements }) => {
                 if (!measurements.p2) return false;

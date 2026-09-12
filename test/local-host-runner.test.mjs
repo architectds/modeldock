@@ -115,6 +115,39 @@ test("target calibration samples baseline only after stop, then applies its deri
   assert.equal(fake.calls.filter((entry) => entry === "stop").length, 2);
 });
 
+test("the first calibration launch is retargeted from the post-stop GPU baseline", async () => {
+  const fake = operations({ verifyResults: [true, true] });
+  const provisionalProfile = {
+    adapterId: "llamacpp-nvidia", modelId: "qwen", profileId: "calibration-provisional",
+    laneCount: 1, laneContextTokens: 8_192, totalContextTokens: 8_192,
+  };
+  const balancedProfile = { ...provisionalProfile, profileId: "calibration-balanced" };
+  const finalProfile = { ...provisionalProfile, profileId: "calculated-final", laneContextTokens: 200_000, totalContextTokens: 200_000 };
+  const spec = (name) => ({ binary: OBSERVED.launch.binary, args: [...OBSERVED.launch.args, name] });
+  const result = await calibrateAndApplyLocalHostPlan(readyHost(), {
+    calibrationSteps: [{
+      id: "bootstrap",
+      desiredSpec: spec("provisional"),
+      desiredProfile: provisionalProfile,
+      replanAfterBaseline: ({ baseline }) => {
+        assert.deepEqual(baseline, { gpu0: "quiet", gpu1: "desktop" });
+        return { desiredSpec: spec("balanced"), desiredProfile: balancedProfile };
+      },
+    }],
+    measureBaseline: async () => ({ gpu0: "quiet", gpu1: "desktop" }),
+    measureCalibration: async (record) => {
+      assert.deepEqual(record.activeProfile, balancedProfile);
+      return { measured: true };
+    },
+    createFinalPlan: async () => ({ desiredSpec: spec("final"), desiredProfile: finalProfile }),
+  }, fake);
+  assert.equal(result.outcome, "applied");
+  assert.deepEqual(result.record.activeProfile, finalProfile);
+  assert.deepEqual(fake.calls.filter((entry) => entry.startsWith("start:")), ["start:balanced", "start:final"]);
+  assert.ok(fake.calls.filter((entry) => entry === "persist:applying").length >= 2,
+    "the measured argv is durable before the replacement starts");
+});
+
 test("named calibration measures the formula inputs and skips an impossible P2 probe", async () => {
   const fake = operations({ verifyResults: [true, true, true] });
   const profiles = {

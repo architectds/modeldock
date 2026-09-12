@@ -5,7 +5,9 @@ import {
   createNvidiaProfileInput,
   estimateNvidiaRuntimeCapacity,
   optimisticNvidiaParallelContext,
+  rebalanceNvidiaProfileInput,
   selectNvidiaRuntimeProfile,
+  shouldProbeNvidiaParallelism,
 } from "../src/local-host-nvidia.mjs";
 
 const GiB = 1024 ** 3;
@@ -87,6 +89,39 @@ test("target ledger ignores all old-process context and observed usage", () => {
   });
   assert.deepEqual(first, second);
   assert.ok(first.gpus.every((gpu) => gpu.staticBytes === gpu.weightBytes + gpu.systemReserveBytes + gpu.runtimeReserveBytes));
+});
+
+test("the measured desktop card receives a smaller tensor share", () => {
+  const target = targetForGpus([16 * GiB, 16 * GiB]);
+  assert.deepEqual(target.tensorSplit, [0.5, 0.5], "equal physical cards start from an equal provisional split");
+  const balanced = rebalanceNvidiaProfileInput(target, [
+    { index: 0, uuid: "gpu-0", usedBytes: Math.round(0.25 * GiB), freeBytes: Math.round(15.75 * GiB) },
+    { index: 1, uuid: "gpu-1", usedBytes: 2 * GiB, freeBytes: 14 * GiB },
+  ]);
+  assert.ok(balanced.tensorSplit[0] > 0.5, "the compute card absorbs more of the model and KV");
+  assert.ok(balanced.tensorSplit[1] < 0.5, "the display-busy card receives less of the model and KV");
+  assert.equal(balanced.gpus[0].systemReserveBytes, Math.round(0.25 * GiB));
+  assert.equal(balanced.gpus[1].systemReserveBytes, 2 * GiB);
+  assert.equal(
+    balanced.gpus.reduce((sum, gpu) => sum + gpu.weightBytes, 0),
+    target.gpus.reduce((sum, gpu) => sum + gpu.weightBytes, 0),
+    "rebalancing conserves the complete model allocation",
+  );
+  const capacityPerShare = balanced.gpus.map((gpu, index) => gpu.baseline.variableCapacityBytes / balanced.tensorSplit[index]);
+  assert.ok(Math.abs(capacityPerShare[0] - capacityPerShare[1]) < 1024,
+    "each split share is derived from the same measured per-card capacity budget");
+});
+
+test("hosts below 32 GiB calibrate P1 only", () => {
+  const dual16Reported = targetForGpus([Math.round(15.9 * GiB), Math.round(15.9 * GiB)]);
+  assert.equal(shouldProbeNvidiaParallelism(dual16Reported), false);
+
+  const exactBoundary = targetForGpus([16 * GiB, 16 * GiB]);
+  assert.equal(shouldProbeNvidiaParallelism(exactBoundary), true,
+    "32 GiB is the boundary; only hosts below it skip parallel calibration");
+
+  const largerHost = targetForGpus([24 * GiB, 24 * GiB]);
+  assert.equal(shouldProbeNvidiaParallelism(largerHost), true);
 });
 
 test("target calibration measures the real Windows baseline and llama footprint", () => {
