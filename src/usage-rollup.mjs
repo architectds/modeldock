@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { estimateApiCost } from "./api-pricing.mjs";
+import { canonicalModelId } from "./model-identity.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 // No model decodes this fast. A request that claims to have produced tokens
@@ -350,23 +351,9 @@ function addPricedStatsRow(target, key, source = {}) {
 const STATS_MODEL_LIMIT = 6;
 const STATS_OTHER = "__other__";
 
-// Stats describe a model family, not a billing route. Provider-qualified and
-// vendor-namespaced spellings of the same model therefore share one durable
-// key in every aggregate and chart. Pricing still uses the original raw key.
-export function canonicalUsageModelId(model) {
-  const raw = String(model || "").trim();
-  if (!raw) return raw;
-  const providerAt = raw.lastIndexOf("@");
-  const withoutProvider = providerAt > 0 ? raw.slice(0, providerAt) : raw;
-  const vendorSeparator = withoutProvider.lastIndexOf("/");
-  const bare = vendorSeparator >= 0 ? withoutProvider.slice(vendorSeparator + 1) : withoutProvider;
-  return bare
-    .toLowerCase()
-    .replace(/[_\s]+/g, "-")
-    .replace(/[^a-z0-9.-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || raw;
-}
+// Keep the established export while making usage and pricing consume the same
+// canonical owner instead of maintaining two model-name pipelines.
+export const canonicalUsageModelId = canonicalModelId;
 
 function statsModelsForBuckets(buckets, retainedKeys) {
   const byModel = new Map();

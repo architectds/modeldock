@@ -41,6 +41,35 @@ test("native Astra uses OpenAI direct standard short-context pricing", () => {
   });
 });
 
+test("Qwen 3.8 27B uses its cheapest normalized provider offer", () => {
+  assert.deepEqual(apiRate("Qwen3.8-27B", "llamacpp"), {
+    input: 0.4,
+    cached: 0.04,
+    output: 3,
+  });
+});
+
+test("equivalent pricing follows canonical model identity across providers", () => {
+  const local = estimateApiCost({
+    model: "Qwen3.8-27B",
+    provider: "llamacpp",
+    inputTokens: 1_000_000,
+    cachedTokens: 800_000,
+    outputTokens: 100_000,
+  });
+  const commandCode = estimateApiCost({
+    model: "Qwen/Qwen3.8-27B",
+    provider: "commandcode",
+    inputTokens: 1_000_000,
+    cachedTokens: 800_000,
+    outputTokens: 100_000,
+  });
+  assert.deepEqual(local, commandCode);
+  assert.equal(local.usd, 0.412);
+  assert.equal(local.pricedTokens, 1_100_000);
+  assert.equal(local.unpricedTokens, 0);
+});
+
 test("equivalent cost discounts cached input separately from new input", () => {
   const result = estimateApiCost({
     model: "gpt-5.6-sol",

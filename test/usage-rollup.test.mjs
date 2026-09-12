@@ -21,6 +21,7 @@ import {
 test("stats model identity removes only vendor and provider routing syntax", () => {
   assert.equal(canonicalUsageModelId("qwen3.8-flash@opencode-go"), "qwen3.8-flash");
   assert.equal(canonicalUsageModelId("Qwen/Qwen3.8-Flash@commandcode"), "qwen3.8-flash");
+  assert.equal(canonicalUsageModelId("qwen3.8:27b@custom"), "qwen3.8-27b");
   assert.equal(canonicalUsageModelId("gpt-5.6-luna@openai"), "gpt-5.6-luna");
   assert.equal(canonicalUsageModelId("gpt-5.6-luna@opencode-go"), "gpt-5.6-luna");
   assert.equal(canonicalUsageModelId("mimo-v2.5-free@opencode-go"), "mimo-v2.5-free",
@@ -314,6 +315,25 @@ test("native Astra contributes priced cost through the complete stats projection
   assert.equal(stats.periods.hours24.unpricedTokens, 0);
   assert.equal(stats.periods.hours24.costCoverage, 1);
   assert.equal(stats.series.hours24.at(-2).byModel["gpt-6-astra"].cost, 7.8);
+});
+
+test("local models use the same normalized equivalent price in every stats view", () => {
+  const { rollup } = foldEvents(emptyRollup(), [
+    event("2026-09-08T13:00:00.000Z", {
+      model: "Qwen3.8-27B",
+      provider: "llamacpp",
+      inputTokens: 1_000_000,
+      cachedTokens: 800_000,
+      outputTokens: 100_000,
+    }),
+  ], { now: "2026-09-08T14:00:00.000Z" });
+  const stats = usageStats(rollup, "2026-09-08T14:30:00.000Z");
+
+  assert.equal(stats.periods.hours24.estimatedApiCostUsd, 0.412);
+  assert.equal(stats.periods.hours24.costCoverage, 1);
+  assert.equal(stats.modelPeriods.hours24.models[0].id, "qwen3.8-27b");
+  assert.equal(stats.modelPeriods.hours24.models[0].estimatedApiCostUsd, 0.412);
+  assert.equal(stats.series.hours24.at(-2).byModel["qwen3.8-27b"].cost, 0.412);
 });
 
 test("stats keep model share bounded and aggregate the tail", () => {
