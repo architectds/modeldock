@@ -65,6 +65,27 @@ test("a warm base state retains only its fixed hidden assistant transcript", () 
   }), /assistant content/);
 });
 
+test("legacy bootstrap metadata normalizes once into independent prefix state", () => {
+  const normalized = createLocalHostKvStateManifest({
+    hostId: "host-qwen",
+    storage: STORAGE,
+    states: [{
+      sessionKey: "a".repeat(64),
+      fingerprint: FINGERPRINT,
+      filename: "old.bin",
+      bytes: 400,
+      promptTokens: 100,
+      warmBaseKey: "b".repeat(64),
+      savedAt: "2026-08-23T01:00:00.000Z",
+      lastAccessedAt: "2026-08-23T01:00:00.000Z",
+    }],
+  });
+  assert.equal(normalized.states[0].prefixKey, "b".repeat(64));
+  assert.equal(normalized.states[0].bootstrapInjected, true);
+  assert.equal("warmBaseKey" in normalized.states[0], false,
+    "the obsolete combined representation is not maintained internally");
+});
+
 test("KV state LRU eviction honors an explicit user disk budget", () => {
   let manifest = plan(emptyManifest(), A, "a.bin", 400, "2026-08-23T01:00:00.000Z").manifest;
   manifest = plan(manifest, B, "b.bin", 400, "2026-08-23T01:01:00.000Z").manifest;

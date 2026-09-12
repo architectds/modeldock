@@ -510,9 +510,10 @@
           <section class="hostdash-grid">
             <article class="metric-card accent-blue wave-card">
               <div class="metric-head"><span data-i18n="hostdash.prefill">Prefill</span><b><span id="hostdash-prefill-last">&mdash;</span> <span data-i18n="metric.tpsLast">tps</span></b></div>
-              <div class="wave-stats"><span><b id="hostdash-prefill-avg">&mdash;</b> <span data-i18n="metric.tpsAvg">avg</span></span><span><b id="hostdash-prefill-restore-last">&mdash;</b> <span data-i18n="hostdash.restoreLast">restore</span></span></div>
+              <div class="wave-stats"><span><b id="hostdash-prefill-ms-last">&mdash;</b> <span data-i18n="hostdash.promptTime">prompt time</span></span><span><b id="hostdash-cache-hit-last">&mdash;</b> <span data-i18n="hostdash.cacheHit">cache hit</span></span></div>
               <div class="wave-wrap">
                 <canvas id="hostdash-prefill-wave" width="340" height="92"></canvas>
+                <div id="hostdash-prefill-tooltip" class="wave-tooltip" hidden></div>
               </div>
               <p><span id="hostdash-prefill-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
             </article>
@@ -521,6 +522,7 @@
               <div class="wave-stats"><span><b id="hostdash-decode-avg">&mdash;</b> <span data-i18n="metric.tpsAvg">avg</span></span><span><b id="hostdash-hot-lanes">&mdash;</b> <span data-i18n="hostdash.hotLanes">hot lanes</span></span></div>
               <div class="wave-wrap">
                 <canvas id="hostdash-decode-wave" width="340" height="92"></canvas>
+                <div id="hostdash-decode-tooltip" class="wave-tooltip" hidden></div>
               </div>
             </article>
             <article class="metric-card accent-amber hostdash-swim-card">

@@ -206,7 +206,7 @@ export class LocalHostKvStateStore {
     return Object.freeze({ removed: Object.freeze(removed), failures: Object.freeze(failures) });
   }
 
-  async save({ sessionKey, fingerprint, warmBaseKey, warmBaseTranscript, slot = 0, signal, at = new Date().toISOString() } = {}) {
+  async save({ sessionKey, fingerprint, prefixKey, bootstrapInjected = false, warmBaseTranscript, slot = 0, signal, at = new Date().toISOString() } = {}) {
     const filename = stateFilename(this.filePrefix, this.makeId());
     // The managed launch receives this same directory as --slot-save-path.
     // Create it before asking the adapter to write, rather than relying on a
@@ -228,7 +228,7 @@ export class LocalHostKvStateStore {
     const plan = planLocalHostKvStateWrite(current, {
       sessionKey,
       fingerprint,
-      ...(warmBaseKey ? { warmBaseKey } : {}),
+      ...(prefixKey ? { prefixKey, bootstrapInjected } : {}),
       ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
       filename,
       bytes: actual.size,
@@ -278,9 +278,10 @@ export class LocalHostKvStateStore {
     return Boolean(findLocalHostKvState(manifest, { sessionKey, fingerprint }));
   }
 
-  // Metadata only: the coordinator needs the previous immutable bootstrap key
-  // before it decides whether a restored conversation can keep using its slot.
-  // It is a SHA-256 digest, never prompt or conversation content.
+  // Metadata only: the coordinator needs the static prefix identity and the
+  // independent bootstrap-injection bit before it can restore a Chat slot.
+  // Both are bounded metadata; prompt and conversation content never live in
+  // this manifest.
   async lookup({ sessionKey, fingerprint } = {}) {
     const manifest = await this.load();
     return findLocalHostKvState(manifest, { sessionKey, fingerprint });

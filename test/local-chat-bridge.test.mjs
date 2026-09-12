@@ -5,7 +5,7 @@ import test from "node:test";
 import { Readable } from "node:stream";
 import { Writable } from "node:stream";
 import { gunzipSync } from "node:zlib";
-import { chatChunksToResponseEvents, chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "../src/local-chat-bridge.mjs";
+import { chatChunksToResponseEvents, chatCompletionToResponse, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "../src/local-chat-bridge.mjs";
 import { localWarmBaseFromSessionOpening, relayResponses } from "../src/gateway.mjs";
 import { LocalHostScheduler } from "../src/local-host-scheduler.mjs";
 import { applyLocalEngineProfile } from "../src/profiles.mjs";
@@ -29,6 +29,27 @@ function gatewayResponse() {
   res.chunks = chunks;
   return res;
 }
+
+test("llama timings preserve model work without charging gateway TTFT", () => {
+  assert.deepEqual(normalizeLlamaServerTimings({
+    cache_n: 153_094,
+    prompt_n: 38,
+    prompt_ms: 42.7,
+    prompt_per_second: 889.9297,
+    predicted_n: 300,
+    predicted_ms: 5_000,
+    predicted_per_second: 60,
+  }), {
+    cacheTokens: 153_094,
+    promptTokens: 38,
+    promptMs: 42.7,
+    promptTps: 889.9297,
+    decodeTokens: 300,
+    decodeMs: 5_000,
+    decodeTps: 60,
+  });
+  assert.equal(normalizeLlamaServerTimings(null), undefined);
+});
 
 test("Responses payload becomes a cacheable Chat request without dropping tool history", () => {
   const bridged = responsesToChat({
@@ -406,7 +427,7 @@ test("a streamed Chat length stop emits a Responses incomplete terminal event", 
 test("Chat stream pipe emits only Responses events and completes", async () => {
   const raw = [
     'data: {"id":"chatcmpl_text","created":19,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","content":"LOCAL"}}]}\n\n',
-    'data: {"id":"chatcmpl_text","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8}}}\n\n',
+    'data: {"id":"chatcmpl_text","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"content":"_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":8}},"timings":{"cache_n":8,"prompt_n":4,"prompt_ms":5,"prompt_per_second":800,"predicted_n":2,"predicted_ms":40,"predicted_per_second":50}}\n\n',
     "data: [DONE]\n\n",
   ];
   const res = new EventEmitter();
@@ -422,6 +443,15 @@ test("Chat stream pipe emits only Responses events and completes", async () => {
   const complete = observed.find((event) => event.type === "response.completed");
   assert.equal(complete.response.output[0].content[0].text, "LOCAL_OK");
   assert.equal(complete.response.usage.input_tokens_details.cached_tokens, 8);
+  assert.deepEqual(result.llamaTimings, {
+    cacheTokens: 8,
+    promptTokens: 4,
+    promptMs: 5,
+    promptTps: 800,
+    decodeTokens: 2,
+    decodeMs: 40,
+    decodeTps: 50,
+  });
 });
 
 test("Chat stream pipe releases a completed llama slot when the body stays open after DONE", async () => {
@@ -640,7 +670,7 @@ test("full original Codex package reaches local Chat as functions and returns a 
     seen.push({ url: String(url), body: JSON.parse(options.body) });
     return new Response(Readable.toWeb(Readable.from([
       'data: {"id":"chatcmpl_full","created":20,"model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_local","type":"function","function":{"name":"exec_command","arguments":"{\\"cmd\\":\\""}}]}}]}\n\n',
-      'data: {"id":"chatcmpl_full","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo LOCAL_OK\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8308,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":8304}}}\n\n',
+      'data: {"id":"chatcmpl_full","model":"Qwen3.8-27B","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"echo LOCAL_OK\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":8308,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":8304}},"timings":{"cache_n":8304,"prompt_n":4,"prompt_ms":8,"prompt_per_second":500,"predicted_n":9,"predicted_ms":150,"predicted_per_second":60}}\n\n',
       "data: [DONE]\n\n",
     ])), { status: 200, headers: { "content-type": "text/event-stream" } });
   };
@@ -656,6 +686,15 @@ test("full original Codex package reaches local Chat as functions and returns a 
       requestUrl: "/v1/responses",
     });
     assert.equal(result.ok, true);
+    assert.deepEqual(result.llamaTimings, {
+      cacheTokens: 8304,
+      promptTokens: 4,
+      promptMs: 8,
+      promptTps: 500,
+      decodeTokens: 9,
+      decodeMs: 150,
+      decodeTps: 60,
+    });
     assert.equal(seen.length, 1);
     assert.equal(seen[0].url, "http://127.0.0.1:11436/v1/chat/completions");
     assert.equal(seen[0].body.input, undefined, "the local upstream must receive Chat, not Responses");

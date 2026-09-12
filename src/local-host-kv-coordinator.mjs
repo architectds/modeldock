@@ -59,9 +59,11 @@ export class LocalHostKvCoordinator {
   #residency;
   #mutation = Promise.resolve();
   #validatedFingerprint = false;
-  // The active lane is in memory, so its static bootstrap key lives here until
-  // it is checkpointed. Checkpoints persist the same digest in their manifest.
-  #warmBaseKeys = new Map();
+  // A conversation's static prefix identity and whether it actually injected
+  // the hidden bootstrap are separate facts. Keeping them together caused a
+  // cold-started session with no bootstrap marker to be discarded instead of
+  // restored from SSD on its next turn.
+  #prefixStates = new Map();
   // Lifetime tallies for the local dashboard: what the SSD cache is actually
   // doing, counted where the actions happen instead of re-derived from logs.
   #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0 };
@@ -70,7 +72,7 @@ export class LocalHostKvCoordinator {
   // the monitor needs to draw the scheduler's swimlanes.
   #events = [];
   #coldPrefillRates = [];
-  #totals = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, timeSavedMs: 0 };
+  #totals = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, timeSavedMs: 0 };
 
   constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp } = {}) {
     if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function" || typeof store.has !== "function") {
@@ -139,9 +141,12 @@ export class LocalHostKvCoordinator {
 
     if (result?.ok === false) return 0;
 
-    const firstResponseMs = nonNegativeNumber(result?.firstResponseLatencyMs);
-    if (cache?.tier === "cold" && cachedTokens === 0 && inputTokens >= MIN_COLD_PREFILL_TOKENS && firstResponseMs > 0) {
-      this.#coldPrefillRates.push(inputTokens / (firstResponseMs / 1000));
+    const timings = result?.llamaTimings;
+    const promptTokens = nonNegativeNumber(timings?.promptTokens);
+    const promptTps = nonNegativeNumber(timings?.promptTps);
+    const cacheTokens = nonNegativeNumber(timings?.cacheTokens);
+    if (cache?.tier === "cold" && cacheTokens === 0 && promptTokens >= MIN_COLD_PREFILL_TOKENS && promptTps > 0) {
+      this.#coldPrefillRates.push(promptTps);
       if (this.#coldPrefillRates.length > COLD_PREFILL_SAMPLE_LIMIT) this.#coldPrefillRates.splice(0, this.#coldPrefillRates.length - COLD_PREFILL_SAMPLE_LIMIT);
     }
 
@@ -290,7 +295,12 @@ export class LocalHostKvCoordinator {
         await this.#diagnose("state_lookup_failed", error);
       }
       let hasSsdState = Boolean(sessionState);
-      const residentWarmBaseKey = this.#warmBaseKeys.get(sessionKey) || sessionState?.warmBaseKey || "";
+      let residentPrefixState = this.#prefixStates.get(sessionKey)
+        || (sessionState?.prefixKey ? {
+          prefixKey: sessionState.prefixKey,
+          bootstrapInjected: Boolean(sessionState.bootstrapInjected),
+        } : null);
+      const currentPrefixKey = warmBase?.sessionKey || "";
       let baseState = null;
       let resolvedWarmBase = null;
       if (warmBase?.sessionKey && typeof warmBase.create === "function") {
@@ -308,35 +318,43 @@ export class LocalHostKvCoordinator {
           baseState = null;
         }
       }
-      const warmBaseChanged = Boolean(warmBase?.sessionKey && residentWarmBaseKey !== warmBase.sessionKey && (residentWarmBaseKey || hasSsdState));
-      const warmBaseUnavailable = Boolean(
-        warmBase?.requiresTranscript
-        && residentWarmBaseKey === warmBase.sessionKey
-        && !resolvedWarmBase,
+      const prefixChanged = Boolean(
+        currentPrefixKey
+        && residentPrefixState?.prefixKey
+        && residentPrefixState.prefixKey !== currentPrefixKey,
       );
-      if (warmBaseChanged && hasSsdState) {
+      const bootstrapUnavailable = Boolean(
+        residentPrefixState?.bootstrapInjected
+        && (!currentPrefixKey || residentPrefixState.prefixKey !== currentPrefixKey || !resolvedWarmBase),
+      );
+      if (prefixChanged && hasSsdState) {
         try {
           if (typeof this.store.remove === "function") await this.store.remove({ sessionKey, fingerprint: this.fingerprint });
         } catch (error) {
           await this.#diagnose("warm_base_discard_failed", error);
         }
         hasSsdState = false;
-        this.#warmBaseKeys.delete(sessionKey);
       }
-      if (warmBaseUnavailable && hasSsdState) {
+      if (bootstrapUnavailable && hasSsdState) {
         try {
           if (typeof this.store.remove === "function") await this.store.remove({ sessionKey, fingerprint: this.fingerprint });
         } catch (error) {
           await this.#diagnose("warm_base_session_discard_failed", error);
         }
         hasSsdState = false;
-        this.#warmBaseKeys.delete(sessionKey);
+      }
+      if (prefixChanged || bootstrapUnavailable) {
+        // The same reset applies to a GPU-hot lane with no SSD copy. Otherwise
+        // a cold rebuild after a missing/new prefix would re-persist the stale
+        // in-memory metadata that forced the rebuild in the first place.
+        this.#prefixStates.delete(sessionKey);
+        residentPrefixState = null;
       }
       const lease = leaseLocalHostResidency(this.#residency, {
         sessionKey,
         fingerprint: this.fingerprint,
         hasSsdState,
-        forceCold: warmBaseChanged || warmBaseUnavailable,
+        forceCold: prefixChanged || bootstrapUnavailable,
       });
       if (lease.kind === "queue") throw new Error("No local host lane became available after admission.");
       this.#residency = lease.residency;
@@ -360,11 +378,14 @@ export class LocalHostKvCoordinator {
         if (action.type === "save_lru_to_ssd") {
           this.#recordEvent("switching", { slot: action.slot });
           try {
-            const warmBaseKey = this.#warmBaseKeys.get(action.sessionKey);
+            const prefixState = this.#prefixStates.get(action.sessionKey);
             const saved = await this.store.save({
               sessionKey: action.sessionKey,
               fingerprint: action.fingerprint,
-              ...(warmBaseKey ? { warmBaseKey } : {}),
+              ...(prefixState?.prefixKey ? {
+                prefixKey: prefixState.prefixKey,
+                bootstrapInjected: prefixState.bootstrapInjected,
+              } : {}),
               slot: action.slot,
               signal,
             });
@@ -388,7 +409,6 @@ export class LocalHostKvCoordinator {
             } else {
               this.#counters.restores += 1;
               restoreMs = Number(restored.restoreMs) || 0;
-              if (sessionState?.warmBaseKey) this.#warmBaseKeys.set(sessionKey, sessionState.warmBaseKey);
               this.#recordEvent("restored", { slot: action.slot, durationMs: restoreMs });
             }
           } catch (error) {
@@ -404,7 +424,9 @@ export class LocalHostKvCoordinator {
           await this.#erase(action.slot);
         }
       }
-      let activeWarmBase = hasSsdState ? resolvedWarmBase : null;
+      let prefixKey = residentPrefixState?.prefixKey || currentPrefixKey;
+      let bootstrapInjected = Boolean(residentPrefixState?.bootstrapInjected);
+      let activeWarmBase = bootstrapInjected ? resolvedWarmBase : null;
       if (warmBase?.sessionKey && typeof warmBase.create === "function") {
         let baseReady = Boolean(baseState) && Boolean(resolvedWarmBase);
         if (!hasSsdState && baseReady) {
@@ -416,6 +438,8 @@ export class LocalHostKvCoordinator {
               restoreMs = Number(restored.restoreMs) || 0;
               tier = "warm";
               activeWarmBase = resolvedWarmBase;
+              prefixKey = warmBase.sessionKey;
+              bootstrapInjected = true;
               this.#recordEvent("restored", { slot: lease.slot, durationMs: restoreMs });
             } else {
               baseReady = false;
@@ -429,14 +453,18 @@ export class LocalHostKvCoordinator {
         // A missing base is an ordinary cold request. Never make the user
         // wait while their first message creates a reusable cache; managed
         // setup owns that one-time prefill.
-        if ((baseReady || hasSsdState) && !activeWarmBase && !warmBase.requiresTranscript) activeWarmBase = warmBase;
+        if (!hasSsdState && baseReady && !activeWarmBase && !warmBase.requiresTranscript) {
+          activeWarmBase = warmBase;
+          prefixKey = warmBase.sessionKey;
+          bootstrapInjected = true;
+        }
       }
       if (tier === "gpu") this.#recordEvent("running", { slot: lease.slot });
-      return { slot: lease.slot, tier, restoreMs, warmBase: activeWarmBase, warmBaseKey: activeWarmBase?.sessionKey || "" };
+      return { slot: lease.slot, tier, restoreMs, warmBase: activeWarmBase, prefixKey, bootstrapInjected };
     });
   }
 
-  async #complete({ slot, sessionKey, success, warmBaseKey = "" }) {
+  async #complete({ slot, sessionKey, success, prefixKey = "", bootstrapInjected = false }) {
     if (!this.assignSlots) return;
     await this.#exclusive(async () => {
       this.#residency = completeLocalHostResidency(this.#residency, {
@@ -446,12 +474,12 @@ export class LocalHostKvCoordinator {
         success,
       });
       if (!success) {
-        this.#warmBaseKeys.delete(sessionKey);
+        this.#prefixStates.delete(sessionKey);
         this.#recordEvent("failed", { slot });
         await this.#erase(slot);
       } else {
-        if (warmBaseKey) this.#warmBaseKeys.set(sessionKey, warmBaseKey);
-        else this.#warmBaseKeys.delete(sessionKey);
+        if (prefixKey) this.#prefixStates.set(sessionKey, { prefixKey, bootstrapInjected: Boolean(bootstrapInjected) });
+        else this.#prefixStates.delete(sessionKey);
         this.#recordEvent("hot", { slot });
       }
     });
@@ -482,11 +510,14 @@ export class LocalHostKvCoordinator {
       for (const lane of this.#residency.lanes) {
         if (lane.state !== "hot") continue;
         try {
-          const warmBaseKey = this.#warmBaseKeys.get(lane.sessionKey);
+          const prefixState = this.#prefixStates.get(lane.sessionKey);
           const result = await this.store.save({
             sessionKey: lane.sessionKey,
             fingerprint: lane.fingerprint,
-            ...(warmBaseKey ? { warmBaseKey } : {}),
+            ...(prefixState?.prefixKey ? {
+              prefixKey: prefixState.prefixKey,
+              bootstrapInjected: prefixState.bootstrapInjected,
+            } : {}),
             slot: lane.slot,
           });
           if (result?.saved) {
@@ -525,16 +556,28 @@ export class LocalHostKvCoordinator {
         // own P-way scheduler. SSD swapping is disabled because restoring slot
         // N and then letting the server choose another slot would corrupt the
         // cache mapping; fair admission and complete Codex history remain safe.
-        if (!this.assignSlots) return run({ cache: { tier: "llama_auto" }, slot: null });
+        if (!this.assignSlots) {
+          this.#totals.requests += 1;
+          const result = await run({ cache: { tier: "llama_auto" }, slot: null });
+          this.#recordUsage(result, { tier: "llama_auto" });
+          return result;
+        }
         const prepared = await this.#prepare(sessionKey, signal, warmBase);
         try {
+          this.#totals.requests += 1;
           const result = await run({
             cache: { tier: prepared.tier, ...(prepared.restoreMs ? { restoreMs: prepared.restoreMs } : {}) },
             slot: prepared.slot,
             warmBase: prepared.warmBase,
           });
           const savedMs = this.#recordUsage(result, prepared);
-          await this.#complete({ slot: prepared.slot, sessionKey, success: result?.ok !== false, warmBaseKey: prepared.warmBaseKey });
+          await this.#complete({
+            slot: prepared.slot,
+            sessionKey,
+            success: result?.ok !== false,
+            prefixKey: prepared.prefixKey,
+            bootstrapInjected: prepared.bootstrapInjected,
+          });
           if (savedMs) this.#recordEvent("time_saved", { slot: prepared.slot, savedMs });
           return result;
         } catch (error) {

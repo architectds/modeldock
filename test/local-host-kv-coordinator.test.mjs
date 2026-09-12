@@ -8,22 +8,22 @@ const FINGERPRINT = "llama-b10549:qwen-q4:262144:q4_0:q4_0";
 function fixture({ laneCount = 1, assignSlots = true } = {}) {
   const calls = [];
   const stored = new Map();
-  const warmBaseKeys = new Map();
+  const prefixStates = new Map();
   const warmBaseTranscripts = new Map();
   const store = {
     async has({ sessionKey, fingerprint }) { return stored.get(sessionKey) === fingerprint; },
     async lookup({ sessionKey, fingerprint }) {
       return stored.get(sessionKey) === fingerprint ? {
-        warmBaseKey: warmBaseKeys.get(sessionKey) || "",
+        ...(prefixStates.has(sessionKey) ? prefixStates.get(sessionKey) : {}),
         ...(warmBaseTranscripts.has(sessionKey) ? { warmBaseTranscript: warmBaseTranscripts.get(sessionKey) } : {}),
       } : null;
     },
     async invalidateExcept({ fingerprint }) { calls.push({ action: "invalidate", fingerprint }); return { invalidated: [] }; },
-    async save({ sessionKey, fingerprint, warmBaseKey, warmBaseTranscript }) {
-      calls.push({ action: "save", sessionKey, fingerprint, ...(warmBaseKey ? { warmBaseKey } : {}), ...(warmBaseTranscript ? { warmBaseTranscript } : {}) });
+    async save({ sessionKey, fingerprint, prefixKey, bootstrapInjected = false, warmBaseTranscript }) {
+      calls.push({ action: "save", sessionKey, fingerprint, ...(prefixKey ? { prefixKey, bootstrapInjected } : {}), ...(warmBaseTranscript ? { warmBaseTranscript } : {}) });
       stored.set(sessionKey, fingerprint);
-      if (warmBaseKey) warmBaseKeys.set(sessionKey, warmBaseKey);
-      else warmBaseKeys.delete(sessionKey);
+      if (prefixKey) prefixStates.set(sessionKey, { prefixKey, bootstrapInjected });
+      else prefixStates.delete(sessionKey);
       if (warmBaseTranscript) warmBaseTranscripts.set(sessionKey, warmBaseTranscript);
       else warmBaseTranscripts.delete(sessionKey);
       return { saved: true };
@@ -38,7 +38,7 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
       calls.push({ action: "remove", sessionKey, fingerprint });
       if (stored.get(sessionKey) !== fingerprint) return { removed: false, removalFailures: [] };
       stored.delete(sessionKey);
-      warmBaseKeys.delete(sessionKey);
+      prefixStates.delete(sessionKey);
       warmBaseTranscripts.delete(sessionKey);
       return { removed: true, removalFailures: [] };
     },
@@ -54,7 +54,7 @@ function fixture({ laneCount = 1, assignSlots = true } = {}) {
     assignSlots,
     onDiagnostic: (value) => diagnostics.push(value),
   });
-  return { calls, stored, warmBaseKeys, warmBaseTranscripts, diagnostics, coordinator, store, slotClient };
+  return { calls, stored, prefixStates, warmBaseTranscripts, diagnostics, coordinator, store, slotClient };
 }
 
 test("single-slot coordinator keeps the current conversation hot and restores an exact inactive conversation from SSD", async () => {
@@ -83,6 +83,45 @@ test("single-slot coordinator keeps the current conversation hot and restores an
   assert.equal(coordinator.snapshot().activeCount, 0);
   assert.equal(coordinator.snapshot().pendingCount, 0);
   assert.equal(coordinator.snapshot().hotCount, 1);
+});
+
+test("a cold-started conversation restores from SSD without injecting a bootstrap it never used", async () => {
+  const { coordinator, calls } = fixture();
+  const warmBase = {
+    sessionKey: "d".repeat(64),
+    requiresTranscript: true,
+    messages: [{ role: "user", content: "Reply with exactly BOOTSTRAP_READY." }],
+    async create() { throw new Error("a user request must not build the missing base"); },
+  };
+  const seen = [];
+  for (const conversationId of ["a", "b", "a"]) {
+    await coordinator.run({
+      conversationId,
+      warmBase,
+      run: async ({ cache, warmBase: activeWarmBase }) => {
+        seen.push({ conversationId, cache, activeWarmBase });
+        return { ok: true };
+      },
+    });
+  }
+
+  assert.deepEqual(seen.map(({ conversationId, cache }) => ({ conversationId, cache })), [
+    { conversationId: "a", cache: { tier: "cold" } },
+    { conversationId: "b", cache: { tier: "cold" } },
+    { conversationId: "a", cache: { tier: "ssd", restoreMs: 4 } },
+  ]);
+  assert.equal(seen.every(({ activeWarmBase }) => activeWarmBase === null), true,
+    "restoring a full cold conversation must not insert a synthetic turn into its history");
+  const aKey = kvSessionKey({ conversationId: "a" });
+  const savedA = calls.find((call) => call.action === "save" && call.sessionKey === aKey);
+  assert.deepEqual(
+    { prefixKey: savedA?.prefixKey, bootstrapInjected: savedA?.bootstrapInjected },
+    { prefixKey: warmBase.sessionKey, bootstrapInjected: false },
+    "the checkpoint separately records prefix identity and bootstrap use",
+  );
+  assert.equal(calls.some((call) => call.action === "remove" && call.sessionKey === aKey), false,
+    "an absent bootstrap marker is not a prefix change");
+  assert.equal(calls.some((call) => call.action === "restore" && call.sessionKey === aKey), true);
 });
 
 test("managed setup seeds an immutable completed warm base before any user conversation", async () => {
@@ -220,6 +259,7 @@ test("coordinator exposes bounded content-free lane events and measures cached-w
       ok: true,
       firstResponseLatencyMs: 2_000,
       usage: { input_tokens: 1_000, output_tokens: 10, input_tokens_details: { cached_tokens: 0 } },
+      llamaTimings: { cacheTokens: 0, promptTokens: 1_000, promptMs: 2_000, promptTps: 500 },
     }),
   });
   await coordinator.run({
@@ -232,6 +272,7 @@ test("coordinator exposes bounded content-free lane events and measures cached-w
   });
 
   const telemetry = coordinator.snapshot().telemetry;
+  assert.equal(telemetry.totals.requests, 2);
   assert.equal(telemetry.windowMs, 300_000);
   assert.equal(telemetry.totals.inputTokens, 2_000);
   assert.equal(telemetry.totals.cachedTokens, 800);
@@ -243,6 +284,29 @@ test("coordinator exposes bounded content-free lane events and measures cached-w
   assert.ok(telemetry.events.some((event) => event.kind === "hot"));
   assert.equal(telemetry.events.some((event) => "sessionKey" in event || "conversationId" in event), false,
     "monitor telemetry never exposes a conversation identity");
+});
+
+test("llama-managed slots still count every managed-run request", async () => {
+  const { coordinator } = fixture({ assignSlots: false });
+  await coordinator.run({
+    conversationId: "llama-auto",
+    run: async ({ cache, slot }) => {
+      assert.deepEqual(cache, { tier: "llama_auto" });
+      assert.equal(slot, null);
+      return {
+        ok: true,
+        usage: { input_tokens: 400, output_tokens: 20, input_tokens_details: { cached_tokens: 300 } },
+        llamaTimings: { cacheTokens: 300, promptTokens: 100, promptMs: 200, promptTps: 500 },
+      };
+    },
+  });
+  assert.deepEqual(coordinator.snapshot().telemetry.totals, {
+    requests: 1,
+    inputTokens: 400,
+    cachedTokens: 300,
+    outputTokens: 20,
+    timeSavedMs: 0,
+  });
 });
 
 test("coordinator caps the five-minute swimlane event stream under repeated session switches", async () => {

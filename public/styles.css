@@ -158,7 +158,7 @@ h2 { margin: 0; font-size: 17px; }
 /* Canvas bitmap dimensions change with device pixel ratio. The local monitor
    must still keep a fixed CSS box; otherwise each redraw feeds the enlarged
    bitmap back into layout and grows exponentially. */
-#hostdash-prefill-wave, #hostdash-decode-wave { display: block; width: 100%; height: 92px; }
+#hostdash-prefill-wave, #hostdash-decode-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 .wave-tooltip {
   position: absolute;
   top: 2px;

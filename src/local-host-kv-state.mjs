@@ -70,7 +70,20 @@ function compareOldest(a, b) {
 }
 
 function normalizeState(value) {
-  const warmBaseKey = value?.warmBaseKey ? assertSessionKey(value.warmBaseKey) : "";
+  // `warmBaseKey` was the old representation for two different facts: which
+  // static prefix a conversation used, and whether its hidden bootstrap turn
+  // was actually injected. Normalize that persisted boundary once into two
+  // independent facts. Old states with no key remain valid cold checkpoints.
+  const prefixKey = value?.prefixKey
+    ? assertSessionKey(value.prefixKey)
+    : value?.warmBaseKey
+      ? assertSessionKey(value.warmBaseKey)
+      : "";
+  const bootstrapInjected = value?.bootstrapInjected === undefined
+    ? Boolean(value?.warmBaseKey)
+    : value.bootstrapInjected;
+  if (typeof bootstrapInjected !== "boolean") throw new TypeError("KV bootstrap injection state must be a boolean.");
+  if (bootstrapInjected && !prefixKey) throw new TypeError("A bootstrapped KV state needs its static prefix identity.");
   const warmBaseTranscript = normalizeWarmBaseTranscript(value?.warmBaseTranscript);
   return Object.freeze({
     sessionKey: assertSessionKey(value?.sessionKey),
@@ -80,7 +93,7 @@ function normalizeState(value) {
     promptTokens: nonNegativeInteger(value?.promptTokens, "A KV state prompt token count"),
     savedAt: timestamp(value?.savedAt, "A KV state saved timestamp"),
     lastAccessedAt: timestamp(value?.lastAccessedAt || value?.savedAt, "A KV state access timestamp"),
-    ...(warmBaseKey ? { warmBaseKey } : {}),
+    ...(prefixKey ? { prefixKey, bootstrapInjected } : {}),
     ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
   });
 }
@@ -166,7 +179,8 @@ export function touchLocalHostKvState(manifest, { sessionKey, fingerprint, at = 
 export function planLocalHostKvStateWrite(manifest, {
   sessionKey,
   fingerprint,
-  warmBaseKey,
+  prefixKey,
+  bootstrapInjected = false,
   warmBaseTranscript,
   filename,
   bytes,
@@ -177,7 +191,7 @@ export function planLocalHostKvStateWrite(manifest, {
   const state = normalizeState({
     sessionKey: assertSessionKey(sessionKey),
     fingerprint,
-    ...(warmBaseKey ? { warmBaseKey: assertSessionKey(warmBaseKey) } : {}),
+    ...(prefixKey ? { prefixKey: assertSessionKey(prefixKey), bootstrapInjected } : {}),
     ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
     filename,
     bytes,

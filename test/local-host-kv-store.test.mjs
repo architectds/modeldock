@@ -114,17 +114,19 @@ test("slot-state restore is session- and fingerprint-exact, and a missing file b
   }
 });
 
-test("a checkpoint retains only the hashed immutable bootstrap key needed to validate a restored Chat prefix", async () => {
+test("a checkpoint separates hashed prefix identity from bootstrap injection", async () => {
   const fixture = await setup();
   try {
     const sessionKey = kvSessionKey({ conversationId: "warm-session" });
-    const warmBaseKey = "a".repeat(64);
-    const saved = await fixture.store.save({ sessionKey, fingerprint: FINGERPRINT, warmBaseKey });
+    const prefixKey = "a".repeat(64);
+    const saved = await fixture.store.save({ sessionKey, fingerprint: FINGERPRINT, prefixKey, bootstrapInjected: false });
     const lookedUp = await fixture.store.lookup({ sessionKey, fingerprint: FINGERPRINT });
-    assert.equal(saved.state.warmBaseKey, warmBaseKey);
-    assert.equal(lookedUp.warmBaseKey, warmBaseKey);
+    assert.equal(saved.state.prefixKey, prefixKey);
+    assert.equal(saved.state.bootstrapInjected, false);
+    assert.equal(lookedUp.prefixKey, prefixKey);
+    assert.equal(lookedUp.bootstrapInjected, false);
     const raw = await readFile(fixture.manifestFile, "utf8");
-    assert.ok(raw.includes(warmBaseKey));
+    assert.ok(raw.includes(prefixKey));
     assert.equal(raw.includes("warm-session"), false, "the manifest never keeps a raw conversation id");
   } finally {
     await rm(fixture.root, { recursive: true, force: true });

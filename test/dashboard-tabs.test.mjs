@@ -88,7 +88,7 @@ function managedHostSnapshot() {
         { at: Date.now() - 10_800, kind: "restored", slot: 0, durationMs: 1_200 },
         { at: Date.now() - 1_000, kind: "hot", slot: 0 },
       ],
-      totals: { inputTokens: 240_000, cachedTokens: 180_000, outputTokens: 12_000, timeSavedMs: 48_000 },
+      totals: { requests: 6, inputTokens: 240_000, cachedTokens: 180_000, outputTokens: 12_000, timeSavedMs: 48_000 },
       coldPrefillTps: 500,
       coldPrefillSamples: 2,
     },
@@ -960,7 +960,18 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
     await sleep(8);
     finish.markFirstResponse();
     await sleep(8);
-    finish({ localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] } });
+    finish({
+      localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] },
+      llamaTimings: {
+        cacheTokens: redraw * 100,
+        promptTokens: 1_000,
+        promptMs: 2_000,
+        promptTps: 500,
+        decodeTokens: 100,
+        decodeMs: 2_000,
+        decodeTps: 50,
+      },
+    });
     await sleep(160);
   }
   await sleep(350);
@@ -995,6 +1006,8 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
       swimlanes: document.querySelectorAll('#hostdash-swimlanes .swimlane').length,
       swimSegments: document.querySelectorAll('#hostdash-swimlanes .swim-segment').length,
       prefillCount: document.getElementById('hostdash-prefill-count')?.textContent,
+      prefillMs: document.getElementById('hostdash-prefill-ms-last')?.textContent,
+      cacheHit: document.getElementById('hostdash-cache-hit-last')?.textContent,
       selectedSession: document.getElementById('session-select')?.value,
       overflowing: [...document.querySelectorAll('#local-host-dashboard, .hostdash-grid, .hostdash-totals, .swimlane-track')]
         .filter((node) => node.scrollWidth > node.clientWidth + 1)
@@ -1014,11 +1027,39 @@ test("the managed-host monitor keeps its canvas geometry and history bounded", {
   assert.equal(monitor.swimlanes, 1, "the managed lane renders as one swimlane");
   assert.ok(monitor.swimSegments >= 2, "the lane timeline renders cold, restore, and hot events");
   assert.equal(monitor.selectedSession, "host-session-0", "the regression exercises an active dashboard session filter");
+  assert.equal(monitor.prefillCount, "6", "the footer reports every request in the managed run, not the bounded plot length");
+  assert.equal(monitor.prefillMs, "2.0 s", "the prefill card uses llama.cpp prompt_ms directly");
+  assert.equal(monitor.cacheHit, "33.3%", "the cache card uses cache_n / (cache_n + prompt_n)");
   assert.notEqual(hostCountsBeforeFilter.prefill, "0", "the fixture produced host-wide prefill history");
   assert.equal(monitor.prefillCount, hostCountsBeforeFilter.prefill, "host-wide prefill history survives a trace-session filter");
   assert.equal(await evaluate(`document.getElementById('hostdash-decode-last')?.textContent`), hostCountsBeforeFilter.decode,
     "host-wide decode history survives the same trace-session filter");
   assert.deepEqual(monitor.overflowing, [], "the managed-host board does not overflow its visible columns");
+
+  for (const [canvasId, tooltipId] of [
+    ["hostdash-prefill-wave", "hostdash-prefill-tooltip"],
+    ["hostdash-decode-wave", "hostdash-decode-tooltip"],
+  ]) {
+    const hover = JSON.parse(await evaluate(`(() => {
+      const canvas = document.getElementById('${canvasId}');
+      const rect = canvas.getBoundingClientRect();
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        clientX: rect.left + rect.width / 2,
+        clientY: rect.top + rect.height / 2,
+      }));
+      const tip = document.getElementById('${tooltipId}');
+      return JSON.stringify({ hidden: tip.hidden, text: tip.textContent, left: tip.style.left });
+    })()`));
+    assert.equal(hover.hidden, false, `${canvasId} opens the shared wave tooltip`);
+    assert.match(hover.text, /tps/i, `${canvasId} reports throughput in the shared format`);
+    assert.match(hover.left, /%$/, `${canvasId} positions the tooltip over the selected sample`);
+    assert.equal(await evaluate(`(() => {
+      const canvas = document.getElementById('${canvasId}');
+      canvas.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
+      return document.getElementById('${tooltipId}').hidden;
+    })()`), true, `${canvasId} hides the tooltip on leave`);
+  }
 });
 
 test("the managed-host board collapses to one column without horizontal overflow", { timeout: 120_000 }, async (t) => {

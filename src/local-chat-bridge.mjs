@@ -259,6 +259,34 @@ function responseUsage(usage) {
   };
 }
 
+// llama.cpp reports model-internal prompt/decode work in the terminal Chat
+// chunk. Keep one normalized representation for diagnostics and the managed
+// host monitor; never infer this work from gateway wall time.
+export function normalizeLlamaServerTimings(value) {
+  if (!value || typeof value !== "object") return undefined;
+  const metric = (field) => {
+    const number = Number(value[field]);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
+  };
+  const cacheTokens = metric("cache_n");
+  const promptTokens = metric("prompt_n");
+  const promptMs = metric("prompt_ms");
+  const decodeTokens = metric("predicted_n");
+  const decodeMs = metric("predicted_ms");
+  const reportedPromptTps = metric("prompt_per_second");
+  const reportedDecodeTps = metric("predicted_per_second");
+  if (!cacheTokens && !promptTokens && !promptMs && !decodeTokens && !decodeMs) return undefined;
+  return Object.freeze({
+    cacheTokens,
+    promptTokens,
+    promptMs,
+    promptTps: reportedPromptTps || (promptTokens > 0 && promptMs > 0 ? (promptTokens * 1000) / promptMs : 0),
+    decodeTokens,
+    decodeMs,
+    decodeTps: reportedDecodeTps || (decodeTokens > 0 && decodeMs > 0 ? (decodeTokens * 1000) / decodeMs : 0),
+  });
+}
+
 function chatReasoningText(message) {
   if (!message || typeof message !== "object") return "";
   for (const field of ["reasoning_content", "reasoning", "reasoning_text"]) {
@@ -381,6 +409,7 @@ class ChatResponseAssembler {
     this.calls = new Map();
     this.nextOutputIndex = 0;
     this.usage = undefined;
+    this.timings = undefined;
     this.finishReason = "";
   }
 
@@ -458,6 +487,7 @@ class ChatResponseAssembler {
   push(chunk) {
     const events = this.start(chunk);
     if (chunk?.usage) this.usage = responseUsage(chunk.usage);
+    if (chunk?.timings) this.timings = normalizeLlamaServerTimings(chunk.timings) || this.timings;
     for (const choice of Array.isArray(chunk?.choices) ? chunk.choices : []) {
       if (typeof choice?.finish_reason === "string" && choice.finish_reason) this.finishReason = choice.finish_reason;
       const delta = choice?.delta || {};
@@ -644,7 +674,14 @@ export async function pipeChatCompletionStream(body, res, {
       for (const event of finalEvents) await write(event);
       const completedResponse = finalEvents.find((event) => event.type === "response.completed")?.response;
       res.end();
-      return { bytes, upstreamBytes, interrupted, failure: completedResponse?.output?.length ? "" : "Local Chat completion had no output.", completedResponse };
+      return {
+        bytes,
+        upstreamBytes,
+        interrupted,
+        failure: completedResponse?.output?.length ? "" : "Local Chat completion had no output.",
+        completedResponse,
+        llamaTimings: assembler.timings,
+      };
     }
   } finally {
     res.removeListener("close", onClose);
@@ -665,5 +702,5 @@ export async function pipeChatCompletionStream(body, res, {
     }
     if (interrupted) reader?.cancel?.().catch(() => {});
   }
-  return { bytes, upstreamBytes, interrupted, failure: "", completedResponse: undefined };
+  return { bytes, upstreamBytes, interrupted, failure: "", completedResponse: undefined, llamaTimings: assembler.timings };
 }

@@ -15,7 +15,7 @@ import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
 import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
-import { chatCompletionToResponse, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
+import { chatCompletionToResponse, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
@@ -4110,6 +4110,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let bytesOut = 0;
   let upstreamResponseBytes = 0;
   let completedResponse;
+  let llamaTimings;
   let responseCompleted = false;
   let responseFailure = "";
   const tee = createUsageTee((event) => {
@@ -4255,6 +4256,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         bytesOut = piped.bytes;
         upstreamResponseBytes = piped.upstreamBytes || piped.bytes;
         if (piped.completedResponse) completedResponse = piped.completedResponse;
+        llamaTimings = piped.llamaTimings;
         if (piped.failure) responseFailure = piped.failure;
         interrupted = piped.interrupted && !responseCompleted;
       } else {
@@ -4267,6 +4269,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           throw new Error("Local Chat upstream returned invalid JSON.");
         }
         const response = chatCompletionToResponse(chatCompletion, { restoreCall: restoreChatCall });
+        llamaTimings = normalizeLlamaServerTimings(chatCompletion.timings);
         const body = JSON.stringify(response);
         completedResponse = response;
         tee.push(Buffer.from(body));
@@ -4375,6 +4378,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       upstreamResponseBytes,
       clientResponseBytes: bytesOut,
       imageTransfer,
+      ...(llamaTimings ? { llamaTimings } : {}),
     });
     metrics?.recordResponseTransform?.(transformReport(), transferMetrics(transfer, { streaming: true, routeReason: route.reason, upstreamRequestBytes: upstreamBytes }));
     metrics?.recordResponseUsage?.({ bytesOut, upstreamBytes: upstreamResponseBytes, usage: traceUsage });
@@ -4395,6 +4399,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       firstResponseLatencyMs,
       latencyMs: Date.now() - startedAt,
       upstream: target.provider,
+      llamaTimings,
     };
     } catch (error) {
       return relayThrowExit(res, error, { finish, resultFields: { route } });

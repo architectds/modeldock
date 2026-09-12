@@ -538,11 +538,14 @@ function renderSessions(recent, names = {}) {
 // it uses the gateway's bounded, content-free lane events rather than trying
 // to reverse-engineer scheduler state from a completed-request log.
 const hostDash = {
+  runKey: "",
   prefill: [],
   decode: [],
   seen: new Set(),
   prefillPeak: { peak: 0 },
   decodePeak: { peak: 0 },
+  prefillHover: { hover: -1 },
+  decodeHover: { hover: -1 },
   prefillPoints: [],
   decodePoints: [],
 };
@@ -665,7 +668,23 @@ function renderLocalHostDashboard(data) {
   const empty = $("hostdash-empty");
   if (empty) empty.hidden = managed;
   section.hidden = !managed;
-  if (!managed) return;
+  if (!managed) {
+    hostDash.prefillHover.hover = -1;
+    hostDash.decodeHover.hover = -1;
+    const prefillTooltip = $("hostdash-prefill-tooltip");
+    const decodeTooltip = $("hostdash-decode-tooltip");
+    if (prefillTooltip) prefillTooltip.hidden = true;
+    if (decodeTooltip) decodeTooltip.hidden = true;
+    return;
+  }
+
+  const runKey = `${Number(data.startedAt) || 0}:${localHost.hostId || ""}`;
+  if (hostDash.runKey !== runKey) {
+    hostDash.runKey = runKey;
+    hostDash.prefill.length = 0;
+    hostDash.decode.length = 0;
+    hostDash.seen.clear();
+  }
 
   // The backend exposes a bounded recent window. Retain dedupe ids only while
   // they remain in that window: otherwise a long-running browser tab retains
@@ -679,22 +698,27 @@ function renderLocalHostDashboard(data) {
   for (const item of recent) {
     if (item.kind !== "responses" || item.status !== "ok" || !item.localCache?.tier || hostDash.seen.has(item.id)) continue;
     hostDash.seen.add(item.id);
-    const restoreMs = Number(item.localCache.restoreMs) || 0;
-    // Prefill speed is charged net of the SSD restore: the restore bought the
-    // speed, so it must not be billed against it. Cached input is likewise
-    // excluded: reporting cached history as new prefill made the old card lie.
-    const firstMs = Number(item.firstResponseLatencyMs) || 0;
-    const prefillMs = Math.max(0, firstMs - restoreMs);
-    const inTokens = Number(item.inputTokens) || 0;
-    const cachedTokens = Math.min(inTokens, Number(item.cachedTokens) || 0);
-    const prefillTokens = Math.max(0, inTokens - cachedTokens);
-    if (prefillTokens > 0 && prefillMs > 0) {
-      appendBoundedPoint(hostDash.prefill, { id: item.id, t: item.startedAt || 0, v: prefillTokens / (prefillMs / 1000) });
+    const timings = item.llamaTimings || {};
+    const promptTokens = Math.max(0, Number(timings.promptTokens) || 0);
+    const cacheTokens = Math.max(0, Number(timings.cacheTokens) || 0);
+    const promptMs = Math.max(0, Number(timings.promptMs) || 0);
+    const promptTps = Math.max(0, Number(timings.promptTps) || 0);
+    if (promptTokens > 0 && promptMs > 0 && promptTps > 0) {
+      appendBoundedPoint(hostDash.prefill, {
+        id: item.id,
+        t: item.startedAt || 0,
+        v: promptTps,
+        promptMs,
+        promptTokens,
+        cacheTokens,
+        cacheRate: cacheTokens / (cacheTokens + promptTokens),
+      });
     }
-    const outTokens = Number(item.outputTokens) || 0;
-    const decodeMs = Math.max(0, (Number(item.latencyMs) || 0) - firstMs);
-    if (outTokens > 0 && decodeMs > 0) {
-      appendBoundedPoint(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: outTokens / (decodeMs / 1000) });
+    const decodeTokens = Math.max(0, Number(timings.decodeTokens) || 0);
+    const decodeMs = Math.max(0, Number(timings.decodeMs) || 0);
+    const decodeTps = Math.max(0, Number(timings.decodeTps) || 0);
+    if (decodeTokens > 0 && decodeMs > 0 && decodeTps > 0) {
+      appendBoundedPoint(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: decodeTps, decodeMs, decodeTokens });
     }
   }
 
@@ -704,15 +728,16 @@ function renderLocalHostDashboard(data) {
   const prefillVisible = hostDash.prefill;
   hostDash.prefillPeak.peak = prefillVisible.reduce((max, point) => Math.max(max, point.v), 0);
   const prefillCanvas = $("hostdash-prefill-wave");
-  if (prefillCanvas) drawWave(prefillCanvas, prefillVisible, hostDash.prefillPeak.peak, -1, WAVE_BLUE, hostDash.prefillPoints);
-  set("hostdash-prefill-last", prefillVisible.length ? number(Math.round(prefillVisible[prefillVisible.length - 1].v)) : "—");
-  set("hostdash-prefill-avg", prefillVisible.length ? number(Math.round(hostDashAvg(prefillVisible))) : "—");
-  set("hostdash-prefill-count", number(prefillVisible.length));
+  if (prefillCanvas) drawWave(prefillCanvas, prefillVisible, hostDash.prefillPeak.peak, hostDash.prefillHover.hover, WAVE_BLUE, hostDash.prefillPoints);
+  const lastPrefill = prefillVisible[prefillVisible.length - 1];
+  set("hostdash-prefill-last", lastPrefill ? number(Math.round(lastPrefill.v)) : "—");
+  set("hostdash-prefill-ms-last", lastPrefill ? duration(lastPrefill.promptMs) : "—");
+  set("hostdash-cache-hit-last", lastPrefill ? percent(lastPrefill.cacheRate) : "—");
 
   const decodeVisible = hostDash.decode;
   hostDash.decodePeak.peak = decodeVisible.reduce((max, point) => Math.max(max, point.v), 0);
   const decodeCanvas = $("hostdash-decode-wave");
-  if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, -1, WAVE_VIOLET, hostDash.decodePoints);
+  if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, hostDash.decodeHover.hover, WAVE_VIOLET, hostDash.decodePoints);
   set("hostdash-decode-last", decodeVisible.length ? number(Math.round(decodeVisible[decodeVisible.length - 1].v)) : "—");
   set("hostdash-decode-avg", decodeVisible.length ? number(Math.round(hostDashAvg(decodeVisible))) : "—");
 
@@ -724,6 +749,7 @@ function renderLocalHostDashboard(data) {
   set("hostdash-read-total", compactTokens(totals.inputTokens));
   set("hostdash-reused-total", compactTokens(totals.cachedTokens));
   set("hostdash-output-total", compactTokens(totals.outputTokens));
+  set("hostdash-prefill-count", number(totals.requests || 0));
   const calibrated = Number(telemetry.coldPrefillSamples) > 0;
   set("hostdash-time-saved", calibrated ? duration(totals.timeSavedMs || 0) : "—");
   set("hostdash-time-saved-label", calibrated ? t("hostdash.timeSaved") : t("hostdash.calibrating"));
@@ -733,7 +759,6 @@ function renderLocalHostDashboard(data) {
   set("hostdash-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
   set("hostdash-gpu-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
   set("hostdash-restores", number(counters.restores || 0));
-  set("hostdash-prefill-restore-last", lastRestore ? duration(lastRestore.durationMs) : "—");
   set("hostdash-restore-last", lastRestore ? duration(lastRestore.durationMs) : "—");
   const slots = $("hostdash-gpu-slots");
   if (slots) {
@@ -1309,6 +1334,8 @@ events.onerror = () => {
   attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawWave(canvas, visibleCacheHistory, 1, hover, WAVE_BLUE, cacheWavePoints), formatValue: percent });
   attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, visibleDataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
   attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, visibleTpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
+  attachAreaWaveHover({ canvasId: "hostdash-prefill-wave", tooltipId: "hostdash-prefill-tooltip", pointsRef: hostDash.prefillPoints, hoverState: hostDash.prefillHover, draw: (canvas, hover) => drawWave(canvas, hostDash.prefill, hostDash.prefillPeak.peak, hover, WAVE_BLUE, hostDash.prefillPoints), formatValue: tps });
+  attachAreaWaveHover({ canvasId: "hostdash-decode-wave", tooltipId: "hostdash-decode-tooltip", pointsRef: hostDash.decodePoints, hoverState: hostDash.decodeHover, draw: (canvas, hover) => drawWave(canvas, hostDash.decode, hostDash.decodePeak.peak, hover, WAVE_VIOLET, hostDash.decodePoints), formatValue: tps });
 
 poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
