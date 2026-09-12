@@ -95,7 +95,8 @@ function managedHostSnapshot() {
   };
 }
 
-async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false, nativeVision = false } = {}) {
+async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false, nativeVision = false, bundled = false } = {}) {
+  const runtime = bundled ? await import("../dist/modeldock.mjs") : { createServices, createApp };
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const port = await availablePort();
   const nativeCatalogFile = path.join(dir, "native-catalog.json");
@@ -111,7 +112,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
       }],
     }), "utf8");
   }
-  const services = createServices({
+  const services = runtime.createServices({
     host: "127.0.0.1",
     port,
     profile: { ...OPENCODE_GO_PROFILE },
@@ -255,7 +256,7 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     };
   }
 
-  const { app } = createApp(services);
+  const { app } = runtime.createApp(services);
   const server = app.listen(port, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(async () => {
@@ -874,8 +875,12 @@ test("changing only the vision provider persists its selected model across refre
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
     return;
   }
-  const { base, services } = await startDashboard(t, { nativeVision: true });
-  const { evaluate } = await openBrowser(t, chromePath, { instance: "vision-persistence" });
+  const { base, services } = await startDashboard(t, { nativeVision: true, bundled: true });
+  const onboarded = await fetch(`${base}/api/onboarding/complete`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(onboarded.status, 200);
+  const { send, evaluate } = await openBrowser(t, chromePath, { instance: "vision-persistence" });
   await evaluate(`location.href = ${JSON.stringify(base)}`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await sleep(250);
@@ -911,6 +916,26 @@ test("changing only the vision provider persists its selected model across refre
     provider: document.getElementById('vision-provider-select').value,
     model: document.getElementById('vision-model-select').value,
   })`)), { provider: "openai", model: "gpt-5.6-luna" });
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(process.env.MODELDOCK_TEST_SCREENSHOT, Buffer.from(shot.result.data, "base64"));
+  }
+  const cleared = await fetch(`${base}/api/models`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ visionModel: "" }),
+  });
+  assert.equal(cleared.status, 200);
+  await evaluate(`location.reload()`);
+  for (let i = 0; i < 40; i += 1) {
+    await sleep(100);
+    if (await evaluate(`document.getElementById('vision-provider-select')?.options.length > 1`)) break;
+  }
+  assert.equal(await evaluate(`document.getElementById('vision-provider-select').value`), "",
+    "a disabled fallback must not pretend to be OpenCode Go");
+  assert.equal(await evaluate(`document.getElementById('vision-model-select').value`), "");
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.none.png`, Buffer.from(shot.result.data, "base64"));
+  }
 });
 
 // The monitor redraws whenever an SSE status snapshot arrives. At fractional

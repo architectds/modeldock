@@ -11,9 +11,9 @@
 // every write into one temp dir per test process, which the sandbox cleanup
 // (scripts/cleanup-sandbox.mjs, "modeldock-*" prefix) reaps later.
 //
-// MODELDOCK_ENV_FILE is intentionally NOT set here: install/restart tests
-// spawn real install.sh/restart.sh children that must keep reading their own
-// root/.env (envFileFor gives MODELDOCK_ENV_FILE top priority).
+// envFileFor follows the isolated state directory too. Do not pin ENV_FILE
+// here: a child installer may explicitly choose its own config root, and must
+// not inherit a parent test's configuration path.
 import { mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";

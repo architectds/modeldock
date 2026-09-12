@@ -1056,12 +1056,15 @@ function renderModelOptions(data, currentRoute = currentRouteView(data)) {
     const wanted = visionProviderOverride && visionProviders.some((provider) => provider.id === visionProviderOverride)
       ? visionProviderOverride
       : selectedVisionProvider;
-    fillSelect(visionProviderSelect, visionProviders, {
+    // An empty saved selection is None, not permission to display the first
+    // paid provider. Keep the same empty option used by the model selector.
+    const items = wanted ? visionProviders : [{ id: "", label: t("models.none") }, ...visionProviders];
+    fillSelect(visionProviderSelect, items, {
       value: wanted,
       disabled: !visionProviders.length || modelBusy,
     });
   }
-  const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value || selectedVisionProvider);
+  const visionFilter = (model) => model.supportsVision && model.provider === (visionProviderSelect?.value ?? selectedVisionProvider);
   const visionModels = models.options
     .filter(visionFilter)
     .sort((a, b) => (b.balanceScore ?? -1) - (a.balanceScore ?? -1) || a.id.localeCompare(b.id));

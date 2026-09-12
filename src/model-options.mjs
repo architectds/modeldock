@@ -162,7 +162,7 @@ export function anyProviderRouteConfigured(config) {
 // lose their "active" pass without a configured token.
 export function visionOptionsAcrossProviders(config, providerId) {
   return modelOptions(config, providerId).filter((model) =>
-    model.supportsVision && (model.provider === providerId || providerRouteConfigured(config, model.provider))
+    model.supportsVision && (model.native || model.provider === providerId || providerRouteConfigured(config, model.provider))
   );
 }
 

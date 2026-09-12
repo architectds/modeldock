@@ -3,7 +3,7 @@ import test from "node:test";
 import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
-import { reconcileLocalHostsOnBoot } from "../src/server.mjs";
+import { reconcileLocalHostsOnBoot, codexModelCatalog } from "../src/server.mjs";
 import {
   beginHostApply,
   createObservedHost,
@@ -55,6 +55,7 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
       label: "Qwen3.8-27B",
       supportsVision: true,
       contextWindow: 262_144,
+      autoCompactTokenLimit: 183_500,
     }],
   });
   let catalogWrites = 0;
@@ -84,8 +85,13 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
   assert.equal(snapshot.llamacpp.models[0].supportsVision, false);
   assert.equal(snapshot.llamacpp.models[0].chatTemplateSupportsObjectArguments, true,
     "the next local tool continuation uses the live Qwen template contract after a gateway restart");
-  assert.equal(snapshot.llamacpp.models[0].autoCompactTokenLimit, 183_500,
-    "a managed local lane compacts early enough to avoid Codex's first-token timeout");
+  assert.equal(Object.hasOwn(snapshot.llamacpp.models[0], "autoCompactTokenLimit"), false,
+    "boot removes the retired 70-percent override from the saved snapshot");
+  const catalog = codexModelCatalog({
+    profileId: "llamacpp", mainModel: "Qwen3.8-27B@llamacpp", tokens: {}, nativeMerge: false,
+  });
+  assert.equal(catalog.models.find((model) => model.slug === "Qwen3.8-27B@llamacpp").auto_compact_token_limit, 209_715,
+    "managed local lanes use the same 80-percent catalog rule as other routed models");
   assert.equal(catalogWrites, 1);
   assert.equal(restartMarks, 1, "Codex is told to reload the corrected Catalog after the gateway comes up");
 });

@@ -492,7 +492,6 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     label: "Qwen3-VL-27B",
     supportsVision: true,
     contextWindow: body.management.capacity.maxSingleRequestTokens,
-    autoCompactTokenLimit: Math.floor(body.management.capacity.maxSingleRequestTokens * 0.7),
   }], "only the verified managed visual model reaches the Codex catalog");
 
   // A ModelDock update can restart the gateway before llama.cpp has answered

@@ -25,19 +25,16 @@ import {
 // Resolve the user configuration (.env) file. Priority:
 //   1. MODELDOCK_ENV_FILE (explicit path)
 //   2. MODELDOCK_CONFIG_DIR/.env
-//   3. ~/.modeldock/.env when it exists (installed layout; cwd is not controllable)
-//   4. <cwd>/.env (dev layout)
+//   3. An isolated state directory owns its own .env as well
+//   4. ~/.modeldock/.env when it exists (installed layout; cwd is not controllable)
+//   5. <cwd>/.env (dev layout)
 // When nothing exists yet, fall back to ~/.modeldock/.env so first-run settings saves
 // land in a cwd-independent location. The resolved path is recorded on the config so
 // the settings API can write back to it.
 // Whether the .env this process resolved belongs to this install.
 //
-// envFileFor falls back to ~/.modeldock/.env whenever MODELDOCK_ENV_FILE and
-// MODELDOCK_CONFIG_DIR are unset, which is the case for every gateway the
-// install tests spawn: they redirect the state directory and the Codex home,
-// but not this. A one-time migration that writes .env therefore rewrote the
-// developer live .env on every `npm test`. Reading it there is fine; writing
-// it is not ours to do.
+// Explicit config overrides may still point outside the state directory.
+// Startup migrations must not silently claim another install's configuration.
 export function ownsEnvFile(file) {
   const resolved = path.resolve(file || envFileFor());
   const ourState = path.resolve(stateDir());
@@ -49,6 +46,11 @@ export function ownsEnvFile(file) {
 export function envFileFor() {
   if (process.env.MODELDOCK_ENV_FILE) return path.resolve(process.env.MODELDOCK_ENV_FILE);
   if (process.env.MODELDOCK_CONFIG_DIR) return path.join(path.resolve(process.env.MODELDOCK_CONFIG_DIR), ".env");
+  // Tests and isolated gateways already redirect stateDir(). Falling through
+  // to the installed user's .env let their settings/disconnect tests overwrite
+  // the real vision preference. Configuration is part of the same isolation.
+  const state = stateDir();
+  if (path.resolve(state) !== path.resolve(defaultStateDir())) return path.join(state, ".env");
   const installed = path.join(os.homedir(), ".modeldock", ".env");
   if (existsSync(installed)) return installed;
   const dev = path.resolve(".env");
@@ -137,13 +139,14 @@ export function isPlaceholderToken(value) {
 // Secret keys are decrypted on the way in, so callers always see the plaintext token;
 // plaintext values (an old unencrypted file) pass through unchanged.
 function applyEnvFile(file) {
-  if (!existsSync(file)) return;
+  if (!existsSync(file)) return {};
   const entries = parseEnvFile(readFileSync(file, "utf8"));
   for (const [key, value] of Object.entries(entries)) {
     if (process.env[key] === undefined) {
       process.env[key] = isSecretKey(key) ? decryptSecret(value) : value;
     }
   }
+  return entries;
 }
 
 // Merge the given entries into the user .env file, preserving comments, blank lines and
@@ -384,7 +387,7 @@ function discoverCodexGoToken(codexHome) {
 export { hasChatGptLogin };
 
 export function loadConfig() {
-  applyEnvFile(envFileFor());
+  const persistedEnv = applyEnvFile(envFileFor());
   const rawHost = process.env.MODELDOCK_HOST || "127.0.0.1";
   if (!isLoopbackHost(rawHost)) {
     throw new Error("MODELDOCK_HOST must be a loopback address for this MVP");
@@ -506,7 +509,11 @@ export function loadConfig() {
   const defaultVisionModel = !nativeMerge
     ? "mimo-v2.5-free"
     : (currentNativeVision ? encodePersistedModelRef(currentNativeVision) : "");
-  const configuredVision = String(process.env.MODELDOCK_VISION_MODEL || "").trim();
+  // This is a dashboard-owned preference. A launcher can inherit an older
+  // process environment across restarts; once saved, the file is authoritative.
+  // Environment-only provisioning still works before the first dashboard save.
+  const configuredVision = String(persistedEnv.MODELDOCK_VISION_MODEL
+    ?? process.env.MODELDOCK_VISION_MODEL ?? "").trim();
   // "none" is the durable representation for a provider with no vision model.
   // An empty env value cannot represent this because it intentionally falls back
   // to the mode-aware default above on the next process start.

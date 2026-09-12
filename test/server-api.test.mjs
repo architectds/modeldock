@@ -256,6 +256,16 @@ test("native vision selection persists its provider without changing the Codex w
   assert.match(persisted, /^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m,
     "the durable selection records the native provider explicitly");
   assert.match(persisted, /^UNRELATED_SETTING=kept$/m);
+  await writeFile(path.join(codexHome, "config.toml"), 'model = "gpt-5.6-luna"\n', "utf8");
+  const enabled = await fetch(`${instance.base}/api/config/mode`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode: "on" }),
+  });
+  assert.equal(enabled.status, 200);
+  const afterEnable = await (await fetch(`${instance.base}/api/models`)).json();
+  assert.equal(afterEnable.selected.visionModel, "gpt-5.6-luna",
+    "re-enabling must not reinterpret native Luna as OpenCode Go Luna");
+  assert.match(await readFile(envFile, "utf8"), /^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m);
 });
 
 test("connecting Ollama publishes local models without changing the selected main model", async (t) => {

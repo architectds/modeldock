@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { loadConfig, hasChatGptLogin, tokenFromCodexToml, encodePersistedModelRef, decodePersistedModelRef } from "../src/config.mjs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { loadConfig, envFileFor, writeEnvFile, hasChatGptLogin, tokenFromCodexToml, encodePersistedModelRef, decodePersistedModelRef } from "../src/config.mjs";
 import { credentialProfiles } from "../src/profiles.mjs";
 
 test("reads an OpenCode bearer token only from a supported provider section", () => {
@@ -23,6 +23,36 @@ test("supports TOML literal strings for an OpenCode backup token", () => {
 
 test("does not treat an unrelated provider token as OpenCode Go", () => {
   assert.equal(tokenFromCodexToml('[model_providers.openai]\nexperimental_bearer_token = "secret"\n'), "");
+});
+
+test("an isolated state directory cannot overwrite the user's installed vision preference", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "modeldock-config-isolation-"));
+  const fakeHome = path.join(root, "user");
+  const installedFile = path.join(fakeHome, ".modeldock", ".env");
+  mkdirSync(path.dirname(installedFile), { recursive: true });
+  const original = "MODELDOCK_VISION_MODEL=gpt-5.6-luna@openai\n";
+  writeFileSync(installedFile, original, "utf8");
+  const keys = ["MODELDOCK_ENV_FILE", "MODELDOCK_CONFIG_DIR", "MODELDOCK_STATE_DIR", "MODELDOCK_VISION_MODEL"];
+  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  t.mock.method(os, "homedir", () => fakeHome);
+  try {
+    delete process.env.MODELDOCK_ENV_FILE;
+    delete process.env.MODELDOCK_CONFIG_DIR;
+    process.env.MODELDOCK_STATE_DIR = path.join(root, "isolated-state");
+    const resolved = envFileFor();
+    // Reproduce a test gateway calling a settings mutation without config.envFile.
+    writeEnvFile({ MODELDOCK_VISION_MODEL: "none" });
+    assert.equal(readFileSync(installedFile, "utf8"), original,
+      "test/discovery mutations must never reach the installed user's .env");
+    assert.equal(resolved, path.join(root, "isolated-state", ".env"));
+    assert.match(readFileSync(resolved, "utf8"), /MODELDOCK_VISION_MODEL=none/);
+  } finally {
+    for (const key of keys) {
+      if (before[key] === undefined) delete process.env[key];
+      else process.env[key] = before[key];
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("loadConfig reads every direct provider credential from the provider registry", () => {
@@ -273,6 +303,12 @@ test("a native vision choice reloads as native even while OpenCode Go is the def
     const config = loadConfig();
     assert.equal(config.profileId, "opencode-go");
     assert.equal(config.visionModel, "gpt-5.6-luna");
+
+    // A restart launched from a long-lived parent can inherit its old value.
+    // The saved dashboard preference must win over that launch snapshot.
+    process.env.MODELDOCK_VISION_MODEL = "gpt-5.6-luna@opencode-go";
+    assert.equal(loadConfig().visionModel, "gpt-5.6-luna",
+      "a stale inherited vision value must not override the saved native choice");
 
     // Existing installs wrote the native slug without its owner. The cached
     // native catalog makes that old value unambiguous during the upgrade.

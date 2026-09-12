@@ -1120,8 +1120,8 @@ export function applyOllamaProfile(config, snapshot) {
 
 // Fill a local engine profile from its connection snapshot, so the catalog and
 // per-model routing publish local models across restarts without re-contacting
-// the engine. The managed launcher may additionally publish a safe compaction
-// limit derived from the host's measured first-token budget.
+// the engine. Do not import the retired managed compaction override: the
+// catalog computes the shared ratio from the final effective context window.
 export function applyLocalEngineProfile(engineId, snapshot) {
   const profile = PROFILES[engineId];
   if (!profile) return null;
@@ -1138,7 +1138,6 @@ export function applyLocalEngineProfile(engineId, snapshot) {
           chatTemplateSupportsObjectArguments: Boolean(model.chatTemplateSupportsObjectArguments),
           mediaMarker: typeof model.mediaMarker === "string" ? model.mediaMarker : "",
           contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
-          autoCompactTokenLimit: Number(model.autoCompactTokenLimit) || 0,
           ownerQualified: true,
           status: model.status || "available",
         }))

@@ -222,10 +222,12 @@ function projectLocalModel(current, {
   chatTemplateSupportsObjectArguments,
   mediaMarker,
   contextWindow = 0,
-  autoCompactTokenLimit = 0,
 } = {}) {
+  // Old managed snapshots carried a 70-percent cap. Local compaction now
+  // derives from the effective catalog window through the shared rule.
+  const { autoCompactTokenLimit: retiredCompactLimit, ...model } = current;
   return {
-    ...current,
+    ...model,
     ...(modelFacts?.modelSlug ? { id: modelFacts.modelSlug } : {}),
     ...(modelFacts?.modelName ? { label: modelFacts.modelName } : {}),
     ...(upstreamId ? { upstreamId } : {}),
@@ -235,7 +237,6 @@ function projectLocalModel(current, {
       : {}),
     ...(typeof mediaMarker === "string" ? { mediaMarker } : {}),
     ...(contextWindow > 0 ? { contextWindow } : {}),
-    ...(autoCompactTokenLimit > 0 ? { autoCompactTokenLimit } : {}),
   };
 }
 
@@ -298,11 +299,6 @@ async function publishManagedLocalEngine(services, record, running) {
     || Number(running?.launch?.ctxSize)
     || Number(record.capabilities?.contextTokens)
     || 0;
-  // Fitting a physical lane and delivering its first token within Codex's
-  // five-minute response deadline are different constraints. Keep the lane
-  // available, but compact managed local histories at 70% before a long
-  // prefill is forced to race the client reconnect timeout.
-  const autoCompactTokenLimit = contextWindow > 0 ? Math.floor(contextWindow * 0.7) : 0;
   const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
   const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
   // A managed argv is useful fallback during recovery, but a running
@@ -318,7 +314,6 @@ async function publishManagedLocalEngine(services, record, running) {
     chatTemplateSupportsObjectArguments: running?.chatTemplateSupportsObjectArguments,
     mediaMarker: running?.mediaMarker,
     contextWindow,
-    autoCompactTokenLimit,
   }));
   const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
   const next = { ...snapshot, launch: record.activeSpec, models };
@@ -349,9 +344,8 @@ async function primeManagedLocalWarmBase(services, record) {
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
-// usable; otherwise the first configured provider becomes active. Main and
-// vision are selected from that same provider so a DeepSeek-only install does
-// not keep advertising an unauthenticated OpenCode vision route.
+// usable; otherwise the first configured provider becomes active. Vision is
+// an independent saved preference, not a derivative of the main provider.
 function onModeSelection(services) {
   const { config, modelSelection } = services;
   const currentProvider = providerForModel(config, modelSelection.mainModel);
@@ -367,24 +361,21 @@ function onModeSelection(services) {
       && model.id === bareModelId(modelSelection.mainModel)
   ));
   const main = currentMain || models[0];
-  // Vision is deliberately cross-provider, so the pick the user is already on
-  // outranks whatever the new main provider happens to catalog: keeping it only
-  // when it shared a provider silently swapped a deliberate choice on every
-  // main-provider switch. A pick no enabled provider can serve falls back to
-  // this provider's own vision model, then to any enabled provider's.
-  const servableVision = visionOptionsAcrossProviders(config, providerId);
-  const visionOwner = providerForModel(config, modelSelection.visionModel);
-  const visionBare = bareModelId(modelSelection.visionModel);
-  const vision = (modelSelection.visionModel
-    && servableVision.find((entry) => entry.provider === visionOwner && bareModelId(entry.id) === visionBare))
-    || servableVision.find((entry) => entry.provider === providerId)
-    || servableVision[0]
-    || null;
+  // Keep the exact identity, including deliberate None. Resolving a native
+  // bare slug through the legacy routed-provider helper changed Luna into
+  // Luna@opencode-go and then overwrote .env. Availability may change during
+  // sign-in/catalog refresh; it is not permission to replace a saved choice.
+  let visionModel = modelSelection.visionModel || "";
+  if (!config.visionModelConfigured) {
+    const available = visionOptionsAcrossProviders(config, providerId);
+    visionModel = (available.find((entry) => entry.id === visionModel)
+      || available.find((entry) => entry.provider === providerId) || available[0])?.id || "";
+  }
   return {
     providerId,
     profile: profileById(providerId),
     mainModel: publishedSlugFor(providerId, main),
-    visionModel: vision?.id || "",
+    visionModel,
   };
 }
 
@@ -401,7 +392,7 @@ function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
 }
 
 function canShowUnavailableSavedModel(config, id) {
-  return String(id).includes(PROVIDER_SEPARATOR) || hasChatGptLogin(config.codexHome);
+  return config.visionModelConfigured || String(id).includes(PROVIDER_SEPARATOR) || hasChatGptLogin(config.codexHome);
 }
 
 function modelsPayload(services) {
@@ -1580,6 +1571,7 @@ export function createApp(services = createServices()) {
     services.modelSelection.visionModel = nextVision;
     config.visionModel = nextVision;
     config.visionModelConfigured = true;
+    recordSettingsEvent({ action: "vision_selection_update", providers: vision ? [vision.provider] : [], filePath: config.settingsEventsFile });
     recordConfigAction(metrics, "models_update", { ok: true });
     return res.json(modelsPayload(services));
   });
