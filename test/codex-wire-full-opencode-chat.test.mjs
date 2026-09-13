@@ -20,6 +20,7 @@ import { gunzipSync } from "node:zlib";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
+const longFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz", import.meta.url))).toString("utf8"));
 
 function listen(server) {
   return new Promise((resolve, reject) => {
@@ -112,6 +113,24 @@ function textStream(text) {
   }]);
 }
 
+function assertChatPairs(messages) {
+  const used = new Set();
+  const pending = new Set();
+  for (const message of messages) {
+    if (message.role === "tool") {
+      assert.ok(pending.delete(message.tool_call_id), "result must belong to the immediately preceding call group");
+    } else {
+      assert.equal(pending.size, 0, "all parallel results must arrive before another message");
+      for (const call of message.tool_calls || []) {
+        assert.ok(!used.has(call.id), "each invocation must have a distinct id");
+        used.add(call.id);
+        pending.add(call.id);
+      }
+    }
+  }
+  assert.equal(pending.size, 0, "history must not end in an orphan call");
+}
+
 test("built bundle bridges the complete original Codex package to strict OpenCode Chat", async (t) => {
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.capture.originalToolCount, 164);
@@ -124,6 +143,24 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
+    if (req.url === "/v1/responses") {
+      try {
+        assert.equal(body.model, "deepseek-v4-flash");
+        const calls = body.input.filter((item) => ["function_call", "custom_tool_call"].includes(item.type));
+        const results = body.input.filter((item) => ["function_call_output", "custom_tool_call_output"].includes(item.type));
+        assert.equal(new Set(calls.map((item) => item.call_id)).size, calls.length);
+        assert.deepEqual(results.map((item) => item.call_id), calls.map((item) => item.call_id));
+        assert.ok(body.input.every((item) => !item.tool_calls && item.role !== "tool"));
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(sse([{ type: "response.completed", response: { id: "resp_history", status: "completed", output: [
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "RESPONSES_HISTORY_OK" }] },
+        ] } }]));
+      } catch (error) {
+        res.writeHead(422, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: error.message }));
+      }
+      return;
+    }
     if (req.url !== "/v1/chat/completions") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "expected Chat Completions endpoint" }));
@@ -142,6 +179,13 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     if (body.model !== "qwen3.8-flash") {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "wrong Go Chat model" }));
+      return;
+    }
+    try {
+      assertChatPairs(body.messages);
+    } catch (error) {
+      res.writeHead(422, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: error.message }));
       return;
     }
     if (body.stream === false) {
@@ -223,11 +267,11 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     }
   });
   await waitForStatus(gatewayPort);
-  const send = async (input, sessionId, stream = true) => {
+  const send = async (input, sessionId, stream = true, model = "qwen3.8-flash@opencode-go") => {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-codex-session-id": sessionId },
-      body: JSON.stringify({ ...fixture.request, model: "qwen3.8-flash@opencode-go", stream, input }),
+      body: JSON.stringify({ ...fixture.request, model, stream, input }),
     });
     const text = await response.text();
     const rejectedTools = requests.at(-1)?.tools || [];
@@ -267,7 +311,40 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   ], "full-go-chat-fixture");
   assert.match(third, /GO_TOOL_LOOP_COMPLETE/);
   assert.equal(requests[2].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_go_c"))?.reasoning_content, "The first tools completed; continue the same task.");
-  const compact = await send([...fixture.request.input,
+  // Reuse the captured long-session history and complete tool table, not a
+  // shortened hand-authored envelope. The added rounds exercise #36's mixed
+  // dialect and reused-id transitions before and after compaction.
+  const history = [...longFixture.input.filter((item) => item.type !== "compaction_trigger"),
+    ...firstTurn, ...secondOutput, { type: "function_call_output", call_id: "call_go_c", output: "done" }];
+  const markers = [];
+  for (let round = 1; round <= 8; round += 1) {
+    const id = round === 3 ? "reuse__2" : "reuse";
+    const call = { type: "function_call", call_id: id, name: "exec_command", arguments: JSON.stringify({ cmd: `echo round_${round}` }) };
+    const chat = { type: "message", role: "assistant", content: null, tool_calls: [
+      { id, type: "function", function: { name: call.name, arguments: call.arguments } },
+    ] };
+    const marker = `ROUND_${round}_RESULT`;
+    markers.push(marker);
+    history.push({ type: "message", role: "user", content: `Run round ${round}.` }, round % 2 ? chat : call);
+    if (round % 2) history.push(call); // Same pending invocation in both dialects.
+    history.push(round % 2
+      ? { type: "function_call_output", call_id: id, output: marker }
+      : { type: "message", role: "tool", tool_call_id: id, content: marker });
+    history.push(
+      { type: "custom_tool_call", call_id: "patch_reused", name: "apply_patch", input: `*** Begin Patch\n*** Add File: round${round}.txt\n+fixture\n*** End Patch` },
+      { type: "custom_tool_call_output", call_id: "patch_reused", output: `PATCH_${round}_RESULT` },
+    );
+    await send(history, "full-go-chat-fixture");
+    const chatResults = requests.at(-1).messages.filter((item) => item.role === "tool").map((item) => item.content);
+    assert.deepEqual(chatResults.filter((text) => /^ROUND_\d+_RESULT$/.test(text)), markers);
+    assert.equal(chatResults.filter((text) => /^PATCH_\d+_RESULT$/.test(text)).length, round);
+  }
+  const switched = await send(history, "full-go-chat-fixture", true, "deepseek-v4-flash@opencode-go");
+  assert.match(switched, /RESPONSES_HISTORY_OK/);
+  const responseResults = requests.at(-1).input.filter((item) => item.type === "function_call_output").map((item) => item.output);
+  assert.deepEqual(responseResults.filter((text) => /^ROUND_\d+_RESULT$/.test(text)), markers);
+
+  const compact = await send([...history,
     { type: "message", role: "user", content: [{ type: "input_text", text: "Summarize the completed work." }] },
     { type: "compaction_trigger" },
   ], "full-go-chat-fixture", false);
@@ -280,4 +357,12 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     { type: "message", role: "user", content: [{ type: "input_text", text: "Resume after compaction." }] },
   ], "full-go-chat-fixture");
   assert.match(resumed, /GO_COMPACTION_RESUMED/);
+  // The first post-compaction tool invocation may reuse a pre-compaction id.
+  await send([
+    ...fixture.request.input, compacted.output[0],
+    { type: "function_call", call_id: "reuse", name: "exec_command", arguments: '{"cmd":"echo after_compact"}' },
+    { type: "function_call_output", call_id: "reuse", output: "AFTER_COMPACT_RESULT" },
+  ], "full-go-chat-fixture");
+  const afterResults = requests.at(-1).messages.filter((item) => item.role === "tool").map((item) => item.content);
+  assert.deepEqual(afterResults, ["AFTER_COMPACT_RESULT"], "pre-compaction pairing state must not leak into the next history");
 });
