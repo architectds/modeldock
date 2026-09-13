@@ -1,6 +1,36 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { refreshProfileModels } from "../src/services.mjs";
+import { profileById } from "../src/profiles.mjs";
+
+test("real Go profile discovers new models without a model argument and retains Zen routing", async () => {
+  const owner = profileById("opencode-go");
+  const profile = { ...owner, availableModels: [...owner.availableModels] };
+  const config = {
+    modelDiscoveryEnabled: true,
+    tokens: { "opencode-go": "test-key" },
+    opencodeBaseUrl: "https://go.example/v1/",
+    zenBaseUrl: "https://zen.example/v1/",
+  };
+  let calls = 0;
+  const fetchImpl = async (url, options) => {
+    calls += 1;
+    assert.equal(url, "https://go.example/v1/models");
+    assert.equal(options.method, undefined);
+    assert.equal(options.headers.Authorization, "Bearer test-key");
+    return Response.json({ data: [{ id: "deepseek-v4.1-flash" }] });
+  };
+  assert.deepEqual(await refreshProfileModels(profile, config, { fetchImpl }), { changed: true, discovered: 1 });
+  assert.equal(calls, 1);
+  assert.equal(profile.availableModels.at(-1).id, "deepseek-v4.1-flash");
+  assert.equal(profile.availableModels.at(-1).endpoint, "responses");
+  assert.deepEqual(await refreshProfileModels(profile, config, { fetchImpl }), { changed: false, discovered: 0 });
+  assert.equal(calls, 2, "later refreshes still query the directory");
+  assert.equal(profile.availableModels.filter((model) => model.id === "deepseek-v4.1-flash").length, 1);
+  assert.equal(owner.baseUrlFor({}), "https://opencode.ai/zen/go/v1");
+  assert.equal(owner.target(config, "deepseek-v4-flash@opencode-go").url, "https://go.example/v1/responses");
+  assert.equal(owner.target(config, "deepseek-v4-flash-free@opencode-go").url, "https://zen.example/v1/responses");
+});
 
 test("directory discovery publishes a listed DeepSeek model without sending an inference probe", async () => {
   const calls = [];

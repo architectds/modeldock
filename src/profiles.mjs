@@ -734,6 +734,10 @@ defineRouting(OPENCODE_GO_PROFILE, {
   // Zen free-tier models are served by a different host than the paid Go
   // endpoint, under the same account and the same token.
   baseUrlFor(config, model) {
+    const goBase = trimBase(config?.opencodeBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
+    // Directory discovery has no model. Only model-specific requests can
+    // select the alternate Zen host; the provider directory belongs to Go.
+    if (model == null) return goBase;
     const entry = modelEntryFor(config, bareModelId(model));
     // The name test is a fallback for a Zen model that is not in the catalog:
     // big-pickle is reachable but unregistered, so entry is undefined for it.
@@ -741,7 +745,7 @@ defineRouting(OPENCODE_GO_PROFILE, {
     const zen = entry?.zen || upstream.endsWith("-free") || upstream === "big-pickle";
     return zen
       ? trimBase(config?.zenBaseUrl || "https://opencode.ai/zen/v1")
-      : trimBase(config?.opencodeBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
+      : goBase;
   },
   target(config, model) {
     const upstream = bareModelId(model);
