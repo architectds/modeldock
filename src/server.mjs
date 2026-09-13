@@ -49,6 +49,7 @@ import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
+import { applyVisionOverrides, readVisionOverrides, visionOverridesPath, writeVisionOverrides } from "./vision-overrides.mjs";
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
@@ -1959,6 +1960,36 @@ export function createApp(services = createServices()) {
     if (restartRequired) recordConfigAction(metrics, "model_enabled_update", { ok: true });
     return res.json({ id: slug, enabled, restartRequired });
   });
+  app.post("/api/models/vision", mutateConfig, async (req, res) => {
+    const { id, supportsVision } = req.body || {};
+    const slug = String(id || "").trim();
+    const model = modelOptions(config).find((entry) => entry.id === slug);
+    if (!model || !profileById(model.provider)?.modelDiscovery) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a remote provider model. Native and local vision capabilities are controlled by their runtime." } });
+    }
+    if (typeof supportsVision !== "boolean") {
+      return res.status(400).json({ error: { type: "invalid_state", message: "supportsVision must be true or false." } });
+    }
+    if (!supportsVision && (services.modelSelection?.visionModel || config.visionModel) === slug) {
+      return res.status(409).json({ error: { type: "model_in_use", message: "Choose a different vision model first, then disable vision for this model." } });
+    }
+    const file = services.visionOverridesFile || visionOverridesPath();
+    const overrides = readVisionOverrides(file);
+    overrides[slug] = supportsVision;
+    writeVisionOverrides(file, overrides);
+    config.visionOverrides = overrides;
+    applyVisionOverrides(allProfiles(), overrides, { publishedSlugFor });
+    services.writeCatalogFile?.();
+    let restartRequired = true;
+    try {
+      await services.configSwitcher.markRestartRequired();
+    } catch (error) {
+      restartRequired = false;
+      recordConfigAction(metrics, "vision_capability_update", { ok: false, error: error.message });
+    }
+    if (restartRequired) recordConfigAction(metrics, "vision_capability_update", { ok: true });
+    return res.json({ id: slug, supportsVision, restartRequired });
+  });
   app.get("/api/models/roster", (req, res) => {
     const totals = rollupTotals(readRollup(services.usageRollupFile || usageRollupPath()));
     // The roster is the only place a switched-off model can be switched back
@@ -1978,6 +2009,8 @@ export function createApp(services = createServices()) {
         providerLabel: providerLabelFor(entry.provider),
         label: entry.label || entry.id,
         supportsVision: Boolean(entry.supportsVision),
+        visionEditable: Boolean(profileById(entry.provider)?.modelDiscovery),
+        visionLocked: Boolean(entry.supportsVision && (services.modelSelection?.visionModel || config.visionModel) === entry.id),
         visionTier: entry.visionTier || "",
         contextWindow: effectiveContextWindow(entry),
         // vendor: the model maker's published figure. native: the Codex

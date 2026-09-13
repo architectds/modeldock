@@ -1665,44 +1665,56 @@ function sortRoster(rows) {
 // The gateway's own selections are drawn as on and locked rather than hidden:
 // the catalog publishes them whatever the file says, so an interactive switch
 // there would be a control that cannot change anything.
-function rosterSwitch(entry, onChanged) {
+function rosterSwitch(entry, onChanged, vision = false) {
   const cell = document.createElement("td");
   cell.className = "roster-switch-cell";
   const wrap = document.createElement("label");
   wrap.className = "roster-switch";
   const input = document.createElement("input");
   input.type = "checkbox";
-  input.checked = entry.published !== false;
-  input.disabled = Boolean(entry.locked);
+  input.checked = vision ? Boolean(entry.supportsVision) : entry.published !== false;
+  const locked = vision ? Boolean(entry.visionLocked) : Boolean(entry.locked);
+  input.disabled = locked;
   const track = document.createElement("span");
   track.className = "roster-switch-track";
   track.append(document.createElement("i"));
   wrap.append(input, track);
-  if (entry.locked) {
+  if (locked) {
     wrap.classList.add("locked");
     wrap.title = t("roster.switchLocked");
   } else {
     wrap.title = input.checked ? t("roster.switchOn") : t("roster.switchOff");
   }
   input.setAttribute("aria-label", `${t("roster.switchLabel")} - ${entry.label}`);
+  const visionLabel = document.createElement("span");
+  const syncVision = () => {
+    if (!vision) return;
+    visionLabel.textContent = t(input.checked ? "roster.yes" : "roster.no");
+    input.setAttribute("aria-label", `Vision - ${entry.label}`);
+    wrap.title = locked
+      ? "Choose a different vision model first to disable this capability."
+      : "Toggle native image input. Saved across restarts and upgrades; restart Codex after changing.";
+  };
+  syncVision();
 
   input.addEventListener("change", async () => {
     const next = input.checked;
     input.disabled = true;
     try {
-      const response = await fetch("/api/models/enabled", {
+      const response = await fetch(vision ? "/api/models/vision" : "/api/models/enabled", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: entry.id, enabled: next }),
+        body: JSON.stringify({ id: entry.id, [vision ? "supportsVision" : "enabled"]: next }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error?.message || `Models ${response.status}`);
-      entry.published = next;
+      if (vision) entry.supportsVision = next;
+      else entry.published = next;
       wrap.title = next ? t("roster.switchOn") : t("roster.switchOff");
       // The row recedes here rather than on the next render: this handler
       // deliberately does not re-render (that would throw away the scroll
       // position of a thirty-row table), so the class has to follow the switch.
-      cell.closest("tr")?.classList.toggle("roster-parked", !next);
+      if (!vision) cell.closest("tr")?.classList.toggle("roster-parked", !next);
       // The restart banner is driven by the same restartRequired flag this
       // route sets, so the row stays put and the page says it once at the top.
       // Re-rendering here would also throw away the scroll position on a
@@ -1712,10 +1724,12 @@ function rosterSwitch(entry, onChanged) {
       input.checked = !next;
       window.alert(error.message);
     } finally {
-      input.disabled = Boolean(entry.locked);
+      input.disabled = locked;
+      syncVision();
     }
   });
   cell.append(wrap);
+  if (vision) cell.append(" ", visionLabel);
   return cell;
 }
 
@@ -1825,7 +1839,9 @@ function rosterRow(entry, rank, onChanged, scales) {
   row.append(context);
   // Yes or no, not a tier: the column answers whether images can be sent at
   // all, and a tier beside a request count reads as a quality score.
-  row.append(rosterCell(t(entry.supportsVision ? "roster.yes" : "roster.no")));
+  row.append(entry.visionEditable
+    ? rosterSwitch(entry, onChanged, true)
+    : rosterCell(t(entry.supportsVision ? "roster.yes" : "roster.no")));
   const usage = entry.usage;
   const requests = usage ? Number(usage.popularity ?? usage.requests) || 0 : null;
   const tpsValue = usage && usage.tps ? Number(usage.tps) : null;

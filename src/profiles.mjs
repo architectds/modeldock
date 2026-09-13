@@ -62,6 +62,11 @@ export function openCodeTransportForModel(modelId) {
   return /^(hy4-preview|minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
 }
 
+// https://www.deepseek.com/en/news/deepseek-v4-1-flash/
+function deepSeekFlashHasVision(id) {
+  return id === "deepseek-v4.1-flash" || id === "deepseek-flash";
+}
+
 // Codex estimates the session history with its own (GPT) tokenizer, which runs
 // ~25-30% under what qwen's tokenizer actually produces. For small local
 // backends (<= LOCAL_CONTEXT_MAX) the advertised window is scaled by
@@ -250,6 +255,7 @@ const OPENCODE_GO_PROFILE = {
   modelDiscovery: true,
   discoveryTransports: new Set(["responses", "chat"]),
   discoveryTransportFor: openCodeTransportForModel,
+  discoveryVisionFor: deepSeekFlashHasVision,
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   // inputNormalizer names a per-model input adaptation the gateway keeps in
@@ -351,6 +357,7 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   settingsInvalidMessage: "A valid DeepSeek API key is required.",
   modelDiscovery: true,
   discoveryTransports: new Set(["responses"]),
+  discoveryVisionFor: deepSeekFlashHasVision,
 
   blockedToolTypes: new Set([]),
   // The official DeepSeek API accepts every Codex local tool as type "function", so
@@ -599,6 +606,7 @@ const COMMAND_CODE_VISION_MODELS = new Set([
   "gpt-5.3-codex",
   "gpt-5.4-mini",
   "deepseek/deepseek-v4-flash-vision-exp",
+  "deepseek/deepseek-v4.1-flash",
   "moonshotai/Kimi-K3",
   "moonshotai/Kimi-K2.7-Code",
   "moonshotai/Kimi-K2.7-Code-Highspeed",

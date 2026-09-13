@@ -23,9 +23,10 @@ import { createDerivedFallback } from "./derived-fallback.mjs";
 import { callerBasePath, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { allProfiles, applyOllamaProfile } from "./profiles.mjs";
+import { allProfiles, applyOllamaProfile, publishedSlugFor } from "./profiles.mjs";
 import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
+import { applyVisionOverrides, readVisionOverrides, visionOverridesPath } from "./vision-overrides.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
@@ -73,14 +74,15 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       .sort((a, b) => a.localeCompare(b))
       .map((id) => {
         const endpoint = profile.discoveryTransportFor?.(id) || "responses";
+        const declaredVision = profile.discoveryVisionFor?.(id);
         const candidate = profile.discoveryModel
           ? profile.discoveryModel(id, directory.get(id))
           : {
               id,
               label: labelForModelId(id),
               endpoint,
-              supportsVision: false,
-              visionStatus: "unknown",
+              supportsVision: declaredVision === true,
+              visionStatus: declaredVision === true ? "documented" : "unknown",
               status: "available",
             };
         // A provider can list models for several dialects. Directory discovery
@@ -97,6 +99,7 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       ...unknown,
     ];
     profile.availableModels = models;
+    applyVisionOverrides([profile], config.visionOverrides, { publishedSlugFor });
     console.log(`[gate] discovered ${unknown.length} ${profile.id} model(s): ${models.length} total`);
     return { changed: true, discovered: unknown.length };
   } catch (error) {
@@ -122,6 +125,9 @@ export function applyNativeVisionDefault(config, modelSelection) {
 
 export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
+  const visionOverridesFile = mutableConfig.visionOverridesFile || visionOverridesPath();
+  mutableConfig.visionOverrides = readVisionOverrides(visionOverridesFile);
+  applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { publishedSlugFor });
   const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
     ? mutableConfig.codexHome
     : path.join(os.homedir(), ".codex");
@@ -254,6 +260,7 @@ export function createServices(config = loadConfig()) {
   let modelCatalogRevision = 0;
   const writeCatalogFile = () => {
     try {
+      applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { publishedSlugFor });
       const catalog = codexModelCatalog({
         ...mutableConfig,
         mainModel: modelSelection.mainModel,
@@ -401,6 +408,7 @@ export function createServices(config = loadConfig()) {
   if (modelRefreshTimer) modelRefreshTimer.unref();
   Object.assign(services, {
     config: mutableConfig, runtime, metrics, zstdMemoryBudget, mediaStore, upstreams, configSwitcher,
+    visionOverridesFile,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,

@@ -7,6 +7,7 @@ import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { CONNECTABLE_ENGINES, readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
+import { applyVisionOverrides, readVisionOverrides } from "./vision-overrides.mjs";
 import { readModelToggles } from "./model-toggles.mjs";
 import { readCustomEndpoints } from "./custom-endpoints.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
@@ -457,6 +458,7 @@ export function loadConfig() {
   // the pickers read this map instead. Without it, editing a native model's
   // window returned 200 and changed neither the page nor the file Codex reads.
   const contextOverrides = readContextOverrides();
+  const visionOverrides = readVisionOverrides();
   // Which published models reach Codex's picker. Read here so every consumer of
   // a config - the catalog writer, the roster, a test fixture - sees the same
   // set without each of them reaching for the file.
@@ -554,6 +556,7 @@ export function loadConfig() {
     tokens,
     customEndpoints,
     contextOverrides,
+    visionOverrides,
     modelToggles,
     ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),
     ollamaSnapshotFile,
@@ -621,6 +624,7 @@ export function loadConfig() {
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
   applyContextOverrides(allProfiles(), contextOverrides, { publishedSlugFor });
+  applyVisionOverrides(allProfiles(), visionOverrides, { publishedSlugFor });
   return config;
 }
 
