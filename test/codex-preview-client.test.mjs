@@ -65,7 +65,7 @@ function stream(event) {
   return `data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`;
 }
 
-function toolStream(name, imagePath) {
+function toolStream(name, imagePath, vision = false) {
   return stream({
     id: "chatcmpl_preview_tool",
     created: 31,
@@ -78,7 +78,7 @@ function toolStream(name, imagePath) {
           index: 0,
           id: "call_preview_images",
           type: "function",
-          function: { name, arguments: JSON.stringify({ paths: [imagePath] }) },
+          function: { name, arguments: JSON.stringify(vision ? { path: imagePath, question: "Describe the fixture." } : { paths: [imagePath] }) },
         }],
       },
       finish_reason: "tool_calls",
@@ -122,7 +122,9 @@ function screenshotPng() {
   return Buffer.from(encodePng({ width, height, channels: 3, depth: 8, data: pixels }));
 }
 
-test("installed Codex replays a bounded preview_images result with its original ref", { timeout: 180_000 }, async (t) => {
+for (const vision of [false, true]) test(vision
+  ? "installed Codex carries the same Go session through stdio vision inspection and continuation"
+  : "installed Codex replays a bounded preview_images result with its original ref", { timeout: 180_000 }, async (t) => {
   const probe = spawnSync("codex", ["--version"], { encoding: "utf8", windowsHide: true, timeout: 30_000 });
   if (probe.error?.code === "ENOENT") {
     t.skip("Codex is not installed on this test host");
@@ -147,16 +149,23 @@ test("installed Codex replays a bounded preview_images result with its original 
   await writeFile(imagePath, original);
 
   const requests = [];
+  const sessionHeaders = [];
   const upstream = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
+    sessionHeaders.push(req.headers["x-opencode-session"]);
+    if (vision && body.stream === false) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ id: "vision_fixture", choices: [{ message: { role: "assistant", content: "VISION_SESSION_OK" }, finish_reason: "stop" }] }));
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     if (requests.length === 1) {
-      const previewTool = (body.tools || []).find((tool) => tool?.function?.name?.endsWith("preview_images"));
-      assert.ok(previewTool, "the complete Codex tool package must include preview_images");
-      res.end(toolStream(previewTool.function.name, imagePath.replace(/\\/g, "/")));
+      const previewTool = (body.tools || []).find((tool) => tool?.function?.name?.endsWith(vision ? "vision_inspect" : "preview_images"));
+      assert.ok(previewTool, "the complete Codex tool package must include the requested image tool");
+      res.end(toolStream(previewTool.function.name, imagePath.replace(/\\/g, "/"), vision));
       return;
     }
     res.end(textStream());
@@ -175,6 +184,7 @@ test("installed Codex replays a bounded preview_images result with its original 
       ...process.env,
       MODELDOCK_PORT: String(gatewayPort),
       MODELDOCK_PROFILE: "opencode-go",
+      MODELDOCK_VISION_MODEL: "qwen3.8-flash@opencode-go",
       MODELDOCK_UPSTREAM_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       OPENCODE_GO_TOKEN: "fixture-token",
       MODELDOCK_STATE_DIR: stateDir,
@@ -211,7 +221,7 @@ test("installed Codex replays a bounded preview_images result with its original 
     "exec", "--ephemeral", "--skip-git-repo-check", "--ignore-rules",
     "--dangerously-bypass-approvals-and-sandbox", "--color", "never", "--json",
     "-C", workspace,
-    "-c", 'model="qwen3.8-flash@opencode-go"',
+    "-c", `model=${JSON.stringify(vision ? "glm-5.3-flash@opencode-go" : "qwen3.8-flash@opencode-go")}`,
     "-c", `openai_base_url=${JSON.stringify(`http://127.0.0.1:${gatewayPort}/v1`)}`,
     "-c", `model_catalog_json=${JSON.stringify(catalogFile.replace(/\\/g, "/"))}`,
     "-c", 'approval_policy="never"',
@@ -231,6 +241,14 @@ test("installed Codex replays a bounded preview_images result with its original 
 
   assert.equal(exitCode, 0, `${stderr}\n${stdout}\n${gatewayStderr}`);
   assert.match(stdout, /PREVIEW_E2E_OK/);
+  assert.ok(sessionHeaders[0], "Codex's conversation id must reach Go");
+  assert.ok(sessionHeaders.every((id) => id === sessionHeaders[0]), "the main and MCP vision calls must belong to the same Codex conversation");
+  if (vision) {
+    assert.equal(requests.length, 3, "main request, auxiliary vision request, then main continuation");
+    assert.equal(requests[1].model, "qwen3.8-flash");
+    assert.match(JSON.stringify(requests[2]), /VISION_SESSION_OK/, "the actual Codex client must replay the successful vision result");
+    return;
+  }
   assert.ok(requests.length >= 2, "Codex must continue after the MCP image result");
   assert.ok(
     requests[0].tools.some((tool) => tool?.function?.name?.endsWith("preview_images")),

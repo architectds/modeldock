@@ -88,7 +88,9 @@ const memoryRequest = config.memoryEnabled
 
 const upstreams = {
   searchWeb: (args) => callMcpTool("web_search_exa", args, baseUrl),
-  inspectVision: (args) => callMcpTool("vision_inspect", args, baseUrl),
+  inspectVision: (args, { sessionId } = {}) => callMcpTool("vision_inspect", args, baseUrl, {
+    headers: sessionId ? { session_id: sessionId } : {},
+  }),
   previewImages: (args) => callMcpToolResult("preview_images", args, baseUrl),
   ...(grokImageAvailable
     ? {

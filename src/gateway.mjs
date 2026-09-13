@@ -21,6 +21,8 @@ import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 import { readCodexAuth } from "./codex-auth.mjs";
+import { sessionIdsFrom, upstreamHeaders } from "./upstream-headers.mjs";
+export { sessionIdsFrom };
 
 // Re-exported so the existing import path keeps working: the tee is SSE
 // machinery and lives with the rest of the framing rules in sse.mjs.
@@ -363,19 +365,6 @@ export function nativeTarget(pathname, search) {
     .replace(/^\/c\/[^/]+\/v1/, "")
     .replace(/^\/v1(?=\/|$)/, "");
   return `${NATIVE_BASE}${withoutPrefix}${search || ""}`;
-}
-
-// Codex marks every request with its conversation and session ids in headers;
-// they ride into usage events so cache rate can be analyzed per session (hit
-// rate vs turns since last compaction) instead of as an anonymous aggregate.
-export function sessionIdsFrom(headers) {
-  const get = (name) => {
-    const value = headers?.[name];
-    return Array.isArray(value) ? String(value[0] ?? "").trim() : String(value ?? "").trim();
-  };
-  const threadId = get("x-codex-parent-thread-id") || get("x-codex-thread-id") || get("thread-id") || get("thread_id");
-  const sessionId = get("session_id") || get("session-id") || get("x-codex-session-id");
-  return { sessionId, threadId };
 }
 
 // The fallback for requests that carry no model id. Per session we remember the
@@ -3796,7 +3785,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     const upstreamRequest = serializedBody({ ...(chatSummary || upstreamSummarizeBody), model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
-      headers: upstreamHeaders(target),
+      headers: upstreamHeaders(target, { incomingHeaders }),
       body: upstreamRequest.body,
       signal,
     });
@@ -4234,7 +4223,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       : upstreamController.signal;
     const upstream = await fetch(target.url, {
       method: "POST",
-      headers: upstreamHeaders(target),
+      headers: upstreamHeaders(target, { incomingHeaders }),
       body: routed.body,
       signal: upstreamSignal,
     });
@@ -4478,13 +4467,4 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   } catch (error) {
     return relayThrowExit(res, error, { finish, resultFields: { route } });
   }
-}
-
-function upstreamHeaders(target) {
-  const headers = {
-    Authorization: `Bearer ${target.token}`,
-    "Content-Type": "application/json",
-    "User-Agent": "modeldock-gateway/0.1",
-  };
-  return headers;
 }

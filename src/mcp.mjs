@@ -1,6 +1,7 @@
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
+import { conversationIdFrom } from "./upstream-headers.mjs";
 
 function textResult(value) {
   return { content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] };
@@ -83,9 +84,11 @@ export function createMcpServer({ upstreams, acceptScopeOnly = false }) {
           }),
           annotations: { readOnlyHint: true, openWorldHint: false },
         },
-        async (args) => {
+        async (args, context) => {
           try {
-            return textResult(await upstreams.inspectVision(args));
+            return textResult(await upstreams.inspectVision(args, {
+              sessionId: conversationIdFrom(context?.http?.req?.headers, context?.mcpReq?._meta),
+            }));
           } catch (error) {
             return errorResult(error);
           }

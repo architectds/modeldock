@@ -12,6 +12,7 @@ import { forEachSseEvent, sseDataLines } from "./sse.mjs";
 import { previewLocalImages } from "./image-preview.mjs";
 import os from "node:os";
 import path from "node:path";
+import { upstreamHeaders } from "./upstream-headers.mjs";
 function safeErrorBody(text) {
   return String(text || "").replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]").slice(0, 1_000);
 }
@@ -423,12 +424,13 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       style: target.transport === "chat" ? "chat" : "responses",
       native: false,
       model: target.model,
+      provider: target.provider,
     };
   }
 
-  async function callVisionModel(model, images, prompt) {
+  async function callVisionModel(model, images, prompt, sessionId) {
     // Resolve the endpoint first: it decides which credential the call needs.
-    const { url, style, native, model: upstreamModel } = visionEndpointFor(model);
+    const { url, style, native, model: upstreamModel, provider } = visionEndpointFor(model);
     const nativeAuth = native ? readCodexAuth(config.codexHome || path.join(os.homedir(), ".codex")) : null;
     const token = native ? nativeAuth.accessToken : tokenFor(config, model);
     if (!token) {
@@ -471,8 +473,9 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+        ...(native
+          ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
+          : upstreamHeaders({ provider, token }, { sessionId })),
         // The native backend bills the turn to this account; routed providers
         // have no such header and must not receive one.
         ...(nativeAuth?.accountId ? { "chatgpt-account-id": nativeAuth.accountId } : {}),
@@ -504,7 +507,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
     return { answer, responseId: parsed.id, usage: parsed.usage };
   }
 
-  async function inspectVision({ image_ref, compare_image_ref, path, question, mode = "general" }) {
+  async function inspectVision({ image_ref, compare_image_ref, path, question, mode = "general" }, { sessionId = "" } = {}) {
     const { readFileSync, existsSync, statSync } = await import("node:fs");
     const { extname, resolve, isAbsolute } = await import("node:path");
 
@@ -591,7 +594,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
 
     let result;
     try {
-      result = await callVisionModel(model, images, prompt);
+      result = await callVisionModel(model, images, prompt, sessionId);
     } catch (error) {
       // The failure is reported as itself. A local engine that is not running
       // should read as a local engine that is not running.

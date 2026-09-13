@@ -137,6 +137,14 @@ test("stdio bridge omits Grok media tools before a Grok session is connected", a
     assert.equal(preview.result.content[1].type, "image");
     assert.equal(Buffer.from(preview.result.content[1].data, "base64").toString(), "preview-bytes");
     assert.equal(gateway.calls.find((message) => message.params?.name === "preview_images")?.params.arguments.paths[0], "D:\\shots\\page.png");
+    for (const [index, threadId] of ["task-a", "task-b", "task-a"].entries()) {
+      const vision = await rpc(bridge, 10 + index, "tools/call", {
+        name: "vision_inspect", arguments: { image_ref: "img_fixture", question: "read" }, _meta: { threadId },
+      });
+      assert.equal(vision.result.isError, undefined);
+      assert.equal(gateway.requests.at(-1).headers.session_id, threadId);
+      assert.equal(gateway.calls.at(-1).params.arguments.sessionId, undefined, "identity must not become a model-visible tool argument");
+    }
   } finally {
     await stopBridge(bridge);
     await gateway.close();

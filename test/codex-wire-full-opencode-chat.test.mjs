@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
+const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
 const longFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz", import.meta.url))).toString("utf8"));
 
@@ -138,11 +138,18 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-wire-go-chat-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [];
+  const sessionHeaders = [];
   const upstream = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
+    sessionHeaders.push(req.headers["x-opencode-session"]);
+    if (!["full-go-chat-fixture", "other-go-task"].includes(req.headers["x-opencode-session"])) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "missing stable x-opencode-session" }));
+      return;
+    }
     if (req.url === "/v1/responses") {
       try {
         assert.equal(body.model, "deepseek-v4-flash");
@@ -365,4 +372,21 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   ], "full-go-chat-fixture");
   const afterResults = requests.at(-1).messages.filter((item) => item.role === "tool").map((item) => item.content);
   assert.deepEqual(afterResults, ["AFTER_COMPACT_RESULT"], "pre-compaction pairing state must not leak into the next history");
+  assert.ok(sessionHeaders.every((id) => id === "full-go-chat-fixture"), "Chat, Responses and compaction retain one conversation identity");
+  await send(fixture.request.input, "other-go-task");
+  assert.equal(sessionHeaders.at(-1), "other-go-task");
+  await send(fixture.request.input, "full-go-chat-fixture");
+  assert.equal(sessionHeaders.at(-1), "full-go-chat-fixture", "another task must not overwrite the first task's header");
+  await Promise.all([
+    send(fixture.request.input, "full-go-chat-fixture"),
+    send(fixture.request.input, "other-go-task"),
+  ]);
+  assert.deepEqual(new Set(sessionHeaders.slice(-2)), new Set(["full-go-chat-fixture", "other-go-task"]));
+  const compactV1 = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses/compact`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "session_id": "other-go-task" },
+    body: JSON.stringify({ ...fixture.request, model: "qwen3.8-flash@opencode-go", stream: false }),
+  });
+  assert.equal(compactV1.status, 200, await compactV1.text());
+  assert.equal(sessionHeaders.at(-1), "other-go-task", "the dedicated compact endpoint preserves its task identity too");
 });
