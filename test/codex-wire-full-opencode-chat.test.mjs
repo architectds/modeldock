@@ -131,6 +131,30 @@ function assertChatPairs(messages) {
   assert.equal(pending.size, 0, "history must not end in an orphan call");
 }
 
+// A routed parallel call group must receive all its results before a message
+// starts another turn. Matching aggregate call/result counts is not enough.
+function assertResponsesToolPairs(input) {
+  const pending = new Set();
+  const callId = (item) => item.call_id;
+  for (const item of input) {
+    if (item?.type === "function_call" || item?.type === "custom_tool_call") {
+      pending.add(callId(item));
+      continue;
+    }
+    if (item?.type === "function_call_output" || item?.type === "custom_tool_call_output") {
+      assert.ok(pending.has(callId(item)), `result ${callId(item)} must belong to the open call group`);
+      pending.delete(callId(item));
+      continue;
+    }
+    assert.equal(
+      pending.size,
+      0,
+      `nothing may sit between a parallel call group and its results (saw ${item?.type}${item?.role ? ` ${item.role}` : ""} before ${[...pending].join(",")})`,
+    );
+  }
+  assert.equal(pending.size, 0, "history must not end in an orphan call");
+}
+
 test("built bundle bridges the complete original Codex package to strict OpenCode Chat", async (t) => {
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.capture.originalToolCount, 164);
@@ -166,6 +190,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
         assert.equal(new Set(calls.map((item) => item.call_id)).size, calls.length);
         assert.deepEqual(results.map((item) => item.call_id), calls.map((item) => item.call_id));
         assert.ok(body.input.every((item) => !item.tool_calls && item.role !== "tool"));
+        assertResponsesToolPairs(body.input);
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(sse([{ type: "response.completed", response: { id: "resp_history", status: "completed", output: [
           { type: "message", role: "assistant", content: [{ type: "output_text", text: "RESPONSES_HISTORY_OK" }] },
@@ -413,4 +438,81 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   });
   assert.equal(compactV1.status, 200, await compactV1.text());
   assert.equal(sessionHeaders.at(-1), "other-go-task", "the dedicated compact endpoint preserves its task identity too");
+
+  // Append a reconstruction of the September parallel-image failure to the
+  // older sanitized August fixture, retaining all 164 tool declarations.
+  // The unsupported-call result exists in Codex history; inserting an image
+  // message before it caused Go to report "No tool output found" instead.
+  const parallelImageUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const parallelGroup = [
+    {
+      type: "function_call",
+      call_id: "call_par_images",
+      name: "mcp__modeldock__preview_images",
+      arguments: JSON.stringify({ files: ["scaling-law-a.png", "scaling-law-b.png"], question: "Compare the two charts." }),
+    },
+    { type: "function_call", call_id: "call_par_agents", name: "collaboration__list_agents", arguments: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "call_par_images",
+      output: [
+        { type: "input_text", text: "Wall time: 9.4832 seconds\nOutput:" },
+        {
+          type: "input_text",
+          text: JSON.stringify({ kind: "screenshot_previews", images: [{ index: 1, file: "scaling-law-a.png", original_ref: "img_parallel_fixture" }] }),
+        },
+        { type: "input_image", image_url: parallelImageUrl },
+      ],
+    },
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "Inspect the chart before continuing." }] },
+    { type: "function_call_output", call_id: "call_par_agents", output: "unsupported call: collaboration__list_agents" },
+  ];
+  const parallelInput = [...fixture.request.input, ...parallelGroup];
+  const runParallelGroup = async (model) => {
+    await send(parallelInput, "full-go-chat-fixture", true, model);
+    const body = requests.at(-1);
+    const start = body.input.findIndex((item) => item.type === "function_call" && item.call_id === "call_par_images");
+    assert.notEqual(start, -1, `${model} must receive the parallel preview group`);
+    assert.deepEqual(
+      body.input.slice(start, start + 4).map((item) => [item.type, item.call_id || item.role]),
+      [
+        ["function_call", "call_par_images"],
+        ["function_call", "call_par_agents"],
+        ["function_call_output", "call_par_images"],
+        ["function_call_output", "call_par_agents"],
+      ],
+      `${model} must keep the parallel group contiguous: no user message may split the two results`,
+    );
+    const imageResult = body.input[start + 2];
+    const agentResult = body.input[start + 3];
+    assert.equal(
+      imageResult.output.some((part) => part.type === "input_image"),
+      false,
+      `${model} promotes pixels out of the tool result`,
+    );
+    assert.ok(
+      imageResult.output.some((part) => part.type === "input_text" && part.text.includes("Wall time: 9.4832 seconds")),
+      `${model} keeps the preview tool text result`,
+    );
+    assert.equal(agentResult.output, "unsupported call: collaboration__list_agents", `${model} keeps the later parallel error result`);
+    const promoted = body.input
+      .slice(start + 4)
+      .find((item) => item.type === "message" && item.role === "user"
+        && Array.isArray(item.content)
+        && item.content.some((part) => part.type === "input_text" && part.text.includes("call_par_images")));
+    assert.ok(promoted, `${model} must keep the promoted preview message after the group`);
+    return promoted;
+  };
+  const referenced = await runParallelGroup("deepseek-v4-flash@opencode-go");
+  assert.equal(referenced.content.some((part) => part.type === "input_image"), false, "a text-only route must not embed pixels");
+  assert.ok(referenced.content.every((part) => part.type === "input_text"), "a text-only route keeps the preview as text");
+  assert.match(
+    referenced.content.map((part) => part.text).join("\n"),
+    /\[Image attachment img_[A-Za-z0-9_-]+: if visual evidence is needed/,
+    "a text-only route must keep the preview by reference",
+  );
+  const visual = await runParallelGroup("deepseek-v4.1-flash@opencode-go");
+  const visualImages = visual.content.filter((part) => part.type === "input_image");
+  assert.equal(visualImages.length, 1, "a vision route keeps the promoted preview pixels");
+  assert.equal(visualImages[0].image_url, parallelImageUrl, "a vision route keeps the exact pixels the tool returned");
 });

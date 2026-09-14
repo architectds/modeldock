@@ -1851,9 +1851,23 @@ export function promoteToolOutputImages(input) {
   if (!Array.isArray(input)) return input;
   let changed = false;
   const output = [];
+  // Canonical normalization already places each group's results contiguously.
+  // Delay promoted messages until that run ends, preserving parallel groups
+  // without introducing another call/result matcher.
+  let pending = null;
+  const flushPromotedImages = () => {
+    if (pending) {
+      output.push(...pending);
+      pending = null;
+    }
+  };
   for (const item of input) {
-    const toolOutput = item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
-    if (!toolOutput || !Array.isArray(item.output)) {
+    if (!isToolOutputItem(item)) {
+      flushPromotedImages();
+      output.push(item);
+      continue;
+    }
+    if (!Array.isArray(item.output)) {
       output.push(item);
       continue;
     }
@@ -1870,7 +1884,7 @@ export function promoteToolOutputImages(input) {
         ? text
         : [{ type: "input_text", text: `[Visual output from tool call ${callId} moved to the following image message.]` }],
     });
-    output.push({
+    (pending ||= []).push({
       type: "message",
       role: "user",
       content: [
@@ -1880,6 +1894,7 @@ export function promoteToolOutputImages(input) {
     });
     changed = true;
   }
+  flushPromotedImages();
   return changed ? output : input;
 }
 

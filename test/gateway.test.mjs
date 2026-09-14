@@ -1073,6 +1073,136 @@ test("promoteToolOutputImages keeps tool text and moves visual bytes into a real
   assert.doesNotMatch(JSON.stringify(promoted[0]), /data:image/, "the tool text no longer carries base64 pixels");
 });
 
+test("promoteToolOutputImages keeps a parallel tool group contiguous before its images", () => {
+  // Reconstruct the observed parallel group, including the valid error result
+  // and developer message interleaved in the original Codex history.
+  const dataUrl = "data:image/png;base64,AAAA";
+  const input = [
+    { type: "function_call", call_id: "call_preview", name: "preview_images", arguments: "{}" },
+    { type: "function_call", call_id: "call_agents", name: "collaboration__list_agents", arguments: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "call_preview",
+      output: [
+        { type: "input_text", text: "preview metadata" },
+        { type: "input_image", image_url: dataUrl },
+      ],
+    },
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "Inspect the rendered chart." }] },
+    { type: "function_call_output", call_id: "call_agents", output: "unsupported call: collaboration__list_agents" },
+  ];
+  const promoted = promoteToolOutputImages(normalizeGatewayInput(input));
+  assert.deepEqual(
+    promoted.map((item) => item.call_id ?? item.type),
+    ["call_preview", "call_agents", "call_preview", "call_agents", "message", "message"],
+    "both results of the parallel group stay directly after the calls",
+  );
+  assert.equal(promoted[3].output, "unsupported call: collaboration__list_agents", "the error output is untouched");
+  assert.equal(promoted[4].role, "user");
+  assert.equal(promoted[4].content[1].image_url, dataUrl);
+  assert.equal(promoted[5].role, "developer");
+});
+
+test("promoteToolOutputImages promotes every image of a mixed function/custom group in result order", () => {
+  const first = "data:image/png;base64,ONE";
+  const second = "data:image/jpeg;base64,TWO";
+  const input = [
+    { type: "function_call", call_id: "call_a", name: "node_repl", arguments: "{}" },
+    { type: "custom_tool_call", call_id: "call_b", name: "preview_images", input: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "call_a",
+      output: [
+        { type: "input_text", text: "rendered" },
+        { type: "input_image", image_url: first },
+      ],
+    },
+    { type: "custom_tool_call_output", call_id: "call_b", output: [{ type: "input_image", image_url: second }] },
+  ];
+  const promoted = promoteToolOutputImages(normalizeGatewayInput(input));
+  assert.deepEqual(
+    promoted.map((item) => item.call_id ?? item.type),
+    ["call_a", "call_b", "call_a", "call_b", "message", "message"],
+  );
+  assert.equal(promoted[4].content[1].image_url, first);
+  assert.equal(promoted[5].content[1].image_url, second);
+  assert.deepEqual(promoted[3].output, [{
+    type: "input_text",
+    text: "[Visual output from tool call call_b moved to the following image message.]",
+  }]);
+});
+
+test("promoteToolOutputImages keeps a developer item between tool output groups in place", () => {
+  const dataUrl = "data:image/png;base64,AAAA";
+  const input = [
+    { type: "function_call", call_id: "call_a", name: "node_repl", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_a", output: [{ type: "input_image", image_url: dataUrl }] },
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "stay on task" }] },
+    { type: "function_call", call_id: "call_b", name: "shell", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_b", output: "done" },
+  ];
+  const promoted = promoteToolOutputImages(normalizeGatewayInput(input));
+  assert.deepEqual(
+    promoted.map((item) => item.call_id ?? item.role),
+    ["call_a", "call_a", "user", "developer", "call_b", "call_b"],
+    "the promoted image stays inside its own tool group",
+  );
+  assert.equal(promoted[2].content[1].image_url, dataUrl);
+});
+
+test("promoteToolOutputImages is identity without an image tool output and never mutates its input", () => {
+  const noImages = [
+    { type: "function_call", call_id: "call_text", name: "shell", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_text", output: "done" },
+    { type: "custom_tool_call_output", call_id: "call_struct", output: [{ type: "input_text", text: "structured" }] },
+  ];
+  assert.equal(promoteToolOutputImages(noImages), noImages, "text-only histories stay byte-identical");
+
+  const dataUrl = "data:image/png;base64,AAAA";
+  const input = [
+    { type: "function_call", call_id: "call_img", name: "node_repl", arguments: "{}" },
+    { type: "function_call", call_id: "call_text", name: "shell", arguments: "{}" },
+    {
+      type: "function_call_output",
+      call_id: "call_img",
+      output: [
+        { type: "input_text", text: "rendered" },
+        { type: "input_image", image_url: dataUrl },
+      ],
+    },
+    { type: "function_call_output", call_id: "call_text", output: "done" },
+  ];
+  const snapshot = structuredClone(input);
+  promoteToolOutputImages(input);
+  assert.deepEqual(input, snapshot, "the incoming Codex envelope stays immutable");
+});
+
+test("a promoted image from a closed turn is still handed off as a ref", () => {
+  const oldImage = "data:image/png;base64,OLD";
+  const meta = (turn_id) => ({ internal_chat_message_metadata_passthrough: { turn_id } });
+  const raw = [
+    { ...meta("turn_old"), type: "message", role: "user", content: [{ type: "input_text", text: "render" }] },
+    { ...meta("turn_old"), type: "function_call", call_id: "call_img", name: "node_repl", arguments: "{}" },
+    { ...meta("turn_old"), type: "function_call", call_id: "call_text", name: "shell", arguments: "{}" },
+    { ...meta("turn_old"), type: "function_call_output", call_id: "call_img", output: [{ type: "input_image", image_url: oldImage }] },
+    { ...meta("turn_old"), type: "function_call_output", call_id: "call_text", output: "done" },
+    { ...meta("turn_current"), type: "message", role: "user", content: [{ type: "input_text", text: "next" }] },
+  ];
+  const normalized = promoteToolOutputImages(normalizeGatewayInput(raw));
+  const rewritten = rewriteHistoricalImages(normalized, {
+    put: () => "img_old",
+    associateMany: () => {},
+  }, {
+    preserveImages: true,
+    keepRecentImages: 0,
+    keepCurrentImages: true,
+    currentStartIndex: currentTurnStartIndex(normalized),
+  });
+  const parts = rewritten.flatMap((item) => Array.isArray(item.content) ? item.content : []);
+  assert.equal(parts.filter((part) => part.type === "input_image").length, 0, "the closed turn's image becomes a ref");
+  assert.match(parts.find((part) => part.type === "input_text" && /img_old/.test(part.text))?.text || "", /img_old/);
+});
+
 test("tool outputs are ordered before their images are promoted so old visual batches become refs", () => {
   const oldImage = "data:image/png;base64,OLD";
   const currentImage = "data:image/png;base64,CURRENT";
