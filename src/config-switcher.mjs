@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { defaultStateDir, stateDir } from "./state-dir.mjs";
 import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
@@ -36,10 +36,22 @@ const MANAGED_END = /^\s*#\s*END\s+modeldock-managed\s*(?:#.*)?$/m;
 // reads config.toml at startup, so an in-place write that dies halfway is
 // exactly the failure that stops Codex from starting.
 async function atomicWrite(file, content) {
-  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
+  // rename() replaces its final path component instead of following it, so an
+  // atomic write to a symlinked config.toml would silently turn the link into a
+  // regular file: the dotfiles copy keeps the old content, the next sync puts
+  // the link back, and the managed route vanishes - on POSIX hosts only, which
+  // is how an installation can look fine on Windows and self-disable on a Mac.
+  // Resolve the link and write the real file atomically in its own directory.
+  let target = file;
+  try {
+    if ((await lstat(file)).isSymbolicLink()) target = await realpath(file);
+  } catch {
+    // Absent or dangling: the plain path stays the target, as before.
+  }
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
   await writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
   try {
-    await rename(tmp, file);
+    await rename(tmp, target);
   } catch (error) {
     await unlink(tmp).catch(() => {});
     throw error;
@@ -64,6 +76,14 @@ const MANAGED_TOP_LEVEL_KEYS = [
   "experimental_realtime_ws_base_url",
 ];
 
+// The two realtime endpoints are part of what makes a managed block *complete*:
+// they are always written with openai_base_url, and they live after it, so a
+// truncated or half-written config cannot carry all three. The detector below
+// requires them for exactly that reason, and both writers read these constants
+// so the rule and the bytes can never drift apart.
+const REALTIME_WEBRTC_BASE_URL = "https://chatgpt.com/backend-api/codex";
+const REALTIME_WS_BASE_URL = "https://api.openai.com/v1";
+
 function providerSection(source) {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const start = lines.findIndex((line) => /^\s*\[model_providers\.modeldock_go\]\s*(?:#.*)?$/i.test(line));
@@ -83,6 +103,27 @@ function isNewManaged(source) {
 
 function hasManagedRoute(source) {
   return isLegacyManaged(source) || isNewManaged(source);
+}
+
+// The sentinel comments are a fence, not the fact. Any tool that re-serializes
+// config.toml from its parsed model (Codex persisting a picker choice, a
+// dotfiles sync, or a script that adds models by hand) keeps every key and
+// drops the comments, and judging the route by comments alone then reported a
+// working installation as Off - after which an enable "restored" a stale backup
+// over the user's current config. The base URL this gateway writes is the fact;
+// the comments only name the block we own.
+function pointsAtLocalGate(source, baseUrl) {
+  const expected = String(baseUrl || "").replace(/\/+$/, "");
+  if (!expected) return false;
+  const written = topLevelString(source, "openai_base_url");
+  if (!written || written.replace(/\/+$/, "") !== expected) return false;
+  // An intact managed block, minus its fence. This is what a re-serializing
+  // writer leaves behind, and it is deliberately narrower than "the base URL
+  // matches": a config truncated to 40% can still hold one complete
+  // openai_base_url line, and that file is corrupt, not managed - it must keep
+  // falling through to the exact backup restore instead of merging garbage.
+  return topLevelString(source, "experimental_realtime_webrtc_call_base_url") === REALTIME_WEBRTC_BASE_URL
+    && topLevelString(source, "experimental_realtime_ws_base_url") === REALTIME_WS_BASE_URL;
 }
 
 function hasCodexRouterBlock(source) {
@@ -247,8 +288,8 @@ export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], ca
   ];
   if (catalogFile) managed.push(`model_catalog_json = ${tomlString(catalogFile)}`);
   managed.push(
-    'experimental_realtime_webrtc_call_base_url = "https://chatgpt.com/backend-api/codex"',
-    'experimental_realtime_ws_base_url = "https://api.openai.com/v1"',
+    `experimental_realtime_webrtc_call_base_url = ${tomlString(REALTIME_WEBRTC_BASE_URL)}`,
+    `experimental_realtime_ws_base_url = ${tomlString(REALTIME_WS_BASE_URL)}`,
     "# END modeldock-managed",
   );
   const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
@@ -333,6 +374,13 @@ export class CodexConfigSwitcher {
     this.mcpEnv = mcpEnv;
   }
 
+  // One derivation of "is Codex routed through this gateway right now", used by
+  // the dashboard status, the enable backup, and disable's restore choice, so
+  // the three can never disagree about whether the route is ours.
+  #routeActive(source) {
+    return hasManagedRoute(source) || pointsAtLocalGate(source, this.baseUrl);
+  }
+
   get model() {
     return typeof this.#model === "function" ? this.#model() : this.#model;
   }
@@ -377,7 +425,7 @@ export class CodexConfigSwitcher {
     }
     let current = "";
     if (configExists) current = await readFile(this.configPath, "utf8");
-    const routeActive = hasManagedRoute(current);
+    const routeActive = this.#routeActive(current);
     const topLevelModel = topLevelString(current, "model");
     const topLevelModelNative = !topLevelModel || !topLevelModel.includes(PROVIDER_SEPARATOR);
     return {
@@ -454,7 +502,7 @@ export class CodexConfigSwitcher {
     // routed at a dead gateway. Strip our managed route first so the backup we take
     // is the true pre-ModelDock baseline.
     let originalWasManaged = false;
-    if (originalExisted && hasManagedRoute(original)) {
+    if (originalExisted && this.#routeActive(original)) {
       originalWasManaged = true;
       const existenceMarker = MANAGED_ORIGINAL_EXISTED.exec(original)?.[1]?.toLowerCase();
       const nl = original.includes("\r\n") ? "\r\n" : "\n";
@@ -555,7 +603,7 @@ export class CodexConfigSwitcher {
     const state = await this.#readState();
     if (!state.enabled) return this.status();
     let current = await this.#readCurrent();
-    const routeActive = hasManagedRoute(current);
+    const routeActive = this.#routeActive(current);
     let backup = "";
     if (routeActive) {
       try {
