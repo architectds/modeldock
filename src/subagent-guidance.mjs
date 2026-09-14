@@ -36,7 +36,7 @@ function partPlainText(part) {
   return "";
 }
 
-function itemPlainText(item) {
+export function itemPlainText(item) {
   if (!item || typeof item !== "object") return "";
   const bits = [];
   const collect = (parts) => {

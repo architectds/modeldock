@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { parseSseData } from "./sse.mjs";
+import { itemPlainText } from "./subagent-guidance.mjs";
 
 export class LocalChatBridgeError extends Error {
   constructor(code, message) {
@@ -217,6 +218,20 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
         const next = assistant();
         next.reasoning_content = next.reasoning_content ? `${next.reasoning_content}\n${reasoning}` : reasoning;
       }
+      continue;
+    }
+    if (item.type === "agent_message") {
+      // Codex collaboration envelope: one agent addressing another. Chat has no
+      // such item type, so the turn joins the history as a labeled user message.
+      // Author and recipient are carried verbatim; the shared item-text
+      // derivation decides which parts are readable plaintext, so a body that
+      // stayed opaque after the relay gate drops out instead of being guessed.
+      const body = itemPlainText(item);
+      if (!body) continue;
+      const author = typeof item.author === "string" && item.author ? item.author : "unknown agent";
+      const recipient = typeof item.recipient === "string" && item.recipient ? item.recipient : "unknown agent";
+      flushAssistant();
+      messages.push({ role: "user", content: escapeMediaMarkerText(`[agent_message from ${author} to ${recipient}]\n${body}`, mediaMarker) });
       continue;
     }
     throw new LocalChatBridgeError("input_item", `Local Chat bridge cannot encode input item ${String(item.type || "unknown")}.`);

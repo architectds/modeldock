@@ -124,6 +124,53 @@ test("Codex custom tool history becomes the same Chat function contract in both 
   assert.deepEqual(local.payload.messages[1].tool_calls[0].function.arguments, { input: "*** Begin Patch\n*** End Patch" });
 });
 
+test("a Codex collaboration agent_message joins Chat history as a labeled user turn", () => {
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      {
+        type: "agent_message",
+        id: "amsg_01a0a1ff-36b4-7483-a6a3-0d9698c66cb6",
+        author: "/root",
+        recipient: "/root/doc_audit_readme",
+        content: [
+          { type: "input_text", text: "Message Type: NEW_TASK\nTask name: /root/doc_audit_readme\nPayload:\n" },
+          { type: "encrypted_content", encrypted_content: "Audit the README." },
+        ],
+        internal_chat_message_metadata_passthrough: { turn_id: "01a0a1ff-3465-7cf1-8328-d5ba6b1abcfc" },
+      },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "start" }] },
+    ],
+  });
+  assert.deepEqual(bridged.payload.messages.map((message) => message.role), ["user", "user"]);
+  const [task, second] = bridged.payload.messages;
+  assert.ok(task.content.startsWith("[agent_message from /root to /root/doc_audit_readme]"), "the envelope keeps its explicit senders");
+  assert.ok(task.content.includes("Message Type: NEW_TASK"), "the visible collaboration header is preserved");
+  assert.ok(task.content.includes("Audit the README."), "a plaintext collaboration body is not dropped");
+  assert.equal(second.content, "start");
+});
+
+test("an agent_message body that stayed opaque after relay drops out instead of failing the turn", () => {
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      { type: "agent_message", author: "/root", recipient: "/root/x", content: [
+        { type: "encrypted_content", encrypted_content: "gAAAAQopaque_cipher_token_shape" },
+      ] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+    ],
+  });
+  assert.deepEqual(bridged.payload.messages.map((message) => message.role), ["user"]);
+  assert.equal(bridged.payload.messages[0].content, "hello");
+});
+
+test("a genuinely unknown input item type still fails closed", () => {
+  assert.throws(
+    () => responsesToChat({ model: "Qwen3.8-27B", input: [{ type: "future_item" }] }),
+    /cannot encode input item future_item/,
+  );
+});
+
 test("llama media sentinels in text history are escaped without touching real images", () => {
   const marker = "<__media_runtime_marker__>";
   const escaped = "<\u200b__media_runtime_marker__>";
@@ -197,6 +244,53 @@ test("the local Chat relay uses the active llama media sentinel for tool output"
     assert.equal(result.ok, true);
     assert.equal(seen.length, 1);
     assert.equal(seen[0].messages.find((message) => message.role === "tool")?.content, `media_marker=${escaped}`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the local Chat relay encodes a collaboration history instead of failing the turn", async (t) => {
+  const id = "Qwen3.8-27B";
+  const selectedModel = `${id}@llamacpp`;
+  applyLocalEngineProfile("llamacpp", {
+    baseUrl: "http://127.0.0.1:11436/v1",
+    models: [{ id, upstreamId: id, label: id, supportsVision: false, contextWindow: 16_384 }],
+  });
+  t.after(() => applyLocalEngineProfile("llamacpp", null));
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    seen.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({
+      id: "chatcmpl_collab",
+      model: id,
+      choices: [{ message: { content: "ACK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 9, completion_tokens: 1 },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await relayResponses({
+      model: selectedModel,
+      stream: false,
+      input: [
+        { type: "agent_message", author: "/root", recipient: "/root/doc_audit_readme", content: [
+          { type: "input_text", text: "Message Type: NEW_TASK\nTask name: /root/doc_audit_readme\nPayload:\n" },
+          { type: "encrypted_content", encrypted_content: "Audit the README." },
+        ] },
+      ],
+    }, gatewayResponse(), {
+      config: { mainModel: selectedModel, profileId: "llamacpp", tokens: {} },
+      mainModel: selectedModel,
+      visionModel: "",
+      knownModels: new Set([selectedModel]),
+      incomingHeaders: { "x-codex-session-id": "collab-relay-session" },
+      requestUrl: "/v1/responses",
+    });
+    assert.equal(result.ok, true, "a collaboration-only history no longer fails the local route");
+    assert.equal(seen.length, 1);
+    const userTexts = seen[0].messages.filter((message) => message.role === "user").map((message) => String(message.content)).join("\n");
+    assert.ok(userTexts.includes("Audit the README."), "the task body reaches the local model as plaintext");
+    assert.ok(userTexts.includes("agent_message from /root"), "the envelope identity survives attribution");
   } finally {
     globalThis.fetch = originalFetch;
   }
