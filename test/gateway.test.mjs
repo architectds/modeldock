@@ -48,6 +48,8 @@ import {
   promoteToolOutputImages,
   RECENT_IMAGE_WINDOW,
   restoreNamespaceCall,
+  restoreToolName,
+  restoreToolNames,
   redactBearer,
   relayCompaction,
   relayNativeAuxiliary,
@@ -5134,6 +5136,224 @@ test("restoreNamespaceCall splits a flattened call back into name and namespace"
   const builtin = { type: "function_call", name: "exec_command", call_id: "call_2", arguments: "{}" };
   assert.equal(restoreNamespaceCall(builtin, namespaces), builtin, "unknown names pass through untouched");
   assert.equal(restoreNamespaceCall(call, new Map()), call, "no namespaces means no rewrite");
+});
+
+// Codex's flattened plugin tools can exceed the 64-character name limit an
+// OpenAI-compatible upstream enforces, and that rejection ends the whole request
+// rather than one call. These two names are the real pair from the captured
+// desktop request in test/fixtures/codex-xai-full-2026-08-21.json.gz.
+const LONG_PLUGIN_TOOL = "mcp__codex_apps__codex_document_control___execute_document_command";
+const LONG_PLUGIN_WIRE = "codex_apps__codex_document_control___execute_document_command";
+const functionTool = (name) => ({ type: "function", name, parameters: { type: "object", properties: {} } });
+
+test("the 66-character plugin tool name from the live capture is what the cap exists for", () => {
+  assert.equal(LONG_PLUGIN_TOOL.length, 66);
+  assert.equal(LONG_PLUGIN_WIRE.length, 61);
+});
+
+test("applyToolPolicy shortens a tool name the upstream would reject", () => {
+  const { tools, toolNames } = applyToolPolicy([functionTool("exec_command"), functionTool(LONG_PLUGIN_TOOL)]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["exec_command", LONG_PLUGIN_WIRE]);
+  assert.ok(tools.every((tool) => tool.name.length <= 64), "every declared name fits the upstream limit");
+  assert.deepEqual(
+    [...toolNames.renames],
+    [[LONG_PLUGIN_WIRE, LONG_PLUGIN_TOOL]],
+    "the restore map is keyed by the name the upstream was given",
+  );
+  // A name that fits is left byte-for-byte alone, so a session already running
+  // keeps the prompt prefix the upstream cached instead of paying to rebuild it.
+  const atLimit = "m".repeat(64);
+  const untouched = applyToolPolicy([functionTool(atLimit)]);
+  assert.equal(untouched.tools[0].name, atLimit);
+  assert.equal(untouched.toolNames.renames.size, 0, "nothing shortened means nothing to restore");
+});
+
+test("the cap keeps a head and a tail when dropping mcp__ cannot fit the name", () => {
+  const head = "a".repeat(27);
+  const tail = "b".repeat(27);
+  const first = `${head}${"X".repeat(47)}${tail}`;
+  const second = `${head}${"Y".repeat(47)}${tail}`;
+  assert.equal(first.length, 101);
+  const once = applyToolPolicy([functionTool(first)]);
+  const wire = once.tools[0].name;
+  assert.match(wire, /^a{27}__[0-9a-f]{6}__b{27}$/, "head, a hash of the whole original, then tail");
+  assert.equal(wire.length, 64);
+  assert.equal(applyToolPolicy([functionTool(first)]).tools[0].name, wire,
+    "the same name shortens the same way on every turn of a session");
+  const both = applyToolPolicy([functionTool(first), functionTool(second)]);
+  const names = both.tools.map((tool) => tool.name);
+  assert.equal(new Set(names).size, 2, "two tools sharing a head and a tail do not collide");
+  assert.deepEqual([...both.toolNames.renames.values()], [first, second]);
+});
+
+test("a shortened name never shadows a tool the client already declared", () => {
+  // `mcp__<x>` would normally shorten to `<x>`, and here the client declares
+  // `<x>` as its own tool. The second one has to fall through to the hash form.
+  const literal = "codex_apps__github___search_installed_repositories_streaming";
+  const long = `mcp__${literal}`;
+  const { tools, toolNames } = applyToolPolicy([functionTool(literal), functionTool(long)]);
+  assert.equal(tools[0].name, literal, "the tool that fits keeps its own name");
+  assert.notEqual(tools[1].name, literal);
+  assert.equal(tools[1].name.length, 64);
+  assert.equal(toolNames.renames.get(tools[1].name), long);
+  assert.equal(new Set(tools.map((tool) => tool.name)).size, 2);
+});
+
+test("a capped namespaced child still resolves in both directions", () => {
+  const namespace = "mcp__codex_apps__codex_document_control__";
+  const child = "execute_a_very_long_document_command";
+  const policy = applyToolPolicy([{
+    type: "namespace",
+    name: namespace,
+    tools: [{ name: child, inputSchema: { type: "object", properties: {} } }],
+  }]);
+  const wire = policy.tools[0].name;
+  assert.ok(wire.length <= 64, "the flattened child name fits the upstream limit");
+  assert.deepEqual(policy.namespaces.get(wire), { name: child, namespace },
+    "the namespace map is keyed by the name the upstream was given");
+  const history = flattenNamespaceCalls(
+    [{ type: "function_call", name: child, namespace, call_id: "call_1", arguments: "{}" }],
+    policy.namespaces,
+    policy.toolNames,
+  );
+  assert.equal(history[0].name, wire, "the replayed call carries the declared name");
+  assert.equal(history[0].namespace, undefined);
+  const restored = restoreNamespaceCall({ type: "function_call", name: wire, call_id: "call_1", arguments: "{}" }, policy.namespaces);
+  assert.equal(restored.name, child, "Codex still sees the pair it declared");
+  assert.equal(restored.namespace, namespace);
+});
+
+test("flattenNamespaceCalls caps replayed flat calls and additional_tools declarations", () => {
+  const policy = applyToolPolicy([functionTool(LONG_PLUGIN_TOOL)]);
+  const input = [
+    { type: "function_call", name: LONG_PLUGIN_TOOL, call_id: "call_1", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_1", output: "done" },
+    { type: "custom_tool_call", name: LONG_PLUGIN_TOOL, call_id: "call_2", input: "x" },
+    { type: "additional_tools", tools: [functionTool(LONG_PLUGIN_TOOL)] },
+    { type: "message", role: "user", content: [] },
+  ];
+  const out = flattenNamespaceCalls(input, policy.namespaces, policy.toolNames);
+  assert.equal(out[0].name, LONG_PLUGIN_WIRE);
+  assert.equal(out[1], input[1], "a call result is keyed by call_id and keeps its shape");
+  assert.equal(out[2].name, LONG_PLUGIN_WIRE, "a custom-tool call is named the same way");
+  assert.equal(out[3].tools[0].name, LONG_PLUGIN_WIRE, "a tool added mid-session is declared with the capped name");
+  assert.equal(out[4], input[4], "an ordinary message is not rebuilt");
+  const restored = restoreToolNames([out[0], out[2]], policy.toolNames.renames);
+  assert.deepEqual(restored.map((item) => item.name), [LONG_PLUGIN_TOOL, LONG_PLUGIN_TOOL]);
+  assert.equal(restoreToolName(input[1], policy.toolNames.renames), input[1], "a call result item is not a call");
+  assert.equal(restoreToolNames([out[3].tools[0]], policy.toolNames.renames)[0], out[3].tools[0],
+    "a declaration is not a call either, so the capped name the upstream was given stays");
+  // With no ledger the name is still shortened: an over-long name fails the whole
+  // request at the upstream, while a name nothing can restore only loses that one
+  // call. The relay always has a ledger, so this is the degraded fallback.
+  assert.equal(flattenNamespaceCalls(input, policy.namespaces)[0].name, LONG_PLUGIN_WIRE);
+});
+
+test("relayResponses sends the capped name upstream and gives Codex back its own", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    const sent = [
+      ...(body.tools || []).map((tool) => tool.name),
+      ...(body.input || []).filter((item) => item.name).map((item) => item.name),
+    ].filter((name) => typeof name === "string" && name.length > 64);
+    // A strict upstream answers for the whole request, not the one tool.
+    if (sent.length) {
+      calls.push({ rejected: sent });
+      return new Response(JSON.stringify({ error: { message: "`name` must be at most 64 characters" } }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+    calls.push(body);
+    const call = (body.input || []).find((item) => item.type === "function_call");
+    return new Response(JSON.stringify({
+      id: "resp_cap",
+      object: "response",
+      model: "deepseek-v4-flash",
+      output: [{ type: "function_call", id: "fc_1", call_id: call?.call_id || "call_1", name: call?.name, arguments: "{}" }],
+      usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "deepseek-v4-flash@opencode-go",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "open the workbook" }] },
+          { type: "function_call", name: LONG_PLUGIN_TOOL, call_id: "call_1", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_1", output: "ready" },
+        ],
+        tools: [functionTool("exec_command"), functionTool(LONG_PLUGIN_TOOL)],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "deepseek-v4-flash@opencode-go",
+        config: { ...configStub(), mainModel: "deepseek-v4-flash@opencode-go" },
+        knownModels: new Set(["deepseek-v4-flash@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].rejected, undefined, "no over-long name reaches the upstream");
+    assert.deepEqual(calls[0].tools.map((tool) => tool.name), ["exec_command", LONG_PLUGIN_WIRE]);
+    assert.equal(calls[0].input.find((item) => item.type === "function_call").name, LONG_PLUGIN_WIRE);
+    const client = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(client.output[0].name, LONG_PLUGIN_TOOL, "Codex resolves the call by the name it declared");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("relayResponses caps and restores a tool name on the Chat transport too", async () => {
+  const sink = collectStream();
+  const res = responseStub(sink);
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push(body);
+    return new Response(JSON.stringify({
+      id: "chatcmpl_cap",
+      model: "qwen3.8-flash",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: LONG_PLUGIN_WIRE, arguments: "{}" } }] },
+        finish_reason: "tool_calls",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await relayResponses(
+      {
+        model: "qwen3.8-flash@opencode-go",
+        stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "open the workbook" }] }],
+        tools: [functionTool("exec_command"), functionTool(LONG_PLUGIN_TOOL)],
+      },
+      res,
+      {
+        ...compactServices(),
+        mainModel: "qwen3.8-flash@opencode-go",
+        config: { ...configStub(), mainModel: "qwen3.8-flash@opencode-go" },
+        knownModels: new Set(["qwen3.8-flash@opencode-go"]),
+        requestUrl: "/v1/responses",
+      },
+    );
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].model, "qwen3.8-flash", "the Go Chat transport is the leg under test");
+    assert.deepEqual(calls[0].tools.map((tool) => tool.function.name), ["exec_command", LONG_PLUGIN_WIRE]);
+    assert.ok(calls[0].tools.every((tool) => tool.function.name.length <= 64), "Chat declares what it can answer for");
+    const client = JSON.parse(Buffer.concat(sink.chunks).toString("utf8"));
+    assert.equal(client.output[0].name, LONG_PLUGIN_TOOL, "the Chat leg restores the name Codex declared");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("pipeNormalizedStream restores the namespace on a full-lifecycle tool call", async () => {

@@ -113,6 +113,21 @@ function textStream(text) {
   }]);
 }
 
+// A real upstream answers for the whole request when one tool name is longer than
+// 64 characters, and the captured Codex desktop package carries five such plugin
+// tools - the reason a Muse Spark turn ended with a 400 instead of an answer.
+function overLongToolNames(body) {
+  const names = [
+    ...(body.tools || []).map((tool) => tool?.function?.name ?? tool?.name),
+    ...(body.input || []).map((item) => item?.name),
+    ...(body.input || []).flatMap((item) => (item?.type === "additional_tools" && Array.isArray(item.tools)
+      ? item.tools.map((tool) => tool?.name)
+      : [])),
+    ...(body.messages || []).flatMap((message) => (message?.tool_calls || []).map((call) => call?.function?.name)),
+  ];
+  return names.filter((name) => typeof name === "string" && name.length > 64);
+}
+
 function assertChatPairs(messages) {
   const used = new Set();
   const pending = new Set();
@@ -191,6 +206,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
         assert.deepEqual(results.map((item) => item.call_id), calls.map((item) => item.call_id));
         assert.ok(body.input.every((item) => !item.tool_calls && item.role !== "tool"));
         assertResponsesToolPairs(body.input);
+        assert.deepEqual(overLongToolNames(body), [], "every name in the sent package fits the upstream limit");
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(sse([{ type: "response.completed", response: { id: "resp_history", status: "completed", output: [
           { type: "message", role: "assistant", content: [{ type: "output_text", text: "RESPONSES_HISTORY_OK" }] },
@@ -226,6 +242,12 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     } catch (error) {
       res.writeHead(422, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: error.message }));
+      return;
+    }
+    const longNames = overLongToolNames(body);
+    if (longNames.length) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `\`name\` must be at most 64 characters, got ${longNames[0].length}` } }));
       return;
     }
     if (body.stream === false) {

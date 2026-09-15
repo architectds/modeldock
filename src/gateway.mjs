@@ -1520,7 +1520,7 @@ export function localWarmBaseFromSessionOpening({ config, model, opening } = {})
   payload = {
     ...payload,
     tools: policy.tools,
-    input: flattenNamespaceCalls(payload.input, policy.namespaces),
+    input: flattenNamespaceCalls(payload.input, policy.namespaces, policy.toolNames),
     instructions: appendLocalHostSafety(stripLocalInstructions(payload.instructions)),
   };
   payload = normalizePayloadForRoute(config, model, payload);
@@ -2059,6 +2059,54 @@ const safeFunctionNamePart = (value) => String(value)
   .replace(/[^A-Za-z0-9_-]/g, (character) => `_x${character.codePointAt(0).toString(16)}_`);
 const safeNamespaceFunctionName = (namespace, name) => `${safeFunctionNamePart(trimNamespaceTail(namespace))}__${safeFunctionNamePart(name)}`;
 
+// OpenAI-compatible upstreams cap a tool name at 64 characters and answer with a
+// request-level 400 when one is longer, which ends the whole turn rather than one
+// tool call. Codex's flattened plugin tools (`mcp__<server>__<tool>`) do exceed
+// it, so the gate shortens any name that cannot fit and restores the original on
+// the way back: the upstream sees a legal name, Codex still resolves the call.
+const MAX_TOOL_NAME_LENGTH = 64;
+const MCP_TOOL_PREFIX = "mcp__";
+// Hash widths tried in order until the shortened name is unique in the request.
+const TOOL_NAME_HASH_WIDTHS = [6, 8, 12, 20];
+
+// The names one request carries. `renames` is the wire -> original map the
+// response path restores from; `used` is every name already spoken for, so a
+// shortened name can never shadow a tool the client also declared.
+function toolNameLedger() {
+  return { renames: new Map(), used: new Set() };
+}
+
+function fitToolName(name, hashWidth) {
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, hashWidth);
+  const budget = MAX_TOOL_NAME_LENGTH - hash.length - 4; // the two "__" separators
+  const head = Math.ceil(budget / 2);
+  return `${name.slice(0, head)}__${hash}__${name.slice(name.length - (budget - head))}`;
+}
+
+// Ladder, cheapest first: fits as-is (byte-stable, so an existing session's
+// prompt cache is untouched) -> drop the redundant `mcp__`, which the remaining
+// name still spells out -> keep the head and tail and put a hash of the original
+// in the middle. Hashing the full original means two tools that share a prefix
+// and a suffix still get different names, and one name always shortens the same
+// way on every turn of a session.
+function toolNameCandidates(name) {
+  const stripped = name.startsWith(MCP_TOOL_PREFIX) ? name.slice(MCP_TOOL_PREFIX.length) : name;
+  const fits = stripped.length <= MAX_TOOL_NAME_LENGTH;
+  const collapsed = TOOL_NAME_HASH_WIDTHS.map((width) => fitToolName(stripped, width));
+  return fits ? [stripped, ...collapsed] : collapsed;
+}
+
+function capToolName(name, ledger) {
+  if (typeof name !== "string" || !name || name.length <= MAX_TOOL_NAME_LENGTH) return name;
+  const taken = (candidate) => ledger?.used?.has(candidate) === true
+    && ledger.renames.get(candidate) !== name;
+  const candidates = toolNameCandidates(name);
+  const candidate = candidates.find((value) => !taken(value)) || candidates[candidates.length - 1];
+  ledger?.renames?.set(candidate, name);
+  ledger?.used?.add(candidate);
+  return candidate;
+}
+
 function functionForCustomTool(tool) {
   return normalizeFunctionTool({
     type: "function",
@@ -2099,7 +2147,7 @@ export function applyToolPolicy(tools, {
   flattenAllNamespaces = false,
   safeNamespaceFunctionNames = false,
 } = {}) {
-  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map(), customToolNames: new Set() };
+  if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map(), customToolNames: new Set(), toolNames: toolNameLedger() };
   const hidden = new Set(hiddenToolNames || []);
   const blocked = new Set(blockedToolTypes || []);
   const hostedOk = new Set(hostedToolTypes || []);
@@ -2112,6 +2160,12 @@ export function applyToolPolicy(tools, {
   // the tool name both contain "__" separators of their own.
   const namespaces = new Map();
   const customToolNames = new Set();
+  // Ledger for the 64-character cap below, seeded with every name this request
+  // declares so a shortened name can never land on a tool that was already there.
+  const toolNames = toolNameLedger();
+  for (const declared of tools) {
+    if (typeof declared?.name === "string") toolNames.used.add(declared.name);
+  }
   const out = [];
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
@@ -2131,14 +2185,19 @@ export function applyToolPolicy(tools, {
           continue;
         }
         stripped.namespaceChildren += 1;
-        namespaces.set(flatName, { name: child.name, namespace: tool.name });
-        out.push(normalizeFunctionTool({ ...child, type: "function", name: flatName }));
+        // Keyed by the name the upstream is given, which is the flat name unless
+        // the cap shortened it: that is what lets the response path and the
+        // replayed history both resolve with one lookup.
+        const wireName = capToolName(flatName, toolNames);
+        namespaces.set(wireName, { name: child.name, namespace: tool.name });
+        out.push(normalizeFunctionTool({ ...child, type: "function", name: wireName }));
       }
       continue;
     }
     if (tool.type === "custom" && typeof tool.name === "string" && customFunctions.has(tool.name)) {
-      out.push(functionForCustomTool(tool));
-      customToolNames.add(tool.name);
+      const wireName = capToolName(tool.name, toolNames);
+      out.push(functionForCustomTool({ ...tool, name: wireName }));
+      customToolNames.add(wireName);
       continue;
     }
     // Hosted tools are decided first, and keep their own counters. Letting a
@@ -2167,9 +2226,22 @@ export function applyToolPolicy(tools, {
       stripped.hidden += 1;
       continue;
     }
+    // The two descriptor types an upstream resolves a call by name for. Codex
+    // declares its plugin tools flat rather than as namespace children, so this
+    // is where a too-long name actually reaches the wire. Hosted tools keep the
+    // name the upstream knows them by, and they are short.
+    if (typeof tool.name === "string" && (tool.type === "function" || tool.type === "custom")) {
+      const wireName = capToolName(tool.name, toolNames);
+      if (wireName !== tool.name) {
+        out.push(tool.type === "function"
+          ? normalizeFunctionTool({ ...tool, name: wireName })
+          : { ...tool, name: wireName });
+        continue;
+      }
+    }
     out.push(tool.type === "function" ? normalizeFunctionTool(tool) : tool);
   }
-  return { tools: out, stripped, namespaces, customToolNames };
+  return { tools: out, stripped, namespaces, customToolNames, toolNames };
 }
 
 function isModelDockNamespace(name) {
@@ -2249,7 +2321,10 @@ export function hiddenToolNamesForModel({ supportsVision = false, modelHiddenToo
 //
 // The pair is resolved against the declarations this request actually carried,
 // so either namespace spelling lands on the one name the upstream was given.
-export function flattenNamespaceCalls(input, namespaces = null) {
+// A replayed call whose flat name is too long for the upstream is shortened the
+// same way its declaration was, and so are the tool descriptors Codex adds
+// mid-session as `additional_tools` items - they carry the same names.
+export function flattenNamespaceCalls(input, namespaces = null, toolNames = null) {
   if (!Array.isArray(input)) return input;
   const byPair = new Map();
   for (const [flatName, split] of namespaces || []) {
@@ -2257,12 +2332,34 @@ export function flattenNamespaceCalls(input, namespaces = null) {
   }
   let changed = false;
   const out = input.map((item) => {
-    if (item?.type !== "function_call" || typeof item.namespace !== "string" || !item.namespace) return item;
-    changed = true;
-    const pair = joinNamespace(item.namespace, item.name);
-    const next = { ...item, name: byPair.get(pair) || pair };
-    delete next.namespace;
-    return next;
+    if (item?.type === "function_call" && typeof item.namespace === "string" && item.namespace) {
+      changed = true;
+      const pair = joinNamespace(item.namespace, item.name);
+      const next = { ...item, name: byPair.get(pair) || capToolName(pair, toolNames) };
+      delete next.namespace;
+      return next;
+    }
+    if (item?.type === "function_call" || item?.type === "custom_tool_call") {
+      const name = capToolName(item.name, toolNames);
+      if (name === item.name) return item;
+      changed = true;
+      return { ...item, name };
+    }
+    if (item?.type === "additional_tools" && Array.isArray(item.tools)) {
+      let toolsChanged = false;
+      const declared = item.tools.map((tool) => {
+        if (!tool || typeof tool !== "object" || typeof tool.name !== "string") return tool;
+        if (tool.type !== "function" && tool.type !== "custom") return tool;
+        const name = capToolName(tool.name, toolNames);
+        if (name === tool.name) return tool;
+        toolsChanged = true;
+        return { ...tool, name };
+      });
+      if (!toolsChanged) return item;
+      changed = true;
+      return { ...item, tools: declared };
+    }
+    return item;
   });
   return changed ? out : input;
 }
@@ -2285,6 +2382,30 @@ export function restoreNamespaceOutput(output, namespaces) {
   let changed = false;
   const out = output.map((item) => {
     const next = restoreNamespaceCall(item, namespaces);
+    if (next !== item) changed = true;
+    return next;
+  });
+  return changed ? out : output;
+}
+
+// Undo a too-long-name shortening on one response item. A namespaced call is
+// already covered - restoreNamespaceCall finds it by the shortened name the map
+// is keyed by - so this is the other half: a call to a tool the client declared
+// flat, which no namespace map knows about.
+export function restoreToolName(item, renames) {
+  if (!renames?.size) return item;
+  if (item?.type !== "function_call" && item?.type !== "custom_tool_call") return item;
+  const original = renames.get(item.name);
+  if (original === undefined || original === item.name) return item;
+  return { ...item, name: original };
+}
+
+// Apply restoreToolName across a response.completed output array.
+export function restoreToolNames(output, renames) {
+  if (!renames?.size || !Array.isArray(output)) return output;
+  let changed = false;
+  const out = output.map((item) => {
+    const next = restoreToolName(item, renames);
     if (next !== item) changed = true;
     return next;
   });
@@ -2408,7 +2529,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
 // re-frames such streams into the standard sequence, synthesizing missing
 // lifecycle events and the completed response's output array. Streams that
 // already carry the full lifecycle pass through event-for-event.
-export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null, customToolNames = null) {
+export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null, customToolNames = null, renames = null) {
   if (!upstreamBody) {
     res.end();
     return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
@@ -2452,9 +2573,9 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
         if (custom.id) customItemIds.add(custom.id);
         if (custom.call_id) customCallIds.add(custom.call_id);
       }
-      return custom;
+      return restoreToolName(custom, renames);
     }
-    return item;
+    return restoreToolName(namespaced, renames);
   };
   const restoreOutput = (output) => {
     if (!Array.isArray(output)) return output;
@@ -2467,8 +2588,8 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
     return changed ? restored : output;
   };
   const restoreStreamEvent = (event) => {
-    if ((!namespaces?.size && !customToolNames?.size) || !event || typeof event !== "object") return event;
-    if (event.item?.type === "function_call") {
+    if ((!namespaces?.size && !customToolNames?.size && !renames?.size) || !event || typeof event !== "object") return event;
+    if (event.item?.type === "function_call" || event.item?.type === "custom_tool_call") {
       const item = restoreCall(event.item);
       if (item !== event.item) return { ...event, item };
     }
@@ -4089,7 +4210,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // Let a measured model narrow its tool dialect without weakening the other
   // models on the same provider. Undefined fields inherit the provider policy.
   const modelToolPolicy = routedModelEntry || {};
-  const { tools, stripped, namespaces, customToolNames } = applyToolPolicy(normalizedPayload.tools, {
+  const { tools, stripped, namespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
@@ -4110,7 +4231,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
   // The declarations above were flattened; the replayed history has to use the
   // same flat names or the upstream sees calls for tools it was never given.
-  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces);
+  // Same for the 64-character cap: a replayed call for a tool whose declaration
+  // was shortened has to carry the shortened name, or it names a tool the
+  // upstream was never given.
+  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces, toolNames);
   // Compress repeated prose without removing the instructions that govern the
   // tools now visible to the local model.
   if (localBackend) {
@@ -4225,9 +4349,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     const localCustomToolNames = chatBridge
       ? new Set([...customToolNames, ...chatBridge.customToolNames])
       : customToolNames;
-    const restoreChatCall = (item) => restoreCustomToolCall(
-      restoreNamespaceCall(item, namespaces),
-      localCustomToolNames,
+    // Undo the two name rewrites in the order their declarations were made: the
+    // namespace pair and the custom-tool bridge are keyed by the shortened name,
+    // so the flat rename goes last.
+    const restoreChatCall = (item) => restoreToolName(
+      restoreCustomToolCall(
+        restoreNamespaceCall(item, namespaces),
+        localCustomToolNames,
+      ),
+      toolNames.renames,
     );
     try {
     const routed = serializedBody({ ...(localChatPayload || normalizedPayload), model: upstreamModel });
@@ -4358,13 +4488,14 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       // (Go, Official, Z.AI, Kimi, custom) arrives here. The pipe inspects the
       // SSE shape: a sparse/bare tool stream is re-framed; a full Responses
       // lifecycle passes through event-for-event. Do not key this on provider.
-      if (normalizedPayload.stream !== true && (customToolNames.size || namespaces.size)) {
+      if (normalizedPayload.stream !== true && (customToolNames.size || namespaces.size || toolNames.renames.size)) {
         const raw = await upstream.text();
         upstreamResponseBytes = Buffer.byteLength(raw);
         try {
           const parsed = JSON.parse(raw);
           const restoredNamespaces = restoreNamespaceOutput(parsed?.output, namespaces);
-          const restored = restoreCustomToolOutput(restoredNamespaces, customToolNames);
+          const restoredCustom = restoreCustomToolOutput(restoredNamespaces, customToolNames);
+          const restored = restoreToolNames(restoredCustom, toolNames.renames);
           if (restored !== parsed?.output) {
             upstreamBody = Readable.toWeb(Readable.from([Buffer.from(JSON.stringify({ ...parsed, output: restored }))]));
           } else {
@@ -4375,7 +4506,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         }
       }
       const piped = normalizedPayload.stream === true
-        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces, customToolNames)
+        ? await pipeNormalizedStream(upstreamBody, res, tee, markFirstResponse, namespaces, customToolNames, toolNames.renames)
         : await pipeGatewayStream(upstreamBody, res, tee, markFirstResponse);
       bytesOut = piped.bytes;
       upstreamResponseBytes ||= piped.upstreamBytes || piped.bytes;

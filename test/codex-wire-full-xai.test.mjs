@@ -110,6 +110,20 @@ test("built bundle accepts the full original Codex xAI package after dialect nor
       res.end(JSON.stringify({ error: `unknown tool type: ${unsupported.type}` }));
       return;
     }
+    // A real upstream rejects the entire request for one over-long tool name, and
+    // the captured Codex package carries five of them (the desktop plugin tools).
+    const longNames = [
+      ...(body.tools || []).map((tool) => tool?.name),
+      ...(body.input || []).map((item) => item?.name),
+      ...(body.input || []).flatMap((item) => (item?.type === "additional_tools" && Array.isArray(item.tools)
+        ? item.tools.map((tool) => tool?.name)
+        : [])),
+    ].filter((name) => typeof name === "string" && name.length > 64);
+    if (longNames.length) {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: `\`name\` must be at most 64 characters, got ${longNames[0].length}` } }));
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.end([
       'data: {"type":"response.created","response":{"id":"resp_full_fixture","status":"in_progress","output":[]}}',
