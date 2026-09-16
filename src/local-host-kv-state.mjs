@@ -15,6 +15,15 @@ import {
 
 export const LOCAL_HOST_KV_STATE_VERSION = 1;
 
+// A warm base is only reachable by the exact prefix identity it was built for,
+// so every prefix change - a different project's instructions, a new plugin
+// tool, a gateway that renames tools - strands the base it wrote before it.
+// Budget and TTL reclaim those eventually, but a roomy disk can hold many
+// GiB of unreachable bases for a week, so the set is bounded on every write.
+// Three is enough for the few prefixes one machine actually rotates between
+// without letting stale bases crowd out conversation checkpoints.
+export const MAX_WARM_BASE_STATES = 3;
+
 function safeFilename(value) {
   const filename = text(value, "A KV state filename");
   if (!/^[a-z0-9][a-z0-9._-]{0,127}\.bin$/i.test(filename)) {
@@ -67,6 +76,10 @@ function compareOldest(a, b) {
   const saved = Date.parse(a.savedAt) - Date.parse(b.savedAt);
   if (saved) return saved;
   return a.filename.localeCompare(b.filename);
+}
+
+function isWarmBaseState(state) {
+  return Boolean(state?.warmBaseTranscript);
 }
 
 function normalizeState(value) {
@@ -210,6 +223,19 @@ export function planLocalHostKvStateWrite(manifest, {
   let retained = normalized.states.filter((entry) => entry.sessionKey !== state.sessionKey);
   let totalBytes = retained.reduce((sum, entry) => sum + entry.bytes, 0) + state.bytes;
   const evicted = [...replaced];
+  // Bound the reachable-base set before budgeting space: the state being
+  // written always counts itself, so a fresh base never evicts itself and the
+  // oldest superseded ones go first. They land in `evicted`, which the caller
+  // deletes only after the new manifest is durable.
+  const existingBases = retained.filter(isWarmBaseState).sort(compareOldest);
+  const keepBases = Math.max(0, MAX_WARM_BASE_STATES - (isWarmBaseState(state) ? 1 : 0));
+  const staleBases = existingBases.slice(0, Math.max(0, existingBases.length - keepBases));
+  if (staleBases.length) {
+    const dropped = new Set(staleBases.map((entry) => entry.filename));
+    retained = retained.filter((entry) => !dropped.has(entry.filename));
+    totalBytes -= staleBases.reduce((sum, entry) => sum + entry.bytes, 0);
+    evicted.push(...staleBases);
+  }
   for (const candidate of [...retained].sort(compareOldest)) {
     if (totalBytes <= normalized.storage.budgetBytes) break;
     retained = retained.filter((entry) => entry.filename !== candidate.filename);

@@ -364,6 +364,55 @@ test("a restart is refused when the SSD budget cannot retain a hot conversation"
   assert.ok(diagnostics.some((entry) => entry.kind === "slot_checkpoint_rejected"));
 });
 
+const BOOTSTRAP_TRANSCRIPT = { assistantContent: "BOOTSTRAP_READY" };
+
+test("a prefix with no warm base says so once and still counts every cold turn", async () => {
+  const f = fixture();
+  // The unreachable base from a previous prefix generation: same host, a key no
+  // request will ever ask for again.
+  const staleKey = "e".repeat(64);
+  f.store.bases = async () => [{ sessionKey: staleKey, bytes: 400 * 1048576, lastAccessedAt: "2026-09-12T04:59:59.853Z" }];
+  const warmBase = {
+    sessionKey: "d".repeat(64),
+    requiresTranscript: true,
+    messages: [{ role: "user", content: "Reply with exactly BOOTSTRAP_READY." }],
+    async create() { return BOOTSTRAP_TRANSCRIPT; },
+  };
+  for (const conversationId of ["a", "b"]) {
+    await f.coordinator.run({ conversationId, warmBase, run: async () => ({ ok: true }) });
+  }
+  const notes = f.diagnostics.filter((entry) => entry.kind === "warm_base_missing");
+  assert.equal(notes.length, 1, "one line per prefix, not one per new conversation");
+  assert.match(notes[0].message, /No warm base for prefix d{12}/);
+  assert.match(notes[0].message, new RegExp(`${staleKey.slice(0, 12)} at 401 MiB`), "names what is on disk instead");
+  assert.equal(f.coordinator.snapshot().counters.warmBaseMissing, 2, "the turns are still counted");
+});
+
+test("per-tier accounting separates a GPU hot hit from an SSD restore", async () => {
+  const { coordinator } = fixture();
+  const usage = (input, cached) => ({ ok: true, usage: { input_tokens: input, input_tokens_details: { cached_tokens: cached }, output_tokens: 5 } });
+  await coordinator.run({ conversationId: "a", run: async () => usage(100, 0) });
+  await coordinator.run({ conversationId: "a", run: async () => usage(120, 100) });
+  await coordinator.run({ conversationId: "b", run: async () => usage(80, 0) });
+  await coordinator.run({ conversationId: "a", run: async () => usage(140, 120) });
+  assert.deepEqual(coordinator.snapshot().byTier, {
+    cold: { requests: 2, inputTokens: 180, cachedTokens: 0, restoreMs: 0 },
+    gpu: { requests: 1, inputTokens: 120, cachedTokens: 100, restoreMs: 0 },
+    ssd: { requests: 1, inputTokens: 140, cachedTokens: 120, restoreMs: 4 },
+  }, "a big cached-token total is only attributable to the tier that served it");
+});
+
+test("priming a base is refused on a route that can never read it back", async () => {
+  const { coordinator, calls } = fixture({ laneCount: 2, assignSlots: false });
+  const result = await coordinator.primeWarmBase({
+    sessionKey: "d".repeat(64),
+    async create({ slot }) { calls.push({ action: "create_warm_base", slot }); return BOOTSTRAP_TRANSCRIPT; },
+  });
+  assert.deepEqual(result, { primed: false, reason: "no_slot_affinity" });
+  assert.equal(calls.some((call) => call.action === "create_warm_base"), false,
+    "no prefix prefill is paid for a state the request path cannot restore");
+});
+
 test("two managed lanes run concurrently and a third conversation waits automatically", async () => {
   const { coordinator } = fixture({ laneCount: 2 });
   const releases = [];

@@ -6,6 +6,7 @@ import {
   findLocalHostKvState,
   invalidateLocalHostKvStates,
   kvSessionKey,
+  MAX_WARM_BASE_STATES,
   planLocalHostKvStateWrite,
   touchLocalHostKvState,
 } from "../src/local-host-kv-state.mjs";
@@ -44,6 +45,43 @@ test("KV manifests retain only hashed session identity", () => {
   const serialized = JSON.stringify(result.manifest);
   assert.doesNotMatch(serialized, /conversation-a/);
   assert.equal(findLocalHostKvState(result.manifest, { sessionKey: key, fingerprint: FINGERPRINT })?.filename, "a.bin");
+});
+
+// Each base is keyed by the exact prefix that built it, so a superseded one can
+// never be read again: it is pure disk held against the conversations that
+// could still be restored. The cap must not depend on budget pressure to bite.
+test("only the newest warm bases survive; superseded prefixes are evicted", () => {
+  const transcript = { assistantContent: "BOOTSTRAP_READY" };
+  let manifest = emptyManifest();
+  const writeBase = (letter, filename, at) => {
+    const result = planLocalHostKvStateWrite(manifest, {
+      sessionKey: letter.repeat(64),
+      fingerprint: FINGERPRINT,
+      filename,
+      bytes: 100,
+      promptTokens: 10,
+      warmBaseTranscript: transcript,
+      at,
+    });
+    manifest = result.manifest;
+    return result;
+  };
+
+  const first3 = ["a", "b", "c"].map((letter, index) => writeBase(letter, `base-${letter}.bin`, `2026-08-2${index + 1}T01:00:00.000Z`));
+  assert.deepEqual(first3.map((result) => result.evicted.length), [0, 0, 0], "the cap is not reached yet");
+  assert.equal(manifest.states.length, MAX_WARM_BASE_STATES);
+
+  const fourth = writeBase("d", "base-d.bin", "2026-08-24T01:00:00.000Z");
+  assert.deepEqual(fourth.evicted.map((state) => state.filename), ["base-a.bin"], "the oldest unreachable base goes first");
+  assert.deepEqual(manifest.states.map((state) => state.filename), ["base-b.bin", "base-c.bin", "base-d.bin"]);
+  assert.equal(manifest.totalBytes, 300, "the evicted bytes return to the budget immediately");
+
+  // A conversation checkpoint competes for space but never displaces a base set
+  // that is already inside the cap.
+  const conversation = plan(manifest, A, "conv.bin", 100, "2026-08-25T01:00:00.000Z");
+  manifest = conversation.manifest;
+  assert.deepEqual(conversation.evicted, []);
+  assert.equal(manifest.states.filter((state) => state.warmBaseTranscript).length, MAX_WARM_BASE_STATES);
 });
 
 test("a warm base state retains only its fixed hidden assistant transcript", () => {

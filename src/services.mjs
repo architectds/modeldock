@@ -27,6 +27,7 @@ import { allProfiles, applyOllamaProfile, publishedSlugFor } from "./profiles.mj
 import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath } from "./vision-overrides.mjs";
+import { createLocalHostDiagnosticSink } from "./local-host-diagnostics.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
@@ -202,7 +203,7 @@ export function createServices(config = loadConfig()) {
   const localHostRuntime = new LocalHostRuntime({
     registryFile: localHostRegistryFile,
     manifestDirectory: stateFile("local-host-kv"),
-    onDiagnostic: ({ kind, message }) => console.log(`[gate] local host ${kind}: ${message}`),
+    onDiagnostic: createLocalHostDiagnosticSink(),
   });
   // The Ollama connection snapshot follows the same state-dir redirect. Real
   // configs restore it during loadConfig; this re-apply covers hand-built test

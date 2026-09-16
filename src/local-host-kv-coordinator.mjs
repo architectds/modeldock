@@ -24,6 +24,9 @@ const TELEMETRY_WINDOW_MS = 300_000;
 const TELEMETRY_EVENT_LIMIT = 240;
 const COLD_PREFILL_SAMPLE_LIMIT = 8;
 const MIN_COLD_PREFILL_TOKENS = 256;
+// One log line per distinct prefix, not per turn: every new conversation of an
+// unprimed project hits this, and a chatty diagnostic would bury the log.
+const MISSING_BASE_KEY_LIMIT = 16;
 
 function nonNegativeNumber(value) {
   const number = Number(value);
@@ -66,7 +69,14 @@ export class LocalHostKvCoordinator {
   #prefixStates = new Map();
   // Lifetime tallies for the local dashboard: what the SSD cache is actually
   // doing, counted where the actions happen instead of re-derived from logs.
-  #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0 };
+  #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0, warmBaseMissing: 0 };
+  // Per-tier request accounting, so "the cache is working" can be answered from
+  // one number per tier instead of reasoning about which code paths ran: a
+  // host can report a large cachedTokens total while every byte of it came from
+  // the GPU tier and the SSD tier was never exercised at all.
+  #tierStats = new Map();
+  // Prefixes already reported as having no warm base (see MISSING_BASE_KEY_LIMIT).
+  #missingBaseKeys = new Set();
   // A content-free, time-bounded record of lane changes. It never contains a
   // Codex conversation id, prompt, or tool data; lanes are the only identity
   // the monitor needs to draw the scheduler's swimlanes.
@@ -102,6 +112,7 @@ export class LocalHostKvCoordinator {
       // never touch the disk. The store keeps its last-known manifest totals.
       ssd: typeof this.store.totals === "function" ? this.store.totals() : null,
       counters: { ...this.#counters },
+      byTier: Object.fromEntries([...this.#tierStats].map(([tier, stats]) => [tier, { ...stats }])),
       telemetry: {
         windowMs: TELEMETRY_WINDOW_MS,
         events: this.#events.map((event) => ({ ...event })),
@@ -130,6 +141,11 @@ export class LocalHostKvCoordinator {
   }
 
   #recordUsage(result, cache) {
+    const tier = typeof cache?.tier === "string" && cache.tier ? cache.tier : "unknown";
+    const stats = this.#tierStats.get(tier) || { requests: 0, inputTokens: 0, cachedTokens: 0, restoreMs: 0 };
+    stats.requests += 1;
+    stats.restoreMs += nonNegativeNumber(cache?.restoreMs);
+    this.#tierStats.set(tier, stats);
     const usage = result?.usage;
     if (!usage || typeof usage !== "object") return 0;
     const inputTokens = nonNegativeNumber(usage.input_tokens);
@@ -138,6 +154,8 @@ export class LocalHostKvCoordinator {
     this.#totals.inputTokens += inputTokens;
     this.#totals.cachedTokens += cachedTokens;
     this.#totals.outputTokens += outputTokens;
+    stats.inputTokens += inputTokens;
+    stats.cachedTokens += cachedTokens;
 
     if (result?.ok === false) return 0;
 
@@ -224,6 +242,10 @@ export class LocalHostKvCoordinator {
   // the manifest retains only the fingerprint and fixed transcript.
   async primeWarmBase(warmBase, { signal } = {}) {
     if (!warmBase?.sessionKey || typeof warmBase.create !== "function") return { primed: false, reason: "invalid_base" };
+    // Without request-level slot affinity the restore path is never taken (see
+    // run()), so a primed base could not be read back by anything. Paying a
+    // full prefix prefill to write a state no request can use is pure loss.
+    if (!this.assignSlots) return { primed: false, reason: "no_slot_affinity" };
     return this.#exclusive(async () => {
       await this.#ensureStoreReady();
       let existing = null;
@@ -283,6 +305,33 @@ export class LocalHostKvCoordinator {
     });
   }
 
+  // A cold first turn is usually a missing warm base, and the reason it is
+  // missing is invisible from the outside: the base key is a digest of the
+  // exact prefix, so a project whose tool set or instructions changed simply
+  // stops matching it. Say it once per prefix, with the keys that ARE stored,
+  // so the gap is diagnosable from the log rather than from a disk archaeology
+  // session. Digests only - never prompt content.
+  async #reportMissingWarmBase(prefixKey) {
+    this.#counters.warmBaseMissing += 1;
+    if (this.#missingBaseKeys.has(prefixKey)) return;
+    if (this.#missingBaseKeys.size >= MISSING_BASE_KEY_LIMIT) this.#missingBaseKeys.clear();
+    this.#missingBaseKeys.add(prefixKey);
+    let stored = "none are stored for this host";
+    if (typeof this.store.bases === "function") {
+      try {
+        const bases = await this.store.bases();
+        if (bases.length) {
+          stored = bases.map((base) => `${String(base.sessionKey).slice(0, 12)} at ${Math.round((base.bytes || 0) / 1048576) + 1} MiB, last used ${base.lastAccessedAt}`).join("; ");
+        }
+      } catch {
+        // A diagnostic never gets to become the request's second failure.
+      }
+    }
+    await this.#diagnose("warm_base_missing", new Error(
+      `No warm base for prefix ${prefixKey.slice(0, 12)}; its first turn cold-prefills. Stored bases: ${stored}.`,
+    ));
+  }
+
   async #prepare(sessionKey, signal, warmBase = null) {
     return this.#exclusive(async () => {
       await this.#ensureStoreReady();
@@ -317,6 +366,7 @@ export class LocalHostKvCoordinator {
           await this.#diagnose("warm_base_lookup_failed", error);
           baseState = null;
         }
+        if (!baseState) await this.#reportMissingWarmBase(warmBase.sessionKey);
       }
       const prefixChanged = Boolean(
         currentPrefixKey

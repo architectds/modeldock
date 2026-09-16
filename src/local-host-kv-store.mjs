@@ -114,6 +114,21 @@ export class LocalHostKvStateStore {
     return this.#lastTotals;
   }
 
+  // The base states this host can still restore, oldest last. A request that
+  // found no base for its own prefix needs this to explain itself in one line:
+  // which prefix keys are on disk, and how much space each unreachable one
+  // holds. Read-only, and never on the status path - that uses totals().
+  async bases() {
+    const manifest = await this.load();
+    return Object.freeze(manifest.states
+      .filter((state) => state.warmBaseTranscript)
+      .map((state) => Object.freeze({
+        sessionKey: state.sessionKey,
+        bytes: state.bytes,
+        lastAccessedAt: state.lastAccessedAt,
+      })));
+  }
+
   async load() {
     let source;
     try {
