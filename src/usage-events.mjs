@@ -167,3 +167,51 @@ export function readLatestMainRoute(filePath = usageEventsPath()) {
   }
   return latest;
 }
+
+// Which conversations actually talked to a given provider, newest first. Every
+// route counts, including tool continuation and compaction: the question here is
+// not "which model is selected" (that is readLatestMainRoute) but "which Codex
+// task's outbound prefix really ran on this host", and a task that only made
+// tool calls against the local engine has a prefix just as specific as one that
+// started with a user turn. Managed setup prewarms from this list so the stored
+// base belongs to a conversation that can ask for it again.
+export function readRecentConversations({
+  provider,
+  filePath = usageEventsPath(),
+  limit = 8,
+} = {}) {
+  const wanted = safeText(provider, "");
+  if (!wanted) return [];
+  const seen = new Set();
+  const ordered = [];
+  for (const file of [`${filePath}.1`, filePath]) {
+    let lines;
+    try {
+      lines = readFileSync(file, "utf8").split(/\r?\n/);
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      if (!line) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (safeText(event?.provider, "") !== wanted) continue;
+      const id = safeText(event?.threadId, "") || safeText(event?.sessionId, "");
+      if (!id) continue;
+      ordered.push({ id, at: Number.isFinite(Date.parse(String(event?.at || ""))) ? Date.parse(String(event.at)) : -1 });
+    }
+  }
+  ordered.sort((left, right) => right.at - left.at);
+  const recent = [];
+  for (const entry of ordered) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    recent.push(entry.id);
+    if (recent.length >= Math.max(1, Math.trunc(limit) || 1)) break;
+  }
+  return recent;
+}

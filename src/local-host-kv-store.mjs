@@ -13,6 +13,7 @@ import {
   expireLocalHostKvStates,
   findLocalHostKvState,
   invalidateLocalHostKvStates,
+  orphanedWarmBaseCheckpoints,
   planLocalHostKvStateWrite,
   removeLocalHostKvState,
   sameKvStorageDirectory,
@@ -127,6 +128,17 @@ export class LocalHostKvStateStore {
         bytes: state.bytes,
         lastAccessedAt: state.lastAccessedAt,
       })));
+  }
+
+  // Checkpoints whose warm base is already gone, split into the ones that can
+  // never be restored (their hidden bootstrap turn had been injected) and the
+  // cold-started ones that can. Without this the disk quietly keeps gigabytes of
+  // states that the next turn will throw away, and the only way to notice is to
+  // reverse-engineer the manifest digests by hand. Read-only, same rule as
+  // bases(): never on the status path.
+  async orphans() {
+    const manifest = await this.load();
+    return orphanedWarmBaseCheckpoints(manifest);
   }
 
   async load() {

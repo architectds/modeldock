@@ -170,6 +170,33 @@ export function findLocalHostKvState(manifest, { sessionKey, fingerprint } = {})
   return normalized.states.find((state) => state.sessionKey === key && state.fingerprint === wantedFingerprint) || null;
 }
 
+// Checkpoints that reference a static prefix which is no longer on disk. A
+// session state records the prefix it was built on (`prefixKey`, the base's own
+// session key); when that base is gone - evicted by the warm-base bound or aged
+// out by TTL - two different things remain, and they must not be conflated:
+//   * `bootstrapInjected` states carry a hidden bootstrap turn that only that
+//     base can replay, so the coordinator discards them on their next turn (see
+//     `bootstrapUnavailable` in local-host-kv-coordinator.mjs). They are dead
+//     weight, and nothing else in the system ever says so.
+//   * cold-started states (no injected bootstrap) still restore as long as their
+//     own outbound prefix keeps matching, so a missing base is harmless for them.
+// Report both, plus the prefix digests, so an operator sees the orphaned
+// conversations directly instead of reverse-engineering manifest digests.
+export function orphanedWarmBaseCheckpoints(manifest) {
+  const normalized = createLocalHostKvStateManifest(manifest);
+  const baseKeys = new Set(normalized.states.filter(isWarmBaseState).map((state) => state.sessionKey));
+  const orphaned = normalized.states.filter((state) => !isWarmBaseState(state) && state.prefixKey && !baseKeys.has(state.prefixKey));
+  const unreachable = orphaned.filter((state) => state.bootstrapInjected);
+  const sumBytes = (states) => states.reduce((total, state) => total + (state.bytes || 0), 0);
+  return Object.freeze({
+    sessions: orphaned.length,
+    bytes: sumBytes(orphaned),
+    unreachable: unreachable.length,
+    unreachableBytes: sumBytes(unreachable),
+    prefixes: Object.freeze([...new Set(orphaned.map((state) => state.prefixKey))]),
+  });
+}
+
 export function touchLocalHostKvState(manifest, { sessionKey, fingerprint, at = new Date().toISOString() } = {}) {
   const normalized = createLocalHostKvStateManifest(manifest);
   const key = assertSessionKey(sessionKey);

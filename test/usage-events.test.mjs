@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { mainRouteFromUsageEvent, readLatestMainRoute, recordUsageEvent, usageFromRelayResult } from "../src/usage-events.mjs";
+import { mainRouteFromUsageEvent, readLatestMainRoute, readRecentConversations, recordUsageEvent, usageFromRelayResult } from "../src/usage-events.mjs";
 
 function tempFile() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-usage-"));
@@ -140,4 +140,39 @@ test("usageFromRelayResult maps a relay result to event fields", () => {
   assert.equal(mapped.provider, "deepseek-official");
   assert.equal(mapped.route, "client_selected");
   assert.equal(mapped.totalTokens, 10);
+});
+
+test("recent conversations list the threads that really used a provider, newest first", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-recent-conversations-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage-events.jsonl");
+  const local = (threadId, at, route = "tool_continuation") => recordUsageEvent({
+    model: "Qwen3.8-27B@llamacpp", provider: "llamacpp", route, status: 200, threadId, at, filePath: file,
+  });
+  local("thread-early", "2026-09-16T10:00:00.000Z");
+  local("thread-late", "2026-09-17T10:00:00.000Z");
+  local("thread-late", "2026-09-17T11:00:00.000Z");
+  // A session id is the only identity for a client that reports no thread id.
+  recordUsageEvent({ model: "Qwen3.8-27B@llamacpp", provider: "llamacpp", route: "default_main", status: 200, sessionId: "session-only", at: "2026-09-17T09:00:00.000Z", filePath: file });
+  // Neither a different provider nor an id-less event is a local conversation.
+  recordUsageEvent({ model: "deepseek-v4-flash", provider: "opencode-go", route: "client_selected", status: 200, threadId: "thread-remote", at: "2026-09-17T12:00:00.000Z", filePath: file });
+  recordUsageEvent({ model: "Qwen3.8-27B@llamacpp", provider: "llamacpp", route: "client_selected", status: 200, at: "2026-09-17T13:00:00.000Z", filePath: file });
+  assert.deepEqual(readRecentConversations({ provider: "llamacpp", filePath: file }), [
+    "thread-late", "session-only", "thread-early",
+  ], "ordered by the newest event of each conversation, not by file order");
+  assert.deepEqual(readRecentConversations({ provider: "llamacpp", filePath: file, limit: 1 }), ["thread-late"]);
+  assert.deepEqual(readRecentConversations({ provider: "nobody", filePath: file }), []);
+  assert.deepEqual(readRecentConversations({ provider: "llamacpp", filePath: path.join(dir, "missing.jsonl") }), [],
+    "no metering yet is an ordinary empty answer, not a failure");
+});
+
+test("recent conversations read through the rotation like every other projection", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-recent-conversations-rotated-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "usage-events.jsonl");
+  writeFileSync(`${file}.1`, `${JSON.stringify({
+    at: "2026-09-15T10:00:00.000Z", provider: "llamacpp", route: "client_selected", status: 200, threadId: "thread-rotated",
+  })}\n`, "utf8");
+  recordUsageEvent({ model: "Qwen3.8-27B@llamacpp", provider: "llamacpp", route: "client_selected", status: 200, threadId: "thread-current", at: "2026-09-17T10:00:00.000Z", filePath: file });
+  assert.deepEqual(readRecentConversations({ provider: "llamacpp", filePath: file }), ["thread-current", "thread-rotated"]);
 });

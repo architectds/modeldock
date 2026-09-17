@@ -275,3 +275,57 @@ test("clearAll reclaims every checkpoint and reports synchronous totals", async 
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("orphans() names the checkpoints whose warm base has been removed", async () => {
+  const fixture = await setup();
+  try {
+    const prefix = "1".repeat(64);
+    const conversation = kvSessionKey({ conversationId: "bootstrapped" });
+    await fixture.store.save({
+      sessionKey: prefix,
+      fingerprint: FINGERPRINT,
+      warmBaseTranscript: { assistantContent: "BOOTSTRAP_READY" },
+      at: "2026-09-17T12:00:00.000Z",
+    });
+    await fixture.store.save({
+      sessionKey: conversation,
+      fingerprint: FINGERPRINT,
+      prefixKey: prefix,
+      bootstrapInjected: true,
+      at: "2026-09-17T12:01:00.000Z",
+    });
+    assert.deepEqual(await fixture.store.orphans(), {
+      sessions: 0, bytes: 0, unreachable: 0, unreachableBytes: 0, prefixes: [],
+    }, "a conversation with its base on disk is not an orphan");
+
+    const removed = await fixture.store.remove({ sessionKey: prefix, fingerprint: FINGERPRINT });
+    assert.equal(removed.removed, true);
+    const orphaned = await fixture.store.orphans();
+    assert.equal(orphaned.sessions, 1);
+    assert.deepEqual(orphaned.prefixes, [prefix]);
+    assert.equal(orphaned.unreachable, 1, "its bootstrap can never be replayed again");
+    assert.equal(orphaned.bytes, 400);
+    assert.equal(orphaned.unreachableBytes, 400);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("orphans() does not call a cold-started checkpoint dead", async () => {
+  const fixture = await setup();
+  try {
+    await fixture.store.save({
+      sessionKey: kvSessionKey({ conversationId: "cold" }),
+      fingerprint: FINGERPRINT,
+      prefixKey: "2".repeat(64),
+      bootstrapInjected: false,
+      at: "2026-09-17T12:00:00.000Z",
+    });
+    const orphaned = await fixture.store.orphans();
+    assert.equal(orphaned.sessions, 1, "it does reference a prefix that is not stored");
+    assert.equal(orphaned.unreachable, 0, "but it restores on its own while its prefix holds");
+    assert.equal(orphaned.unreachableBytes, 0);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

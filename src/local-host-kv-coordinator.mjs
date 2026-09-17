@@ -317,18 +317,34 @@ export class LocalHostKvCoordinator {
     if (this.#missingBaseKeys.size >= MISSING_BASE_KEY_LIMIT) this.#missingBaseKeys.clear();
     this.#missingBaseKeys.add(prefixKey);
     let stored = "none are stored for this host";
+    let orphans = "";
     if (typeof this.store.bases === "function") {
       try {
         const bases = await this.store.bases();
         if (bases.length) {
           stored = bases.map((base) => `${String(base.sessionKey).slice(0, 12)} at ${Math.round((base.bytes || 0) / 1048576) + 1} MiB, last used ${base.lastAccessedAt}`).join("; ");
         }
+        // The other half of the same question: the manifest can also be holding
+        // checkpoints whose base has already gone, which nothing else reports
+        // until someone digs through digests by hand.
+        if (typeof this.store.orphans === "function") {
+          const orphaned = await this.store.orphans();
+          if (orphaned.sessions) {
+            const miB = (bytes) => Math.round((bytes || 0) / 1048576);
+            const digests = orphaned.prefixes.slice(0, 4).map((prefix) => String(prefix).slice(0, 12)).join(", ");
+            const more = orphaned.prefixes.length > 4 ? ` (+${orphaned.prefixes.length - 4} more)` : "";
+            const dead = orphaned.unreachable
+              ? `; ${orphaned.unreachable} can never be restored (${miB(orphaned.unreachableBytes)} MiB)`
+              : "";
+            orphans = ` Orphaned checkpoint${orphaned.sessions === 1 ? "" : "s"}: ${orphaned.sessions} of ${miB(orphaned.bytes)} MiB for ${orphaned.prefixes.length === 1 ? "prefix" : "prefixes"} ${digests}${more}${dead}.`;
+          }
+        }
       } catch {
         // A diagnostic never gets to become the request's second failure.
       }
     }
     await this.#diagnose("warm_base_missing", new Error(
-      `No warm base for prefix ${prefixKey.slice(0, 12)}; its first turn cold-prefills. Stored bases: ${stored}.`,
+      `No warm base for prefix ${prefixKey.slice(0, 12)}; its first turn cold-prefills. Stored bases: ${stored}.${orphans}`,
     ));
   }
 

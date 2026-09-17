@@ -372,6 +372,15 @@ test("a prefix with no warm base says so once and still counts every cold turn",
   // request will ever ask for again.
   const staleKey = "e".repeat(64);
   f.store.bases = async () => [{ sessionKey: staleKey, bytes: 400 * 1048576, lastAccessedAt: "2026-09-12T04:59:59.853Z" }];
+  // Two checkpoints of that gone prefix are still on disk: one bootstrapped, so
+  // it is already dead, and one cold-started, which may still restore.
+  f.store.orphans = async () => ({
+    sessions: 2,
+    bytes: 3_600 * 1048576,
+    unreachable: 1,
+    unreachableBytes: 3_400 * 1048576,
+    prefixes: ["a".repeat(64), "b".repeat(64)],
+  });
   const warmBase = {
     sessionKey: "d".repeat(64),
     requiresTranscript: true,
@@ -385,7 +394,28 @@ test("a prefix with no warm base says so once and still counts every cold turn",
   assert.equal(notes.length, 1, "one line per prefix, not one per new conversation");
   assert.match(notes[0].message, /No warm base for prefix d{12}/);
   assert.match(notes[0].message, new RegExp(`${staleKey.slice(0, 12)} at 401 MiB`), "names what is on disk instead");
+  assert.match(notes[0].message, /Orphaned checkpoints: 2 of 3600 MiB for prefixes a{12}, b{12}; 1 can never be restored \(3400 MiB\)\./,
+    "says how much of the disk is checkpoint of a prefix that no longer exists");
   assert.equal(f.coordinator.snapshot().counters.warmBaseMissing, 2, "the turns are still counted");
+});
+
+test("the warm base diagnostic stays silent about orphans it cannot read", async () => {
+  const f = fixture();
+  const staleKey = "e".repeat(64);
+  f.store.bases = async () => [{ sessionKey: staleKey, bytes: 1048576, lastAccessedAt: "2026-09-12T04:59:59.853Z" }];
+  f.store.orphans = async () => { throw new Error("manifest unreadable"); };
+  const warmBase = {
+    sessionKey: "d".repeat(64),
+    requiresTranscript: true,
+    messages: [{ role: "user", content: "Reply with exactly BOOTSTRAP_READY." }],
+    async create() { return BOOTSTRAP_TRANSCRIPT; },
+  };
+  await f.coordinator.run({ conversationId: "a", warmBase, run: async () => ({ ok: true }) });
+  const notes = f.diagnostics.filter((entry) => entry.kind === "warm_base_missing");
+  assert.equal(notes.length, 1, "an unreadable orphan census must not lose the original diagnostic");
+  assert.match(notes[0].message, new RegExp(`${staleKey.slice(0, 12)} at 2 MiB`));
+  assert.equal(notes[0].message.includes("Orphaned"), false);
+  assert.equal(f.coordinator.snapshot().counters.warmBaseMissing, 1);
 });
 
 test("per-tier accounting separates a GPU hot hit from an SSD restore", async () => {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
+import { recordUsageEvent } from "../src/usage-events.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { probeLocalEngine, readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 import { parseLlamaArgs } from "../src/engine-processes.mjs";
@@ -79,6 +80,8 @@ async function startApp(t, { discoverEngines }) {
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
     codexHome: path.join(dir, "codex"),
     localHostRegistryFile: path.join(dir, "local-hosts.json"),
+    // Without this the boot prime would read the developer's real metering log.
+    usageEventsFile: path.join(dir, "usage-events.jsonl"),
   };
   const services = createServices(config);
   services.discoverEngines = discoverEngines;
@@ -452,11 +455,26 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
     async verify() { return true; },
   });
   let primedWarmBase = null;
-  services.latestCodexSessionOpening = async () => ({
-    instructions: "Current Codex base instructions.",
-    developerMessages: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "Current workspace instructions." }] }],
-    tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }],
+  // The newest Codex task belongs to an unrelated project; only the metering log
+  // knows which conversation really ran on the local model.
+  const localThread = "01a09347-cfc3-7723-ae4b-4f43a7b890da";
+  recordUsageEvent({
+    model: "Qwen3-VL-27B@llamacpp", provider: "llamacpp", route: "client_selected", status: 200,
+    threadId: localThread, at: "2026-09-17T12:00:00.000Z", filePath: services.usageEventsFile,
   });
+  recordUsageEvent({
+    model: "deepseek-v4-flash@opencode-go", provider: "opencode-go", route: "client_selected", status: 200,
+    threadId: "01a0a18d-ac81-7531-88e7-fbe704c173ea", at: "2026-09-17T13:00:00.000Z", filePath: services.usageEventsFile,
+  });
+  let openingQuery = null;
+  services.latestCodexSessionOpening = async (options) => {
+    openingQuery = options;
+    return {
+      instructions: "Current Codex base instructions.",
+      developerMessages: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "Current workspace instructions." }] }],
+      tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }],
+    };
+  };
   services.localHostRuntime.primeWarmBase = async (warmBase) => {
     primedWarmBase = warmBase;
     return { primed: true, reused: false };
@@ -484,6 +502,8 @@ test("managed setup applies selected model, projector, and SSD paths as one veri
   assert.equal(discovered.launch.visionProjectorPath, projector);
   assert.ok(primedWarmBase?.sessionKey, "managed setup derives a base from the current Codex opening before any local user turn");
   assert.deepEqual(body.warmBase, { primed: true, reused: false });
+  assert.deepEqual(openingQuery?.preferredSessionIds, [localThread],
+    "only the conversations that sent traffic to this host are offered as the prime source");
 
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
   assert.deepEqual(snapshot.llamacpp.models, [{

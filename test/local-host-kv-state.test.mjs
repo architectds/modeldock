@@ -7,6 +7,7 @@ import {
   invalidateLocalHostKvStates,
   kvSessionKey,
   MAX_WARM_BASE_STATES,
+  orphanedWarmBaseCheckpoints,
   planLocalHostKvStateWrite,
   touchLocalHostKvState,
 } from "../src/local-host-kv-state.mjs";
@@ -171,4 +172,63 @@ test("manifest rejects path-like filenames and unbounded stored bytes", () => {
     sessionKey: kvSessionKey(A), fingerprint: FINGERPRINT, filename: "a.bin", bytes: 1001, promptTokens: 1,
     savedAt: "2026-08-23T01:00:00.000Z", lastAccessedAt: "2026-08-23T01:00:00.000Z",
   }] }), /exceeds its disk budget/);
+});
+
+const ORPHAN_STORAGE = { directory: "D:/ModelDock/KV", budgetBytes: 5000 };
+const BASE_PREFIX = "1".repeat(64);
+const GONE_PREFIX = "2".repeat(64);
+const COLD_PREFIX = "3".repeat(64);
+
+function state(sessionKey, { bytes, prefixKey, bootstrapInjected, warmBaseTranscript }) {
+  return {
+    sessionKey,
+    fingerprint: FINGERPRINT,
+    filename: `${sessionKey.slice(0, 4)}.bin`,
+    bytes,
+    promptTokens: 10,
+    savedAt: "2026-09-17T12:00:00.000Z",
+    lastAccessedAt: "2026-09-17T12:00:00.000Z",
+    ...(prefixKey ? { prefixKey, bootstrapInjected } : {}),
+    ...(warmBaseTranscript ? { warmBaseTranscript } : {}),
+  };
+}
+
+test("orphan reporting names the checkpoints whose warm base is gone", () => {
+  const manifest = createLocalHostKvStateManifest({
+    hostId: "host-qwen",
+    storage: ORPHAN_STORAGE,
+    states: [
+      // The base itself, and a conversation still able to use it.
+      state(BASE_PREFIX, { bytes: 300, warmBaseTranscript: { assistantContent: "BOOTSTRAP_READY" } }),
+      state("a".repeat(64), { bytes: 100, prefixKey: BASE_PREFIX, bootstrapInjected: true }),
+      // Bootstrapped onto a prefix that is no longer stored: discarded on sight.
+      state("b".repeat(64), { bytes: 200, prefixKey: GONE_PREFIX, bootstrapInjected: true }),
+      // Cold-started onto a missing prefix: still restorable while its own
+      // outbound prefix keeps matching, so it is not dead weight yet.
+      state("c".repeat(64), { bytes: 50, prefixKey: COLD_PREFIX, bootstrapInjected: false }),
+      // A plain cold checkpoint records no prefix identity at all.
+      state("d".repeat(64), { bytes: 400 }),
+    ],
+  });
+  const orphans = orphanedWarmBaseCheckpoints(manifest);
+  assert.equal(orphans.sessions, 2, "both checkpoints naming an absent prefix are named");
+  assert.equal(orphans.bytes, 250);
+  assert.deepEqual(orphans.prefixes, [GONE_PREFIX, COLD_PREFIX]);
+  assert.equal(orphans.unreachable, 1, "only the bootstrapped checkpoint can never be restored");
+  assert.equal(orphans.unreachableBytes, 200);
+  assert.equal(orphans.unreachable <= orphans.sessions, true);
+});
+
+test("orphan reporting is empty for a healthy manifest", () => {
+  const manifest = createLocalHostKvStateManifest({
+    hostId: "host-qwen",
+    storage: ORPHAN_STORAGE,
+    states: [
+      state(BASE_PREFIX, { bytes: 300, warmBaseTranscript: { assistantContent: "BOOTSTRAP_READY" } }),
+      state("a".repeat(64), { bytes: 100, prefixKey: BASE_PREFIX, bootstrapInjected: true }),
+    ],
+  });
+  assert.deepEqual(orphanedWarmBaseCheckpoints(manifest), {
+    sessions: 0, bytes: 0, unreachable: 0, unreachableBytes: 0, prefixes: [],
+  });
 });

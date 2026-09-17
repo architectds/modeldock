@@ -47,7 +47,7 @@ import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomR
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
-import { usageEventsPath } from "./usage-events.mjs";
+import { readRecentConversations, usageEventsPath } from "./usage-events.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath, writeVisionOverrides } from "./vision-overrides.mjs";
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
@@ -329,19 +329,43 @@ async function publishManagedLocalEngine(services, record, running) {
 // hand-written calibration prompt. The envelope is read into memory only; the
 // durable KV manifest keeps just the resulting fingerprint and bootstrap
 // transcript. A miss is non-fatal: the host is still fully usable cold.
+//
+// The envelope is taken from the conversations that actually sent traffic to
+// this host, newest first, and only then from the newest Codex task on disk.
+// A base is a prefix-specific cache: priming the newest task of an unrelated
+// project writes a base no local request will ever name, while the conversation
+// that really uses the local model cold-prefills on every turn.
 async function primeManagedLocalWarmBase(services, record) {
   if (!record?.activeSpec || !services.localHostRuntime?.primeWarmBase) return { primed: false, reason: "unavailable" };
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
   const localModel = snapshot?.models?.[0]?.id;
   if (!localModel) return { primed: false, reason: "model_unavailable" };
+  const conversations = await (services.readRecentConversations || readRecentConversations)({
+    provider: "llamacpp",
+    filePath: services.usageEventsFile || usageEventsPath(),
+  });
   const opening = await (services.latestCodexSessionOpening || latestCodexSessionOpening)({
     sessionsRoot: path.join(services.config.codexHome, "sessions"),
+    preferredSessionIds: conversations,
   });
   if (!opening) return { primed: false, reason: "opening_unavailable" };
+  if (conversations.length && !conversations.includes(opening.sessionId)) {
+    // A Codex rollout has to record both the global instructions and the dynamic
+    // tool envelope for its prefix to be reproducible. When the conversations
+    // that really used this host stopped recording one, every candidate is
+    // rejected and the scan walks back to an unrelated older task; a base built
+    // from it cannot match a live request, so saying nothing would leave the
+    // user with a warm base that is warm for nobody.
+    console.log(`[gate] local host has ${conversations.length} local conversation(s) (newest ${String(conversations[0]).slice(0, 8)}), but none of their Codex rollouts supply a complete opening envelope; prewarmed from ${String(opening.sessionId || "unknown").slice(0, 8)} instead, which a current request is unlikely to name.`);
+  }
   const model = publishedSlugFor("llamacpp", localModel);
   const warmBase = localWarmBaseFromSessionOpening({ config: services.config, model, opening });
   if (!warmBase) return { primed: false, reason: "prefix_unavailable" };
-  return services.localHostRuntime.primeWarmBase(warmBase);
+  const primed = await services.localHostRuntime.primeWarmBase(warmBase);
+  // Which conversation the base was built for, and whether it was already
+  // stored: this is the pair of facts that made a wrong-prime invisible.
+  console.log(`[gate] local host warm base ${primed?.reused ? "reused" : primed?.primed ? "primed" : `not primed (${primed?.reason || "unknown"})`} for conversation ${String(opening.sessionId || "unknown").slice(0, 8)} of ${conversations.length ? "a local conversation" : "the newest Codex task"}.`);
+  return primed;
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
