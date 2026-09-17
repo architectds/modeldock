@@ -42,6 +42,7 @@ import {
   normalizeOllamaInput,
   normalizeOpenCodeFlashInput,
   normalizeOpenCodeProInput,
+  normalizeXaiInput,
   pipeGatewayStream,
   flattenNamespaceCalls,
   pipeNormalizedStream,
@@ -919,6 +920,53 @@ test("a wake keeps every text part and any pixels it carries", () => {
 test("an empty wake does not fabricate a user row", () => {
   assert.deepEqual(dropUnpairedToolItems([deliveredWake("   ")]), []);
   assert.deepEqual(dropUnpairedToolItems([deliveredWake([])]), []);
+});
+
+// The pairing pass is shared, so this must be proven per consumer and not assumed:
+// every route that normalizes Codex history had the same hole, and only the native
+// leg, which forwards the item untouched, never did. Driving one fixture through each
+// normalizer is what makes "affects all APIs, fixed for all APIs" a checked fact.
+test("every normalizing route delivers the same wake exactly once; native forwards it", () => {
+  const text = "<heartbeat>\n<automation_id>trader-cycle</automation_id>\nRead the market clock first.\n</heartbeat>";
+  const fixture = () => [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "run the cycle" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "cycle report v1" }] },
+    { type: "function_call", call_id: "call_done", name: "exec_command", arguments: '{"cmd":"echo ok"}' },
+    { type: "function_call_output", call_id: "call_done", output: "ok" },
+    deliveredWake(text),
+  ];
+  const plainText = (items) => items
+    .filter((item) => item?.type === "message" && item.role === "user")
+    .map((item) => (Array.isArray(item.content) ? item.content.map((part) => part?.text || "").join("") : String(item.content || "")))
+    .join("\n");
+  const routes = {
+    "generic routed (hosted Responses dialect)": normalizeGatewayInput,
+    "opencode-go flash": normalizeOpenCodeFlashInput,
+    "opencode-go pro": normalizeOpenCodeProInput,
+    xai: normalizeXaiInput,
+    "ollama / custom / vllm": normalizeOllamaInput,
+    "local llama.cpp": normalizeLocalInput,
+  };
+  for (const [name, normalize] of Object.entries(routes)) {
+    const out = normalize(fixture());
+    assert.ok(plainText(out).includes("Read the market clock first."), `${name} must deliver the wake to the model`);
+    assert.equal(
+      plainText(out).split("Read the market clock first.").length - 1,
+      1,
+      `${name} must deliver the wake exactly once`,
+    );
+    assert.equal(
+      out.some((item) => item?.type === "function_call_output" && item.call_id == null),
+      false,
+      `${name} must not forward a call-id-less tool row`,
+    );
+  }
+  // The native leg keeps its own contract: the delivered item goes through as it was,
+  // because the upstream understands it. No rescue, and no duplicate copy.
+  const native = normalizeNativeInput(fixture());
+  assert.equal(native.filter((item) => item?.type === "function_call_output" && item.call_id == null).length, 1);
+  assert.equal(native.filter((item) => item?.type === "message" && item.role === "user").length, 1);
 });
 
 // The collaboration channel uses the same delivery shape, and normalizeGatewayInput
