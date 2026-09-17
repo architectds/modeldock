@@ -201,6 +201,37 @@ test("built bundle bridges the complete original Codex package to strict local C
   assert.match(second, /LOCAL_FIXTURE_DONE/);
   const replayedAssistant = requests[1].messages.find((message) => message.tool_calls?.some((call) => call.id === "call_local_fixture"));
   assert.equal(replayedAssistant?.reasoning_content, "Run the requested command and inspect its result.");
+
+  // The transition that broke in 0.3.77 and never worked for a scheduled wake:
+  // Codex delivers an automation heartbeat (and a cross-thread message) as a
+  // function_call_output that has an id, a name and a turn_id but NO call_id, so
+  // the pairing pass used to delete the instruction along with the tool row. The
+  // model then saw a history ending in its own previous report and kept writing it.
+  // Replay it through the built bundle and prove the strict Chat upstream receives
+  // the text as a user turn while the pairing contract still holds.
+  const wake = {
+    type: "function_call_output",
+    id: "fco_local_wake",
+    name: "automation_update",
+    namespace: "codex_app",
+    output: "<heartbeat>\n<automation_id>trader-cycle</automation_id>\nSTEP 0 - read the market clock first.\n</heartbeat>",
+    internal_chat_message_metadata_passthrough: { turn_id: "local-wake-turn" },
+  };
+  const third = await send([...fixture.request.input, wake]);
+  assert.match(third, /response\.completed/);
+  const wakeMessages = requests[2].messages;
+  assert.equal(wakeMessages.at(-1).role, "user", "the delivered wake is the turn the model is asked to answer");
+  assert.match(String(wakeMessages.at(-1).content), /STEP 0 - read the market clock first\./);
+  assert.equal(
+    wakeMessages.filter((message) => message.role === "tool" && message.tool_call_id === "fco_local_wake").length,
+    0,
+    "a delivery never becomes an unpaired tool row",
+  );
+  assert.equal(
+    JSON.stringify(wakeMessages).includes("automation_update"),
+    false,
+    "the delivering tool name is not invented as an upstream call",
+  );
 });
 
 test("built bundle preserves full-Codex tools across a mock KV restore after gateway restart", async (t) => {

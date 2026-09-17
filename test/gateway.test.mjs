@@ -836,6 +836,91 @@ test("dropUnpairedToolItems drops duplicate outputs and an output that precedes 
   assert.equal(out[1].output, "first", "the relocated output is the first one for the call");
 });
 
+// A Codex wake is delivered as a tool output that never had a call: the real item
+// captured from session 01a083e8 has an id, a name, a namespace and a turn_id, and no
+// call_id key at all. Deleting it deleted the instruction.
+function deliveredWake(output) {
+  return {
+    type: "function_call_output",
+    id: "fco_01a0b9c7-9a3e-7b31-8f2b-1a2b3c4d5e6f",
+    name: "automation_update",
+    namespace: "codex_app",
+    output,
+    internal_chat_message_metadata_passthrough: { turn_id: "01a08b83-5d36-7613-8637-d6ba6c27b1f1" },
+  };
+}
+
+test("normalizeGatewayInput delivers a call-id-less wake to the model as user text", () => {
+  const input = [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "run the cycle" }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "cycle report v1" }] },
+    deliveredWake("<heartbeat>\nSTEP 0 - read the market clock first.\n</heartbeat>"),
+  ];
+  const out = normalizeGatewayInput(input);
+  assert.deepEqual(out.map((item) => `${item.type}:${item.role}`), [
+    "message:developer",
+    "message:user",
+    "message:assistant",
+    "message:user",
+  ], "the delivery becomes a user turn in place");
+  assert.equal(
+    out[3].content[0].text,
+    "<heartbeat>\nSTEP 0 - read the market clock first.\n</heartbeat>",
+    "the delivered text reaches the model verbatim, with no wrapper",
+  );
+  const serialized = JSON.stringify(out);
+  assert.equal(serialized.includes("automation_update"), false, "the delivering tool name is not invented as an upstream tool call");
+  assert.equal(serialized.includes("fco_01a0b9c7"), false, "an output id must not be relayed as an item id");
+});
+
+test("a rescued wake is a fixed point so the replayed prompt prefix stays stable", () => {
+  // Codex replays the whole history on every request. If the rescue depended on which
+  // turn was current, the promoted row would vanish on the next request and churn the
+  // upstream prefix cache every single wake.
+  const once = normalizeGatewayInput([
+    { type: "message", role: "user", content: [{ type: "input_text", text: "run the cycle" }] },
+    deliveredWake("STEP 0"),
+  ]);
+  const twice = normalizeGatewayInput(once);
+  assert.deepEqual(twice, once, "normalizing an already-promoted history is idempotent");
+  assert.equal(JSON.stringify(twice), JSON.stringify(once));
+});
+
+test("dropUnpairedToolItems rescues a wake but still drops severed compact history", () => {
+  const input = [
+    { type: "function_call", call_id: "call_paired", name: "f", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_paired", output: "kept" },
+    // A compact task sliced this call away: it carries an id, so it is stale history.
+    { type: "function_call_output", call_id: "call_severed", output: "stale tool dump" },
+    deliveredWake("wake text"),
+  ];
+  const out = dropUnpairedToolItems(input);
+  assert.deepEqual(out.map((item) => item.call_id ?? `${item.type}:${item.role}`), [
+    "call_paired",
+    "call_paired",
+    "message:user",
+  ], "only the pairing-less delivery is rescued");
+  assert.equal(out[2].content[0].text, "wake text");
+});
+
+test("a wake keeps every text part and any pixels it carries", () => {
+  const out = dropUnpairedToolItems([
+    deliveredWake([
+      { type: "output_text", text: "see the screenshot" },
+      { type: "input_image", image_url: "data:image/png;base64,AAAA", detail: "high" },
+      { type: "encrypted_content", encrypted_content: "opaque" },
+    ]),
+  ]);
+  assert.deepEqual(out[0].content.map((part) => part.type), ["input_text", "input_image"]);
+  assert.equal(out[0].content[1].image_url, "data:image/png;base64,AAAA");
+});
+
+test("an empty wake does not fabricate a user row", () => {
+  assert.deepEqual(dropUnpairedToolItems([deliveredWake("   ")]), []);
+  assert.deepEqual(dropUnpairedToolItems([deliveredWake([])]), []);
+});
+
 test("normalizeGatewayInput repairs the real severed compact history shape", () => {
   // Live repro: an assistant text message sat between function_call
   // call_00_zViPA3xCB2wYsU7H6dZW5091 and its output; the upstream rejected the
