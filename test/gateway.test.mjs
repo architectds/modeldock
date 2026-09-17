@@ -921,6 +921,28 @@ test("an empty wake does not fabricate a user row", () => {
   assert.deepEqual(dropUnpairedToolItems([deliveredWake([])]), []);
 });
 
+// The collaboration channel uses the same delivery shape, and normalizeGatewayInput
+// also runs promoteCollaborationNewTask, which appends a user message when it finds a
+// delegated payload. The rescue happens first, so the payload must arrive exactly
+// once: the append guard has to recognise the row this pass already created.
+test("a delegated NEW_TASK wake is delivered once, not promoted twice", () => {
+  const payload = "Check the QCR floor before the next open and report only a change.";
+  const delivered = deliveredWake(`Message Type: NEW_TASK\nTask name: worker-1\nSender: /root\nPayload:\n${payload}`);
+  const out = normalizeGatewayInput([
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] },
+    delivered,
+  ]);
+  const copies = out.filter((item) => item?.role === "user" && JSON.stringify(item).includes(payload));
+  assert.equal(copies.length, 1, "one user row carries the delegated payload");
+  assert.equal(out.filter((item) => item?.type === "function_call_output").length, 0, "no tool row survives without a call");
+  // A plain user copy of the same payload must also stay single, proving both entry
+  // points converge on one representation instead of maintaining two.
+  const asUser = normalizeGatewayInput([
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: `Message Type: NEW_TASK\nTask name: worker-1\nSender: /root\nPayload:\n${payload}` }] },
+  ]);
+  assert.equal(asUser.filter((item) => item?.role === "user" && JSON.stringify(item).includes(payload)).length, 1);
+});
 test("normalizeGatewayInput repairs the real severed compact history shape", () => {
   // Live repro: an assistant text message sat between function_call
   // call_00_zViPA3xCB2wYsU7H6dZW5091 and its output; the upstream rejected the

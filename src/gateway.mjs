@@ -599,6 +599,88 @@ function isToolOutputItem(item) {
   return item?.type === "function_call_output" || item?.type === "custom_tool_call_output";
 }
 
+// Text of a delivered tool output, kept out of the log line but needed twice: as
+// the promoted user content and for the "was anything readable delivered" test.
+function deliveredOutputContent(output) {
+  if (typeof output === "string") {
+    return output.trim() ? [{ type: "input_text", text: output }] : [];
+  }
+  if (output == null) return [];
+  if (!Array.isArray(output)) {
+    let text;
+    try {
+      text = JSON.stringify(output);
+    } catch {
+      text = String(output);
+    }
+    return typeof text === "string" && text.trim() ? [{ type: "input_text", text }] : [];
+  }
+  const parts = [];
+  for (const part of output) {
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "input_image" && typeof part.image_url === "string") {
+      // The router already reads pixels out of an unpaired tool output, so they
+      // must survive the conversion instead of dying with the tool row.
+      parts.push({ type: "input_image", image_url: part.image_url, ...(part.detail ? { detail: part.detail } : {}) });
+      continue;
+    }
+    if (typeof part.text === "string" && part.text.trim()) {
+      parts.push({ type: "input_text", text: part.text });
+    }
+  }
+  return parts;
+}
+
+// One line per delivering tool, never the content. The class is rare, and the
+// failure mode it replaces was total silence: a week of eaten heartbeats left no
+// trace anywhere. Names and counts only.
+const deliveredReportNames = new Set();
+const DELIVERED_REPORT_NAME_LIMIT = 16;
+
+function reportDeliveredToolOutput(item, content) {
+  const name = typeof item.name === "string" && item.name ? item.name : item.type;
+  if (deliveredReportNames.has(name)) return;
+  if (deliveredReportNames.size >= DELIVERED_REPORT_NAME_LIMIT) deliveredReportNames.clear();
+  deliveredReportNames.add(name);
+  const chars = content.reduce((sum, part) => sum + (typeof part.text === "string" ? part.text.length : 0), 0);
+  console.error(`[modeldock] delivered ${name} as a call-id-less tool output; its ${chars} chars now reach the model as a user message. Codex wakes (automation heartbeats, cross-thread messages) arrive in this shape.`);
+}
+
+// A tool output with no `call_id` at all is not a severed pair - the client never
+// expressed a pairing for it. Codex uses exactly this shape to DELIVER content: an
+// automation heartbeat and a cross-thread message both arrive as a
+// `function_call_output` whose `name` is the delivering tool and whose `call_id` key
+// is absent (measured in one real Codex session: 59 such items, 54
+// `automation_update`, 5 `send_message_to_thread`). Deleting the item deleted the
+// instruction, so the model was handed a history that ended with its own previous
+// report and continued it - the "replay without doing the work" symptom, and it hit
+// every route that normalizes while the native leg, which forwards the item as-is,
+// worked. Keep the text by representing it as the user content it was meant to
+// become.
+//
+// Only the id-less shape is rescued. An output that DOES carry a call id with no
+// matching call stays dropped, as before: that is sliced compact history, the
+// summary already covers it, and it is the pairing contract strict upstreams
+// validate. The conversion depends on the item alone - never on its neighbours or on
+// which turn is current - so replaying the same history re-derives the same bytes and
+// the upstream prompt prefix stays cache-stable.
+function promoteDeliveredToolOutputs(input, callIds) {
+  let changed = false;
+  const out = [];
+  for (const item of input) {
+    if (!isToolOutputItem(item) || item.call_id != null || callIds.has(item.call_id)) {
+      out.push(item);
+      continue;
+    }
+    const content = deliveredOutputContent(item.output);
+    changed = true;
+    if (!content.length) continue;
+    out.push({ type: "message", role: "user", content });
+    reportDeliveredToolOutput(item, content);
+  }
+  return changed ? out : input;
+}
+
 function chatToolCallId(call) {
   if (!call || typeof call !== "object") return undefined;
   const id = call.id ?? call.call_id;
@@ -704,8 +786,10 @@ export function flattenChatToolCallsToResponses(input) {
 // custom_tool_call items with function_call_output / custom_tool_call_output)
 // and the chat shape (an assistant message carrying a `tool_calls` array whose
 // results are role:"tool" messages with tool_call_id). Normalize the dialect
-// and reused identities once, then drop only the unpaired side. Valid Responses
-// pairs are unchanged; mixed history is represented as canonical Responses pairs.
+// and reused identities once, then drop only the unpaired side - except a delivery,
+// which has no pairing at all and is rescued as user text (see
+// promoteDeliveredToolOutputs). Valid Responses pairs are unchanged; mixed history is
+// represented as canonical Responses pairs.
 export function dropUnpairedToolItems(input) {
   if (!Array.isArray(input)) return input;
   input = uniquifyReusedToolCallIds(flattenChatToolCallsToResponses(input));
@@ -715,7 +799,11 @@ export function dropUnpairedToolItems(input) {
     if (isToolCallItem(item)) callIds.add(item.call_id);
     if (isToolOutputItem(item)) outputIds.add(item.call_id);
   }
-  const paired = input.filter((item) => {
+  // Promotion runs before the filter, so a rescued delivery is no longer a tool
+  // item and cannot be deleted by it. No call gains a missing result here: only
+  // id-less outputs are converted, and those are paired with an id-less call only
+  // when such a call exists, which is the same test the filter applied before.
+  const paired = promoteDeliveredToolOutputs(input, callIds).filter((item) => {
     if (isToolCallItem(item)) return outputIds.has(item.call_id);
     if (isToolOutputItem(item)) return callIds.has(item.call_id);
     return true;
