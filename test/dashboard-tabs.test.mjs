@@ -1206,6 +1206,17 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
     startVisible: document.getElementById('local-config-start').offsetParent !== null,
     leftStartRemoved: document.getElementById('llamacpp-restart') === null,
+    restartVisible: document.getElementById('local-service-restart').offsetParent !== null,
+    // Rendered text, not the key: a missing translation would show the raw
+    // "host.restartService" to the user.
+    restartLabel: document.getElementById('local-service-restart').textContent.trim(),
+    // Adjacency is the request: it sits beside Leave management, not somewhere
+    // the operator has to go looking for it.
+    restartNextToLeave: (() => {
+      const leave = document.getElementById('local-host-unmanage');
+      const restart = document.getElementById('local-service-restart');
+      return Boolean(leave && leave.parentElement && leave.parentElement === restart.parentElement);
+    })(),
   })`));
   assert.deepEqual(drawer, {
     visible: true,
@@ -1224,6 +1235,9 @@ test("a managed llama drawer keeps its persisted paths visible after takeover", 
     leaveVisible: true,
     startVisible: false,
     leftStartRemoved: true,
+    restartVisible: true,
+    restartLabel: "Restart service",
+    restartNextToLeave: true,
   });
 });
 
@@ -1264,6 +1278,11 @@ test("a stopped managed llama keeps its full drawer and moves Start service ther
     leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
     managedActionsTogether: document.getElementById('local-host-unmanage').parentElement === document.getElementById('local-config-start').parentElement,
     startImmediatelyAfterLeave: document.getElementById('local-host-unmanage').nextElementSibling === document.getElementById('local-config-start'),
+    // The engine is not answering in this state, which is exactly when the
+    // service restart has to be there: the host cannot be released, so the only
+    // way out is to restart the service and drop the warm KV.
+    restartVisible: document.getElementById('local-service-restart').offsetParent !== null,
+    restartBeforeLeave: document.getElementById('local-service-restart').nextElementSibling === document.getElementById('local-host-unmanage'),
     gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
     management: document.getElementById('local-host-management-state').textContent.trim(),
     leftStartRemoved: document.getElementById('llamacpp-restart') === null,
@@ -1285,6 +1304,8 @@ test("a stopped managed llama keeps its full drawer and moves Start service ther
     leaveVisible: true,
     managedActionsTogether: true,
     startImmediatelyAfterLeave: true,
+    restartVisible: true,
+    restartBeforeLeave: true,
     gateway: "Gateway: connected - 1 model(s), but the engine is not answering",
     management: "Managed profile: --parallel 1 \u00b7 --ctx-size 215,040. Multiple sessions available.",
     leftStartRemoved: true,

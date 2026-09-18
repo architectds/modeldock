@@ -21,7 +21,7 @@ import { memoryStoreFor } from "./memory.mjs";
 import { bindMemoryScope, verifiedMemoryScope, withoutMemoryMutations } from "./memory-scope.mjs";
 import { CodexConfigSwitcher } from "./config-switcher.mjs";
 import { createAutostart } from "./autostart.mjs";
-import { createUpdater, localVersion } from "./update.mjs";
+import { createUpdater, localVersion, restartInstalledService } from "./update.mjs";
 import { createDerivedFallback } from "./derived-fallback.mjs";
 import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instance-owner.mjs";
 import { runGatewayVerifierCli } from "../scripts/gateway-verifier.mjs";
@@ -2763,6 +2763,32 @@ export function createApp(services = createServices()) {
     const released = Boolean(services.localHostRuntime?.releaseGatewayRestartPreparation?.());
     recordConfigAction(metrics, "local_restart_checkpoint_release", { ok: true, released });
     return res.json({ released });
+  });
+
+  // Restart the gateway service itself, immediately, with no KV handoff.
+  //
+  // Two refusals make this route what it is, and both are the point:
+  //   - It is guarded by `localPostGuard` alone, NOT `serializeConfigMutation`.
+  //     The mutation queue is exactly what a wedged local host blocks: a release
+  //     or a checkpoint waiting on the KV coordinator sits in that queue and
+  //     takes everything behind it down with it. The one action that clears the
+  //     wedge must not have to queue behind it.
+  //   - It never calls `prepareGatewayRestart()`. Checkpointing is a courtesy the
+  //     wedge can veto; a slot state that cannot be saved or erased would hold
+  //     the restart hostage forever. Warm KV is simply dropped - the next turn
+  //     cold-prefills, which is a cost, not a failure.
+  //
+  // The response goes out before the supervisor is spawned so the caller learns
+  // it was accepted; the process then stops underneath it.
+  app.post("/api/local/service/restart", localPostGuard, async (_req, res) => {
+    const scheduled = await (services.restartService || restartInstalledService)();
+    recordConfigAction(metrics, "local_service_restart", { ok: Boolean(scheduled) });
+    if (!scheduled) {
+      return res.status(500).json({
+        error: { type: "service_restart_failed", message: "ModelDock could not start the service restart." },
+      });
+    }
+    return res.json({ scheduled: true, kvHandoff: false });
   });
 
   // Start an engine again exactly as it was running when it was connected.

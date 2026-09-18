@@ -447,9 +447,23 @@ export function scheduleRestart(rootDir, {
       child.on("error", () => { /* the old gateway keeps serving */ });
       child.unref?.();
     }
+    return true;
   } catch (error) {
     // The old gateway keeps serving; the Update button stays actionable.
+    return false;
   }
+}
+
+// Restart this install's gateway with no update and, deliberately, no local KV
+// handoff. This is the escape hatch for a managed host that can be neither
+// released nor drained: asking the KV coordinator to unload first would hand the
+// wedge a veto over the one action that clears it. It reuses the same recovery
+// supervisor the verified self-update path uses, so there is one restart owner.
+export function restartInstalledService({ rootDir = root, spawnImpl, platform } = {}) {
+  const options = {};
+  if (spawnImpl) options.spawnImpl = spawnImpl;
+  if (platform) options.platform = platform;
+  return scheduleRestart(rootDir, options);
 }
 
 // A bridge runtime cannot execute a Node-24-only bundle, but it can hand the

@@ -3226,6 +3226,13 @@ function renderLocalHostControl(engine, found) {
     release.hidden = !management;
     release.dataset.hostId = management?.id || "";
   }
+  // The restart escape hatch is offered whether or not this host is managed.
+  // The state it exists for is a local host that can be neither released nor
+  // drained, and an action that only appears once everything is healthy is not
+  // an escape hatch. It also never depends on the engine being reachable: it
+  // restarts ModelDock, not llama.cpp.
+  const serviceRestart = $("local-service-restart");
+  if (serviceRestart) serviceRestart.hidden = false;
   const directory = $("local-host-kv-directory");
   if (directory && management?.cacheDirectory) directory.value = management.cacheDirectory;
   if (directory && !management && !directory.value && localKvDirectoryDefault) {
@@ -3548,6 +3555,43 @@ $("local-config-start")?.addEventListener("click", async () => {
   }
 });
 $("local-config-close")?.addEventListener("click", closeLocalConfig);
+
+// Restart the gateway service and stop for nothing. This route is deliberately
+// outside the config mutation queue and deliberately skips the KV handoff, so a
+// request that has wedged the coordinator - and therefore the release and
+// checkpoint routes behind it - cannot also block its own recovery. Dropping warm
+// KV costs the next turn a prefill; refusing to restart would cost the session.
+$("local-service-restart")?.addEventListener("click", async () => {
+  const button = $("local-service-restart");
+  if (!button || button.disabled) return;
+  if (!window.confirm(t("host.restartServiceConfirm"))) return;
+  const errorLine = $("local-config-error");
+  button.disabled = true;
+  button.textContent = t("host.restartServiceBusy");
+  if (errorLine) {
+    errorLine.hidden = true;
+    errorLine.textContent = "";
+  }
+  try {
+    const response = await fetch("/api/local/service/restart", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error?.message || `Restart service ${response.status}`);
+    // The page is about to lose its server. The shared probe reloads it as soon
+    // as a gateway answers again, so the button intentionally stays disabled.
+    awaitRestartThenReload();
+  } catch (error) {
+    if (errorLine) {
+      errorLine.hidden = false;
+      errorLine.textContent = error.message;
+    }
+    button.disabled = false;
+    button.textContent = t("host.restartService");
+  }
+});
 $("local-config-save")?.addEventListener("click", () => {
   if ($("local-config-save")?.dataset.mode === "manage") submitLocalManage().catch(() => {});
   else submitLocalConfig("connect").catch(() => {});
