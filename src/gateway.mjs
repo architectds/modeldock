@@ -4394,7 +4394,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   let llamaTimings;
   let responseCompleted = false;
   let responseFailure = "";
+  // Liveness for the managed local host. The tee is built for the whole request
+  // but the lease's progress callback only exists once the scheduler has admitted
+  // this attempt, so the tee reads it through this binding. Every route pushes its
+  // events through this one tee, which is what lets a single hook cover the chat
+  // bridge, the normalized stream and the byte passthrough. It stays null for
+  // unmanaged traffic, where there is no lease to keep alive.
+  let leaseProgress = null;
   const tee = createUsageTee((event) => {
+    leaseProgress?.();
     const eventUsage = usageFromEvent(event);
     if (eventUsage) usage = eventUsage;
     if (event?.type === "response.completed") {
@@ -4410,7 +4418,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const localWarmBase = target.provider === "llamacpp" && target.transport === "chat"
     ? localWarmBaseFor({ payload: relayPayload, target, upstreamModel })
     : null;
-  const executeRelay = async ({ slot = null, cache = null, warmBase = null, signal: requestSignal = signal } = {}) => {
+  const executeRelay = async ({ slot = null, cache = null, warmBase = null, signal: requestSignal = signal, progress = null } = {}) => {
+    leaseProgress = progress;
     // The KV tier this request rides on (gpu_hot / ssd_restore / cold_prefill
     // / llama_auto) is the one fact that lets the dashboard show what the SSD
     // cache is buying. Annotated onto the live metrics record rather than
@@ -4647,11 +4656,26 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // inputTokens/outputTokens ride on the trace record: the dashboard's
     // context-token waveform plots recent[].inputTokens per completed call.
     const semanticFailed = Boolean(responseFailure);
+    // A cancellation that *we* started - a reclaimed lease or a gateway restart -
+    // stops the pipe on the abort and leaves the response open, so the caller
+    // waits forever for an event that will never arrive. That is the state that
+    // looks like "ModelDock turned itself off and nothing was returned": the
+    // gateway had finished with the turn, Codex had not. End it with the terminal
+    // event the client understands, and report the reason instead of pretending
+    // the caller left. A caller that really did go away has a closed response and
+    // is left alone.
+    const hostCancelled = interrupted && !res.writableEnded && !res.destroyed;
+    const cancelReason = hostCancelled
+      ? (requestSignal?.reason?.message || "Local model request was cancelled by ModelDock.")
+      : "";
+    // Dispatch on the negotiated content type: a streaming turn must end with a
+    // response.failed event, a JSON turn cannot carry SSE framing at all.
+    if (hostCancelled) endRelayFailure(res, cancelReason, bytesOut > 0);
     finish?.({
       ok: !interrupted && !semanticFailed,
-      httpStatus: interrupted ? 499 : upstream.status,
+      httpStatus: interrupted ? (hostCancelled ? 503 : 499) : upstream.status,
       upstream: target.provider,
-      error: interrupted ? "client disconnected" : responseFailure || undefined,
+      error: interrupted ? (hostCancelled ? cancelReason : "client disconnected") : responseFailure || undefined,
       bytesOut,
       inputTokens: traceUsage?.input_tokens || 0,
       outputTokens: traceUsage?.output_tokens || 0,
@@ -4673,12 +4697,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     // Injectable so unit tests do not append to the real ~/.modeldock file.
     recordUsage({
       ...relayRoute,
-      status: interrupted ? 499 : semanticFailed ? "error" : upstream.status,
+      status: interrupted ? (hostCancelled ? 503 : 499) : semanticFailed ? "error" : upstream.status,
       ...usageTokens(traceUsage),
     });
     return {
       ok: !interrupted && !semanticFailed,
-      httpStatus: interrupted ? 499 : upstream.status,
+      httpStatus: interrupted ? (hostCancelled ? 503 : 499) : upstream.status,
       route,
       error: responseFailure || undefined,
       usage: traceUsage,

@@ -40,6 +40,20 @@ function dispatchableRecord(registry) {
   )) || null;
 }
 
+// The lease watchdog defaults are sized for a real 27B turn on a consumer
+// desktop, which is far longer than anything a test can wait for, and a support
+// engineer diagnosing a "local model stopped answering" report needs to be able
+// to prove the reclaim fires without editing source. Unset means the defaults.
+function leaseOverrides(env) {
+  const read = (name, key) => {
+    const raw = String(env[`MODELDOCK_LOCAL_${name}`] ?? "").trim();
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value > 0 ? { [key]: value } : null;
+  };
+  return Object.assign({}, read("LEASE_MS", "maxLeaseMs"), read("STALL_MS", "stallMs"), read("LEASE_TICK_MS", "leaseTickMs"));
+}
+
 export class LocalHostRuntime {
   #loaded = false;
   #record = null;
@@ -55,6 +69,7 @@ export class LocalHostRuntime {
     this.manifestDirectory = manifestDirectory;
     this.fetch = fetchImpl;
     this.onDiagnostic = onDiagnostic;
+    this.lease = leaseOverrides(globalThis.process?.env || {});
   }
 
   async #build(record) {
@@ -80,6 +95,7 @@ export class LocalHostRuntime {
       slotClient,
       assignSlots: record.activeProfile.laneCount === 1 || record.capabilities?.requestSlotAffinity === true,
       onDiagnostic: this.onDiagnostic,
+      ...(this.lease && Object.keys(this.lease).length ? { lease: this.lease } : {}),
     });
   }
 
@@ -90,6 +106,14 @@ export class LocalHostRuntime {
     // refreshes queue behind the in-flight one and then run, so a takeover's
     // deliberate rebuild is never swallowed by a concurrent lazy load.
     while (this.#refreshing) await this.#refreshing.catch(() => {});
+    // ...and a lazy refresh must never rebuild what it just waited for. Each
+    // coordinator owns its own scheduler, so two of them over one llama.cpp
+    // host means two independent admission queues: two Codex conversations were
+    // measured starting their turns at the same instant on a profile with a
+    // single lane, and the status payload - read from whichever coordinator was
+    // installed last - reported no active request at all. Only an explicit
+    // record asks for a rebuild.
+    if (record === undefined && this.#loaded && this.#coordinator) return this.snapshot();
     const work = (async () => {
       let selected = null;
       if (record === undefined) {
@@ -145,6 +169,27 @@ export class LocalHostRuntime {
       ssd: live.ssd || null,
       counters: live.counters || null,
       telemetry: live.telemetry || null,
+      // Who is holding the single lane, and for how long. A count alone cannot
+      // tell "one request in flight" apart from "one request has been parked
+      // behind a zombie lease for hours", which is exactly the state that was
+      // undiagnosable from the outside.
+      lease: Object.freeze({
+        maxLeaseMs: live.maxLeaseMs || 0,
+        stallMs: live.stallMs || 0,
+        reclaims: live.reclaims || null,
+        active: Object.freeze((live.active || []).map((job) => ({
+          conversationId: job.conversationId,
+          ageMs: job.ageMs,
+          quietMs: job.quietMs,
+          started: job.started,
+          reclaiming: job.reclaiming,
+          reclaimReason: job.reclaimReason,
+        }))),
+        pending: Object.freeze((live.pending || []).map((job) => ({
+          conversationId: job.conversationId,
+          ageMs: job.ageMs,
+        }))),
+      }),
     });
   }
 
@@ -271,7 +316,10 @@ export class LocalHostRuntime {
         conversationId,
         signal: requestSignal,
         warmBase,
-        run: (context) => run({ ...context, signal: requestSignal }),
+        // The coordinator composes the caller's signal with the scheduler's lease
+        // controller and forwards both the result and the progress callback, so
+        // the relay can be cancelled by a disconnect *or* a reclaimed lease.
+        run: (context = {}) => run(context),
       });
     } finally {
       this.#requestControllers.delete(controller);

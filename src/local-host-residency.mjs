@@ -179,3 +179,24 @@ export function completeLocalHostResidency(residency, {
   }
   return withLane(current, laneSlot, success ? hotLane(laneSlot, key, wantedFingerprint, completedAt) : emptyLane(laneSlot));
 }
+
+// Reclaim a lane whose request will never report back.
+//
+// "active" means a request owns the slot and its KV state is in flux, so no
+// other conversation may lease it and a loaded profile may not change its
+// fingerprint. That is right, but it assumed the owner always returns: a relay
+// that never settles leaves the lane active for the life of the process, and
+// every later request on any conversation then parks behind an owner that is
+// only nominally alive. Lanes are in-memory, so the only way out was a restart.
+// Age is never judged here - the scheduler that computed the reclaim deadline
+// while the owner was live is the one that calls this.
+export function abandonLocalHostResidency(residency, { slot } = {}) {
+  const current = createLocalHostResidency(residency);
+  const laneSlot = Number(slot);
+  if (!Number.isSafeInteger(laneSlot) || laneSlot < 0 || laneSlot >= current.laneCount) throw new TypeError("A valid local host slot is required.");
+  const lane = current.lanes[laneSlot];
+  // An empty or hot lane is not owned by a live request; nothing to reclaim.
+  if (lane.state !== "active") return current;
+  // Its contents are unknown, so it is dropped rather than promoted to hot.
+  return withLane(current, laneSlot, emptyLane(laneSlot));
+}

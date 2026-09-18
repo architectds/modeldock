@@ -11,6 +11,7 @@ import {
   completeLocalHostResidency,
   createLocalHostResidency,
   leaseLocalHostResidency,
+  abandonLocalHostResidency,
 } from "./local-host-residency.mjs";
 import { requiredText as text } from "./local-host-validation.mjs";
 
@@ -69,7 +70,7 @@ export class LocalHostKvCoordinator {
   #prefixStates = new Map();
   // Lifetime tallies for the local dashboard: what the SSD cache is actually
   // doing, counted where the actions happen instead of re-derived from logs.
-  #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0, warmBaseMissing: 0 };
+  #counters = { saves: 0, restores: 0, coldPrefills: 0, evictions: 0, expired: 0, cleared: 0, warmBaseMissing: 0, leaseReclaims: 0 };
   // Per-tier request accounting, so "the cache is working" can be answered from
   // one number per tier instead of reasoning about which code paths ran: a
   // host can report a large cachedTokens total while every byte of it came from
@@ -84,7 +85,9 @@ export class LocalHostKvCoordinator {
   #coldPrefillRates = [];
   #totals = { requests: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, timeSavedMs: 0 };
 
-  constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp } = {}) {
+  // `lease` overrides the scheduler's lease watchdog for tests only; production
+  // runs on the defaults, which are sized from measured worst-case local turns.
+  constructor({ hostId, laneCount = 1, fingerprint, store, slotClient, assignSlots = true, onDiagnostic = noOp, lease = null } = {}) {
     if (!store || typeof store.save !== "function" || typeof store.restore !== "function" || typeof store.invalidateExcept !== "function" || typeof store.has !== "function") {
       throw new TypeError("A KV coordinator needs a local KV state store.");
     }
@@ -96,7 +99,45 @@ export class LocalHostKvCoordinator {
     this.slotClient = slotClient;
     this.assignSlots = Boolean(assignSlots);
     this.onDiagnostic = onDiagnostic;
-    this.scheduler = new LocalHostScheduler({ hostId: this.hostId, maxActiveRequests: Number(laneCount) });
+    // The scheduler's lease watchdog is the last line of defence for the whole
+    // local host: with one lane, a single request that never settles parks
+    // every conversation on the machine. Reclaiming the lane is not enough -
+    // the residency must give the slot back and its unknown KV contents must be
+    // discarded, or the next request is told to queue behind a ghost.
+    this.scheduler = new LocalHostScheduler({
+      hostId: this.hostId,
+      maxActiveRequests: Number(laneCount),
+      ...(lease || {}),
+      onLeaseReclaimed: ({ conversationId, reason, ageMs, forced }) => {
+        const seconds = Math.round(ageMs / 1000);
+        if (!forced) {
+          // The request was told to stop and still owns its lane, so nothing is
+          // discarded here. Logged anyway: this is the only trace a slow-death
+          // stall leaves when the request does unwind cleanly.
+          void this.#diagnose("lane_stalled", new Error(
+            `Local host lane held by a request that stopped making progress (${reason} after ${seconds}s); its stream was cancelled.`
+          ));
+          return;
+        }
+        // The request ignored its cancellation. Take the lane back: without this
+        // the residency keeps reporting an owner that only exists as a hung
+        // promise, and every later local request queues behind it forever.
+        this.#counters.leaseReclaims += 1;
+        const key = kvSessionKey({ principalId: "local", conversationId });
+        const lane = this.#residency.lanes.find((entry) => entry.state === "active" && entry.sessionKey === key);
+        if (lane) {
+          this.#residency = abandonLocalHostResidency(this.#residency, { slot: lane.slot });
+          this.#prefixStates.delete(key);
+          this.#recordEvent("lane_reclaimed", { slot: lane.slot });
+          // Its KV contents are unaccounted for, so they are dropped rather than
+          // left to be mistaken for a usable prefix.
+          void this.#erase(lane.slot);
+        }
+        void this.#diagnose("lane_reclaimed", new Error(
+          `Reclaimed the local host lane (${reason} after ${seconds}s) because its request never released it. The next request cold-starts.`
+        ));
+      },
+    });
     this.#residency = createLocalHostResidency({ laneCount: Number(laneCount) });
   }
 
@@ -533,6 +574,16 @@ export class LocalHostKvCoordinator {
   async #complete({ slot, sessionKey, success, prefixKey = "", bootstrapInjected = false }) {
     if (!this.assignSlots) return;
     await this.#exclusive(async () => {
+      const lane = this.#residency.lanes[slot];
+      if (lane?.state !== "active" || lane.sessionKey !== sessionKey) {
+        // The lease watchdog already took this lane back and handed it to
+        // somebody else. A late response must not resurrect or evict that
+        // ownership; the state it produced is unaccounted for and is dropped.
+        await this.#diagnose("late_completion_discarded", new Error(
+          "A local request finished after its lane was reclaimed; its KV state was discarded."
+        ));
+        return;
+      }
       this.#residency = completeLocalHostResidency(this.#residency, {
         slot,
         sessionKey,
@@ -617,24 +668,36 @@ export class LocalHostKvCoordinator {
       principalId: normalizedPrincipalId,
       conversationId: normalizedConversationId,
       signal,
-      run: async () => {
+      run: async (context = {}) => {
+        // The scheduler hands the operation its own composed signal: caller
+        // disconnect *or* lease reclaim, plus the progress callback that keeps a
+        // live stream from ever being judged stalled. Compose here rather than
+        // trusting the caller's signal, because the lease controller only exists
+        // inside the scheduler.
+        const progress = typeof context.progress === "function" ? context.progress : noOp;
+        const leaseSignal = context.signal || signal;
+        const operationSignal = leaseSignal && signal && leaseSignal !== signal
+          ? AbortSignal.any([signal, leaseSignal])
+          : leaseSignal;
         // Builds without request-level slot affinity can still use llama.cpp's
         // own P-way scheduler. SSD swapping is disabled because restoring slot
         // N and then letting the server choose another slot would corrupt the
         // cache mapping; fair admission and complete Codex history remain safe.
         if (!this.assignSlots) {
           this.#totals.requests += 1;
-          const result = await run({ cache: { tier: "llama_auto" }, slot: null });
+          const result = await run({ cache: { tier: "llama_auto" }, slot: null, progress, signal: operationSignal });
           this.#recordUsage(result, { tier: "llama_auto" });
           return result;
         }
-        const prepared = await this.#prepare(sessionKey, signal, warmBase);
+        const prepared = await this.#prepare(sessionKey, operationSignal, warmBase);
         try {
           this.#totals.requests += 1;
           const result = await run({
             cache: { tier: prepared.tier, ...(prepared.restoreMs ? { restoreMs: prepared.restoreMs } : {}) },
             slot: prepared.slot,
             warmBase: prepared.warmBase,
+            progress,
+            signal: operationSignal,
           });
           const savedMs = this.#recordUsage(result, prepared);
           await this.#complete({
