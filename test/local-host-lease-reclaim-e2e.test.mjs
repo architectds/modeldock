@@ -26,6 +26,7 @@ import {
   takeOverHost,
 } from "../src/local-hosts.mjs";
 import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
+import { kvSessionKey } from "../src/local-host-kv-state.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
@@ -75,6 +76,10 @@ test("built bundle reclaims a local lane whose relay never observes the end of i
 
   let wedged = false;
   const requests = [];
+  // Slot control calls are recorded so the test can prove the reclaimed
+  // conversation's KV was actually discarded in the engine, not just dropped
+  // from the gateway's own bookkeeping.
+  const slotActions = [];
   const sockets = new Set();
   // A strict llama.cpp Chat endpoint whose first response is *delivered* and
   // then left open: it ends the HTTP body but never lets the socket go away, so
@@ -84,6 +89,13 @@ test("built bundle reclaims a local lane whose relay never observes the end of i
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
+    const slotMatch = /^\/slots\/(\d+)\?action=(\w+)$/.exec(req.url) || /^\/slots\/(\d+)$/.exec(req.url);
+    if (slotMatch) {
+      slotActions.push(`${slotMatch[2] || "state"}:slot${slotMatch[1]}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ n_erased: 1, n_saved: 1, filename: `slot${slotMatch[1]}.bin` }));
+      return;
+    }
     if (req.url !== "/v1/chat/completions") {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "expected Chat Completions endpoint" }));
@@ -258,6 +270,48 @@ test("built bundle reclaims a local lane whose relay never observes the end of i
   const after = await send("lease-next");
   assert.equal(after.status, 200, `the next conversation must be served, got: ${after.text.slice(0, 200)}`);
   assert.match(after.text, /AFTER_RECLAIM/);
+
+  // 4b. Not merely admitted: the KV slot changed owner. The lane is no longer
+  //     held by the wedged conversation, and exactly one conversation is hot -
+  //     the one that was parked behind it. This is the difference between "the
+  //     request queue moved" and "the engine's context actually switched".
+  const switched = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/status`)).json();
+  const afterLocal = switched.localHost || {};
+  assert.deepEqual(
+    (afterLocal.lease?.active || []).map((job) => job.conversationId),
+    [],
+    `the wedged conversation still owns the lane: ${JSON.stringify(afterLocal.lease?.active)}`,
+  );
+  // Ownership, named: the hot slot belongs to the conversation that was parked
+  // behind the wedge, not to the one that wedged. Comparing the KV digests is
+  // what turns "a lane looks healthy" into "the KV actually switched session".
+  const ownerKey = String((afterLocal.lanes || [])[0]?.sessionKey || "");
+  assert.equal((afterLocal.lanes || [])[0]?.state, "hot", `the successor must have completed into a warm slot: ${JSON.stringify(afterLocal.lanes)}`);
+  assert.equal(afterLocal.hotCount, 1, `expected exactly one warm conversation: ${JSON.stringify(afterLocal.lanes)}`);
+  assert.ok(ownerKey, `the new occupant must own the slot: ${JSON.stringify(afterLocal.lanes)}`);
+  assert.equal(
+    ownerKey,
+    kvSessionKey({ principalId: "local", conversationId: "lease-next" }),
+    "the slot is held by the conversation that waited behind the wedge",
+  );
+  assert.notEqual(
+    ownerKey,
+    kvSessionKey({ principalId: "local", conversationId: "lease-wedge" }),
+    "the wedged conversation must not still own the KV slot",
+  );
+  // The discard reached the engine too: the wedged conversation's KV was erased
+  // out of the slot, so its successor did not inherit a half-written prefix.
+  assert.ok(
+    slotActions.some((action) => action.startsWith("erase:")),
+    `expected a slot erase in the engine, saw ${JSON.stringify(slotActions)}`,
+  );
+
+  // 4c. And the reclaimed conversation is reusable: it comes back cold rather
+  //     than poisoning the slot with the stale prefix it left behind. If the
+  //     reclaim had discarded the wrong conversation's state, this is where it
+  //     would surface.
+  const retry = await send("lease-wedge");
+  assert.equal(retry.status, 200, `the reclaimed conversation must be servable again, got: ${retry.text.slice(0, 200)}`);
 
   // 5. And it is in the log: the whole complaint was that this was silent.
   assert.match(

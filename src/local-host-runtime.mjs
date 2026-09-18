@@ -165,7 +165,16 @@ export class LocalHostRuntime {
       pendingCount: live.pendingCount || 0,
       hotCount: live.hotCount || 0,
       slotAffinity: Boolean(live.slotAffinity),
-      lanes: (live.lanes || []).map((lane) => ({ slot: lane.slot, state: lane.state, lastAccessedAt: lane.lastAccessedAt })),
+      // `sessionKey` is the opaque KV digest, never a raw conversation id. It is
+      // what lets an operator answer the only question that matters during a
+      // switch: *which* conversation owns the GPU slot right now - the one that
+      // was reclaimed or the one that took its place.
+      lanes: (live.lanes || []).map((lane) => ({
+        slot: lane.slot,
+        state: lane.state,
+        sessionKey: lane.sessionKey || "",
+        lastAccessedAt: lane.lastAccessedAt,
+      })),
       ssd: live.ssd || null,
       counters: live.counters || null,
       telemetry: live.telemetry || null,
