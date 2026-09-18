@@ -29,7 +29,10 @@ import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from
 import { kvSessionKey } from "../src/local-host-kv-state.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
+// The published artifact can be replayed here verbatim: point the override at a
+// downloaded release asset to prove the bytes users install behave, rather than
+// trusting that the local build happens to match it.
+const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
 
 function listen(server) {
   return new Promise((resolve, reject) => {
