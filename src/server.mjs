@@ -2663,6 +2663,21 @@ export function createApp(services = createServices()) {
           runtime: services.localHostRuntime,
           logDir: services.engineLogDir || stateFile("engine-logs"),
         });
+        // Detect the dead run instead of waiting for it. `verify()` polls for its
+        // whole timeout (three minutes) for a server that is never going to
+        // arrive, then reports failure - which made this route refuse to release a
+        // host that no longer exists. Verification exists to keep ModelDock from
+        // walking away from a live process the user still owns; when nothing is
+        // listening at the endpoint there is nothing left to protect, and refusing
+        // only strands the record in "draining" forever.
+        const serving = (await (services.discoverEngines || discoverLocalEngines)({}))
+          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
+        if (!serving) {
+          await writeLocalHostRegistry(services.localHostRegistryFile, removeLocalHost(registry, id));
+          services.localHostRuntime?.invalidate?.();
+          recordConfigAction(metrics, "local_unmanage", { ok: true, releasedDeadHost: true });
+          return res.json({ released: true, hostId: id, restoredPreTakeover: false, deadHostReleased: true });
+        }
         // activeSpec === null is the failed-first-takeover shape: ModelDock
         // never replaced the original process, so there is nothing to restore
         // via apply/drain - routing it through applyLocalHostPlan put the
@@ -2887,28 +2902,47 @@ export function createApp(services = createServices()) {
     },
   }));
 
-  app.post("/api/local/disconnect", mutateConfig, async (req, res) => {
+  // Disconnect is the last resort, so it may not depend on anything the host it
+  // is leaving can still hold: no queue behind a wedged mutation, no engine
+  // round-trip, and no prerequisite that management be released first.
+  //
+  // It used to answer 409 while a llama.cpp host was managed ("Leave host control
+  // before disconnecting"), but releasing management restores the pre-takeover
+  // command and *verifies* it, which cannot succeed against a server that is dead
+  // - and a record already stuck in "draining" can never be verified again. Two
+  // refusals referencing each other formed a lock with no exit: the host could not
+  // be used, could not be unmanaged, and could not be disconnected.
+  //
+  // Management is therefore *released* here rather than demanded as a precondition.
+  // Authority is never orphaned - the records go away with the route - but nothing
+  // is verified, drained or restarted on the way out, because the whole point is
+  // that the process being walked away from may be beyond answering.
+  app.post("/api/local/disconnect", localPostGuard, async (req, res) => {
     const { engine } = req.body || {};
     if (!CONNECTABLE_ENGINES.includes(engine)) {
       return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
     }
+    let releasedHosts = 0;
     if (engine === "llamacpp") {
       const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-      if (Object.values(registry.hosts).some((record) => record.adapterId === "llamacpp-nvidia")) {
-        return res.status(409).json({
-          error: {
-            type: "host_managed",
-            message: "Leave host control before disconnecting the managed llama.cpp route.",
-          },
-        });
+      const managed = Object.values(registry.hosts).filter((record) => record.adapterId === "llamacpp-nvidia");
+      if (managed.length) {
+        let released = registry;
+        for (const record of managed) released = removeLocalHost(released, record.id);
+        await writeLocalHostRegistry(services.localHostRegistryFile, released);
+        releasedHosts = managed.length;
+        // Drops the coordinator and its KV lanes in memory without touching the
+        // engine. On-disk checkpoints survive; deleting them stays an explicit
+        // action behind /api/local/kv/clear.
+        services.localHostRuntime?.invalidate?.();
       }
     }
     clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
     applyLocalEngineProfile(engine, null);
     reconcileModelSelection(services);
     services.writeCatalogFile?.();
-    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
-    return res.json({ engine, models: [], settings: settingsPayload(services) });
+    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true, releasedHosts });
+    return res.json({ engine, models: [], releasedHosts, settings: settingsPayload(services) });
   });
   // Signing in to xAI. Three routes because a device grant is three moments:
   // ask for a code, wait for a person, then use what they approved.

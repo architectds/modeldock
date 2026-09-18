@@ -3290,7 +3290,10 @@ function renderLocalHostControl(engine, found) {
     }
   }
   const disconnect = $("local-config-disconnect");
-  if (disconnect) disconnect.hidden = !routed || Boolean(management);
+  // Offered while managed as well. Disconnect used to be hidden exactly when it
+  // was the only control that could still work: a managed host had to leave
+  // control first, and leaving control needed a server that could verify.
+  if (disconnect) disconnect.hidden = !routed;
 }
 
 function localEnginePort(found, engine) {

@@ -1300,7 +1300,10 @@ test("a stopped managed llama keeps its full drawer and moves Start service ther
     startVisible: true,
     startLabel: "Start service",
     saveVisible: false,
-    disconnectVisible: false,
+    // The stuck state: managed, and the engine is not answering. This is exactly
+    // when Disconnect used to vanish - hidden while managed, with the release it
+    // demanded unable to verify a dead server. It has to be on screen here.
+    disconnectVisible: true,
     leaveVisible: true,
     managedActionsTogether: true,
     startImmediatelyAfterLeave: true,

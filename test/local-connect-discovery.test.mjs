@@ -312,18 +312,27 @@ test("gateway connection and explicit host takeover stay separate", async (t) =>
   assert.equal(after.engines[0].management.state, "ready");
   assert.equal(after.engines[0].management.ssdState, "configured");
 
-  const refusedDisconnect = await fetch(`${base}/api/local/disconnect`, {
+  // The escape hatch. Disconnect used to answer 409 while the host was managed -
+  // "leave control first" - and leaving control needed the server to verify, which
+  // a dead or draining host can never do. Refusing on a prerequisite that the same
+  // broken host controls is how the drawer became unusable with no way out.
+  // Disconnect now releases the authority itself, in one shot, with no detection.
+  const disconnected = await fetch(`${base}/api/local/disconnect`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
   });
-  assert.equal(refusedDisconnect.status, 409, "managed process authority cannot be orphaned behind a disconnected route");
+  const disconnectBody = await disconnected.json();
+  assert.equal(disconnected.status, 200, JSON.stringify(disconnectBody));
+  assert.equal(disconnectBody.releasedHosts, 1, "management is released by the disconnect, not demanded as a precondition");
 
-  const released = await fetch(`${base}/api/local/unmanage`, {
+  // Authority really went with it: the host is no longer managed, so a follow-up
+  // release has nothing left to do.
+  const afterRelease = await fetch(`${base}/api/local/unmanage`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: managedBody.management.id }),
   });
-  assert.equal(released.status, 200);
+  assert.equal(afterRelease.status, 404, "no managed authority survives the disconnect");
   const finalState = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(finalState.engines[0].connected, true, "releasing authority does not disconnect the gateway route");
-  assert.equal(finalState.engines[0].management, null);
+  assert.equal(finalState.engines[0].management ?? null, null, "the engine reports unmanaged");
+  assert.equal(finalState.engines[0].connected, false, "and the gateway route was dropped in the same action");
   assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
 });
 

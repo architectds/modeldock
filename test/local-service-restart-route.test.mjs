@@ -12,6 +12,8 @@ import path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { createObservedHost, markHostVerified, takeOverHost } from "../src/local-hosts.mjs";
+import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -54,7 +56,7 @@ async function appFixture(t, { localHostRuntime, restartService }) {
     await new Promise((resolve) => server.close(resolve));
     await rm(dir, { recursive: true, force: true });
   });
-  return { base: `http://127.0.0.1:${server.address().port}` };
+  return { base: `http://127.0.0.1:${server.address().port}`, services, dir };
 }
 
 // The wedge itself, reproduced at the seam that mattered: a KV handoff that never
@@ -129,4 +131,68 @@ test("the service restart reports a failed schedule instead of claiming success"
   assert.equal(response.status, 500);
   const body = await response.json();
   assert.equal(body.error?.type, "service_restart_failed");
+});
+
+test("disconnect answers while a mutation is held and detects nothing at all", async (t) => {
+  let releaseHandoff;
+  let invalidated = 0;
+  const localHostRuntime = {
+    prepareGatewayRestart() {
+      return new Promise((resolve) => { releaseHandoff = resolve; });
+    },
+    releaseGatewayRestartPreparation() { return false; },
+    invalidate() { invalidated += 1; },
+  };
+  const { base, services } = await appFixture(t, { localHostRuntime, restartService: async () => true });
+  // Any detection at all would be a way for the unreachable host to keep holding
+  // the disconnect hostage, so the spy's job is to prove it is never asked.
+  let detections = 0;
+  services.discoverEngines = async () => { detections += 1; return []; };
+
+  const held = fetch(`${base}/api/local/restart-checkpoint`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const response = await fetch(`${base}/api/local/disconnect`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ engine: "llamacpp" }),
+    signal: AbortSignal.timeout(3_000),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(detections, 0, "disconnect must not probe, verify or discover");
+  assert.equal(invalidated, 0, "nothing to abandon with an empty registry");
+
+  releaseHandoff({ managed: true, saved: 0, failed: 0, interrupted: 0, idle: false, holdMs: 0 });
+  await held;
+});
+
+test("a dead managed host is released instead of being verified for three minutes", async (t) => {
+  const { base, services, dir } = await appFixture(t, { localHostRuntime: undefined, restartService: async () => true });
+  // Nothing is serving: the exact report state, where the engine died and the
+  // record is left draining.
+  services.discoverEngines = async () => [];
+  const endpoint = "http://127.0.0.1:1/v1";
+  let record = takeOverHost(createObservedHost({
+    id: "llamacpp-dead-fixture",
+    adapterId: "llamacpp-nvidia",
+    endpoint,
+    launch: { binary: "D:/llama/llama-server.exe", args: ["-m", "D:/models/gone.gguf"] },
+  }), { kvState: { directory: path.join(dir, "kv"), budgetBytes: 1024 * 1024 } });
+  record = markHostVerified(record);
+  // The state from the report: control taken, engine gone, record stuck draining.
+  await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(createLocalHostRegistry(), record));
+
+  const started = Date.now();
+  const response = await fetch(`${base}/api/local/unmanage`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hostId: record.id }),
+    signal: AbortSignal.timeout(5_000),
+  });
+  const body = await response.json();
+  const elapsed = Date.now() - started;
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.deadHostReleased, true, "nothing is listening, so there is nothing to protect");
+  assert.ok(elapsed < 5_000, `releasing a dead host waited ${elapsed} ms on a verification that can never pass`);
 });
