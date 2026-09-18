@@ -55,11 +55,16 @@ function envelope(sessionId, label) {
 async function sessionsFixture(files) {
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-session-preference-"));
   const created = [];
+  // Sample the clock once. The ages below are spaced by single milliseconds, so
+  // taking `Date.now()` per file let the fixture's own write cost (a millisecond
+  // per file under load) outweigh the intended spacing and reorder the mtimes -
+  // which made "the newest rollout" mean whichever file the machine wrote last.
+  const now = Date.now();
   for (const [name, text, ageMs] of files) {
     const file = path.join(root, name);
     await mkdir(path.dirname(file), { recursive: true });
     await writeFile(file, text, "utf8");
-    const when = new Date(Date.now() - ageMs);
+    const when = new Date(now - ageMs);
     await utimes(file, when, when);
     created.push(file);
   }
