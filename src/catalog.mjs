@@ -75,6 +75,19 @@ export function baseInstructionsFor(config, { supportsVision = false, nativeWebS
 // an image through the gateway while still being text-only itself, so upstream
 // vision capability - not catalog input admission - selects its instructions.
 function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
+  // Per-model reviewer declaration: Codex asks no model of its own for the
+  // approval reviewer, so the request arrives unmodelled and the gate resolves it
+  // to the session's own model. Declaring the reviewer here lets the client name
+  // it instead. Routed entries only: a native entry carries no such field, and the
+  // reviewer intent for a GPT session is OpenAI's to declare, not ours - and a
+  // route never names itself as its own reviewer.
+  const reviewModel = String(config?.reviewModel || "");
+  // One newer effort anywhere in model_catalog_json makes a pre-0.138 client exit 1
+  // and publish no models (the hazard documented on BASE_REASONING_LEVELS), so the
+  // effort travels with the override only when every supported build can parse it.
+  const reviewEffort = BASE_REASONING_LEVELS.includes(config?.reviewEffort)
+    ? String(config.reviewEffort)
+    : "";
   return models.map((entry) => {
     const native = nativeSlugs.has(entry.slug);
     const routed = native ? null : modelEntryFor(config, entry.slug);
@@ -89,6 +102,12 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
         ...entry.model_messages,
         instructions_template: instructions,
       },
+      ...(reviewModel && !native && bareModelId(entry.slug) !== bareModelId(reviewModel)
+        ? {
+            auto_review_model_override: reviewModel,
+            ...(reviewEffort ? { multi_agent_reasoning_effort: reviewEffort } : {}),
+          }
+        : {}),
     };
   });
 }

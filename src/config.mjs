@@ -535,6 +535,23 @@ export function loadConfig() {
   const visionModel = configuredVision.toLowerCase() === "none"
     ? ""
     : modelRef(configuredVision || (primaryCustomEndpoint?.supportsVision && customSlug ? customSlug : defaultVisionModel));
+  // Approval-review model. Codex names no model of its own for the approval
+  // reviewer, so the request reached the gate unmodelled and was resolved as
+  // `default_main` - the session's own model. Measured live: every escalated
+  // command in a Qwen3.8-Flash turn produced a ~20-token review answer from
+  // Qwen3.8-Flash. That is bearable on a strong model and bad on a small or
+  // local one, which is exactly where an approval gate matters most. The fix is
+  // a client-side declaration (auto_review_model_override in the catalog this
+  // gate publishes), not a gateway substitution: the client then names the
+  // reviewer and routing stays a honour-the-request decision.
+  const configuredReviewModel = String(persistedEnv.MODELDOCK_REVIEW_MODEL
+    ?? process.env.MODELDOCK_REVIEW_MODEL ?? "").trim();
+  const reviewModel = configuredReviewModel ? modelRef(configuredReviewModel) : "";
+  // Published only beside the override. An effort the installed client cannot
+  // parse would take the whole catalog down, so catalog.mjs keeps it inside the
+  // closed enum older Codex builds accept.
+  const reviewEffort = String(persistedEnv.MODELDOCK_REVIEW_EFFORT
+    ?? process.env.MODELDOCK_REVIEW_EFFORT ?? "").trim().toLowerCase();
 
   const debug = {
     enabled: envOn("MODELDOCK_DEBUG"),
@@ -580,6 +597,8 @@ export function loadConfig() {
     // The refresh path may fill only the latter; upgrades must never replace a
     // saved vision provider/model choice with a newly discovered default.
     visionModelConfigured: Boolean(configuredVision),
+    reviewModel,
+    reviewEffort,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
     // Defaults to the signed-in state when the env key is unset (see above).
