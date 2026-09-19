@@ -1,9 +1,15 @@
 name: CI
 
+# Reusable only. This suite is a release gate: release.yml's `ci` job calls it when a v*
+# tag is pushed, and nothing else can start it. There is deliberately no push,
+# pull_request or workflow_dispatch trigger - a change to main is gated locally (npm test
+# plus the built-bundle e2e that reproduces the fix), never by a hosted run. No run is
+# expected on a push, and that is the point: the suite is a release gate, not a ritual.
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   test:

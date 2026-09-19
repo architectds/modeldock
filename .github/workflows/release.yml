@@ -10,6 +10,12 @@ permissions:
   contents: write
 
 jobs:
+  # The suite and the cross-platform install legs run here and nowhere else: they are a
+  # release gate, not a per-push ritual. ci.yml is reusable-only, so this is its only
+  # entry point (see AGENTS.md "Review and CI cadence").
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   mac-stt-helper:
     runs-on: macos-latest
     steps:
@@ -34,7 +40,7 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: mac-stt-helper
+    needs: [mac-stt-helper, ci]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -46,10 +52,11 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
-      # build artifact need the built bundle, so build before testing.
+      # dist/ is gitignored, so the artifacts have to be built here. The suite itself is
+      # NOT run again: the `ci` job above is its only owner and `release` waits on it, so
+      # repeating `npm test` here would be a second gate on the same fact, which can only
+      # drift.
       - run: npm run build
-      - run: npm test
       - name: Check tag matches package.json version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
