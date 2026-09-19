@@ -15,7 +15,7 @@ import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnSta
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
-import { historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
+import { collaborationEnvelopeTurn, historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent } from "./subagent-guidance.mjs";
 import { attachSseKeepAlive, createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, chatReasoningText, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
@@ -1077,8 +1077,8 @@ function attachProExecutionGuidance(input) {
 // Codex places delegated subagent tasks in its own collaboration channel.
 // When that channel is genuinely opaque (Fernet-shaped), only the native
 // backend can open it. Relay the item through a native model constrained to
-// echo the plaintext back through one function call, then let the existing
-// promoter treat it like any plaintext NEW_TASK. The relay model resolves
+// echo the plaintext back through one function call, then let the envelope
+// rendering treat it like any plaintext collaboration body. The relay model resolves
 // dynamically (the vision model when it is native - usually Luna - else any
 // native slug) so catalog renames never hard-fail; with no native model the
 // gateway fails closed and leaves the item opaque.
@@ -1215,7 +1215,7 @@ export async function relayOpaqueCollaboration(input, services, { signal } = {})
     if (!plain) throw new Error("Collaboration relay returned no payload");
     putCollaborationRelayCache(cacheKey, plain);
   }
-  // Replace the opaque part with plaintext so the existing promoter sees it.
+  // Replace the opaque part with plaintext so the envelope rendering can carry it.
   return input.map((item) => {
     if (item !== found.item) return item;
     return {
@@ -1245,8 +1245,15 @@ export function normalizeGatewayInput(input) {
         // did not, and one shared owner now covers both.
         content: [{ type: "input_text", text: text ? `${SUMMARY_PREFIX}\n\n${text}` : UNREADABLE_COMPACTION }],
       };
-    });
-  return promoteCollaborationNewTask(rewritten);
+    })
+    // Codex's collaboration envelope is an item type no provider dialect has, so it is
+    // rendered where it already sits: the body reaches the model as a labeled user turn
+    // and the envelope keeps its position, so the request prefix and the owning turn_id
+    // are unchanged. Nothing is ever appended here - appending a "task" row is how the
+    // deleted promoter ended up overwriting the live instruction with prose recovered
+    // from history.
+    .map((item) => collaborationEnvelopeTurn(item) ?? item);
+  return rewritten;
 }
 
 // Codex emits its built-in tools as custom_tool_call / local_shell_call items

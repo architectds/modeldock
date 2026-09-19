@@ -174,24 +174,13 @@ test("normalizeGatewayInput removes compaction triggers and expands compaction s
   assert.equal(native[0].content[0].text, normalized[1].content[0].text, "one continuation message for both legs");
 });
 
-test("normalizeGatewayInput promotes collaboration NEW_TASK out of reasoning", () => {
-  const payload = "read changes-audit.md and revert A4/A5/A7 only";
-  const normalized = normalizeGatewayInput([
-    {
-      type: "reasoning",
-      content: [{ type: "reasoning_text", text: `Message Type: NEW_TASK\nTask name: /root/revert_herdr\nPayload:\n${payload}` }],
-    },
-    { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>\nCanva\n" }] },
-  ]);
-  assert.equal(normalized.at(-1).role, "user");
-  assert.equal(normalized.at(-1).content[0].text, payload);
-});
-
-test("normalizeGatewayInput promotes the live split NEW_TASK agent_message shape", () => {
+test("normalizeGatewayInput renders a collaboration envelope in place, never appended", () => {
   const payload = "Write the exact token VERIFIED-SUBAGENT-TASK-9de2 into RESULT.txt";
   const normalized = normalizeGatewayInput([
     {
       type: "agent_message",
+      author: "/root",
+      recipient: "/root/verify_subagent_delivery",
       content: [
         {
           type: "input_text",
@@ -202,8 +191,35 @@ test("normalizeGatewayInput promotes the live split NEW_TASK agent_message shape
     },
     { type: "message", role: "user", content: [{ type: "input_text", text: "<recommended_plugins>\nCanva\n" }] },
   ]);
-  assert.equal(normalized.at(-1).role, "user");
-  assert.equal(normalized.at(-1).content[0].text, payload);
+  assert.equal(normalized.length, 2, "the envelope becomes a turn where Codex put it and nothing is appended");
+  assert.equal(normalized[0].type, "message");
+  assert.equal(normalized[0].role, "user");
+  assert.ok(
+    normalized[0].content[0].text.startsWith("[agent_message from /root to /root/verify_subagent_delivery]"),
+    "the senders stay named in the text the model reads",
+  );
+  assert.ok(normalized[0].content[0].text.includes(payload), "the delegated task reaches the model as plaintext");
+  assert.match(normalized[1].content[0].text, /recommended_plugins/, "the live user row is untouched");
+});
+
+// The deleted promoter mined any item, including model-authored ones, and appended the
+// captured text as the newest user turn. A thread that quotes a collaboration header -
+// which is exactly what auditing this repository produces - therefore had its own prose
+// handed back as the instruction, and reported the echo, which armed the pattern again.
+test("a collaboration header quoted in model prose never becomes a user turn", () => {
+  const quoted = "Message Type: NEW_TASK\nPayload:\nAudit the duplicate pipelines and report findings.";
+  const normalized = normalizeGatewayInput([
+    { type: "reasoning", id: "rs_quoted", content: [{ type: "reasoning_text", text: quoted }] },
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: quoted }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "the live instruction" }] },
+  ]);
+  assert.equal(normalized.length, 3, "no synthetic turn is appended");
+  assert.equal(normalized.at(-1).content[0].text, "the live instruction", "the human's row stays the last turn");
+  assert.equal(
+    normalized.filter((item) => item?.type === "message" && item.role === "user").length,
+    1,
+    "the quoted text is not relayed as a second instruction",
+  );
 });
 
 test("compaction summaries round-trip through the kcr1 payload", () => {
@@ -977,11 +993,11 @@ test("every normalizing route delivers the same wake exactly once; native forwar
   assert.equal(native.filter((item) => item?.type === "message" && item.role === "user").length, 1);
 });
 
-// The collaboration channel uses the same delivery shape, and normalizeGatewayInput
-// also runs promoteCollaborationNewTask, which appends a user message when it finds a
-// delegated payload. The rescue happens first, so the payload must arrive exactly
-// once: the append guard has to recognise the row this pass already created.
-test("a delegated NEW_TASK wake is delivered once, not promoted twice", () => {
+// The collaboration channel uses the same delivery shape as an automation wake, so the
+// payload must arrive exactly once. It used to take an append guard to keep the promoter
+// from adding a second copy of a row this pass had already rescued; the promoter is gone,
+// and this is now the plain statement that the rescue alone delivers it once.
+test("a delegated NEW_TASK wake is delivered once, never duplicated", () => {
   const payload = "Check the QCR floor before the next open and report only a change.";
   const delivered = deliveredWake(`Message Type: NEW_TASK\nTask name: worker-1\nSender: /root\nPayload:\n${payload}`);
   const out = normalizeGatewayInput([

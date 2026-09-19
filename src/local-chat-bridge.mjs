@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { parseSseData } from "./sse.mjs";
-import { itemPlainText, partPlainText } from "./subagent-guidance.mjs";
+import { collaborationEnvelopeTurn, itemPlainText, partPlainText } from "./subagent-guidance.mjs";
 
 export class LocalChatBridgeError extends Error {
   constructor(code, message) {
@@ -306,14 +306,19 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
       continue;
     }
     if (item.type === "agent_message") {
-      // Codex collaboration envelope: one agent addressing another. Chat has no
-      // such item type, so the turn joins the history as a labeled user message.
-      // Author and recipient are carried verbatim; the shared item-text
-      // derivation decides which parts are readable plaintext, so a body that
-      // stayed opaque after the relay gate drops out instead of being guessed.
-      const author = typeof item.author === "string" && item.author ? item.author : "unknown agent";
-      const recipient = typeof item.recipient === "string" && item.recipient ? item.recipient : "unknown agent";
-      foldItem(item, `agent_message from ${author} to ${recipient}`, "");
+      // Codex collaboration envelope: one agent addressing another. Chat has no such
+      // item type, so the turn joins the history as a labeled user message - rendered by
+      // the single owner in subagent-guidance, which is also what the input contract
+      // applies before this bridge ever sees the item. Author and recipient are carried
+      // verbatim; a body that stayed opaque after the relay gate drops out instead of
+      // being guessed.
+      const envelope = collaborationEnvelopeTurn(item);
+      if (!envelope) continue;
+      flushAssistant();
+      messages.push({
+        role: "user",
+        content: escapeMediaMarkerText(envelope.content[0].text, mediaMarker),
+      });
       continue;
     }
     // The bracket keeps the type the model can repeat back; the note keeps the

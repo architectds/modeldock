@@ -15,18 +15,11 @@ export function historicalImageSpawnHint(ref) {
   return `[Image attachment ${ref}: if visual evidence is needed, call vision_inspect(image_ref="${ref}", question="your specific visual question") before making visual claims. Pixels are preserved by reference, not embedded in this text history.]`;
 }
 
-const NEW_TASK_RE = /Message Type:\s*NEW_TASK\b[\s\S]*?Payload:\s*\n?([\s\S]+)/i;
-
 // Same Fernet-shaped gate as gateway.mjs: whitespace-free gAAAA... tokens stay
 // opaque. Codex's collaboration channel puts the spawn `message` in a sibling
 // encrypted_content part that is actually plaintext.
 export function isOpaqueEncryptedContent(value) {
   return typeof value === "string" && /^gAAAA[A-Za-z0-9_-]+={0,2}$/.test(value);
-}
-
-function newTaskPayloadFromText(text) {
-  const match = String(text || "").match(NEW_TASK_RE);
-  return match ? match[1].trim() : "";
 }
 
 // The one readable-text rule for a Responses content part: a real text part, or
@@ -58,12 +51,6 @@ export function itemPlainText(item) {
   return bits.join("\n");
 }
 
-function isPluginWrapperUser(item) {
-  if (item?.type !== "message" || item?.role !== "user") return false;
-  const text = itemPlainText(item);
-  return text.includes("<recommended_plugins>") || text.includes("<app-context>");
-}
-
 // A delegated collaboration payload whose body sits in a genuinely opaque
 // (Fernet-shaped) part. Only the native backend can open it; the gateway
 // relays it through a native model to recover the plaintext before promotion.
@@ -85,23 +72,36 @@ export function hasOpaqueCollaboration(input) {
   return null;
 }
 
-export function promoteCollaborationNewTask(input) {
-  if (!Array.isArray(input)) return input;
-  let payload = "";
-  for (const item of input) {
-    const found = newTaskPayloadFromText(itemPlainText(item));
-    if (found) payload = found;
-  }
-  if (!payload) return input;
-  const already = input.some((item) => (
-    item?.type === "message"
-    && item?.role === "user"
-    && !isPluginWrapperUser(item)
-    && itemPlainText(item).includes(payload.slice(0, Math.min(80, payload.length)))
-  ));
-  if (already) return input;
-  return [
-    ...input,
-    { type: "message", role: "user", content: [{ type: "input_text", text: payload }] },
-  ];
+// A Codex collaboration envelope (`agent_message`) is an item type no provider
+// dialect has, so it joins the transcript as a labeled user turn carrying whatever
+// is readable in it. Author and recipient stay named; a body that stayed opaque
+// after the relay gate already had its chance drops out instead of being guessed.
+//
+// This is the only place those words are assembled: the input contract renders every
+// route from it, and the Chat bridge renders the callers that hand it items directly.
+// The two must never disagree about how one envelope reads.
+//
+// There used to be a second, much wider mechanism here: a promoter that scanned every
+// item for text shaped like `Message Type: NEW_TASK ... Payload:` and appended the
+// captured text as a *trailing* user turn. It was invented for children whose task
+// arrived only inside an unreadable item, and it worked, but nothing constrained where
+// the text came from. Any model that quoted such a header - in an answer, or in a
+// reasoning summary, which is exactly what auditing this repository produces - had its
+// own prose re-delivered as the newest user message, after the real instruction. The
+// loop fed itself: each turn that reported the echo wrote more text matching the
+// pattern. Recovering a task from prose is not a gateway job, so the promoter is
+// deleted rather than gated; the envelope below is the whole contract.
+export function collaborationEnvelopeTurn(item) {
+  if (item?.type !== "agent_message") return null;
+  const body = itemPlainText(item);
+  if (!body.trim()) return null;
+  const author = typeof item.author === "string" && item.author ? item.author : "unknown agent";
+  const recipient = typeof item.recipient === "string" && item.recipient ? item.recipient : "unknown agent";
+  const { author: _author, recipient: _recipient, content: _content, ...rest } = item;
+  return {
+    ...rest,
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: `[agent_message from ${author} to ${recipient}]\n${body}` }],
+  };
 }
