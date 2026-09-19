@@ -4225,26 +4225,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     recordDerivedFallback(services, sessionId, { model: requestedModel, reason: "native_passthrough" });
     return relayNativeResponses(payload, res, services, { signal });
   }
-  // An address of ours that no longer resolves. The model was published by this
-  // gateway and picked from that catalog, so the endpoint behind it was removed
-  // - a configuration fault to report, not a stale id to paper over. Falling
-  // back to the main model here would answer with a model the user did not
-  // choose and say nothing about it, which is the same trade the vision
-  // fallback used to make.
-  //
-  // Only owned addresses. A bare id may be one of Codex's own models, and
-  // those carry no provider at all - that is the one case that still falls back.
-  const addressedProvider = addressedProviderOf(requestedModel);
-  if (addressedProvider && !knownModels?.has?.(requestedModel)) {
-    const error = {
-      error: {
-        type: "configuration_error",
-        message: `${requestedModel} is no longer configured. Its ${addressedProvider} endpoint was removed; pick another model, or restart Codex to drop it from the picker.`,
-      },
-    };
-    sendJsonError(res, 503, error);
-    return { ok: false, httpStatus: 503, route: { model: requestedModel, reason: "unconfigured_provider" }, error };
-  }
+  // No speculative guard here. An `@provider` address missing from `knownModels` does
+  // not mean its endpoint was removed: the picker Codex holds comes from the persisted
+  // catalog file while `knownModels` is rebuilt in memory, so right after a restart -
+  // or while a model refresh is failing - the two disagree and the address still
+  // resolves perfectly well upstream. Answering 503 there reported a configuration
+  // fault that did not exist and told the user to restart Codex, which deleted a
+  // working model from their picker. The provider's real absence is caught below by
+  // the target lookup, which has evidence for it, and a model that genuinely leaves a
+  // provider is already taken out of the picker by the dynamic tidy pass.
 
   // Remote compaction for routed models: Codex expects a compaction output item
   // (v2) or replacement history (v1) back, which DeepSeek does not produce

@@ -63,10 +63,10 @@ export function openCodeTransportForModel(modelId) {
   return /^(hy4-preview|minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
 }
 
-// https://www.deepseek.com/en/news/deepseek-v4-1-flash/
-function deepSeekFlashHasVision(id) {
-  return id === "deepseek-v4.1-flash" || id === "deepseek-flash";
-}
+// V4.1 Flash and the bare Flash alias used to be known only through a special case
+// here, which granted them a vision flag while leaving everything else to discovery.
+// They are declared in both providers' availableModels now, so no exception is needed:
+// a declaration is what makes the row survive a restart and carries the real contract.
 
 // Codex estimates the session history with its own (GPT) tokenizer, which runs
 // ~25-30% under what qwen's tokenizer actually produces. For small local
@@ -261,7 +261,6 @@ const OPENCODE_GO_PROFILE = {
   modelDiscovery: true,
   discoveryTransports: new Set(["responses", "chat"]),
   discoveryTransportFor: openCodeTransportForModel,
-  discoveryVisionFor: deepSeekFlashHasVision,
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   // inputNormalizer names a per-model input adaptation the gateway keeps in
@@ -281,6 +280,23 @@ const OPENCODE_GO_PROFILE = {
     { id: "longcat-2.0-free", label: "Longcat 2.0 Free", endpoint: "responses", zen: true, free: true, supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
     { id: "longcat-2.0", label: "Longcat 2.0", endpoint: "chat", supportsVision: false, contextWindow: 1048756, contextSource: "vendor", status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", inputNormalizer: "opencode-pro", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    // Declared, not discovered. A discovered row lives only in memory: it carries no
+    // window, no input normalizer and no ladder, and it is absent until a refresh
+    // succeeds. This gateway logged 157 discovery timeouts and a boot refresh of
+    // `discovered=0`, while the persisted Codex catalog kept advertising the model, so
+    // Codex offered an address the running process did not know and every request got
+    // the 503 "endpoint was removed" from relayResponses' addressed-provider guard. The
+    // symptom was intermittent for exactly that reason: it reappeared on the next
+    // successful refresh.
+    //
+    // The normalizer is the same one V4 Flash needs on this provider (replayed reasoning
+    // items must reach it as concrete reasoning_text); applying it to a model that did
+    // not need it is inert, so this is the safe side of the inference. The window is the
+    // vendor's figure, not a measurement, and the ladder is V4 Flash's on DeepSeek's own
+    // "on par" claim - neither is marked as measured. Vision is documented for this model
+    // (https://www.deepseek.com/en/news/deepseek-v4-1-flash/).
+    { id: "deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash", endpoint: "responses", inputNormalizer: "opencode-flash", supportsVision: true, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
+    { id: "deepseek-flash", label: "DeepSeek Flash", endpoint: "responses", inputNormalizer: "opencode-flash", supportsVision: true, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
     { id: "glm-5", label: "GLM 5", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.1", label: "GLM 5.1", endpoint: "responses", supportsVision: false, contextWindow: 200000, contextSource: "vendor", status: "available" },
     { id: "glm-5.2", label: "GLM 5.2", endpoint: "responses", supportsVision: false, contextWindow: 1000000, contextSource: "vendor", status: "available" },
@@ -363,7 +379,6 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   settingsInvalidMessage: "A valid DeepSeek API key is required.",
   modelDiscovery: true,
   discoveryTransports: new Set(["responses"]),
-  discoveryVisionFor: deepSeekFlashHasVision,
 
   blockedToolTypes: new Set([]),
   // The official DeepSeek API accepts every Codex local tool as type "function", so
@@ -381,6 +396,18 @@ const DEEPSEEK_OFFICIAL_PROFILE = {
   availableModels: [
     { id: "deepseek-v4-flash", label: "DeepSeek V4 Flash", endpoint: "responses", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
     { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", endpoint: "responses", supportsVision: false, acceptsImagesViaGateway: true, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "measured", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", reasoningSource: "measured", status: "available" },
+    // Declared so the row survives a restart: a discovered row is memory-only, so these
+    // two disappeared on every boot until a refresh happened to add them back, and the
+    // addressed-provider guard then answered 503 "endpoint was removed". No input
+    // normalizer, because the official API takes replayed reasoning items as they are
+    // (its measured V4 siblings carry none either).
+    //
+    // Not published as vision-capable even though DeepSeek documents it: this provider
+    // already has a dedicated vision entry (deepseek-v4-flash-vision-exp below), and
+    // declaring an unmeasured model as vision-capable would move the gateway's automatic
+    // vision route without anyone asking. Vision for this slug stays unmeasured here.
+    { id: "deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
+    { id: "deepseek-flash", label: "DeepSeek Flash", endpoint: "responses", supportsVision: false, contextWindow: DEEPSEEK_CONTEXT_WINDOW, contextSource: "vendor", supportedReasoningLevels: DEEPSEEK_REASONING_LEVELS, defaultReasoningLevel: "medium", status: "available" },
     // DeepSeek's first vision model, announced 2026-08-21 and experimental by
     // its own name. It reads images through the same Responses endpoint the
     // other two use, so it needs no route of its own - only a published entry

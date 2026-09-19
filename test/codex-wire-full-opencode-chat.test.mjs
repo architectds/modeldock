@@ -184,7 +184,11 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       directoryCalls += 1;
       assert.equal(req.headers.authorization, "Bearer fixture-token");
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ data: [{ id: "deepseek-v4.1-flash" }] }));
+      // The directory deliberately lists a slug NO provider declares: that is what
+      // proves discovery still publishes new models. deepseek-v4.1-flash is absent
+      // here on purpose - it must be routable because it is declared, with no help
+      // from this response, which is the restart-window bug it used to hit.
+      res.end(JSON.stringify({ data: [{ id: "deepseek-v4.2-flash" }] }));
       return;
     }
     const chunks = [];
@@ -199,7 +203,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     }
     if (req.url === "/v1/responses") {
       try {
-        assert.ok(["deepseek-v4-flash", "deepseek-v4.1-flash"].includes(body.model));
+        assert.ok(["deepseek-v4-flash", "deepseek-v4.1-flash", "deepseek-v4.2-flash"].includes(body.model));
         const calls = body.input.filter((item) => ["function_call", "custom_tool_call"].includes(item.type));
         const results = body.input.filter((item) => ["function_call_output", "custom_tool_call_output"].includes(item.type));
         assert.equal(new Set(calls.map((item) => item.call_id)).size, calls.length);
@@ -331,15 +335,23 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   await waitForStatus(gatewayPort);
   let discovered = false;
   let published = false;
+  let declaredWithoutDiscovery = false;
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const models = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models`)).json();
-    discovered = models.options.some((model) => model.id === "deepseek-v4.1-flash@opencode-go");
+    discovered = models.options.some((model) => model.id === "deepseek-v4.2-flash@opencode-go");
     const catalog = JSON.parse(readFileSync(path.join(root, "state", "codex-model-catalog.json"), "utf8"));
-    published = catalog.models.some((model) => model.slug === "deepseek-v4.1-flash@opencode-go");
-    if (discovered && published) break;
+    published = catalog.models.some((model) => model.slug === "deepseek-v4.2-flash@opencode-go");
+    // The directory above never mentions v4.1: it is only here because it is declared.
+    const v41 = models.options.find((model) => model.id === "deepseek-v4.1-flash@opencode-go");
+    declaredWithoutDiscovery = Boolean(v41?.contextWindow && v41?.inputNormalizer);
+    if (discovered && published && declaredWithoutDiscovery) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(discovered, "boot discovery must publish the new Go model in the picker");
+  assert.ok(
+    declaredWithoutDiscovery,
+    "a declared model must be published with its window and normalizer even when discovery never lists it",
+  );
   assert.equal(directoryCalls, 1, "boot must query the real Go profile directory once");
   assert.ok(published, "Codex must receive the same discovered slug");
   const send = async (input, sessionId, stream = true, model = "qwen3.8-flash@opencode-go") => {
@@ -418,9 +430,15 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   assert.match(switched, /RESPONSES_HISTORY_OK/);
   const responseResults = requests.at(-1).input.filter((item) => item.type === "function_call_output").map((item) => item.output);
   assert.deepEqual(responseResults.filter((text) => /^ROUND_\d+_RESULT$/.test(text)), markers);
-  const newlyDiscovered = await send(history, "full-go-chat-fixture", true, "deepseek-v4.1-flash@opencode-go");
+  const newlyDiscovered = await send(history, "full-go-chat-fixture", true, "deepseek-v4.2-flash@opencode-go");
   assert.match(newlyDiscovered, /RESPONSES_HISTORY_OK/);
-  assert.equal(requests.at(-1).model, "deepseek-v4.1-flash", "new model must not fall back to the old main model");
+  assert.equal(requests.at(-1).model, "deepseek-v4.2-flash", "new model must not fall back to the old main model");
+  // The declared row must also route now, which is the transition this gateway had to
+  // make safe: discovery-only rows used to be missing right after a restart, and the
+  // addressed-provider guard answered 503 "endpoint was removed" for them.
+  const declared = await send(history, "full-go-chat-fixture", true, "deepseek-v4.1-flash@opencode-go");
+  assert.match(declared, /RESPONSES_HISTORY_OK/);
+  assert.equal(requests.at(-1).model, "deepseek-v4.1-flash", "the declared DeepSeek row must route without discovery");
 
   const compact = await send([...history,
     { type: "message", role: "user", content: [{ type: "input_text", text: "Summarize the completed work." }] },

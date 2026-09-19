@@ -75,17 +75,17 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       .sort((a, b) => a.localeCompare(b))
       .map((id) => {
         const endpoint = profile.discoveryTransportFor?.(id) || "responses";
-        const declaredVision = profile.discoveryVisionFor?.(id);
+        // Discovery grants no capability. A listed id proves only that the provider
+        // answers for it; vision needs the window, input normalizer and image path that
+        // only a declaration carries, so an undescribed row is published as text-only
+        // until someone declares it. The removed discoveryVisionFor exception did the
+        // opposite: it published supportsVision for two DeepSeek rows that had no
+        // window, no normalizer and no ladder, and because the rows themselves were
+        // discovered they disappeared on every restart until a refresh put them back -
+        // which surfaced as the addressed-provider 503 "endpoint was removed".
         const candidate = profile.discoveryModel
           ? profile.discoveryModel(id, directory.get(id))
-          : {
-              id,
-              label: labelForModelId(id),
-              endpoint,
-              supportsVision: declaredVision === true,
-              visionStatus: declaredVision === true ? "documented" : "unknown",
-              status: "available",
-            };
+          : { id, label: labelForModelId(id), endpoint, supportsVision: false, visionStatus: "unknown", status: "available" };
         // A provider can list models for several dialects. Directory discovery
         // is not permission to publish an Anthropic /messages model through an
         // OpenAI bridge we do not implement. The provider declares the endpoint
