@@ -82,6 +82,21 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
   // reviewer intent for a GPT session is OpenAI's to declare, not ours - and a
   // route never names itself as its own reviewer.
   const reviewModel = String(config?.reviewModel || "");
+  // A reviewer nobody can serve is worse than no reviewer declared: Codex would
+  // name it, the request would fail, and every escalation would block. Same rule
+  // the vision route already uses - a native id is checked against the ChatGPT
+  // login, a routed id against an enabled provider - because an override that
+  // cannot answer is not a fallback, it is an outage with extra steps.
+  // The stored ref's owner wins; the captured native slug set only covers a legacy
+  // bare value, because the cache is absent on a first boot and must not be what
+  // decides whether a reviewer is callable.
+  const reviewOwnerIsNative = Boolean(config?.reviewModelIsNative)
+    || reviewModel.endsWith(`@${NATIVE_PROVIDER_ID}`)
+    || nativeSlugs.has(reviewModel);
+  const reviewServiceable = Boolean(reviewModel)
+    && (reviewOwnerIsNative
+      ? hasChatGptLogin(config?.codexHome)
+      : enabledProvidersFor(config).has(providerForModel(config, reviewModel)));
   // One newer effort anywhere in model_catalog_json makes a pre-0.138 client exit 1
   // and publish no models (the hazard documented on BASE_REASONING_LEVELS), so the
   // effort travels with the override only when every supported build can parse it.
@@ -102,7 +117,7 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
         ...entry.model_messages,
         instructions_template: instructions,
       },
-      ...(reviewModel && !native && bareModelId(entry.slug) !== bareModelId(reviewModel)
+      ...(reviewServiceable && !native && bareModelId(entry.slug) !== bareModelId(reviewModel)
         ? {
             auto_review_model_override: reviewModel,
             ...(reviewEffort ? { multi_agent_reasoning_effort: reviewEffort } : {}),

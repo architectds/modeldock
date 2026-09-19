@@ -547,6 +547,12 @@ export function loadConfig() {
   const configuredReviewModel = String(persistedEnv.MODELDOCK_REVIEW_MODEL
     ?? process.env.MODELDOCK_REVIEW_MODEL ?? "").trim();
   const reviewModel = configuredReviewModel ? modelRef(configuredReviewModel) : "";
+  // Record the owner while the suffix is still on the value. modelRef() strips the
+  // storage-only "@openai" (that is what makes it the client's slug), so a later
+  // re-derivation has to guess, and guessing from the captured native-slug cache
+  // would let a signed-out install - or a first boot with no cache yet - publish a
+  // reviewer nobody can answer. The stored ref is the owner statement.
+  const reviewModelIsNative = reviewModel && configuredReviewModel.endsWith(`@${NATIVE_PROVIDER_ID}`);
   // Published only beside the override. An effort the installed client cannot
   // parse would take the whole catalog down, so catalog.mjs keeps it inside the
   // closed enum older Codex builds accept.
@@ -598,6 +604,7 @@ export function loadConfig() {
     // saved vision provider/model choice with a newly discovered default.
     visionModelConfigured: Boolean(configuredVision),
     reviewModel,
+    reviewModelIsNative,
     reviewEffort,
     // Wizard-managed native-GPT merge: off for users without a ChatGPT/Codex
     // subscription so the picker never advertises models that 401 on request.
