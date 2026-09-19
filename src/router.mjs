@@ -183,10 +183,16 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
     if (mainModelSupportsVision) {
       return { model: mainModel, reason: "current_turn_image", directVision: true };
     }
-    if (!visionModel) {
-      return { model: mainModel, reason: "vision_unavailable", directVision: false };
+    // Vision=None is a supported configuration, and reaching here has already proved that
+    // neither the picked model nor the dashboard model can read the image. There is no
+    // model left that could answer, so this used to hand back `mainModel` anyway - a
+    // substitution that can never be served, because relayResponses refuses an image with
+    // no vision service. All it did was make that refusal and its usage row name the
+    // dashboard model rather than the one the user picked. Falling through keeps the
+    // picked model on the route and produces the identical 503.
+    if (visionModel) {
+      return { model: visionModel, reason: "current_turn_image", directVision: true };
     }
-    return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
   // Codex's own model picker is populated from the catalog this gate publishes, so a
   // model id the client carries is a deliberate choice by the user in that picker - honour
