@@ -80,11 +80,17 @@ if (!LANES.includes(selector)) {
   process.exit(2);
 }
 // `--list LANE` reports what a lane would run without running it, so the tables can be
-// inspected from a workflow or a review without paying for the suite.
-const lane = selector === "--list" ? (process.argv[3] || "--all") : selector;
-if (!LANES.includes(lane) || lane === "--list" || lane === "--preflight") {
-  console.error(`test-lane --list: unknown lane ${lane}`);
-  process.exit(2);
+// inspected from a workflow or a review without paying for the suite. The extra argument
+// is only a lane name for --list: every other selector takes none, and validating them as
+// if it did made `--preflight` reject itself, which broke `npm test` through its own
+// pretest hook. Only --list's argument is checked, and --list itself is not a runnable lane.
+let lane = selector;
+if (selector === "--list") {
+  lane = process.argv[3] || "--all";
+  if (!LANES.includes(lane) || lane === "--list" || lane === "--preflight") {
+    console.error(`test-lane --list: unknown lane ${lane}`);
+    process.exit(2);
+  }
 }
 
 if (selector === "--preflight") {
