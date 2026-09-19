@@ -155,10 +155,6 @@ h2 { margin: 0; font-size: 17px; }
 #cache-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 #data-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 #tps-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
-/* Canvas bitmap dimensions change with device pixel ratio. The local monitor
-   must still keep a fixed CSS box; otherwise each redraw feeds the enlarged
-   bitmap back into layout and grows exponentially. */
-#hostdash-prefill-wave, #hostdash-decode-wave { display: block; width: 100%; height: 92px; cursor: crosshair; }
 .wave-tooltip {
   position: absolute;
   top: 2px;
@@ -920,127 +916,14 @@ body { padding-left: 88px; }
    rather than a button, so the state reads without a second control. */
 .custom-action.is-open { border-color: var(--blue); background: rgba(80,183,255,.12); }
 
-/* --- VRAM ledger: one bar, four segments, widths proportional to the card --- */
-.vram { margin: 14px 0 0; }
-.vram[hidden] { display: none; }
-.vram-bar { display: flex; width: 100%; height: 22px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
-.vram-seg { display: block; height: 100%; transition: width .18s ease; }
-.vram-seg.is-weights { background: var(--blue); }
-.vram-seg.is-kv { background: var(--violet); }
-.vram-seg.is-overhead { background: var(--muted); opacity: .55; }
-/* Headroom is the point of the whole picture, so it reads as empty space until
-   there is too little of it, and then it is the thing that turns red. */
-.vram-seg.is-headroom { background: repeating-linear-gradient(45deg, rgba(137,160,175,.14) 0 6px, transparent 6px 12px); }
-.vram-swatch.is-headroom { background: none; border: 1px solid rgba(137,160,175,.5); }
-.vram.is-tight .vram-swatch.is-headroom { background: rgba(255,107,107,.28); border-color: rgba(255,107,107,.5); }
-.vram.is-tight .vram-seg.is-headroom { background: rgba(255,107,107,.28); }
-.vram-caption { margin: 7px 0 0; display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-/* A legend rather than a list: each term wears the colour of the band it
-   names, so the bar can be read without counting segments left to right. */
-.vram-term { display: inline-flex; align-items: center; gap: 6px; }
-.vram-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
-.vram-advice { margin: 5px 0 0; color: var(--amber); font-size: 11px; }
-.vram-advice[hidden] { display: none; }
-/* The same numbers, one line, on the discovery row - so a card in trouble can
-   be spotted without opening anything. */
-
-/* --- Trade-off sliders ------------------------------------------------- */
-.tune { margin: 16px 0 0; display: grid; gap: 10px; }
-.tune[hidden] { display: none; }
-/* `hidden` has to beat the grid display, or a row hidden in JS still shows. */
-.tune-row[hidden] { display: none; }
-/* Not a warning about a setting - a statement that there is nothing to set. */
-.tune-unfit { margin: 0; color: var(--amber); font-size: 11px; line-height: 1.4; }
-.tune-unfit[hidden] { display: none; }
-.tune-row { display: grid; grid-template-columns: 118px 1fr 64px; align-items: center; gap: 10px; }
-.tune-label { color: var(--muted); font-size: 11px; }
-.tune-value { color: var(--text); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; text-align: right; }
-.tune-row input[type="range"] { width: 100%; accent-color: var(--blue); }
-.tune-row input[type="range"]:disabled { opacity: .45; }
-/* Three stops rather than a continuous range: the only meaningful values are
-   the three cache types, and a slider that lands between them would be lying. */
-.tune-stops { display: flex; gap: 4px; }
-.tune-stop { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 5px 0; background: var(--panel-2); color: var(--muted); font-family: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
-.tune-stop:hover:not(:disabled) { color: var(--text); border-color: #365064; }
-.tune-stop.is-active { border-color: var(--blue); color: var(--blue); background: rgba(80,183,255,.12); }
-.tune-stop:disabled { opacity: .38; cursor: not-allowed; }
-.tune-stop:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-/* Applying a chosen configuration needs ownership of the engine process, which
-   this does not have yet, so the honest deliverable is the command to run. */
-.tune-command { margin: 10px 0 0; }
-.tune-command[hidden] { display: none; }
-.tune-command-label { margin: 0 0 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
-.tune-command code { display: block; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); font-size: 11px; overflow-wrap: anywhere; }
-
-/* The button claims nothing on its own; the note says where the settings came
-   from, because they were measured on someone else's hardware, not this one. */
-.optimize { display: flex; align-items: center; gap: 10px; margin: 16px 0 0; }
-.optimize[hidden] { display: none; }
-.optimize-note { color: var(--muted); font-size: 10px; line-height: 1.3; }
-/* What pressing it did, in the flags it chose. */
-.optimize-result { margin: 8px 0 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); color: var(--text); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
-.optimize-result[hidden] { display: none; }
-.tune-apply-row { margin-top: 10px; }
-
 /* Settings that are on and doing nothing. Amber rather than red: nothing is
    broken right now, but the configuration says something untrue. */
 .engine-warnings { margin: 14px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
 .engine-warnings[hidden] { display: none; }
 .engine-warnings li { padding: 7px 10px; border: 1px solid rgba(247,185,85,.32); border-radius: 8px; background: rgba(247,185,85,.07); color: var(--amber); font-size: 11px; line-height: 1.4; }
 
-/* The host monitor is an operational board, not the dashboard's four narrow
-   metric cards. Its events remain content-free and bounded to five minutes. */
-.hostdash-panel { max-width: none; }
-.hostdash-totals { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0 0 16px; }
-.hostdash-totals > span { min-width: 0; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
-.hostdash-totals b { display: block; overflow: hidden; color: var(--text); font: 650 18px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; }
-.hostdash-totals small { display: block; margin-top: 4px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
-.hostdash-saving b { color: var(--green); }
-.hostdash-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.hostdash-grid .metric-card { min-width: 0; min-height: 238px; }
-.hostdash-swim-card, .hostdash-continuity-card { display: flex; flex-direction: column; }
-.swimlanes { display: grid; gap: 9px; margin: 18px 0 0; }
-.swimlane { display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: center; gap: 9px; min-width: 0; }
-.swimlane-label { overflow: hidden; color: var(--muted); font: 700 9px ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; text-overflow: ellipsis; white-space: nowrap; }
-.swimlane-track { position: relative; height: 26px; overflow: hidden; border: 1px solid rgba(137,160,175,.18); border-radius: 7px; background: repeating-linear-gradient(90deg, rgba(137,160,175,.08) 0 1px, transparent 1px 25%); }
-.swimlane-track::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 1px; background: rgba(236,244,248,.55); box-shadow: 0 0 7px rgba(236,244,248,.4); }
-.swim-segment { position: absolute; top: 4px; bottom: 4px; min-width: 3px; border-radius: 4px; opacity: .9; }
-.swim-segment.swim-running { background: var(--violet); }.swim-segment.swim-switching { background: var(--amber); }.swim-segment.swim-restoring { background: var(--blue); }.swim-segment.swim-hot { background: var(--green); }.swim-segment.swim-cold { background: rgba(247,185,85,.62); }.swim-segment.swim-failed { background: #ff6b6b; }
-.swim-current { position: absolute; top: 50%; right: 1px; width: 7px; height: 7px; border: 2px solid var(--panel); border-radius: 50%; background: var(--muted); box-shadow: 0 0 10px currentColor; transform: translateY(-50%); }
-.swim-current.is-active { color: var(--amber); background: var(--amber); }.swim-current.is-hot { color: var(--green); background: var(--green); }
-.swimlane-legend { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: auto 0 0; color: var(--muted); font-size: 10px; }
-.swimlane-legend .swim-segment { position: static; width: 10px; height: 8px; min-width: 10px; }
-.swimlane-legend .swim-segment:not(:first-child) { margin-left: 6px; }
-
-/* GPU residency and SSD checkpoint capacity are distinct bounded quantities.
-   The joining rail makes restores visible without pretending they are a rate. */
-.kv-residency { display: grid; grid-template-columns: minmax(0, 1fr) 66px minmax(0, 1fr); align-items: center; gap: 9px; min-height: 104px; margin-top: 10px; }
-.kv-tier { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2); }
-.kv-tier > span { display: block; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
-.kv-tier > strong { display: block; margin-top: 6px; color: var(--text); font: 700 17px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.04em; }
-.kv-slots { display: flex; gap: 4px; min-height: 8px; margin-top: 10px; }
-.kv-slot { display: block; min-width: 10px; height: 8px; flex: 1; border-radius: 99px; background: rgba(137,160,175,.2); }.kv-slot.is-hot { background: var(--green); }.kv-slot.is-active { background: var(--amber); }
-.kv-transfer { position: relative; display: grid; justify-items: center; gap: 2px; min-width: 0; color: var(--blue); font-size: 9px; text-align: center; }
-.kv-transfer i { width: 100%; height: 1px; background: var(--blue); box-shadow: 0 0 9px rgba(80,183,255,.5); }.kv-transfer i::after { content: ""; float: right; width: 5px; height: 5px; margin-top: -2px; border-top: 1px solid var(--blue); border-right: 1px solid var(--blue); transform: rotate(45deg); }
-.kv-transfer b { font: 700 15px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }.kv-transfer span { overflow: hidden; max-width: 100%; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
-
-/* SSD budget fill: a bounded quantity gets a bar, not a wave - the line would
-   just climb to the cap and flatline. */
-.ssd-fill-track { height: 10px; border-radius: 5px; background: rgba(154,166,188,.15); overflow: hidden; margin: 12px 0 8px; }
-.ssd-fill-bar { height: 100%; width: 0; border-radius: 5px; background: var(--green); transition: width .3s ease; }
-.ssd-fill-bar.is-tight { background: var(--amber); }
-.ssd-counts { font-size: 11px; color: var(--muted); margin: 0 0 6px; }
-
-@media (max-width: 900px) {
-  .hostdash-grid { grid-template-columns: minmax(0, 1fr); }
-}
-@media (max-width: 560px) {
-  .hostdash-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .kv-residency { grid-template-columns: minmax(0, 1fr) 52px minmax(0, 1fr); gap: 6px; }
-}
-
-/* The managed-host tab exists only while a takeover is active; rail links are
-   flex, so the hidden attribute needs an explicit override to actually hide. */
+/* Rail links are flex, so the hidden attribute needs an explicit override to
+   actually hide one. */
 .rail-link[hidden] { display: none; }
 
 /* --- Stats: one bounded 30-day snapshot, never an append-only dashboard. --- */

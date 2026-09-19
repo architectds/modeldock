@@ -29,10 +29,6 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v5H4zM4 14h16v5H4zM7.5 7.5h.01M7.5 16.5h.01" /></svg>
         <span class="rail-label" data-i18n="nav.local"></span>
       </a>
-      <a class="rail-link" href="#hostmonitor" data-rail="hostmonitor" id="rail-hostmonitor" hidden data-i18n-title="nav.hostmonitor">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
-        <span class="rail-label" data-i18n="nav.hostmonitor"></span>
-      </a>
       <a class="rail-link" href="#stats" data-rail="stats" data-i18n-title="nav.stats">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V10M10 19V5M16 19v-7M3 19h18" /></svg>
         <span class="rail-label" data-i18n="nav.stats"></span>
@@ -327,7 +323,7 @@
         <div class="engine-body" id="ollama-body">
         <div class="custom-row">
           <button id="ollama-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
-          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
+          <button id="ollama-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Open</button>
           <p id="ollama-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="ollama-error" class="custom-error" aria-live="polite" hidden></p>
@@ -344,7 +340,7 @@
         <div class="engine-body" id="llamacpp-body">
         <div class="custom-row">
           <button id="llamacpp-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
-          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn" data-i18n-title="local.manageTip" title="Let ModelDock manage this host">Manage</button>
+          <button id="llamacpp-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn" data-i18n-title="local.manageTip" title="Open this engine's settings">Open</button>
           <p id="llamacpp-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="llamacpp-error" class="custom-error" aria-live="polite" hidden></p>
@@ -361,7 +357,7 @@
         <div class="engine-body" id="vllm-body">
         <div class="custom-row">
           <button id="vllm-connect" type="button" class="custom-action engine-button" data-i18n="local.connectBtn">Connect</button>
-          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Manage</button>
+          <button id="vllm-configure" type="button" class="custom-action engine-button" data-i18n="local.manageBtn">Open</button>
           <p id="vllm-status" class="custom-status" aria-live="polite" hidden></p>
         </div>
         <p id="vllm-error" class="custom-error" aria-live="polite" hidden></p>
@@ -382,54 +378,26 @@
         <ul id="local-warnings" class="engine-warnings" hidden></ul>
         <section id="local-host-control" class="field" hidden aria-labelledby="local-host-control-title">
           <div class="field-head"><span id="local-host-control-title" data-i18n="host.title">Host control</span></div>
-          <p id="local-host-gateway-state" class="custom-hint"></p>
-          <p id="local-host-management-state" class="custom-hint"></p>
-          <div id="local-host-management-form">
-            <label class="field">
-              <div class="field-head">
-                <span data-i18n="host.model">Model file</span>
-                <button id="local-host-model-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
-              </div>
-              <input id="local-host-model-file" class="lang-select" type="text" spellcheck="false" />
-              <p class="custom-hint" data-i18n="host.modelHint">Choose the GGUF ModelDock will launch and manage.</p>
-            </label>
-            <label class="chip-toggle" id="local-host-vision-row">
-              <input id="local-host-vision-enabled" type="checkbox" />
-              <span data-i18n="host.vision">Enable local vision</span>
-            </label>
-            <label id="local-host-vision-projector-row" class="field" hidden>
-              <div class="field-head">
-                <span data-i18n="host.visionProjector">Vision projector</span>
-                <button id="local-host-vision-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
-              </div>
-              <input id="local-host-vision-projector" class="lang-select" type="text" spellcheck="false" />
-              <p class="custom-hint" data-i18n="host.visionHint">Requires a compatible vision GGUF base model and llama.cpp projector.</p>
-            </label>
-            <label class="field">
-              <div class="field-head">
-                <span data-i18n="host.folder">SSD KV folder</span>
-                <button id="local-host-kv-browse" type="button" class="field-browse" data-i18n="host.browse">Browse</button>
-              </div>
-              <input id="local-host-kv-directory" class="lang-select" type="text" spellcheck="false" />
-            </label>
-            <label class="field">
-              <div class="field-head"><span data-i18n="host.budgetLabel">SSD KV budget (GiB)</span></div>
-              <input id="local-host-kv-budget" class="lang-select" type="number" min="1" max="1024" step="1" value="8" />
-              <p id="local-host-kv-hint" class="custom-hint" hidden></p>
-            </label>
-            <div class="custom-row">
-              <p id="local-host-manage-status" class="custom-status" aria-live="polite" hidden></p>
-            </div>
-          </div>
-          <div class="custom-row">
-            <button id="local-service-restart" type="button" class="custom-action" data-i18n="host.restartService" hidden>Restart service</button>
-            <button id="local-host-unmanage" type="button" class="custom-action" data-i18n="host.leave" hidden>Leave management</button>
-            <button id="local-config-start" type="button" class="custom-action primary" data-i18n="local.restart" hidden>Start service</button>
-          </div>
+          <label class="field">
+            <div class="field-head"><span data-i18n="host.model">Model file</span></div>
+            <input id="local-host-model-file" class="lang-select" type="text" spellcheck="false" />
+            <p class="custom-hint" data-i18n="host.modelHint">Choose the GGUF ModelDock will launch and manage.</p>
+          </label>
+          <label class="chip-toggle" id="local-host-vision-row">
+            <input id="local-host-vision-enabled" type="checkbox" />
+            <span data-i18n="host.vision">Enable local vision</span>
+          </label>
+          <label id="local-host-vision-projector-row" class="field" hidden>
+            <div class="field-head"><span data-i18n="host.visionProjector">Vision projector</span></div>
+            <input id="local-host-vision-projector" class="lang-select" type="text" spellcheck="false" />
+            <p class="custom-hint" data-i18n="host.visionHint">Requires a compatible vision GGUF base model and llama.cpp projector.</p>
+          </label>
         </section>
         <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
         <p id="local-config-start-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Starts this service from its saved command. Settings passed through environment variables are not captured.</p>
         <div class="custom-row local-config-actions">
+          <button id="local-config-start" type="button" class="custom-action primary" data-i18n="local.restart" hidden>Start service</button>
+          <button id="local-service-restart" type="button" class="custom-action" data-i18n="host.restartService">Restart service</button>
           <button id="local-config-save" type="button" class="custom-action primary" data-i18n="local.connect">Connect and Save</button>
           <button id="local-config-disconnect" type="button" class="custom-action" data-i18n="local.disconnect" hidden>Disconnect</button>
         </div>
@@ -496,72 +464,6 @@
           <p id="roster-note" class="custom-hint" aria-live="polite"></p>
         </section>
       </div>
-
-      <div class="view" data-view="hostmonitor">
-        <p id="hostdash-empty" class="custom-hint" data-i18n="hostdash.empty" hidden>Host monitoring appears while a local host is under ModelDock management.</p>
-        <section id="local-host-dashboard" class="panel page-panel hostdash-panel" hidden aria-labelledby="local-host-dashboard-title">
-          <p class="eyebrow" data-i18n="hostdash.eyebrow">MANAGED HOST</p>
-          <h2 id="local-host-dashboard-title" data-i18n="hostdash.title">Local host monitor</h2>
-          <div class="hostdash-totals" aria-label="Managed local host totals">
-            <span><b id="hostdash-read-total">&mdash;</b><small data-i18n="hostdash.read">read</small></span>
-            <span><b id="hostdash-reused-total">&mdash;</b><small data-i18n="hostdash.reused">reused</small></span>
-            <span><b id="hostdash-output-total">&mdash;</b><small data-i18n="hostdash.generated">generated</small></span>
-            <span class="hostdash-saving"><b id="hostdash-time-saved">&mdash;</b><small id="hostdash-time-saved-label" data-i18n="hostdash.timeSaved">time avoided</small></span>
-          </div>
-          <section class="hostdash-grid">
-            <article class="metric-card accent-blue wave-card">
-              <div class="metric-head"><span data-i18n="hostdash.prefill">Prefill</span><b><span id="hostdash-prefill-last">&mdash;</span> <span data-i18n="metric.tpsLast">tps</span></b></div>
-              <div class="wave-stats"><span><b id="hostdash-prefill-ms-last">&mdash;</b> <span data-i18n="hostdash.promptTime">prompt time</span></span><span><b id="hostdash-cache-hit-last">&mdash;</b> <span data-i18n="hostdash.cacheHit">cache hit</span></span></div>
-              <div class="wave-wrap">
-                <canvas id="hostdash-prefill-wave" width="340" height="92"></canvas>
-                <div id="hostdash-prefill-tooltip" class="wave-tooltip" hidden></div>
-              </div>
-              <p><span id="hostdash-prefill-count">0</span> <span data-i18n="metric.callsObserved">calls observed</span></p>
-            </article>
-            <article class="metric-card accent-violet wave-card">
-              <div class="metric-head"><span data-i18n="hostdash.decode">Decode</span><b><span id="hostdash-decode-last">&mdash;</span> <span data-i18n="metric.tpsLast">tps</span></b></div>
-              <div class="wave-stats"><span><b id="hostdash-decode-avg">&mdash;</b> <span data-i18n="metric.tpsAvg">avg</span></span><span><b id="hostdash-hot-lanes">&mdash;</b> <span data-i18n="hostdash.hotLanes">hot lanes</span></span></div>
-              <div class="wave-wrap">
-                <canvas id="hostdash-decode-wave" width="340" height="92"></canvas>
-                <div id="hostdash-decode-tooltip" class="wave-tooltip" hidden></div>
-              </div>
-            </article>
-            <article class="metric-card accent-amber hostdash-swim-card">
-              <div class="metric-head"><span data-i18n="hostdash.sessions">Sessions</span><b><span id="hostdash-active-count">0</span> <span data-i18n="metric.active">active</span> · <span id="hostdash-pending-count">0</span> <span data-i18n="hostdash.waiting">waiting</span></b></div>
-              <div id="hostdash-swimlanes" class="swimlanes" role="img" aria-label="Local host lane activity during the last five minutes"></div>
-              <p class="swimlane-legend">
-                <span class="swim-segment swim-running"></span><span data-i18n="hostdash.running">running</span>
-                <span class="swim-segment swim-switching"></span><span data-i18n="hostdash.switching">switching</span>
-                <span class="swim-segment swim-restoring"></span><span data-i18n="hostdash.restoring">restoring</span>
-                <span class="swim-segment swim-hot"></span><span data-i18n="hostdash.tierGpu">GPU hot</span>
-              </p>
-            </article>
-            <article class="metric-card accent-green hostdash-continuity-card">
-              <div class="metric-head"><span data-i18n="hostdash.continuity">KV continuity</span><b id="hostdash-restore-last">&mdash;</b></div>
-              <div class="kv-residency" aria-label="GPU and SSD KV residency">
-                <div class="kv-tier kv-tier-gpu">
-                  <span data-i18n="hostdash.tierGpu">GPU hot</span>
-                  <strong id="hostdash-gpu-hot-lanes">&mdash;</strong>
-                  <div id="hostdash-gpu-slots" class="kv-slots"></div>
-                </div>
-                <div class="kv-transfer">
-                  <i aria-hidden="true"></i>
-                  <b id="hostdash-restores">0</b>
-                  <span data-i18n="hostdash.restores">restores</span>
-                </div>
-                <div class="kv-tier kv-tier-ssd">
-                  <span data-i18n="hostdash.ssd">SSD KV cache</span>
-                  <strong id="hostdash-ssd-used">&mdash;</strong>
-                  <div class="ssd-fill-track"><div id="hostdash-ssd-fill" class="ssd-fill-bar"></div></div>
-                </div>
-              </div>
-              <p class="ssd-counts"><span id="hostdash-ssd-states">0</span> <span data-i18n="hostdash.states">states</span> · <span id="hostdash-checkpoints">0</span> <span data-i18n="hostdash.checkpoints">checkpoints</span> · <span id="hostdash-cold-prefills">0</span> <span data-i18n="hostdash.coldPrefills">cold prefills</span></p>
-              <button id="hostdash-ssd-clear" type="button" class="custom-action" data-i18n="hostdash.clear">Clear SSD cache</button>
-            </article>
-          </section>
-        </section>
-      </div>
-
 
     </main>
 

@@ -534,36 +534,6 @@ function renderSessions(recent, names = {}) {
   select.value = sessionFilter;
 }
 
-// The managed local-host monitor. Hidden unless a host is under takeover:
-// it uses the gateway's bounded, content-free lane events rather than trying
-// to reverse-engineer scheduler state from a completed-request log.
-const hostDash = {
-  runKey: "",
-  prefill: [],
-  decode: [],
-  seen: new Set(),
-  prefillPeak: { peak: 0 },
-  decodePeak: { peak: 0 },
-  prefillHover: { hover: -1 },
-  decodeHover: { hover: -1 },
-  prefillPoints: [],
-  decodePoints: [],
-};
-const HOSTDASH_SWIM_STATE = {
-  running: "running",
-  switching: "switching",
-  restoring: "restoring",
-  restored: "restoring",
-  cold_prefill: "cold",
-  hot: "hot",
-  failed: "failed",
-};
-
-function hostDashAvg(history) {
-  if (!history.length) return 0;
-  return history.reduce((sum, point) => sum + point.v, 0) / history.length;
-}
-
 // Money is never abbreviated. "$1.3K" throws away the only number the card
 // exists to report, and an option that call sites can forget is how the summary
 // card ended up shortened while its own breakdown rows were not. Sub-cent
@@ -577,81 +547,6 @@ function usd(value) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(amount);
-}
-
-function compactTokens(value) {
-  const count = Math.max(0, Number(value) || 0);
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(count >= 10_000_000 ? 0 : 1)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(count >= 10_000 ? 0 : 1)}K`;
-  return number(Math.round(count));
-}
-
-function hostDashState(kind) {
-  return HOSTDASH_SWIM_STATE[String(kind || "")] || "";
-}
-
-function hostDashEvents(telemetry) {
-  return Array.isArray(telemetry?.events)
-    ? telemetry.events.filter((event) => Number.isFinite(Number(event?.at))).sort((left, right) => Number(left.at) - Number(right.at))
-    : [];
-}
-
-function createSwimSegment({ event, next, windowStart, now }) {
-  const state = hostDashState(event.kind);
-  if (!state) return null;
-  let start = Math.max(windowStart, Number(event.at));
-  let end = Math.min(now, Number(next?.at) || now);
-  if (event.kind === "restored" && Number(event.durationMs) > 0) {
-    start = Math.max(windowStart, Number(event.at) - Number(event.durationMs));
-    end = Math.min(now, Number(event.at));
-  }
-  if (end <= start) end = Math.min(now, start + Math.max(350, Number(event.durationMs) || 0));
-  if (end <= windowStart || start >= now) return null;
-  const segment = document.createElement("span");
-  segment.className = `swim-segment swim-${state}`;
-  const left = Math.max(0, Math.min(100, ((start - windowStart) / (now - windowStart)) * 100));
-  const width = Math.min(100 - left, Math.max(0.7, ((end - start) / (now - windowStart)) * 100));
-  segment.style.left = `${left}%`;
-  segment.style.width = `${width}%`;
-  segment.title = `${event.kind} · ${new Date(Number(event.at)).toLocaleTimeString()}`;
-  return segment;
-}
-
-function renderHostSwimlanes(localHost, telemetry) {
-  const container = $("hostdash-swimlanes");
-  if (!container) return;
-  const now = Date.now();
-  const windowMs = Math.max(1_000, Number(telemetry?.windowMs) || 300_000);
-  const windowStart = now - windowMs;
-  const events = hostDashEvents(telemetry);
-  const lanes = [...(localHost.lanes || [])].sort((left, right) => Number(left.slot) - Number(right.slot));
-  const rows = lanes.map((lane) => {
-    const row = document.createElement("div");
-    row.className = "swimlane";
-    const label = document.createElement("span");
-    label.className = "swimlane-label";
-    label.textContent = `SLOT ${Number(lane.slot) + 1}`;
-    const track = document.createElement("div");
-    track.className = "swimlane-track";
-    const laneEvents = events.filter((event) => Number(event.slot) === Number(lane.slot) && hostDashState(event.kind));
-    if (!laneEvents.length && lane.state !== "empty") {
-      laneEvents.push({
-        at: Math.max(windowStart, Date.parse(lane.lastAccessedAt || "") || now),
-        kind: lane.state === "hot" ? "hot" : "running",
-      });
-    }
-    laneEvents.forEach((event, index) => {
-      const segment = createSwimSegment({ event, next: laneEvents[index + 1], windowStart, now });
-      if (segment) track.append(segment);
-    });
-    const current = document.createElement("span");
-    current.className = `swim-current${lane.state === "active" ? " is-active" : lane.state === "hot" ? " is-hot" : ""}`;
-    current.title = lane.state || "empty";
-    track.append(current);
-    row.append(label, track);
-    return row;
-  });
-  container.replaceChildren(...rows);
 }
 
 function renderLocalHostDashboard(data) {
