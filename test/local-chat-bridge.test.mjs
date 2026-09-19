@@ -164,11 +164,65 @@ test("an agent_message body that stayed opaque after relay drops out instead of 
   assert.equal(bridged.payload.messages[0].content, "hello");
 });
 
-test("a genuinely unknown input item type still fails closed", () => {
-  assert.throws(
-    () => responsesToChat({ model: "Qwen3.8-27B", input: [{ type: "future_item" }] }),
-    /cannot encode input item future_item/,
-  );
+test("an unknown input item joins as labeled text and says so instead of failing the turn", () => {
+  // The shape that cost a user every chat-transport turn: Codex adds an item type,
+  // the bridge had no branch for it, and the answer was 502 "cannot encode input
+  // item". Nothing in a stored history justifies that.
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "look" }] },
+      { type: "future_item", content: [{ type: "input_text", text: "a turn format this build never saw" }] },
+      { type: "another_future_item" },
+    ],
+  });
+  // The second unknown item has nothing readable in it, so it contributes no turn -
+  // but it is still named, which is the difference between a fold and a silence.
+  assert.deepEqual(bridged.payload.messages.map((message) => message.role), ["user", "user"]);
+  assert.equal(bridged.payload.messages[1].content, "[future_item]\na turn format this build never saw");
+  assert.deepEqual(bridged.degraded, ["unsupported item future_item", "unsupported item another_future_item"]);
+});
+
+test("an unencodable tool, role, or content part degrades and is named in the notes", () => {
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [
+      { type: "message", role: "collaborator", content: [{ type: "input_text", text: "relay this" }] },
+      { type: "message", role: "user", content: [{ type: "input_file", filename: "spec.pdf" }] },
+      { type: "function_call", name: "exec_command", arguments: "{}" },
+      { type: "function_call_output", output: "orphan output" },
+    ],
+    tools: [
+      { type: "function", name: "keep_me", parameters: { type: "object", properties: {} } },
+      { type: "web_search" },
+    ],
+  });
+  const [user, withFile, orphanCall, orphanOutput] = bridged.payload.messages;
+  assert.equal(user.role, "user");
+  assert.ok(user.content.startsWith("[collaborator] relay this"), "the unknown role stays visible in the text");
+  assert.match(withFile.content, /\[input_file: spec\.pdf - not carried to this model\]/);
+  assert.equal(orphanCall.role, "user", "a call with no id cannot be paired, so its text joins as a turn");
+  assert.match(orphanCall.content, /unpaired function_call exec_command/);
+  assert.equal(orphanOutput.content, "[unpaired function_call_output]\norphan output");
+  assert.deepEqual(bridged.payload.tools.map((tool) => tool.function.name), ["keep_me"], "only the encodable tool is declared");
+  assert.deepEqual(bridged.degraded, [
+    "message role collaborator",
+    "content part input_file",
+    "unpaired function_call exec_command",
+    "unpaired function_call_output",
+    "tool type web_search",
+  ]);
+});
+
+test("an agent_message fold is the intended encoding, not a degradation", () => {
+  const bridged = responsesToChat({
+    model: "Qwen3.8-27B",
+    input: [{ type: "agent_message", author: "/root", recipient: "/root/x", content: [
+      { type: "input_text", text: "do the work" },
+    ] }],
+  });
+  assert.equal(bridged.payload.messages.length, 1);
+  assert.deepEqual(bridged.degraded, [], "a known Codex shape must not read as a loss");
 });
 
 test("llama media sentinels in text history are escaped without touching real images", () => {
@@ -205,7 +259,9 @@ test("the local Chat relay uses the active llama media sentinel for tool output"
   const marker = "<__media_runtime_marker__>";
   const escaped = "<\u200b__media_runtime_marker__>";
   const id = "Qwen3.8-27B";
-  const selectedModel = `${id}@llamacpp`;
+  // A single-model llama.cpp snapshot publishes under the stable local entry;
+  // the friendly id in the snapshot stays internal (wire keeps upstreamId).
+  const selectedModel = "Local@llamacpp";
   applyLocalEngineProfile("llamacpp", {
     baseUrl: "http://127.0.0.1:11436/v1",
     models: [{ id, upstreamId: id, label: id, supportsVision: true, mediaMarker: marker, contextWindow: 16_384 }],
@@ -291,6 +347,62 @@ test("the local Chat relay encodes a collaboration history instead of failing th
     const userTexts = seen[0].messages.filter((message) => message.role === "user").map((message) => String(message.content)).join("\n");
     assert.ok(userTexts.includes("Audit the README."), "the task body reaches the local model as plaintext");
     assert.ok(userTexts.includes("agent_message from /root"), "the envelope identity survives attribution");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a hosted Chat route folds an unread item too instead of answering 502", async () => {
+  // The failure this guards was reported on a hosted chat-transport model, not a
+  // local one: every provider whose endpoint answers Chat shares this bridge, so
+  // the rescue has to hold there as well. Command Code is that route without a
+  // local host in the picture.
+  const slug = "Qwen/Qwen3.8-Flash@commandcode";
+  const originalFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (_url, options) => {
+    seen.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({
+      id: "chatcmpl_folded",
+      model: "Qwen/Qwen3.8-Flash",
+      choices: [{ message: { content: "ACK" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 7, completion_tokens: 1 },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const result = await relayResponses({
+      model: slug,
+      stream: false,
+      input: [
+        { type: "agent_message", author: "/root", recipient: "/root/worker", content: [
+          { type: "input_text", text: "Message Type: NEW_TASK\nTask name: /root/worker\nPayload:\ncheck it" },
+        ] },
+        { type: "brand_new_codex_item", content: [{ type: "input_text", text: "a shape from a newer Codex" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "go" }] },
+      ],
+      tools: [
+        { type: "web_search" },
+        { type: "function", name: "exec_command", parameters: { type: "object", properties: {} } },
+      ],
+    }, gatewayResponse(), {
+      config: {
+        mainModel: slug,
+        profileId: "opencode-go",
+        commandcodeBaseUrl: "https://commandcode.example/provider/v1",
+        tokens: { commandcode: "user_test_fold" },
+      },
+      mainModel: slug,
+      visionModel: "",
+      knownModels: new Set([slug]),
+      incomingHeaders: { "x-codex-session-id": "fold-hosted" },
+      requestUrl: "/v1/responses",
+    });
+    assert.equal(result.ok, true, "one unread item cannot end a hosted chat turn");
+    assert.equal(seen.length, 1);
+    const texts = seen[0].messages.map((message) => String(message.content ?? "")).join("\n");
+    assert.ok(texts.includes("agent_message from /root to /root/worker"), "the collaboration envelope is carried");
+    assert.ok(texts.includes("[brand_new_codex_item]\na shape from a newer Codex"), "the unknown item arrives as labeled text");
+    assert.deepEqual(seen[0].tools.map((tool) => tool.function.name), ["exec_command"], "only a declarable tool is declared");
   } finally {
     globalThis.fetch = originalFetch;
   }

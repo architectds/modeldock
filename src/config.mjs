@@ -2,7 +2,8 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor, llamaLocalStableEntry } from "./profiles.mjs";
+import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { CONNECTABLE_ENGINES, readLocalEnginesSnapshot } from "./local-engines.mjs";
@@ -621,6 +622,19 @@ export function loadConfig() {
   // last connect saw, without probing a machine that may be offline now.
   const localSnapshot = readLocalEnginesSnapshot() || {};
   for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
+  // A saved vision reference outlives a rename: before the stable entry it
+  // could name a llama.cpp file that has since been replaced, and vision
+  // escalation consults this value directly. With no stable entry published
+  // (no engine connected) the reference stays untouched - it may name a host
+  // that is coming back. The main-model history folds at its own reader
+  // (readLatestMainRoute replays events; mainModelFor folds them again here).
+  // One rule owns the name test (isLlamaLocalName) and one owns the publication
+  // gate (llamaLocalStableEntry); this layer only decides when it applies: a saved
+  // reference is rewritten while the stable entry is published, and left alone
+  // otherwise because it may name a host that is coming back.
+  if (llamaLocalStableEntry() && isLlamaLocalName(config.visionModel)) {
+    config.visionModel = canonicalLlamaLocalKey(config.visionModel);
+  }
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
   applyContextOverrides(allProfiles(), contextOverrides, { publishedSlugFor });

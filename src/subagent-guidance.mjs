@@ -29,7 +29,11 @@ function newTaskPayloadFromText(text) {
   return match ? match[1].trim() : "";
 }
 
-function partPlainText(part) {
+// The one readable-text rule for a Responses content part: a real text part, or
+// a collaboration body that Codex left in a plaintext `encrypted_content` sibling.
+// Anything genuinely opaque yields "" so callers can tell "nothing readable" from
+// "readable but unusual" instead of guessing per call site.
+export function partPlainText(part) {
   if (typeof part?.text === "string" && part.text) return part.text;
   const blob = part?.encrypted_content;
   if (typeof blob === "string" && blob && !isOpaqueEncryptedContent(blob)) return blob;

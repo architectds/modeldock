@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { compressConversation } from "../src/compress.mjs";
-import { capDirectSummary, encodeCompactionSummary, decodeCompactionSummary, normalizeGatewayInput } from "../src/gateway.mjs";
+import { capDirectSummary, encodeCompactionSummary, decodeCompactionSummary, normalizeGatewayInput, SUMMARY_PREFIX } from "../src/gateway.mjs";
 
 const msg = (role, text) => ({ type: "message", role, content: [{ type: "input_text", text }] });
 
@@ -65,7 +65,13 @@ test("the returned compaction item expands back into a usable history", () => {
   assert.equal(expanded[1].content[0].text, "continue");
 
   const restored = expanded[0].content[0].text;
-  assert.equal(restored, summary, "the expanded text is the extract, unmodified");
+  // The extract is carried verbatim, but never bare: a compaction payload is text
+  // a model wrote, and Codex replays the stored item into every later request, so an
+  // unmarked expansion reaches the next model as an unlabeled user instruction. That
+  // is the "my own reasoning came back as the user's message" report, and this
+  // assertion used to pin it in place.
+  assert.ok(restored.startsWith(SUMMARY_PREFIX), "the continuation says it is a handoff summary");
+  assert.equal(restored.slice(SUMMARY_PREFIX.length + 2), summary, "the extract itself is unmodified");
   assert.ok(!restored.includes("kcr1:"), "the envelope is not leaked into the prompt");
   assert.ok(
     !restored.includes("[Earlier conversation history was compacted in an unreadable format.]"),
@@ -108,7 +114,12 @@ test("a structured summary from another harness still expands", () => {
       ],
     },
   ]);
-  assert.equal(expanded[0].content[0].text, "earlier progress\nand the remaining steps");
+  // Labeled like every other expansion: the parts came from another harness's
+  // model, not from the user, and an unmarked row reads as the human's instruction.
+  assert.equal(
+    expanded[0].content[0].text,
+    `${SUMMARY_PREFIX}\n\nearlier progress\nand the remaining steps`,
+  );
 });
 
 // The direct-return path had no size ceiling while the upstream compact path

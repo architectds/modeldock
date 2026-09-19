@@ -88,9 +88,9 @@ test("a ready managed host corrects stale visual Catalog state during gateway bo
   assert.equal(Object.hasOwn(snapshot.llamacpp.models[0], "autoCompactTokenLimit"), false,
     "boot removes the retired 70-percent override from the saved snapshot");
   const catalog = codexModelCatalog({
-    profileId: "llamacpp", mainModel: "Qwen3.8-27B@llamacpp", tokens: {}, nativeMerge: false,
+    profileId: "llamacpp", mainModel: "Local@llamacpp", tokens: {}, nativeMerge: false,
   });
-  assert.equal(catalog.models.find((model) => model.slug === "Qwen3.8-27B@llamacpp").auto_compact_token_limit, 209_715,
+  assert.equal(catalog.models.find((model) => model.slug === "Local@llamacpp").auto_compact_token_limit, 209_715,
     "managed local lanes use the same 80-percent catalog rule as other routed models");
   assert.equal(catalogWrites, 1);
   assert.equal(restartMarks, 1, "Codex is told to reload the corrected Catalog after the gateway comes up");

@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { canonicalLlamaLocalKey } from "./model-identity.mjs";
 
 // Append-only usage metering that survives gateway restarts. The in-memory
 // Metrics snapshot resets every restart (and this gateway restarts often during
@@ -133,7 +134,9 @@ export function mainRouteFromUsageEvent(event) {
   if (!model || !provider || !PRIMARY_MODEL_ROUTES.has(route)) return null;
   if (!Number.isInteger(status) || status < 200 || status >= 300) return null;
   if (!Number.isFinite(Date.parse(at))) return null;
-  return { model, provider, at };
+  // History predates the stable entry: a replayed llama.cpp slug names a file
+  // that may not be loaded anymore. The endpoint identity is what it meant.
+  return { model: canonicalLlamaLocalKey(model), provider, at };
 }
 
 // Reuse the existing bounded metering log as the durable source. Reading at

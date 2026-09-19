@@ -363,7 +363,7 @@ test("disconnecting a local engine leaves its model reachable", async () => {
 // but the server only answers to the id its /v1/models advertises - the model
 // path or tag. The wire must therefore carry upstreamId, never the friendly
 // slug; sending the slug would 404 against a server that does not know it.
-test("a local engine routes to the endpoint id, not the friendly slug", async () => {
+test("a local engine routes to the endpoint id behind the stable slug", async () => {
   const { applyLocalEngineProfile } = await import("../src/profiles.mjs");
 
   applyLocalEngineProfile("llamacpp", {
@@ -374,7 +374,9 @@ test("a local engine routes to the endpoint id, not the friendly slug", async ()
       upstreamId: "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
     }],
   });
-  const target = upstreamTargetFor({}, "Qwen3.8-27B@llamacpp");
+  // The published entry is stable across model swaps; the wire keeps the id
+  // this particular server actually advertises.
+  const target = upstreamTargetFor({}, "Local@llamacpp");
   applyLocalEngineProfile("llamacpp", null);
 
   assert.equal(target.model, "D:/models/Qwen3.8-27B-UD-Q4_K_XL.gguf", "the wire sends the endpoint id");
@@ -383,7 +385,7 @@ test("a local engine routes to the endpoint id, not the friendly slug", async ()
   assert.match(target.url, /^http:\/\/127\.0\.0\.1/);
 });
 
-test("a single GGUF is shown by its header name while its provider remains explicit", () => {
+test("a single GGUF publishes the stable local entry while its provider stays explicit", () => {
   applyLocalEngineProfile("llamacpp", {
     baseUrl: "http://127.0.0.1:11435/v1",
     models: [{
@@ -396,17 +398,17 @@ test("a single GGUF is shown by its header name while its provider remains expli
   });
   const config = {
     profileId: "llamacpp",
-    mainModel: "Qwen3.8-27B@llamacpp",
+    mainModel: "Local@llamacpp",
     visionModel: "",
     tokens: {},
     modelToggles: {},
     nativeMerge: false,
   };
-  const entry = catalogFor(config).models.find((model) => model.slug === "Qwen3.8-27B@llamacpp");
+  const entry = catalogFor(config).models.find((model) => model.slug === "Local@llamacpp");
   applyLocalEngineProfile("llamacpp", null);
 
-  assert.ok(entry, "the friendly local model is published");
-  assert.equal(entry.display_name, "llama.cpp (local) - Qwen3.8-27B");
-  assert.equal(entry.slug, "Qwen3.8-27B@llamacpp", "the provider address stays separate from the model name");
+  assert.ok(entry, "the stable local entry is published however the file names itself");
+  assert.equal(entry.display_name, "llama.cpp (local)", "the picker names the endpoint, not the loaded model");
+  assert.equal(entry.slug, "Local@llamacpp", "the provider address stays separate from the model identity");
   assert.equal(entry.auto_compact_token_limit, 188_620, "a stale managed cap cannot override the shared 80-percent rule");
 });

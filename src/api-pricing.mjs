@@ -98,6 +98,13 @@ const PRICE_OFFERS = [
   // for 27B, but both complete offers remain so the selection is auditable.
   ["qwen3.8-27b@qwen-cloud", { input: 0.5, cached: 0.1, output: 3 }],
 
+  // Shadow rate for the stable local llama.cpp entry. A model running on this
+  // machine costs no API credits, but Stats prices it at the hosted Qwen 3.8
+  // Flash standard rate so a local run and its hosted equivalent are directly
+  // comparable on one ruler. This is a display convention, not a claim about
+  // money spent: usage events keep carrying provider "llamacpp" regardless.
+  ["Local@llamacpp", { input: 0.15, cached: 0.016, output: 0.47 }],
+
   // OpenAI direct API standard short-context rates for native Codex traffic,
   // checked on 2026-09-08. Do not apply an OpenRouter-only promotional
   // discount here.

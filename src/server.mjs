@@ -30,7 +30,7 @@ import { SessionNames } from "./session-names.mjs";
 import { latestCodexSessionOpening } from "./codex-session-prefix.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, applyOllamaProfile, bareModelId, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
@@ -48,6 +48,7 @@ import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsErr
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { readRecentConversations, usageEventsPath } from "./usage-events.mjs";
+import { attachSseKeepAlive } from "./sse.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath, writeVisionOverrides } from "./vision-overrides.mjs";
 import { isModelPublished, modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
@@ -316,11 +317,17 @@ async function publishManagedLocalEngine(services, record, running) {
     mediaMarker: running?.mediaMarker,
     contextWindow,
   }));
-  const changed = JSON.stringify(models) !== JSON.stringify(snapshot.models);
+  // What decides "restart Codex" is the published catalog projection, not the
+  // snapshot file: the llama.cpp entry publishes under a stable id, so a model
+  // swap changes the wire id and the drawer facts without changing anything
+  // Codex was told. Diffing the file nagged a restart for an invisible edit.
+  const publishedBefore = publishedCatalogFingerprint("llamacpp");
   const next = { ...snapshot, launch: record.activeSpec, models };
   writeLocalEngineSnapshot(file, "llamacpp", next);
   applyLocalEngineProfile("llamacpp", next);
+  const publishedAfter = publishedCatalogFingerprint("llamacpp");
   services.writeCatalogFile?.();
+  const changed = publishedAfter !== publishedBefore;
   if (changed) await services.configSwitcher.markRestartRequired();
   return changed;
 }
@@ -337,8 +344,10 @@ async function publishManagedLocalEngine(services, record, running) {
 // that really uses the local model cold-prefills on every turn.
 async function primeManagedLocalWarmBase(services, record) {
   if (!record?.activeSpec || !services.localHostRuntime?.primeWarmBase) return { primed: false, reason: "unavailable" };
-  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
-  const localModel = snapshot?.models?.[0]?.id;
+  // The base must be built under the identity a live request will arrive with.
+  // That is the stable entry the profile publishes, not whatever id the
+  // snapshot file was written under by an older build.
+  const localModel = profileById("llamacpp")?.availableModels?.[0]?.id;
   if (!localModel) return { primed: false, reason: "model_unavailable" };
   const conversations = await (services.readRecentConversations || readRecentConversations)({
     provider: "llamacpp",
@@ -536,6 +545,10 @@ function statsModelDirectory(services) {
     const id = entry.native ? `${entry.id}@${NATIVE_PROVIDER.id}` : entry.id;
     remember(id, entry.label || entry.id);
   }
+  // The stable local entry keeps its "llama.cpp (local)" label even while no
+  // engine is connected: folded history still needs the human name, and the
+  // inventory above is empty for a provider with nothing published.
+  remember(LLAMACPP_LOCAL_SLUG, LLAMACPP_LOCAL_MODEL_LABEL);
   return {
     labelFor: (id) => labels.get(id) || "",
   };
@@ -676,6 +689,14 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
     mediaMarker: engine?.engine === "llamacpp" ? engine.mediaMarker : undefined,
   });
   if (JSON.stringify(current) === JSON.stringify(next)) return null;
+  // A swapped file is a real event even when the published identity hides it:
+  // KV slots, warm bases, and the drawer facts all reset against the new
+  // fingerprint. Silent in the log meant "the engine changed and nothing said
+  // why the first turn is cold."
+  if ((current.upstreamId || "") !== (next.upstreamId || "")) {
+    const base = (value) => String(value || "").replace(/\\/g, "/").split("/").pop() || "unknown";
+    console.log(`[gate] local engine model changed: ${base(current.upstreamId)} -> ${base(next.upstreamId)}; published entry stays stable, warm KV rebuilds from the new fingerprint.`);
+  }
   return {
     ...snapshot,
     models: [next],
@@ -2152,8 +2173,11 @@ export function createApp(services = createServices()) {
         const snapshot = readLocalEnginesSnapshot(file)?.[engine.engine];
         const refreshed = refreshedSingleModelSnapshot(snapshot, engine);
         if (!refreshed) continue;
+        const publishedBefore = publishedCatalogFingerprint(engine.engine);
         writeLocalEngineSnapshot(file, engine.engine, refreshed);
         applyLocalEngineProfile(engine.engine, refreshed);
+        const publishedAfter = publishedCatalogFingerprint(engine.engine);
+        if (publishedAfter === publishedBefore) continue;
         services.writeCatalogFile?.();
         await services.configSwitcher.markRestartRequired();
         recordConfigAction(metrics, `local_model_name_refreshed_${engine.engine}`, { ok: true });
@@ -2283,13 +2307,27 @@ export function createApp(services = createServices()) {
           });
         }),
       };
+      const publishedBefore = publishedCatalogFingerprint(engine);
       writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
       applyLocalEngineProfile(engine, snapshot);
       services.writeCatalogFile?.();
-      // Same for a local engine: the models are new to Codex.
-      await services.configSwitcher.markRestartRequired();
+      // Same rule as the managed publish: connect only means a new world to
+      // Codex when the published catalog projection actually moved. Re-
+      // connecting llama.cpp after swapping the GGUF updates the wire id and
+      // nothing the picker was told, and that swap is precisely the flow the
+      // stable identity exists to keep restart-free.
+      if (publishedCatalogFingerprint(engine) !== publishedBefore) await services.configSwitcher.markRestartRequired();
       recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
-      return res.json({ engine, baseUrl: base, models: snapshot.models, observation, settings: settingsPayload(services) });
+      return res.json({
+        engine,
+        baseUrl: base,
+        // Report what Codex will be told, not the snapshot's internal row: the
+        // two are the same object for every engine except a single-model
+        // llama.cpp, whose published id is deliberately stable.
+        models: profileById(engine)?.availableModels || snapshot.models,
+        observation,
+        settings: settingsPayload(services),
+      });
     } catch (error) {
       recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
       const status = error instanceof LocalEngineError ? 400 : 502;
@@ -3169,9 +3207,13 @@ export function createApp(services = createServices()) {
     res.flushHeaders();
     eventClients.add(res);
     res.write(`data: ${JSON.stringify(statusPayload(services))}\n\n`);
-    const keepAlive = setInterval(() => res.write(": keepalive\n\n"), 20_000);
+    // One keepalive implementation for every SSE peer in this process. The relay
+    // needs it because a cold prefill is silent, the dashboard needs it because a
+    // quiet proxy idle-drops a stream with no events; both are the same job, and
+    // the helper's frames carry the identical comment payload.
+    const detachKeepAlive = attachSseKeepAlive(res, 20_000);
     req.on("close", () => {
-      clearInterval(keepAlive);
+      detachKeepAlive();
       eventClients.delete(res);
     });
   });

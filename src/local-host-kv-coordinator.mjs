@@ -78,6 +78,14 @@ export class LocalHostKvCoordinator {
   #tierStats = new Map();
   // Prefixes already reported as having no warm base (see MISSING_BASE_KEY_LIMIT).
   #missingBaseKeys = new Set();
+  // Circuit breaker for llama.cpp slot commands. When the engine is stopped
+  // or mid-restart, every erase fails again on every turn, and each failure
+  // costs the request the time it takes to walk out to a connection timeout.
+  // Three consecutive connection-shaped failures pause erasing for one
+  // minute; a success closes the breaker immediately. The pause is logged so
+  // a stopped engine reads as stopped instead of burying the log in repeats.
+  #eraseFailures = 0;
+  #erasePausedUntil = 0;
   // A content-free, time-bounded record of lane changes. It never contains a
   // Codex conversation id, prompt, or tool data; lanes are the only identity
   // the monitor needs to draw the scheduler's swimlanes.
@@ -250,10 +258,28 @@ export class LocalHostKvCoordinator {
   }
 
   async #erase(slot) {
+    if (Date.now() < this.#erasePausedUntil) return false;
     try {
       await this.slotClient.erase({ slot });
+      this.#eraseFailures = 0;
       return true;
     } catch (error) {
+      if (/fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Target is unreachable|Connection refused|access denied|Could not connect/i.test(diagnosticMessage(error))) {
+        this.#eraseFailures += 1;
+        if (this.#eraseFailures >= 3) {
+          this.#erasePausedUntil = Date.now() + 60_000;
+          this.#eraseFailures = 0;
+          await this.#diagnose("slot_commands_paused", new Error(
+            "llama.cpp slot commands paused for 60s: three connection attempts in a row went unanswered, so the engine looks stopped or mid-restart."
+          ));
+          return false;
+        }
+      } else {
+        // A non-connection failure (bad slot id, engine confusion) must not
+        // trip or reset a connection breaker; report it every time, as before.
+        await this.#diagnose("slot_erase_failed", error);
+        return false;
+      }
       await this.#diagnose("slot_erase_failed", error);
       return false;
     }

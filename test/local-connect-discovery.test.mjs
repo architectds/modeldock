@@ -133,7 +133,7 @@ test("connect attaches the port discovery found, not the profile default", async
   assert.equal(snapshot.llamacpp.baseUrl, `http://127.0.0.1:${port}/v1`, "the persisted address is the discovered one");
 });
 
-test("connect publishes the GGUF name and keeps the endpoint id for the wire", async (t) => {
+test("connect publishes the stable local id and keeps the endpoint id for the wire", async (t) => {
   const engine = fakeEngine();
   engine.listen(0, "127.0.0.1");
   await new Promise((resolve) => engine.once("listening", resolve));
@@ -163,10 +163,15 @@ test("connect publishes the GGUF name and keeps the endpoint id for the wire", a
   const payload = await response.json();
   assert.equal(response.status, 200, `connect failed: ${JSON.stringify(payload)}`);
   const model = payload.models[0];
-  assert.equal(model.id, "Qwen3.8-27B", "the published id is the model name, not the path");
-  assert.equal(model.label, "Qwen3.8-27B", "the picker label is the model name");
+  // The picker identity belongs to the endpoint: whatever GGUF is loaded (and
+  // whatever name its header declares), a single-model llama.cpp publishes as
+  // Local@llamacpp so swapping models never invalidates a session's slug.
+  assert.equal(model.id, "Local", "the published id is the stable local entry, not the loaded file");
+  assert.equal(model.label, "llama.cpp (local)", "the picker label names the endpoint, never the model");
   assert.equal(model.upstreamId, "qwen3.8:27b", "the wire id is the endpoint id the server advertises");
   const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
+  // The snapshot file keeps the friendly name internally (the drawer shows it);
+  // only the published projection pins the stable id.
   assert.equal(snapshot.llamacpp.models[0].id, "Qwen3.8-27B");
   assert.equal(snapshot.llamacpp.models[0].upstreamId, "qwen3.8:27b", "the persisted snapshot keeps the endpoint id for relaunch");
   assert.equal(snapshot.llamacpp.models[0].supportsVision, false, "a stale manual vision checkbox cannot override llama.cpp's live modalities");

@@ -3,6 +3,7 @@ import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
 import { localEngineDefinition } from "./local-engine-definitions.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
+import { LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
 
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
@@ -174,7 +175,10 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
     const profile = profileById(reference.provider);
     if (!profile?.label) return null;
     const modelLabel = modelEntryFor(null, id)?.label || reference.model;
-    return `${profile.label} - ${modelLabel}`;
+    // An entry labeled with its provider's own name (the stable llama.cpp
+    // entry) is already fully described by the provider label; joining them
+    // would double it into "llama.cpp (local) - llama.cpp (local)".
+    return modelLabel === profile.label ? profile.label : `${profile.label} - ${modelLabel}`;
   };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
   // catalog stores bare ids, so resolve through bareModelId. A main model owned by
@@ -195,7 +199,9 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
     if (item.id === qualifiedMain || rest.some((entry) => entry.slug === item.id)) continue;
     rest.push({
         slug: item.id,
-        displayName: `${item.providerLabel} - ${model.label || model.id}`,
+        displayName: (model.label || model.id) === item.providerLabel
+          ? item.providerLabel
+          : `${item.providerLabel} - ${model.label || model.id}`,
         supportsVision: Boolean(model.supportsVision),
         providerLabel: item.providerLabel,
         contextWindow: model.contextWindow || CONTEXT_WINDOW,
@@ -502,6 +508,13 @@ const LLAMACPP_ENGINE = localEngineDefinition("llamacpp");
 const VLLM_ENGINE = localEngineDefinition("vllm");
 const LLAMACPP_PROFILE = localEngineProfile("llamacpp", `${LLAMACPP_ENGINE.label} (local)`, `http://127.0.0.1:${LLAMACPP_ENGINE.defaultPort}`, "modeldock-llamacpp-v1", "chat");
 const VLLM_PROFILE = localEngineProfile("vllm", `${VLLM_ENGINE.label} (local)`, `http://127.0.0.1:${VLLM_ENGINE.defaultPort}`, "modeldock-vllm-v1");
+
+// The stable llama.cpp entry itself (the id, the slug, and the alias rule)
+// lives in model-identity.mjs, because routing, stats, and boot selection all
+// have to fold on the exact same string. What lives here is the label: the
+// picker identity names the endpoint, never the loaded model.
+export { LLAMACPP_LOCAL_MODEL_ID, LLAMACPP_LOCAL_SLUG } from "./model-identity.mjs";
+export const LLAMACPP_LOCAL_MODEL_LABEL = LLAMACPP_PROFILE.label;
 
 // Grok through a Grok subscription rather than through metered API credits.
 //
@@ -1138,13 +1151,22 @@ export function applyLocalEngineProfile(engineId, snapshot) {
   const profile = PROFILES[engineId];
   if (!profile) return null;
   if (snapshot?.baseUrl) profile.baseUrl = snapshot.baseUrl;
+  // A connected llama.cpp publishes exactly one stable local entry whatever
+  // model it is loading (see LLAMACPP_LOCAL_MODEL_ID). Snapshots written by
+  // older builds carry the file's own name as the id, so the pin happens at
+  // this single projection point instead of migrating the file: catalog,
+  // routing, and warm-base priming agree the moment the snapshot is applied
+  // at startup, without waiting for a rescan. A multi-model llama.cpp server
+  // keeps per-model ids; one launch spec cannot name every advertised model.
+  const stableIdentity = engineId === "llamacpp"
+    && Array.isArray(snapshot?.models) && snapshot.models.length === 1;
   profile.availableModels = Array.isArray(snapshot?.models)
     ? snapshot.models
         .filter((model) => model?.id)
         .map((model) => ({
-          id: model.id,
+          id: stableIdentity ? LLAMACPP_LOCAL_MODEL_ID : model.id,
           upstreamId: model.upstreamId || model.id,
-          label: model.label || model.id,
+          label: stableIdentity ? LLAMACPP_LOCAL_MODEL_LABEL : (model.label || model.id),
           endpoint: "responses",
           supportsVision: Boolean(model.supportsVision),
           chatTemplateSupportsObjectArguments: Boolean(model.chatTemplateSupportsObjectArguments),
@@ -1155,6 +1177,23 @@ export function applyLocalEngineProfile(engineId, snapshot) {
         }))
     : [];
   return profile;
+}
+
+// The JSON of everything the Codex catalog derives from a profile's published
+// models. A change here means the picker Codex already loaded describes a
+// different world and the user must restart; no change means whatever else
+// moved (a hot-swapped GGUF behind a stable id, launch diagnostics) is
+// invisible to every open session. Restart banners must diff this, not the
+// snapshot file and not the full profile entry (which carries wire ids).
+export function publishedCatalogFingerprint(profileIdOrObject) {
+  const profile = typeof profileIdOrObject === "string" ? PROFILES[profileIdOrObject] : profileIdOrObject;
+  return JSON.stringify((profile?.availableModels || []).map((model) => ({
+    id: model.id,
+    label: model.label,
+    contextWindow: model.contextWindow,
+    supportsVision: Boolean(model.supportsVision),
+    status: model.status || "available",
+  })));
 }
 // Published routed ids carry their owner in a suffix such as
 // "deepseek-v4-flash@deepseek-official". The suffix is a routing address only
@@ -1209,6 +1248,14 @@ export function providerForModel(config, model) {
 
 // Resolve the curated model entry (label, endpoint, zen flag, vision metadata) for a
 // bare model id. Used by the gateway to pick the upstream base URL per model.
+// Is the stable local entry published right now? That single question is the gate
+// on every llama.cpp alias: with an engine connected, a stale name still means
+// "this machine's local endpoint"; with none, the same name must keep failing with
+// the honest configuration error instead of being invented into existence.
+export function llamaLocalStableEntry() {
+  return PROFILES.llamacpp?.availableModels?.find((entry) => entry.id === LLAMACPP_LOCAL_MODEL_ID) || null;
+}
+
 export function modelEntryFor(config, model) {
   const provider = providerForModel(config, model);
   const bare = bareModelId(model);
@@ -1218,6 +1265,19 @@ export function modelEntryFor(config, model) {
   // made metadata and routing disagree: a bare or misspelled id could borrow an
   // entry from the active profile while providerForModel still sent it to the
   // default provider. Dynamic profiles must register before this lookup.
+  if (provider === "llamacpp" && bare !== LLAMACPP_LOCAL_MODEL_ID) {
+    // llama.cpp publishes one stable entry whatever file it loads, so every name
+    // that endpoint has ever answered to is an alias of it. Resolving the alias at
+    // the entry owner is what keeps a stored reference (a vision model saved before
+    // the rename, a host connected after config load) from being sent upstream as if
+    // it were a wire id: without this the caller gets no entry and falls back to the
+    // stale name, which the server has never heard of. The routed path still
+    // normalizes the slug earlier (normalizeLegacySlug) so the picker, the stats and
+    // the honest 503 all name one identity; with no engine connected there is no
+    // stable entry to resolve to and this returns null, as before.
+    const stable = llamaLocalStableEntry();
+    if (stable) return stable;
+  }
   return null;
 }
 

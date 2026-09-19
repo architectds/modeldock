@@ -97,6 +97,22 @@ export function translateUpstreamError({ provider, status, bodyText, free = fals
   };
 }
 
+// A local engine that is not answering is the most misleading failure ModelDock
+// can report: the raw "fetch failed" reads as "the gateway died", so users
+// restart a service that is answering perfectly while nothing is listening on the
+// engine port. All relay-facing copy for that condition lives here, so the relay
+// and every other relay exit cannot drift into two diagnoses of one failure.
+const LOCAL_CONNECTION_FAILURE = /fetch failed|ECONNREFUSED|ECONNRESET|socket hang up|Connection refused|unable to connect|other reason|Target is unreachable|FailedToOpenSocket|NetworkError|could not connect|access denied/i;
+
+export function isLocalConnectionFailure(text) {
+  return LOCAL_CONNECTION_FAILURE.test(String(text || ""));
+}
+
+export function localEngineDownMessage({ label, address = "", action }) {
+  const where = address ? ` at ${address}` : "";
+  return `${label}${where} is not answering (connection failed). ModelDock itself is up: ${action}.`;
+}
+
 // The zen free endpoint intermittently accepts a request, burns the whole
 // output budget on reasoning, and answers 200 with no output items: output:[]
 // with stop_reason "max_output_tokens" (non-streaming) or a bare

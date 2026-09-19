@@ -108,3 +108,37 @@ export function createUsageTee(onEvent) {
   };
   return { push, end };
 }
+
+// SSE keepalive for relays whose upstream is known to compute quietly. A local
+// llama.cpp turn spends minutes cold-prefilling a full Codex prompt without
+// emitting a single byte, and a client with a byte-level idle timer reads that
+// as a dead relay ("idle timeout waiting for SSE", Reconnecting loops on every
+// turn). A comment frame is required to be ignored by every conforming SSE
+// reader while still resetting that timer. attachSseKeepAlive wraps res.write:
+// any real write pushes the quiet deadline out, and the timer emits a comment
+// only while the relay itself has been silent. The comment bypasses the usage
+// tee and the byte counters - it is transport framing, not model output - and
+// the returned detach restores the original write and stops the timer.
+export function attachSseKeepAlive(res, intervalMs) {
+  const original = res.write.bind(res);
+  let lastActivity = Date.now();
+  res.write = (chunk, ...args) => {
+    if (chunk) lastActivity = Date.now();
+    return original(chunk, ...args);
+  };
+  const timer = setInterval(() => {
+    if (res.writableEnded || res.destroyed) return;
+    if (Date.now() - lastActivity < intervalMs) return;
+    lastActivity = Date.now();
+    try {
+      original(": keepalive\r\n\r\n");
+    } catch {
+      // The response is closing; detach clears the interval.
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    res.write = original;
+  };
+}

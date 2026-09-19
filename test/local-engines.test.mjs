@@ -124,7 +124,10 @@ test("applyLocalEngineProfile publishes vision and context, and nothing else", a
   assert.equal(profile.id, "llamacpp");
   assert.equal(profile.baseUrl, "http://127.0.0.1:8080");
   const [model] = profile.availableModels;
-  assert.equal(model.id, "qwen3-27b");
+  // A single-model llama.cpp publishes under the stable local identity; the
+  // snapshot's own name survives as the wire id, never as the published one.
+  assert.equal(model.id, "Local");
+  assert.equal(model.upstreamId, "qwen3-27b");
   assert.equal(model.supportsVision, true);
   assert.equal(model.chatTemplateSupportsObjectArguments, true);
   assert.ok(model.contextWindow > 0, "the advertised window survives");
@@ -211,13 +214,18 @@ test("a connected local engine is routed to itself, keyless", async () => {
 
   const config = { tokens: { "opencode-go": "should-never-be-used" } };
   const cases = [
-    ["qwen3-30b.gguf@llamacpp", "http://127.0.0.1:8080/v1/chat/completions", "llamacpp"],
+    // A single-model llama.cpp is published, requested, and routed as the
+    // stable Local entry; the wire still carries the id the server advertises.
+    ["Local@llamacpp", "http://127.0.0.1:8080/v1/chat/completions", "llamacpp"],
     ["Qwen/Qwen3-8B@vllm", "http://127.0.0.1:8000/v1/responses", "vllm"],
   ];
   for (const [model, url, provider] of cases) {
     const target = upstreamTargetFor(config, model);
     assert.equal(target.url, url, `${model} goes to its own engine`);
     assert.equal(target.provider, provider);
+    if (provider === "llamacpp") {
+      assert.equal(target.model, "qwen3-30b.gguf", "the wire carries the endpoint's advertised id, not the published slug");
+    }
     assert.equal(target.token, "", "no credential is sent to a loopback engine");
     assert.equal(target.tokenRequired, false, "and the tokenless gate must not 503 it");
     assert.equal(target.toolArgumentsAsObjects, provider === "llamacpp", "only the advertised llama template gets object arguments");

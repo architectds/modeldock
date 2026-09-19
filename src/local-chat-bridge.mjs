@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { parseSseData } from "./sse.mjs";
-import { itemPlainText } from "./subagent-guidance.mjs";
+import { itemPlainText, partPlainText } from "./subagent-guidance.mjs";
 
 export class LocalChatBridgeError extends Error {
   constructor(code, message) {
@@ -38,11 +38,19 @@ function instructionText(instructions, mediaMarker = "") {
   return instructions.map((part) => typeof part?.text === "string" ? escapeMediaMarkerText(part.text, mediaMarker) : "").filter(Boolean).join("\n");
 }
 
-function chatContent(content, itemType = "message", mediaMarker = "") {
+// Chat carries text, images, and tool calls; Codex's Requests carry more shapes
+// than that, and it invents new ones faster than this bridge can learn them.
+// `notes` collects what had to be folded so the caller can say so out loud
+// (metrics, and one log line) - the alternative used to be a 502 that killed the
+// turn and told the user nothing about which item was at fault.
+function chatContent(content, itemType = "message", mediaMarker = "", notes = null) {
   if (typeof content === "string") return escapeMediaMarkerText(content, mediaMarker);
   if (content === null || content === undefined) return "";
   if (!Array.isArray(content)) {
-    throw new LocalChatBridgeError("unsupported_content", `Local Chat bridge cannot encode ${itemType} content.`);
+    // Not a content array at all. Reading it as text is lossy; failing the turn
+    // is worse, and the shape still belongs in the log.
+    notes?.push(`${itemType} content (not an array)`);
+    return textValue(content, mediaMarker);
   }
   const parts = [];
   for (const part of content) {
@@ -51,17 +59,39 @@ function chatContent(content, itemType = "message", mediaMarker = "") {
       parts.push({ type: "text", text: escapeMediaMarkerText(part.text, mediaMarker) });
       continue;
     }
-    if (part.type === "input_image" && typeof part.image_url === "string") {
-      parts.push({ type: "image_url", image_url: { url: part.image_url } });
+    if (part.type === "input_image") {
+      // Codex sends the Responses dialect (a bare string) and history that has
+      // already passed a Chat round trip carries the object form. Accept either.
+      const url = typeof part.image_url === "string"
+        ? part.image_url
+        : (typeof part.image_url?.url === "string" ? part.image_url.url : "");
+      if (url) {
+        parts.push({ type: "image_url", image_url: { url } });
+        continue;
+      }
+    }
+    const text = partPlainText(part);
+    if (text) {
+      parts.push({ type: "text", text: escapeMediaMarkerText(text, mediaMarker) });
       continue;
     }
-    throw new LocalChatBridgeError("unsupported_content_part", `Local Chat bridge cannot encode ${itemType} content part ${String(part.type || "unknown")}.`);
+    // A part this transport cannot carry (a file, an audio clip, a type newer
+    // than this build). Say so in the history instead of pretending it was not
+    // there: the model can then tell the user what it could not read.
+    const name = typeof part.filename === "string" && part.filename
+      ? part.filename
+      : (typeof part.file_id === "string" && part.file_id ? part.file_id : "");
+    parts.push({
+      type: "text",
+      text: escapeMediaMarkerText(`[${String(part.type || "part")}${name ? `: ${name}` : ""} - not carried to this model]`, mediaMarker),
+    });
+    notes?.push(`content part ${String(part.type || "unknown")}`);
   }
   if (parts.every((part) => part.type === "text")) return parts.map((part) => part.text).join("\n");
   return parts;
 }
 
-function chatTools(tools, mediaMarker = "") {
+function chatTools(tools, mediaMarker = "", notes = null) {
   if (!Array.isArray(tools)) return { tools: [], customToolNames: new Set() };
   const customToolNames = new Set();
   const converted = [];
@@ -96,7 +126,11 @@ function chatTools(tools, mediaMarker = "") {
       });
       continue;
     }
-    throw new LocalChatBridgeError("unsupported_tool", `Local Chat bridge cannot encode tool type ${String(tool.type || "unknown")}.`);
+    // A tool descriptor this transport has no equivalent for (a provider-owned
+    // builtin, or a type newer than this build). Declaring it is impossible and
+    // failing the turn helps nobody: leave it out so the model answers with the
+    // tools it can see, and record that we did.
+    notes?.push(`tool type ${String(tool.type || "unknown")}`);
   }
   return { tools: converted, customToolNames };
 }
@@ -124,27 +158,32 @@ function objectToolArguments(value) {
   return parsed;
 }
 
-function toolCallItem(item, { toolArgumentsAsObjects = false, mediaMarker = "" } = {}) {
+// Returns null for a call that cannot be paired at all - Chat has no place for a
+// tool call with no id or no name, and the caller folds its text into an ordinary
+// turn rather than failing the request over one malformed history item.
+function toolCallItem(item, { toolArgumentsAsObjects = false, mediaMarker = "", notes = null } = {}) {
   const callId = item.call_id || item.id;
-  if (typeof callId !== "string" || !callId) {
-    throw new LocalChatBridgeError("tool_call_id", "Local Chat bridge needs a call_id for every function call.");
-  }
-  if (typeof item.name !== "string" || !item.name) {
-    throw new LocalChatBridgeError("tool_call_name", "Local Chat bridge needs a name for every function call.");
-  }
+  if (typeof callId !== "string" || !callId) return null;
+  if (typeof item.name !== "string" || !item.name) return null;
   const argumentsValue = item.type === "custom_tool_call"
     ? { input: typeof item.input === "string" ? item.input : textValue(item.input ?? "") }
     : item.arguments ?? item.input ?? {};
   const argumentsText = typeof argumentsValue === "string" ? argumentsValue : textValue(argumentsValue, mediaMarker);
+  let args = escapeMediaMarkerText(argumentsText, mediaMarker);
+  if (toolArgumentsAsObjects) {
+    try {
+      args = escapeMediaMarkerValue(objectToolArguments(argumentsValue), mediaMarker);
+    } catch {
+      // This template wants a decoded object and this call's arguments are not
+      // JSON. Send the string shape every other dialect uses: the call still
+      // reads, and the note records that the template got the weaker form.
+      notes?.push(`tool arguments for ${item.name} are not a JSON object`);
+    }
+  }
   return {
     id: callId,
     type: "function",
-    function: {
-      name: item.name,
-      arguments: toolArgumentsAsObjects
-        ? escapeMediaMarkerValue(objectToolArguments(argumentsValue), mediaMarker)
-        : escapeMediaMarkerText(argumentsText, mediaMarker),
-    },
+    function: { name: item.name, arguments: args },
   };
 }
 
@@ -176,29 +215,75 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
     messages.push(pendingAssistant);
     pendingAssistant = null;
   };
+  // A Codex item that has no Chat equivalent - a collaboration envelope, a tool
+  // shape newer than this build, an orphan call - joins the transcript as a
+  // labeled user turn carrying whatever is readable in it, and `degraded` names
+  // the shape so the relay can record it. Throwing here used to answer the user
+  // with "Local Chat bridge cannot encode input item <type>" and no turn at all:
+  // one unread item ended every chat-transport session that had ever exchanged a
+  // message between agents. Keeping is better than dropping, and dropping is
+  // better than failing, but neither is allowed to be silent.
+  // This is the transport half of a deliberate pair: the input contract already
+  // repairs pairing before any provider validates it (promoteDeliveredToolOutputs
+  // and dropUnpairedToolItems in gateway.mjs). That pass cannot see a shape it does
+  // not know, so this one owns the rest; neither is redundant.
+  const degraded = [];
+  // `note` is what the relay records. An empty note marks a fold that is the
+  // intended encoding of a Codex shape - a collaboration envelope - rather than a
+  // loss this build had to accept, so an ordinary multi-agent session does not
+  // read as a degraded one.
+  const foldItem = (item, label, note = label) => {
+    if (note) degraded.push(note);
+    // Readable text from any of the three places Codex keeps it: content/summary
+    // parts, a tool result, or the arguments of the call itself.
+    const argumentsValue = item.type === "custom_tool_call" ? item.input : (item.arguments ?? item.input);
+    const body = itemPlainText(item)
+      || (item.output === undefined || item.output === null ? "" : textValue(item.output, mediaMarker))
+      || (typeof argumentsValue === "string" ? argumentsValue : argumentsValue === undefined || argumentsValue === null ? "" : textValue(argumentsValue, mediaMarker));
+    if (!body) return;
+    flushAssistant();
+    messages.push({ role: "user", content: escapeMediaMarkerText(`[${label}]\n${body}`, mediaMarker) });
+  };
   for (const item of payload.input) {
     if (!item || typeof item !== "object") continue;
     if (["function_call", "custom_tool_call"].includes(item.type)) {
+      const call = toolCallItem(item, { toolArgumentsAsObjects, mediaMarker, notes: degraded });
+      if (!call) {
+        foldItem(item, `unpaired ${item.type}${item.name ? ` ${item.name}` : ""}`);
+        continue;
+      }
       const next = assistant();
       if (!next.tool_calls) next.tool_calls = [];
-      next.tool_calls.push(toolCallItem(item, { toolArgumentsAsObjects, mediaMarker }));
+      next.tool_calls.push(call);
       continue;
     }
     if (["function_call_output", "custom_tool_call_output"].includes(item.type)) {
       flushAssistant();
       const callId = item.call_id || item.id;
       if (typeof callId !== "string" || !callId) {
-        throw new LocalChatBridgeError("tool_output_id", "Local Chat bridge needs a call_id for every function output.");
+        foldItem(item, `unpaired ${item.type}`);
+        continue;
       }
       messages.push({ role: "tool", tool_call_id: callId, content: textValue(item.output, mediaMarker) });
       continue;
     }
     if (item.type === "message") {
       const role = item.role === "developer" ? "system" : item.role;
-      if (!["system", "user", "assistant"].includes(role)) {
-        throw new LocalChatBridgeError("message_role", `Local Chat bridge cannot encode message role ${String(item.role || "unknown")}.`);
+      const content = chatContent(item.content, "message", mediaMarker, degraded);
+      if (role !== "system" && role !== "user" && role !== "assistant") {
+        // A role this transport does not have is still somebody's turn: keep the
+        // content, and keep the role visible in the text.
+        degraded.push(`message role ${String(item.role || "unknown")}`);
+        flushAssistant();
+        const roleLabel = escapeMediaMarkerText(`[${String(item.role || "unknown")}]`, mediaMarker);
+        messages.push({
+          role: "user",
+          content: Array.isArray(content)
+            ? [{ type: "text", text: roleLabel }, ...content]
+            : `${roleLabel} ${content}`,
+        });
+        continue;
       }
-      const content = chatContent(item.content, "message", mediaMarker);
       if (role === "assistant") {
         const next = assistant();
         next.content = next.content === null || next.content === undefined
@@ -226,18 +311,17 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
       // Author and recipient are carried verbatim; the shared item-text
       // derivation decides which parts are readable plaintext, so a body that
       // stayed opaque after the relay gate drops out instead of being guessed.
-      const body = itemPlainText(item);
-      if (!body) continue;
       const author = typeof item.author === "string" && item.author ? item.author : "unknown agent";
       const recipient = typeof item.recipient === "string" && item.recipient ? item.recipient : "unknown agent";
-      flushAssistant();
-      messages.push({ role: "user", content: escapeMediaMarkerText(`[agent_message from ${author} to ${recipient}]\n${body}`, mediaMarker) });
+      foldItem(item, `agent_message from ${author} to ${recipient}`, "");
       continue;
     }
-    throw new LocalChatBridgeError("input_item", `Local Chat bridge cannot encode input item ${String(item.type || "unknown")}.`);
+    // The bracket keeps the type the model can repeat back; the note keeps the
+    // reason a reader of the metrics needs.
+    foldItem(item, String(item.type || "unknown"), `unsupported item ${String(item.type || "unknown")}`);
   }
   flushAssistant();
-  const convertedTools = chatTools(payload.tools, mediaMarker);
+  const convertedTools = chatTools(payload.tools, mediaMarker, degraded);
   const chat = {
     model: payload.model,
     messages,
@@ -255,7 +339,7 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
     ...(cachePrompt ? { cache_prompt: true } : {}),
     ...(payload.stream === true ? { stream_options: { include_usage: true } } : {}),
   };
-  return { payload: chat, customToolNames: convertedTools.customToolNames };
+  return { payload: chat, customToolNames: convertedTools.customToolNames, degraded };
 }
 
 function responseUsage(usage) {

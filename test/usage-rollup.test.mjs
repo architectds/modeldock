@@ -317,7 +317,11 @@ test("native Astra contributes priced cost through the complete stats projection
   assert.equal(stats.series.hours24.at(-2).byModel["gpt-6-astra"].cost, 7.8);
 });
 
-test("local models use the same normalized equivalent price in every stats view", () => {
+test("local llama traffic folds onto the stable entry and prices at the hosted flash shadow rate", () => {
+  // Two historical spellings of the same local endpoint (a file name from one
+  // era, a GGUF codename from another) aggregate into one row: the stable
+  // local entry, priced by its published rate rather than by whichever GGUF
+  // produced the tokens.
   const { rollup } = foldEvents(emptyRollup(), [
     event("2026-09-08T13:00:00.000Z", {
       model: "Qwen3.8-27B",
@@ -326,14 +330,25 @@ test("local models use the same normalized equivalent price in every stats view"
       cachedTokens: 800_000,
       outputTokens: 100_000,
     }),
+    event("2026-09-08T13:30:00.000Z", {
+      model: "Src@llamacpp",
+      provider: "llamacpp",
+      inputTokens: 0,
+      cachedTokens: 0,
+      outputTokens: 0,
+    }),
   ], { now: "2026-09-08T14:00:00.000Z" });
   const stats = usageStats(rollup, "2026-09-08T14:30:00.000Z");
 
-  assert.equal(stats.periods.hours24.estimatedApiCostUsd, 0.412);
+  // 0.2M uncached at 0.15 + 0.8M cached at 0.016 + 0.1M out at 0.47 = 0.0898,
+  // the same rate mix qwen3.8-flash@opencode-go would charge.
+  const shadow = +(0.2 * 0.15 + 0.8 * 0.016 + 0.1 * 0.47).toFixed(6);
+  assert.equal(+stats.periods.hours24.estimatedApiCostUsd.toFixed(6), shadow);
   assert.equal(stats.periods.hours24.costCoverage, 1);
-  assert.equal(stats.modelPeriods.hours24.models[0].id, "qwen3.8-27b");
-  assert.equal(stats.modelPeriods.hours24.models[0].estimatedApiCostUsd, 0.412);
-  assert.equal(stats.series.hours24.at(-2).byModel["qwen3.8-27b"].cost, 0.412);
+  assert.equal(stats.modelPeriods.hours24.models[0].id, "local");
+  assert.equal(stats.modelPeriods.hours24.models[0].completedRequests, 2);
+  assert.equal(+(stats.modelPeriods.hours24.models[0].estimatedApiCostUsd).toFixed(6), shadow);
+  assert.equal(+stats.series.hours24.at(-2).byModel["local"].cost.toFixed(6), shadow);
 });
 
 test("stats keep model share bounded and aggregate the tail", () => {

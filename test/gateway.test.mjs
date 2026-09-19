@@ -62,6 +62,7 @@ import {
   routeGatewayRequest,
   sessionIdsFrom,
   stripLocalInstructions,
+  SUMMARY_PREFIX,
   upstreamTargetFor,
 } from "../src/gateway.mjs";
 
@@ -163,7 +164,14 @@ test("normalizeGatewayInput removes compaction triggers and expands compaction s
   assert.equal(normalized[0].type, "message");
   assert.equal(normalized[1].type, "message");
   assert.equal(normalized[1].role, "user");
-  assert.equal(normalized[1].content[0].text, "earlier context");
+  // A compaction payload is model-written text, so the row that replays it must say
+  // so: an unmarked one arrives as the human's own instruction (see SUMMARY_PREFIX).
+  assert.equal(normalized[1].content[0].text, `${SUMMARY_PREFIX}\n\nearlier context`);
+  // Cross-consumer equivalence: the routed and native legs decode the same stored
+  // item into the same words. They used to disagree, and the routed leg - the one
+  // every non-native model runs - was the unlabelled side.
+  const native = normalizeNativeInput([input[2]]);
+  assert.equal(native[0].content[0].text, normalized[1].content[0].text, "one continuation message for both legs");
 });
 
 test("normalizeGatewayInput promotes collaboration NEW_TASK out of reasoning", () => {

@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { estimateApiCost } from "./api-pricing.mjs";
-import { canonicalModelId } from "./model-identity.mjs";
+import { canonicalLlamaLocalKey, canonicalModelId } from "./model-identity.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 // No model decodes this fast. A request that claims to have produced tokens
@@ -84,12 +84,15 @@ export function readRollup(file = usageRollupPath()) {
     if (parsed?.version !== ROLLUP_VERSION
       || !validIsoCursor(parsed.lastFoldedAt)
       || !validBucketCollection(parsed.days, "day")) return emptyRollup();
+    const days = foldLocalBucketKeys(parsed.days);
+    const hours = validBucketCollection(parsed.hours, "hour") ? foldLocalBucketKeys(parsed.hours) : {};
     return {
       ...parsed,
       // v2 initially carried only daily buckets. Keep those thirty days and
       // let foldUsageFile backfill this optional bounded view from the event
       // log instead of invalidating the whole rollup on upgrade.
-      hours: validBucketCollection(parsed.hours, "hour") ? parsed.hours : {},
+      days,
+      hours,
   };
   } catch {
     return emptyRollup();
@@ -110,10 +113,39 @@ const hourOf = (iso) => {
 // The key is the published slug: two providers can serve a model of the same
 // name (deepseek-v4-flash is on both opencode-go and deepseek-official) and
 // their usage is not the same usage.
+//
+// One exception: llama.cpp. A local machine has one llama.cpp endpoint whose
+// published identity is stable across model swaps, so every name it has ever
+// been published under ("Qwen3.8-27B", a GGUF codename, a shard path) is the
+// same local endpoint. Stats fold it onto the stable entry - one row, labeled
+// by the provider, priced at the local entry's shadow rate - instead of
+// fragmenting a user's local history across every file that ever loaded.
+// Merge legacy per-file keys written into a persisted rollup before the fold
+// existed. Numbers add; non-numeric fields keep the first entry's shape.
+function foldLocalBucketKeys(buckets) {
+  let changed = false;
+  const out = {};
+  for (const [key, entry] of Object.entries(buckets || {})) {
+    const wanted = canonicalLlamaLocalKey(key);
+    if (wanted !== key) changed = true;
+    const existing = out[wanted];
+    if (!existing) {
+      out[wanted] = entry;
+      continue;
+    }
+    const merged = { ...existing };
+    for (const [field, value] of Object.entries(entry || {})) {
+      if (typeof value === "number" && typeof merged[field] === "number") merged[field] += value;
+    }
+    out[wanted] = merged;
+  }
+  return changed ? out : buckets;
+}
+
 export function rollupKey(event) {
   const model = String(event?.model || "unknown");
   const provider = String(event?.provider || "unknown");
-  return model.includes("@") ? model : `${model}@${provider}`;
+  return canonicalLlamaLocalKey(model.includes("@") ? model : `${model}@${provider}`);
 }
 
 function addEvent(bucket, event) {

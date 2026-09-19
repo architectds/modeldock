@@ -6,16 +6,17 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { addressedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
+import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
-import { translateUpstreamError, freeEmptyOutputError } from "./error-translation.mjs";
+import { translateUpstreamError, freeEmptyOutputError, isLocalConnectionFailure, localEngineDownMessage } from "./error-translation.mjs";
 import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "./router.mjs";
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, promoteCollaborationNewTask } from "./subagent-guidance.mjs";
-import { createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
+import { attachSseKeepAlive, createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, chatReasoningText, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
 import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
@@ -396,7 +397,11 @@ const NATIVE_COMPACTION_FALLBACK_CLASSES = new Set([
 function mainModelFor(services, sessionId) {
   const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
   if (sessionModel) return sessionModel;
-  const selected = services.mainModel || services.config?.mainModel || "";
+  const selected = canonicalLlamaLocalKey(String(services.mainModel || services.config?.mainModel || ""));
+  // A boot selection can be replayed from a usage event recorded before the
+  // stable entry existed (the latest-main-route read replays history, not
+  // config). Fold it onto the stable identity here so the fallback route and
+  // the catalog row it seeds cannot disagree with what the picker publishes.
   // A routed selection is provider-qualified or a known legacy bare id; native
   // slugs are bare and are published from Codex's captured catalog.
   if (selected && (selected.includes("@") || services.knownModels?.has?.(selected))) return selected;
@@ -415,6 +420,18 @@ function recordDerivedFallback(services, sessionId, route) {
 // account"). Map them onto the slug we actually publish before routing.
 export function normalizeLegacySlug(model, knownModels) {
   if (typeof model !== "string") return model;
+  // llama.cpp publishes one stable local entry that replaces whatever name the
+  // loaded file has published over time ("Qwen3.8-27B@llamacpp", a GGUF codename
+  // like "Src@llamacpp", a raw shard path). A session pinned to an older name
+  // means "the llama.cpp server on this machine", and that server is answering;
+  // answering it is the wire contract of the stable entry. The alias only fires
+  // for a name that is not currently published while the stable one is, so with
+  // no local engine connected the request still falls through to the honest
+  // 503 configuration error. Bare ids and every other provider pass untouched.
+  if (knownModels && isLlamaLocalName(model) && !knownModels.has(model)) {
+    const stable = canonicalLlamaLocalKey(model);
+    if (knownModels.has(stable)) return stable;
+  }
   const match = model.match(/^([a-z0-9][a-z0-9-]*)\/(.+)$/);
   if (!match || !knownModels) return model;
   const [, provider, id] = match;
@@ -451,8 +468,15 @@ export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
 const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another language model that will resume the task.
 
 Include current progress, key decisions, constraints, user preferences, remaining steps, and critical data or references. Be concise, structured, and focused on seamless continuation.`;
-const SUMMARY_PREFIX =
+// Exported because both decode sites (routed and native) must put the same words on
+// a replayed compaction, and a test asserts the boundary they share.
+export const SUMMARY_PREFIX =
   "Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:";
+// What the routed leg says when a stored compaction payload cannot be read at all
+// (a native Fernet token, which only the OpenAI backend can open). Named so the
+// routed decode has one string to point at instead of an inline literal nobody
+// greps for.
+const UNREADABLE_COMPACTION = "[Earlier conversation history was compacted in an unreadable format.]";
 const COMPACTION_PREFIX = "kcr1:";
 // The v1 replacement-history budget: keep the most recent user messages up to
 // this many characters, then append the continuation message.
@@ -576,7 +600,7 @@ export function normalizeNativeInput(input, { compaction = false } = {}) {
         content: [
           {
             type: "input_text",
-            text: `Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:\n\n${summary}`,
+            text: `${SUMMARY_PREFIX}\n\n${summary}`,
           },
         ],
       };
@@ -664,6 +688,12 @@ function reportDeliveredToolOutput(item, content) {
 // validate. The conversion depends on the item alone - never on its neighbours or on
 // which turn is current - so replaying the same history re-derives the same bytes and
 // the upstream prompt prefix stays cache-stable.
+//
+// This is the input-contract half of a deliberate pair. A Chat transport has a
+// second, later rescue for items it cannot encode at all (responsesToChat folds them
+// into a labeled turn); that one covers shapes normalization never sees, this one
+// fixes the pairing before any provider validates it. Neither is redundant, so do
+// not delete either one because the other exists.
 function promoteDeliveredToolOutputs(input, callIds) {
   let changed = false;
   const out = [];
@@ -1206,7 +1236,14 @@ export function normalizeGatewayInput(input) {
         [CURRENT_TURN_MARKER]: true,
         type: "message",
         role: "user",
-        content: [{ type: "input_text", text: text || "[Earlier conversation history was compacted in an unreadable format.]" }],
+        // The label is not decoration. A compaction payload is text a model wrote,
+        // and Codex replays the stored item into every later request, so without it
+        // the next model sees its own earlier prose delivered as an unmarked user
+        // turn and answers it as if the human had typed it - the "my own reasoning
+        // came back at me as the user's message" report. The native leg already said
+        // this (see normalizeNativeInput); the routed leg was the one pathway that
+        // did not, and one shared owner now covers both.
+        content: [{ type: "input_text", text: text ? `${SUMMARY_PREFIX}\n\n${text}` : UNREADABLE_COMPACTION }],
       };
     });
   return promoteCollaborationNewTask(rewritten);
@@ -3411,13 +3448,35 @@ function beginUpstreamStream(res, upstream) {
   res.flushHeaders();
 }
 
+// How long a connected local engine may stay silent before the client gets one
+// SSE comment frame. Sized far below Codex's stream idle timeout: a healthy
+// 40k-token cold prefill at 300 t/s takes minutes and emits nothing, and
+// "idle timeout waiting for SSE" made that compute look like a dead relay.
+// Only local providers use it. Hosted silence stays silence under the watchdog
+// ruling - a quiet hosted upstream really is a stalled one.
+const LOCAL_STREAM_KEEPALIVE_MS = 15_000;
+
 // The relay threw: one exit shape for the client, the telemetry finisher, and
 // the returned result. These used to disagree - the client body was redacted
 // while finish?.() and the returned result carried error.message raw, so a
 // fetch error echoing an Authorization header would land unredacted in the
 // metrics records and ~/.modeldock/usage-events.jsonl.
-function relayThrowExit(res, error, { finish, resultFields = {} } = {}) {
-  const message = redactBearer(error.message);
+function relayThrowExit(res, error, { finish, resultFields = {}, target = null } = {}) {
+  let message = redactBearer(error.message);
+  // A dead local engine must not read as "ModelDock itself failed". The raw
+  // "fetch failed" text sent users restarting a gateway that was answering
+  // perfectly; name the engine, its address, and the one action that helps.
+  // The wording of this diagnosis has one owner (error-translation.mjs) because the
+  // sentence, not just the status, is the product here: "fetch failed" told users the
+  // gateway had died while the gateway was the only thing still talking to them.
+  const profile = target ? profileById(target.provider) : null;
+  if (profile?.local && isLocalConnectionFailure(`${message} ${error?.cause?.code || ""}`)) {
+    message = localEngineDownMessage({
+      label: profile.label,
+      address: target.baseUrl || target.url || "the configured address",
+      action: "start the engine and press Rescan on the Local Hosts page",
+    });
+  }
   finish?.({ ok: false, error: message });
   if (!sendJsonError(res, 502, { error: { type: "upstream_failed", message } })) {
     endRelayStreamFailure(res, message);
@@ -4131,7 +4190,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       upstream: target.provider,
     };
   } catch (error) {
-    return relayThrowExit(res, error, { finish, resultFields: { route } });
+    return relayThrowExit(res, error, { finish, resultFields: { route }, target });
   }
 }
 
@@ -4442,6 +4501,13 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
         cachePrompt: Boolean(target.cachePrompt),
       })
       : null;
+    // An item this transport cannot represent is folded into the transcript rather
+    // than ending the turn, but the fold must leave a trace: without this the one
+    // thing that was wrong about a request is exactly what nobody could see.
+    if (chatBridge?.degraded?.length) {
+      finish?.annotate?.({ chatBridgeFolded: chatBridge.degraded.slice(0, 12) });
+      console.error(`[modeldock] chat bridge folded ${chatBridge.degraded.length} item(s) this transport cannot encode for ${upstreamModel}: ${chatBridge.degraded.slice(0, 3).join(", ")}`);
+    }
     const localChatPayload = chatBridge ? injectLocalWarmBase(chatBridge.payload, warmBase) : null;
     const localCustomToolNames = chatBridge
       ? new Set([...customToolNames, ...chatBridge.customToolNames])
@@ -4456,6 +4522,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       ),
       toolNames.renames,
     );
+    let localStreamKeepAlive = null;
     try {
     const routed = serializedBody({ ...(localChatPayload || normalizedPayload), model: upstreamModel });
     const upstreamBytes = routed.bytes;
@@ -4538,6 +4605,18 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
 
     beginUpstreamStream(res, upstream);
+    // Local silence is honest compute (cold prefill of a full Codex prompt),
+    // not a stall: reset the client's byte-level idle timer with comment
+    // frames while the engine is quiet. Attached after beginUpstreamStream so
+    // the first keepalive can never flush the headers before the upstream's
+    // real status and content type are set.
+    if (normalizedPayload.stream === true && profileById(target.provider)?.local) {
+      // Injectable interval for tests, same convention as the lease watchdog.
+      const keepAliveMs = Number(services.localStreamKeepAliveMs) > 0
+        ? Number(services.localStreamKeepAliveMs)
+        : LOCAL_STREAM_KEEPALIVE_MS;
+      localStreamKeepAlive = attachSseKeepAlive(res, keepAliveMs);
+    }
     if (chatBridge) {
       if (normalizedPayload.stream === true) {
         const piped = await pipeChatCompletionStream(upstreamBody, res, {
@@ -4611,6 +4690,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       if (piped.failure) responseFailure = piped.failure;
       interrupted = piped.interrupted && !responseCompleted;
     }
+    localStreamKeepAlive?.();
+    localStreamKeepAlive = null;
     markFirstResponse();
     if (completedResponse && routeAffinity && (!chatBridge || completedResponse.status === "completed")) {
       routeAffinity.registerResponse(completedResponse, route.model);
@@ -4714,7 +4795,8 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       llamaTimings,
     };
     } catch (error) {
-      return relayThrowExit(res, error, { finish, resultFields: { route } });
+      localStreamKeepAlive?.();
+      return relayThrowExit(res, error, { finish, resultFields: { route }, target });
     }
   };
   try {
@@ -4723,6 +4805,6 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     }
     return await executeRelay();
   } catch (error) {
-    return relayThrowExit(res, error, { finish, resultFields: { route } });
+    return relayThrowExit(res, error, { finish, resultFields: { route }, target });
   }
 }
