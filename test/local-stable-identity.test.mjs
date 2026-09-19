@@ -13,7 +13,7 @@ import { Writable } from "node:stream";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 
 import { applyLocalEngineProfile, publishedCatalogFingerprint, profileById, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG } from "../src/profiles.mjs";
-import { canonicalLlamaLocalKey } from "../src/model-identity.mjs";
+import { canonicalLlamaLocalKey, foldLlamaLocalKeys } from "../src/model-identity.mjs";
 import { normalizeLegacySlug, relayResponses } from "../src/gateway.mjs";
 import { estimateApiCost } from "../src/api-pricing.mjs";
 import { codexModelCatalog } from "../src/model-options.mjs";
@@ -115,6 +115,23 @@ test("stale llama slugs resolve to the live stable entry", () => {
   // The legacy merged-catalog slash form keeps working alongside.
   assert.equal(normalizeLegacySlug("opencode-go/deepseek-v4-flash", new Set(["deepseek-v4-flash@opencode-go"])),
     "deepseek-v4-flash@opencode-go");
+});
+
+// A context window is stored under the slug the catalog published when it was
+// written, so a value measured before the stable identity is filed under the
+// file's own name. Folding is what keeps it applying; the canonical key wins, so
+// a fold never replaces a newer value with an older name for the same entry.
+test("stored local keys fold onto the stable entry without overwriting it", () => {
+  assert.deepEqual(foldLlamaLocalKeys({ "Qwen3.8-27B@llamacpp": 131_072 }), { "Local@llamacpp": 131_072 });
+  assert.deepEqual(foldLlamaLocalKeys({ "Src@llamacpp": 262_144, "Local@llamacpp": 131_072 }),
+    { "Local@llamacpp": 131_072 }, "the published key outranks the name it used to be published under");
+  assert.deepEqual(foldLlamaLocalKeys({ "Local@llamacpp": 131_072, "Src@llamacpp": 262_144 }),
+    { "Local@llamacpp": 131_072 });
+  // Everything else is left exactly as stored, including another provider that
+  // happens to be called llamacpp-like and a key for a hosted model.
+  const untouched = { "deepseek-v4-flash@opencode-go": 1_000_000, "qwen3.8:27b@custom": 65_536 };
+  assert.equal(foldLlamaLocalKeys(untouched), untouched, "an unchanged map is returned as-is");
+  assert.deepEqual(foldLlamaLocalKeys({}), {});
 });
 
 test("the catalog labels the stable entry once and honors the engine window", () => {

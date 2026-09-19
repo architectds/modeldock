@@ -30,7 +30,8 @@ test("built local catalog ignores old 70-percent snapshots and follows context e
     }
   });
   await mkdir(overrides.MODELDOCK_CODEX_HOME);
-  const id = "Qwen3.8-27B@llamacpp";
+  // The slug the catalog publishes for the local endpoint, whatever GGUF is loaded.
+  const id = "Local@llamacpp";
   writeLocalEngineSnapshot(path.join(root, "local-engines.json"), "llamacpp", {
     baseUrl: "http://127.0.0.1:9/v1",
     models: [{ id: "Qwen3.8-27B", contextWindow: 235_776, autoCompactTokenLimit: 165_043 }],
@@ -68,4 +69,30 @@ test("built local catalog ignores old 70-percent snapshots and follows context e
     assert.equal(res.status, 200, await res.text());
     await assertPublished(expectedWindow, expectedLimit);
   }
+  // The name this endpoint was published under before the stable identity. An id
+  // still arriving that way has to land on the entry that is published now: filing
+  // it under a name no entry matches answered 200 with the new value while the
+  // published window never moved, which is how a measured window silently stopped
+  // applying after a GGUF swap.
+  const legacyId = "Qwen3.8-27B@llamacpp";
+  const aliased = await fetch(`${base}/api/models/context`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: legacyId, contextWindow: 131_072 }),
+  });
+  const aliasedBody = await aliased.text();
+  assert.equal(aliased.status, 200, aliasedBody);
+  assert.equal(JSON.parse(aliasedBody).id, id, "the edit is recorded under the published slug, not the name it arrived as");
+  await assertPublished(131_072, 104_857);
+  const stored = JSON.parse(await readFile(path.join(root, "context-overrides.json"), "utf8"));
+  assert.deepEqual(Object.keys(stored), [id], "the old per-file name is folded, not held beside the stable entry");
+  // And clearing through the old name has to reach that one stored value rather
+  // than leave the alias behind to be folded onto it again.
+  const cleared = await fetch(`${base}/api/models/context`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: legacyId, contextWindow: null }),
+  });
+  assert.equal(cleared.status, 200, await cleared.text());
+  await assertPublished(235_776, 188_620);
 });

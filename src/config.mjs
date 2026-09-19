@@ -2,7 +2,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, profileById, publishedSlugFor, llamaLocalStableEntry } from "./profiles.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, profileById, publishedSlugFor, llamaLocalStableEntry } from "./profiles.mjs";
 import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
@@ -454,11 +454,23 @@ export function loadConfig() {
   // a loader that writes .env writes whichever .env it resolves, which under
   // `node --test` is the user's real one.
   const customEndpoints = readCustomEndpoints();
+  // The keyless OpenAI-dialect engines republish what their last connect saw,
+  // without probing a machine that may be offline now. Applied this early because
+  // the llama.cpp pin decides the slug its one entry is published under, and every
+  // value below that is keyed by a published slug is read after it - the context
+  // overrides are keyed by it, so they are folded onto it, not before it. Ollama
+  // is the one that cannot move here: its profile is derived from the frozen
+  // config (see the applyOllamaProfile call below).
+  const localSnapshot = readLocalEnginesSnapshot() || {};
+  for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   // Native models are appended to the published set rather than living in a
   // profile, so the stamping pass at the end cannot reach them; the catalog and
   // the pickers read this map instead. Without it, editing a native model's
   // window returned 200 and changed neither the page nor the file Codex reads.
-  const contextOverrides = readContextOverrides();
+  // Folded on read: a window measured before the stable local identity is filed
+  // under the file's own name, and filing it there left the published window
+  // untouched while the edit answered 200.
+  const contextOverrides = foldContextOverrideKeys(readContextOverrides());
   const visionOverrides = readVisionOverrides();
   // Which published models reach Codex's picker. Read here so every consumer of
   // a config - the catalog writer, the roster, a test fixture - sees the same
@@ -618,10 +630,6 @@ export function loadConfig() {
   // Populate the ollama profile from the connection snapshot so local models stay
   // published across restarts without re-contacting Ollama.
   applyOllamaProfile(config, ollamaSnapshot);
-  // Same contract for the keyless OpenAI-dialect engines: republish what the
-  // last connect saw, without probing a machine that may be offline now.
-  const localSnapshot = readLocalEnginesSnapshot() || {};
-  for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   // A saved vision reference outlives a rename: before the stable entry it
   // could name a llama.cpp file that has since been replaced, and vision
   // escalation consults this value directly. With no stable entry published
@@ -637,7 +645,7 @@ export function loadConfig() {
   }
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
-  applyContextOverrides(allProfiles(), contextOverrides, { publishedSlugFor });
+  applyContextOverrides(allProfiles(), config.contextOverrides, { publishedSlugFor });
   applyVisionOverrides(allProfiles(), visionOverrides, { publishedSlugFor });
   return config;
 }

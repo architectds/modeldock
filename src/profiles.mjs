@@ -3,7 +3,7 @@ import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
 import { localEngineDefinition } from "./local-engine-definitions.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
-import { LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
+import { foldLlamaLocalKeys, LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
 
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
@@ -1254,6 +1254,16 @@ export function providerForModel(config, model) {
 // the honest configuration error instead of being invented into existence.
 export function llamaLocalStableEntry() {
   return PROFILES.llamacpp?.availableModels?.find((entry) => entry.id === LLAMACPP_LOCAL_MODEL_ID) || null;
+}
+
+// A map keyed by published slug, as the catalog publishes it now: keys written
+// before the stable local identity fold onto the entry that endpoint publishes
+// today, so the catalog, the picker and the override stamping pass all read one
+// map. Gated on the stable entry, the same gate every other llama.cpp alias uses:
+// a multi-model llama.cpp server keeps per-model ids, and those keys name
+// different entries rather than each other's old name.
+export function foldContextOverrideKeys(overrides) {
+  return llamaLocalStableEntry() ? foldLlamaLocalKeys(overrides) : overrides;
 }
 
 export function modelEntryFor(config, model) {

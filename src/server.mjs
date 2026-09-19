@@ -30,7 +30,8 @@ import { SessionNames } from "./session-names.mjs";
 import { latestCodexSessionOpening } from "./codex-session-prefix.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
+import { canonicalLlamaLocalKey, foldLlamaLocalKeys } from "./model-identity.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
@@ -1897,12 +1898,23 @@ export function createApp(services = createServices()) {
   // next Codex restart, which is what restartRequired tells the dashboard to say.
   app.post("/api/models/context", mutateConfig, async (req, res) => {
     const { id, contextWindow } = req.body || {};
-    const slug = String(id || "").trim();
-    if (!slug) {
+    const requested = String(id || "").trim();
+    if (!requested) {
       return res.status(400).json({ error: { type: "invalid_model", message: "A model id is required." } });
     }
+    // The local endpoint publishes one stable entry whatever file it loads, so an
+    // id still carrying the file's own name addresses that entry. Canonicalizing the
+    // write key keeps the stored override on the slug the catalog actually publishes:
+    // filing it under a name no entry matches answered 200 with the new value while
+    // the published window never moved. Only while that entry is published - a
+    // multi-model llama.cpp server keeps per-model ids, and each keeps its own edit.
+    const slug = llamaLocalStableEntry() ? canonicalLlamaLocalKey(requested) : requested;
     const file = services.contextOverridesFile || contextOverridesPath();
-    const overrides = readContextOverrides(file);
+    // Folded on read as well as on write: a value stored before the stable identity
+    // is still the user's measurement, and clearing it has to reach the entry it
+    // applies to rather than leave the old key behind to be folded in again.
+    const stored = readContextOverrides(file);
+    const overrides = llamaLocalStableEntry() ? foldLlamaLocalKeys(stored) : stored;
     if (contextWindow === null) {
       delete overrides[slug];
     } else {
