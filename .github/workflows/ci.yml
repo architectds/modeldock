@@ -24,7 +24,30 @@ jobs:
       # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
       # boot smoke need the built bundle, so build before testing.
       - run: npm run build
-      - run: npm test
+      # The blocking half: every test that needs nothing but this checkout and a port.
+      # See scripts/test-lane.mjs for what each lane excludes and why.
+      - run: npm run test:ci
+      # The browser render leg drives a real Chrome over CDP, and a runner can fail it
+      # with no product defect: v0.3.85 was blocked by a Chrome that stayed alive without
+      # ever publishing a page target, which is exactly the class of failure that teaches
+      # people to re-run checks instead of reading them. Advisory until it has cleared a
+      # release cleanly, then drop the continue-on-error line so it gates again.
+      - name: Dashboard render check (advisory)
+        id: browser
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run test:browser 2>&1 | tee browser-render.log
+      - name: Surface browser render output in the run summary
+        if: steps.browser.outcome == 'failure'
+        run: |
+          {
+            echo "### dashboard render leg failed (advisory: this does not block the release)"
+            echo "Only this leg can see what users actually get on screen, so read the tail."
+            echo '```'
+            tail -120 browser-render.log 2>/dev/null || echo "(no log captured)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Bundle boot smoke test
         run: |
           MODELDOCK_PORT=4979 MODELDOCK_MODEL_PROBE_ENABLED=0 node dist/modeldock.mjs &
