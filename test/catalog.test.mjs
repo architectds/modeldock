@@ -73,7 +73,6 @@ test("DeepSeek Flash and Pro admit images through a configured visual fallback",
   }, {
     mainModel: config.mainModel,
     visionModel: config.visionModel,
-    knownModels: new Set(catalog.models.map((entry) => entry.slug)),
     affinity: new RouteAffinity(),
     modelSupportsVision: (model) => Boolean(modelEntryFor(config, model)?.supportsVision),
   });

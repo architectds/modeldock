@@ -281,46 +281,83 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     "managed-drawer-offline": 1800,
     "vision-persistence": 2400,
   }[instance] ?? 1500;
-  const port = 9350 + Math.floor(process.pid % 200) + instanceOffset;
-  const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}`);
-  const chrome = spawn(chromePath, [
-    "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox",
-    // A CI container gets a 64 MB /dev/shm, and Chrome puts its renderer's
-    // shared memory there: without this it dies during startup and the only
-    // symptom upstairs is a debugging port that never answers.
-    "--disable-dev-shm-usage",
-    `--remote-debugging-port=${port}`, `--window-size=${width},${height}`,
-    ...(deviceScaleFactor === 1 ? [] : [`--force-device-scale-factor=${deviceScaleFactor}`]),
-    `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
-
-  // Chrome says why it failed on stderr, and this used to be thrown away - so a
-  // startup crash arrived as "exposed no page target", which names the symptom
-  // and not one cause. Kept and quoted in the failure instead.
-  let stderr = "";
-  chrome.stderr.on("data", (chunk) => { stderr += String(chunk); });
-  let exited = null;
-  chrome.on("exit", (code, signal) => { exited = signal || code; });
-
+  const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
+  const profiles = [];
   let ws;
-  t.after(() => { try { ws?.close(); } catch { /* closing a closed socket */ } chrome.kill(); });
+  let live = null;
+  t.after(async () => {
+    try { ws?.close(); } catch { /* closing a closed socket */ }
+    const chrome = live?.chrome;
+    if (chrome) {
+      // Kill first, then wait for the process to actually leave: Chrome keeps its
+      // profile files (CrashpadMetrics-active.pma, lockfile) open for a moment after
+      // the signal, and unlinking them in that window fails with EBUSY. A kill whose
+      // exit never arrives must not hang the runner either, so the wait is bounded.
+      const gone = new Promise((resolve) => chrome.once("exit", resolve));
+      chrome.kill();
+      await Promise.race([gone, sleep(3_000)]);
+    }
+    // Best-effort: these are throwaway profile dirs, and a file still held by a dying
+    // renderer must not turn a passed render check into a failed one.
+    for (const dir of profiles) {
+      await rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 }).catch(() => {});
+    }
+  });
 
-  let target = null;
-  // 30s rather than 10. A cold CI runner is not a warm laptop, and the previous
-  // budget was tight enough that this test failed on the runner while passing
-  // everywhere else - a flake, which in a render check is worse than useless
-  // because it teaches people to re-run it.
-  for (let i = 0; i < 120 && !target; i += 1) {
-    await sleep(250);
-    if (exited !== null) break;
-    try {
-      const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
-      target = list.find((entry) => entry.type === "page");
-    } catch { /* not listening yet */ }
+  // One Chrome launch, and the page target it must publish. An attempt number shifts
+  // the port and the profile so a retry cannot reconnect to the wedged instance.
+  const launch = async (attempt) => {
+    const port = basePort + attempt * 40;
+    const profile = path.join(os.tmpdir(), `modeldock-tabs-profile-${process.pid}-${instance}-${attempt}`);
+    profiles.push(profile);
+    const chrome = spawn(chromePath, [
+      "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-sandbox",
+      // A CI container gets a 64 MB /dev/shm, and Chrome puts its renderer's
+      // shared memory there: without this it dies during startup and the only
+      // symptom upstairs is a debugging port that never answers.
+      "--disable-dev-shm-usage",
+      `--remote-debugging-port=${port}`, `--window-size=${width},${height}`,
+      ...(deviceScaleFactor === 1 ? [] : [`--force-device-scale-factor=${deviceScaleFactor}`]),
+      `--user-data-dir=${profile}`, "about:blank",
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+
+    // Chrome says why it failed on stderr, and this used to be thrown away - so a
+    // startup crash arrived as "exposed no page target", which names the symptom
+    // and not one cause. Kept and quoted in the failure instead.
+    let stderr = "";
+    chrome.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    let exited = null;
+    chrome.on("exit", (code, signal) => { exited = signal || code; });
+
+    let target = null;
+    // 30s rather than 10. A cold CI runner is not a warm laptop, and the previous
+    // budget was tight enough that this test failed on the runner while passing
+    // everywhere else - a flake, which in a render check is worse than useless
+    // because it teaches people to re-run it.
+    for (let i = 0; i < 120 && !target; i += 1) {
+      await sleep(250);
+      if (exited !== null) break;
+      try {
+        const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+        target = list.find((entry) => entry.type === "page");
+      } catch { /* not listening yet */ }
+    }
+    return { chrome, exited, port, stderr, target };
+  };
+
+  // A runner can also start a Chrome that stays alive and never publishes a target at
+  // all, which is exactly what a 30s wait reports. Relaunch once on a fresh port before
+  // calling it a failure: the render check still has to render.
+  let session = await launch(0);
+  if (!session.target) {
+    session.chrome.kill();
+    session = await launch(1);
   }
-  assert.ok(target, exited !== null
-    ? `Chrome exited (${exited}) before exposing a page target: ${stderr.trim().slice(-600) || "no output"}`
-    : `Chrome exposed no page target within 30s: ${stderr.trim().slice(-600) || "no output"}`);
+  live = session;
+  assert.ok(session.target, session.exited !== null
+    ? `Chrome exited (${session.exited}) before exposing a page target: ${session.stderr.trim().slice(-600) || "no output"}`
+    : `Chrome exposed no page target within 30s (port ${session.port}): ${session.stderr.trim().slice(-600) || "no output"}`);
+  const { target } = session;
 
   ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {

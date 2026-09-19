@@ -2586,10 +2586,6 @@ export function restoreCustomToolOutput(output, customToolNames) {
 // fell through to OpenCode Go carrying the OpenCode token.
 export { upstreamTargetFor };
 
-export function routeGatewayRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision }) {
-  return routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision, modelSupportsVision });
-}
-
 export { RouteAffinity };
 
 function usageFromEvent(event) {
@@ -4247,11 +4243,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   const mainModel = mainModelFor(services, sessionId);
   const visionModel = services.visionModel || config.visionModel;
   const modelSupportsVision = (model) => Boolean(modelEntryFor(config, model)?.supportsVision);
-  const route = routeGatewayRequest(payload, {
+  const route = routeResponsesRequest(payload, {
     mainModel,
     visionModel,
     affinity: routeAffinity,
-    knownModels,
     mainModelSupportsVision: modelSupportsVision(mainModel),
     modelSupportsVision,
   });

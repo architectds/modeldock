@@ -217,6 +217,12 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     if (req.url !== "/provider/v1/chat/completions") {
       return rejectWith(404, `expected the Command Code provider chat path, saw ${req.url}`);
     }
+    // The measured refusal for the Messages half of the directory (2026-08-31), quoted
+    // verbatim. ModelDock does not implement the Anthropic Messages dialect, so a stale
+    // picker that still carries a Claude id lands here and the provider says no.
+    if (String(body.model || "").startsWith("claude-")) {
+      return rejectWith(400, `Model "${body.model}" must be called via /provider/v1/messages (Anthropic Messages shape).`);
+    }
     if (body.input !== undefined || body.instructions !== undefined || body.include !== undefined || body.cache_prompt !== undefined) {
       return rejectWith(400, "Responses-only field reached a Chat upstream");
     }
@@ -425,16 +431,20 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   assert.equal(repairedCall.call_id, longSwitchFixture.input[41].call_id);
   assert.equal(JSON.parse(nativeCompact).output[0].type, "compaction");
 
-  // And the Messages-only half is unreachable even when a stale Codex picker sends
-  // it: never published means refused at the gate, not forwarded to a Chat endpoint
-  // that would answer 400 on every turn.
+  // The Messages-only half is never published, and a stale Codex picker that still
+  // carries one must not be answered as a different model. Honoured means forwarded:
+  // the address reaches the provider on its Chat surface and the provider's own
+  // measured refusal comes back, so the user sees why instead of text from a model
+  // they never chose.
   const chatRequests = requests.length;
   const claudeTurn = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-codex-session-id": "full-commandcode-chat-claude" },
     body: JSON.stringify({ ...fixture.request, model: "claude-sonnet-5@commandcode", stream: false, input: fixture.request.input }),
   });
-  await claudeTurn.text();
-  assert.notEqual(claudeTurn.status, 200, "a Messages-dialect model must never be served through the Chat bridge");
-  assert.equal(requests.length, chatRequests, "the refused Claude request must not reach the upstream");
+  const claudeTurnBody = await claudeTurn.text();
+  assert.notEqual(claudeTurn.status, 200, "a Messages-dialect model must never be served as a completion");
+  assert.equal(requests.length, chatRequests + 1, "the address is forwarded rather than substituted");
+  assert.equal(requests.at(-1).model, "claude-sonnet-5", "the picked model, not the dashboard model, reaches the wire");
+  assert.match(claudeTurnBody, /Anthropic Messages shape/, "the user sees the provider's own refusal");
 });

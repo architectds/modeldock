@@ -139,22 +139,34 @@ export class RouteAffinity {
   }
 }
 
-export function routeResponsesRequest(source, { mainModel, visionModel, affinity, knownModels, mainModelSupportsVision = false, modelSupportsVision } = {}) {
+// Route one Responses request by the model the client named. `mainModel` is the
+// dashboard's display default and is used for exactly one thing: a request that names
+// no model at all. It is not a spare tyre for an id we do not currently list.
+//
+// An `@provider` address is self-identifying (providerForModel reads the provider off
+// the string) and a bare id has one deterministic home (the default provider), so
+// neither needs a membership test to be routed. Asking `knownModels` first, and taking
+// the dashboard model whenever the answer is no, silently answered as a model the user
+// never picked - and `knownModels` is rebuilt in memory, so right after a restart or
+// during a failing model refresh it is routinely behind the catalog the picker came
+// from. A model id is honoured; whether the upstream can serve it is the upstream's
+// answer, not something to paper over by substitution.
+export function routeResponsesRequest(source, { mainModel, visionModel, affinity, mainModelSupportsVision = false, modelSupportsVision } = {}) {
   const current = currentTurnItems(source?.input);
   const requested = source?.model;
   const supportsVision = (model) => {
     if (typeof modelSupportsVision === "function") return Boolean(modelSupportsVision(model));
     return model === visionModel || (mainModelSupportsVision && model === mainModel);
   };
-  const requestedKnown = Boolean(requested && knownModels?.has(requested));
+  const requestedExplicit = Boolean(requested);
   const pinned = affinity?.consumeFrom(current);
-  // An explicit, known client model reclaims the wheel from a stale cross-model
-  // pin. Without this, one visual turn routed to the vision model (e.g. Luna) pins
-  // that model, and every following tool continuation cascades onto it - never
-  // returning to the model the user actually selected. When the client sends the
-  // same model or no known model, the pin still holds, so a single model's own
-  // multi-step tool loop stays coherent.
-  const clientOverridesPin = pinned && requestedKnown && requested !== pinned.model;
+  // An explicit client model reclaims the wheel from a stale cross-model pin. Without
+  // this, one visual turn routed to the vision model (e.g. Luna) pins that model, and
+  // every following tool continuation cascades onto it - never returning to the model
+  // the user actually selected. When the client sends the same model or no model at
+  // all, the pin still holds, so a single model's own multi-step tool loop stays
+  // coherent.
+  const clientOverridesPin = pinned && requestedExplicit && requested !== pinned.model;
   if (pinned && !clientOverridesPin) {
     const directVision = supportsVision(pinned.model);
     return { model: pinned.model, reason: "tool_continuation", directVision, pinnedCallId: pinned.callId };
@@ -165,7 +177,7 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
   if (hasImage(current) && !isAgenticHistory(source?.input)) {
     // A picker selection wins when it can read the attached image. A text-only
     // selection still escalates to the configured vision model below.
-    if (requestedKnown && supportsVision(requested)) {
+    if (requestedExplicit && supportsVision(requested)) {
       return { model: requested, reason: "current_turn_image", directVision: true };
     }
     if (mainModelSupportsVision) {
@@ -177,11 +189,9 @@ export function routeResponsesRequest(source, { mainModel, visionModel, affinity
     return { model: visionModel, reason: "current_turn_image", directVision: true };
   }
   // Codex's own model picker is populated from the catalog this gate publishes, so a
-  // model id we recognise is a deliberate choice by the user in that picker - honour it
-  // and let the caller sync the dashboard to match. Anything unrecognised (a stale id, a
-  // provider default) falls back to the dashboard selection rather than being forwarded
-  // to an upstream that would reject it.
-  if (requestedKnown && requested !== mainModel) {
+  // model id the client carries is a deliberate choice by the user in that picker - honour
+  // it and let the caller sync the dashboard to match.
+  if (requestedExplicit && requested !== mainModel) {
     return { model: requested, reason: "client_selected", directVision: false };
   }
   return { model: mainModel, reason: "default_main", directVision: false };
