@@ -2,11 +2,19 @@
 // owner instead of a hand-maintained file list per workflow (which drifts the moment
 // someone adds or renames a test file).
 //
-//   node scripts/test-lane.mjs --all        everything (what `npm test` runs)
-//   node scripts/test-lane.mjs --ci         everything the release gate blocks on
-//   node scripts/test-lane.mjs --browser    the browser render leg only (advisory)
-//   node scripts/test-lane.mjs --fast       the no-elevated-rights lane (local iteration)
+//   node scripts/test-lane.mjs --all        everything, the way `npm test` runs it
+//   node scripts/test-lane.mjs --fast       no elevated rights: the release gate
+//   node scripts/test-lane.mjs --host       the rights/OS lane (launchers, installers)
+//   node scripts/test-lane.mjs --live       the real installed-Codex lane
+//   node scripts/test-lane.mjs --browser    the Chrome render leg
 //   node scripts/test-lane.mjs --preflight  the shared setup steps, then stop
+//   node scripts/test-lane.mjs --list LANE  print a lane's files and stop
+//
+// `--fast` is what a release blocks on, and it is deliberately the same command a
+// developer or an agent runs before pushing: one gate, run it locally, get the same
+// answer. The other lanes are not less important, they are *conditional* - they need a
+// real machine, an installed Codex, or a browser - so they are separate steps that can
+// each say why they failed instead of coloring the gate.
 //
 // The preflight is the same four steps every lane needs, so `npm test` (through its
 // `pretest` hook) and each narrower lane cannot drift into checking different things:
@@ -65,9 +73,17 @@ function runNode(args, label) {
   }
 }
 
+const LANES = ["--all", "--fast", "--host", "--live", "--browser", "--preflight", "--list"];
 const selector = process.argv[2] || "--all";
-if (!["--all", "--ci", "--browser", "--fast", "--preflight"].includes(selector)) {
-  console.error(`unknown lane ${selector} (expected --all, --ci, --browser, --fast or --preflight)`);
+if (!LANES.includes(selector)) {
+  console.error(`unknown lane ${selector} (expected one of: ${LANES.join(", ")})`);
+  process.exit(2);
+}
+// `--list LANE` reports what a lane would run without running it, so the tables can be
+// inspected from a workflow or a review without paying for the suite.
+const lane = selector === "--list" ? (process.argv[3] || "--all") : selector;
+if (!LANES.includes(lane) || lane === "--list" || lane === "--preflight") {
+  console.error(`test-lane --list: unknown lane ${lane}`);
   process.exit(2);
 }
 
@@ -86,21 +102,39 @@ if (missing.length) {
   console.error(`test-lane: rule table names files that no longer exist: ${missing.join(", ")} - delete the entry`);
   process.exit(1);
 }
+// The three conditional lanes plus --fast must be a partition: a file in two tables would
+// run twice in one CI job, and --fast (defined as the complement) would still hide it.
+const lanes = [...BROWSER, ...LIVE, ...HOST];
+const doubled = lanes.filter((name, index) => lanes.indexOf(name) !== index);
+if (doubled.length) {
+  console.error(`test-lane: files sit in two lanes at once: ${[...new Set(doubled)].join(", ")}`);
+  process.exit(1);
+}
 
 const present = readdirSync(testDir).filter((name) => name.endsWith(".test.mjs")).sort();
 const files = present.filter((name) => {
-  if (selector === "--browser") return BROWSER.includes(name);
-  if (selector === "--ci") return !BROWSER.includes(name);
-  if (selector === "--fast") return !BROWSER.includes(name) && !LIVE.includes(name) && !HOST.includes(name);
-  return true;
+  switch (lane) {
+    case "--browser": return BROWSER.includes(name);
+    case "--host": return HOST.includes(name);
+    case "--live": return LIVE.includes(name);
+    // --fast is everything that needs nothing but the checkout and a loopback port, so it
+    // is the complement of the three conditional lanes rather than its own list.
+    case "--fast": return !BROWSER.includes(name) && !LIVE.includes(name) && !HOST.includes(name);
+    default: return true;
+  }
 });
 
-// A lane must never run against a stale bundle, so it takes the identical preflight.
+if (selector === "--list") {
+  for (const name of files) console.log(path.join("test", name));
+  process.exit(0);
+}
+
+// Every lane takes the identical preflight, and must never run against a stale bundle.
 for (const [script, ...rest] of PREFLIGHT) {
   runNode([path.join(repoRoot, script), ...rest], `pretest ${script}`);
 }
 
-console.log(`# test-lane ${selector}: ${files.length}/${present.length} file(s)`);
+console.log(`# test-lane ${lane}: ${files.length}/${present.length} file(s)`);
 const run = spawnSync(process.execPath, [
   // Must be a file:// URL: `--import` with a bare Windows absolute path throws
   // ERR_UNSUPPORTED_ESM_URL_SCHEME, and it throws per file, which reads as every test

@@ -24,9 +24,20 @@ jobs:
       # dist/ is gitignored (not committed) but test/install-mock.test.mjs and the
       # boot smoke need the built bundle, so build before testing.
       - run: npm run build
-      # The blocking half: every test that needs nothing but this checkout and a port.
-      # See scripts/test-lane.mjs for what each lane excludes and why.
-      - run: npm run test:ci
+      # The release gate, as two named lanes rather than one glob, so a failure says what
+      # kind of thing broke. `test:fast` is the same command a developer or an agent runs
+      # before pushing - needs nothing but this checkout and a loopback port - so the gate
+      # and the local check cannot drift into different questions. `test:host` is the
+      # launcher/installer discipline: same code, but it drives real processes and shells,
+      # so it gets its own step and its own failure message.
+      - name: Suite (no elevated rights)
+        run: npm run test:fast
+      - name: Suite (launchers and installers)
+        run: npm run test:host
+      # The LIVE lane (real installed Codex) is deliberately not here: it self-skips on a
+      # runner with no Codex, so it would only ever report that it skipped. It is a
+      # developer's `npm run test:live`, run on a machine that has the client.
+      #
       # The browser render leg drives a real Chrome over CDP, and a runner can fail it
       # with no product defect: v0.3.85 was blocked by a Chrome that stayed alive without
       # ever publishing a page target, which is exactly the class of failure that teaches
