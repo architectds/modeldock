@@ -20,7 +20,15 @@ const TEXT_EXTENSIONS = new Set([".html", ".js", ".css", ".svg", ".json", ".txt"
 
 // Only these top-level assets ship in the bundle. Vision eval images stay on disk and
 // are dev-only: loadTaskImage returns null when they are absent and the eval skips.
-const INLINE_ASSETS = ["dashboard.png", "icon.png", "icon.ico", "icon.svg", "favicon.png", "favicon.ico", "commandcode-favicon.svg"];
+//
+// This list is the shipped asset set, so an entry with no consumer is bytes every user
+// downloads. Two were dead weight: dashboard.png (only scripts/shot.mjs writes it, and the
+// README uses dashboard-banner.png) and icon.ico (only scripts/create-shortcut.ps1 reads
+// it, from disk, and an installed root has no assets/ at all). The browser asks for
+// exactly icon.svg, favicon.png, favicon.ico, icon.png and commandcode-favicon.svg, and
+// test/codex-wire-full-commandcode-chat.test.mjs boots this bundle and fetches one of
+// them over HTTP, so a live file cannot be removed from this list unnoticed.
+const INLINE_ASSETS = ["icon.png", "icon.svg", "favicon.png", "favicon.ico", "commandcode-favicon.svg"];
 
 // Minify an inlined text asset before it becomes a string literal in the
 // bundle. esbuild's own minify never touches string literals, so without this
@@ -58,6 +66,7 @@ async function generateStaticModule() {
   const assetFiles = INLINE_ASSETS.filter((f) => {
     try { return statSync(path.join(assetsDir, f)).isFile(); } catch { return false; }
   });
+  assertAssetsHaveConsumers(assetFiles, publicDir, publicFiles);
   return [
     `import { Buffer } from "node:buffer";`,
     `export default {`,
@@ -65,6 +74,34 @@ async function generateStaticModule() {
     `assets: ${await inlineTree(assetsDir, assetFiles)},`,
     `};`,
   ].join("\n");
+}
+
+// An inlined asset is bytes in dist/modeldock.mjs, which is the file every user
+// downloads and the gateway keeps in memory. Only the dashboard's own requests and
+// src/ can ask for one, so an entry that neither names is pure weight: this is how
+// dashboard.png (400 KB of base64, a stale README screenshot) and icon.ico (360 KB,
+// read from disk by scripts/create-shortcut.ps1, which an installed root has no assets/
+// directory for) reached the shipped package and stayed there. A dev-only script naming
+// the file is not a consumer; the file stays in assets/ for that script either way.
+// Serving itself is covered end to end: test/codex-wire-full-commandcode-chat.test.mjs
+// boots this bundle and fetches /assets/commandcode-favicon.svg over HTTP.
+function assertAssetsHaveConsumers(assetFiles, publicDir, publicFiles) {
+  const haystack = [
+    ...publicFiles.map((f) => readFileSync(path.join(publicDir, f), "utf8")),
+    ...readdirSync(path.join(root, "src")).filter((f) => f.endsWith(".mjs")).map((f) => readFileSync(path.join(root, "src", f), "utf8")),
+  ].join("\n");
+  const dead = assetFiles.filter((name) => {
+    // Bound the name on both sides, so favicon.ico is not read as a reference to
+    // icon.ico and icon.svg is not read as icon.svgz. A leading slash (the browser
+    // asks for /assets/icon.svg) is a valid boundary.
+    return !new RegExp(`(?<![\\w.\-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`).test(haystack);
+  });
+  if (!dead.length) return;
+  const bytes = dead.map((name) => statSync(path.join(root, "assets", name)).size);
+  console.error(`build: inlined assets that nothing requests: ${dead.join(", ")}`);
+  console.error(`  (${bytes.map((n) => `${(n / 1024).toFixed(0)} KB`).join(", ")} on disk)`);
+  console.error("  Remove the entry from INLINE_ASSETS, or reference it from public/ or src/.");
+  process.exit(1);
 }
 
 const staticInlinePlugin = {

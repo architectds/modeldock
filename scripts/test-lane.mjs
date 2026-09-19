@@ -63,6 +63,9 @@ const PREFLIGHT = [
   ["scripts/sync-installer-helpers.mjs", "--check"],
   ["scripts/check-internal-docs.mjs"],
   ["scripts/build-if-stale.mjs"],
+  // After the build, because it measures the artifact the lanes are about to run.
+  // The package is the one product surface that only ever grows by accident.
+  ["scripts/check-bundle-budget.mjs"],
 ];
 
 function runNode(args, label) {
