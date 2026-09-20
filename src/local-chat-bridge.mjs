@@ -761,11 +761,11 @@ export async function pipeChatCompletionStream(body, res, {
       upstreamBytes += value.byteLength || Buffer.byteLength(value);
       buffer += decoder.write(Buffer.from(value));
       await process();
-      // Chat Completions defines data: [DONE] as the transport terminator.
-      // llama.cpp also reports a semantic finish_reason after it releases its
-      // slot, and its managed route opts into accepting that terminal boundary.
-      // Do not wait for a dangling HTTP body after either signal: doing so keeps
-      // the gateway lease, and every queued local conversation, alive forever.
+      // Chat Completions defines data: [DONE] as the transport terminator, and
+      // llama.cpp also reports a semantic finish_reason once it has released the
+      // request. Accept either as the end of the turn: waiting for the HTTP body
+      // to close on its own keeps the gateway lease, and every queued local
+      // conversation behind it, alive until the idle timeout fires.
       if (upstreamTerminal) {
         break;
       }

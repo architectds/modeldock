@@ -1708,8 +1708,9 @@ export function createApp(services = createServices()) {
     const { id, supportsVision } = req.body || {};
     const slug = String(id || "").trim();
     const model = modelOptions(config).find((entry) => entry.id === slug);
-    if (!model || !profileById(model.provider)?.modelDiscovery) {
-      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a remote provider model. Native and local vision capabilities are controlled by their runtime." } });
+    const visionEditable = Boolean(model && (profileById(model.provider)?.modelDiscovery || model.provider === "llamacpp"));
+    if (!visionEditable) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a discovered provider model or the local llama.cpp model." } });
     }
     if (typeof supportsVision !== "boolean") {
       return res.status(400).json({ error: { type: "invalid_state", message: "supportsVision must be true or false." } });
@@ -1753,7 +1754,7 @@ export function createApp(services = createServices()) {
         providerLabel: providerLabelFor(entry.provider),
         label: entry.label || entry.id,
         supportsVision: Boolean(entry.supportsVision),
-        visionEditable: Boolean(profileById(entry.provider)?.modelDiscovery),
+        visionEditable: Boolean(profileById(entry.provider)?.modelDiscovery || entry.provider === "llamacpp"),
         visionLocked: Boolean(entry.supportsVision && (services.modelSelection?.visionModel || config.visionModel) === entry.id),
         visionTier: entry.visionTier || "",
         contextWindow: effectiveContextWindow(entry),
@@ -2014,7 +2015,7 @@ export function createApp(services = createServices()) {
         error: { type: "service_restart_failed", message: "ModelDock could not start the service restart." },
       });
     }
-    return res.json({ scheduled: true, kvHandoff: false });
+    return res.json({ scheduled: true });
   });
 
   // Start an engine again exactly as it was running when it was connected.

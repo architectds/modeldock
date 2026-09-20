@@ -99,6 +99,7 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
     nativeCatalogFile,
     usageRollupFile: path.join(dir, "usage-rollup.json"),
     usageEventsFile: path.join(dir, "usage-events.jsonl"),
+    visionOverridesFile: path.join(dir, "vision-overrides.json"),
   });
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -607,6 +608,47 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       .map((b) => b.id || b.className))`));
     assert.deepEqual(nameless, [], `#${tab} has controls with no accessible name`);
   }
+
+  // The local endpoint reports what /props currently says, but that observation
+  // is not allowed to remove the user's correction surface. Projectors can be
+  // attached after the snapshot was written, and older llama.cpp builds expose
+  // incomplete modality metadata, so the same persisted capability switch used
+  // for discovered providers must remain available for the stable local row.
+  const localVisionBefore = JSON.parse(await evaluate(`JSON.stringify((() => {
+    const row = [...document.querySelectorAll('#roster-groups tr')]
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+    const switches = row ? [...row.querySelectorAll('input[type="checkbox"]')] : [];
+    return { found: Boolean(row), count: switches.length, checked: switches[1]?.checked, disabled: switches[1]?.disabled };
+  })())`));
+  assert.deepEqual(localVisionBefore, { found: true, count: 2, checked: false, disabled: false },
+    "the llama.cpp vision capability is always exposed as an editable switch");
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#roster-groups tr')]
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+    row.querySelectorAll('input[type="checkbox"]')[1].click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(50);
+    if (!existsSync(services.visionOverridesFile)) continue;
+    const saved = JSON.parse(readFileSync(services.visionOverridesFile, "utf8"));
+    if (saved["Local@llamacpp"] === true) break;
+  }
+  assert.equal(JSON.parse(readFileSync(services.visionOverridesFile, "utf8"))["Local@llamacpp"], true,
+    "the local capability correction uses the canonical persisted override store");
+  await evaluate(`location.reload()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(100);
+    if (await evaluate(`document.querySelector('#roster-groups tr') !== null`)) break;
+  }
+  const localVisionAfter = JSON.parse(await evaluate(`JSON.stringify((() => {
+    const row = [...document.querySelectorAll('#roster-groups tr')]
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+    const input = row?.querySelectorAll('input[type="checkbox"]')[1];
+    return { checked: input?.checked, disabled: input?.disabled };
+  })())`));
+  assert.deepEqual(localVisionAfter, { checked: true, disabled: false },
+    "the corrected local vision capability survives a browser refresh");
 
   // Catalog refresh is a live event, not a page-load detail. Keep Models open
   // while adding a model, then keep Stats open while changing its label: both

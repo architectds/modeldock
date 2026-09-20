@@ -205,110 +205,6 @@ export async function listEngineListeners({
   }
 }
 
-// Rewrite a llama-server argv with the settings a user chose, keeping every
-// other argument exactly as it was.
-//
-// Editing the observed argv rather than composing a fresh one is deliberate: a
-// composed line would silently drop whatever this user needed and we did not
-// think of - a chat template, a device selection, an alias, a LoRA. The parts
-// being tuned are replaced by name; everything else survives untouched.
-const OVERRIDE_FLAGS = {
-  modelPath: ["-m", "--model"],
-  ctxSize: ["-c", "--ctx-size"],
-  parallel: ["-np", "--parallel"],
-  gpuLayers: ["-ngl", "--n-gpu-layers", "--gpu-layers"],
-  cacheTypeK: ["-ctk", "--cache-type-k"],
-  cacheTypeV: ["-ctv", "--cache-type-v"],
-  mainGpu: ["-mg", "--main-gpu"],
-  splitMode: ["-sm", "--split-mode"],
-  tensorSplit: ["-ts", "--tensor-split"],
-  device: ["-dev", "--device"],
-  cacheReuse: ["--cache-reuse"],
-  slotSavePath: ["--slot-save-path"],
-  visionProjectorPath: ["--mmproj"],
-};
-
-// Presence-only switches: there is no value token to step over, and the two
-// spellings are opposites rather than aliases.
-const OVERRIDE_SWITCHES = {
-  kvUnified: {
-    on: "--kv-unified",
-    off: "--no-kv-unified",
-    spellings: ["--kv-unified", "-kvu", "--no-kv-unified", "-no-kvu"],
-  },
-  // Turned off by writing the negative form rather than by removing the
-  // positive one. llama.cpp has flipped this default once already, so a
-  // configuration that means it has to say it; both spellings are present in
-  // the builds this targets, and the older ones that only ever had
-  // --no-context-shift are the ones where the default was the wrong way round.
-  contextShift: {
-    on: "--context-shift",
-    off: "--no-context-shift",
-    spellings: ["--context-shift", "--no-context-shift"],
-  },
-};
-
-// Three states per key, not two. `undefined` means the caller does not own this
-// setting and whatever is on the command line stays. Any other value - `null`
-// included - means the caller owns it, so the existing flag comes off first and
-// is rewritten only if there is something to write.
-//
-// The distinction is the whole fix. Choosing f16 in the drawer passes no cache
-// type, which under the old rule skipped the key entirely, so an existing
-// `-ctk q8_0` survived a restart whose own preview line said f16 - the engine
-// came back running something the UI had just told the user it was leaving. The
-// switch had the mirror bug: it was stripped unconditionally, so a user's
-// deliberate `--no-kv-unified` disappeared on a restart that only moved the
-// context slider.
-export function applyLaunchOverrides(args, overrides = {}) {
-  const out = [];
-  const drop = new Set();
-  const dropSwitch = new Set();
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) continue;
-    for (const flag of OVERRIDE_FLAGS[key] || []) drop.add(flag);
-    for (const flag of OVERRIDE_SWITCHES[key]?.spellings || []) dropSwitch.add(flag);
-  }
-  const source = Array.isArray(args) ? args : [];
-  for (let i = 0; i < source.length; i += 1) {
-    const token = source[i];
-    if (dropSwitch.has(token)) continue;
-    if (drop.has(token)) {
-      // Skip the flag and the value that belongs to it, but never swallow the
-      // next flag when this one was written without a value.
-      const next = source[i + 1];
-      if (next !== undefined && !next.startsWith("-")) i += 1;
-      continue;
-    }
-    out.push(token);
-  }
-  if (overrides.modelPath) out.push("-m", String(overrides.modelPath));
-  if (overrides.ctxSize) out.push("-c", String(overrides.ctxSize));
-  if (overrides.parallel) out.push("--parallel", String(overrides.parallel));
-  if (overrides.gpuLayers) out.push("-ngl", String(overrides.gpuLayers));
-  if (overrides.cacheTypeK) out.push("-ctk", String(overrides.cacheTypeK));
-  if (overrides.cacheTypeV) out.push("-ctv", String(overrides.cacheTypeV));
-  if (overrides.mainGpu !== null && overrides.mainGpu !== undefined) out.push("-mg", String(overrides.mainGpu));
-  if (overrides.splitMode) out.push("-sm", String(overrides.splitMode));
-  if (overrides.tensorSplit) out.push("-ts", String(overrides.tensorSplit));
-  if (overrides.device) out.push("-dev", String(overrides.device));
-  if (Number.isSafeInteger(overrides.cacheReuse) && overrides.cacheReuse >= 0) {
-    out.push("--cache-reuse", String(overrides.cacheReuse));
-  }
-  if (overrides.slotSavePath) out.push("--slot-save-path", String(overrides.slotSavePath));
-  if (overrides.visionProjectorPath) out.push("--mmproj", String(overrides.visionProjectorPath));
-  // Write the cache topology explicitly. Managed profiles use independent,
-  // equal lanes; inheriting a previous unified pool would invalidate both the
-  // per-lane catalog promise and the numbered SSD slot mapping.
-  if (typeof overrides.kvUnified === "boolean") {
-    out.push(overrides.kvUnified ? OVERRIDE_SWITCHES.kvUnified.on : OVERRIDE_SWITCHES.kvUnified.off);
-  }
-  if (typeof overrides.contextShift === "boolean") {
-    out.push(overrides.contextShift ? OVERRIDE_SWITCHES.contextShift.on : OVERRIDE_SWITCHES.contextShift.off);
-  }
-  return out;
-}
-
 // llama-server's command line is a complete adoption spec. Parsing it is what
 // turns "an engine is running on 11435" into "Qwen3.8-27B Q3_K_M, 80K context,
 // one slot, vulkan build" without asking the user to retype any of it.
@@ -326,7 +222,6 @@ const LLAMA_FLAGS = [
   ["splitMode", ["-sm", "--split-mode"]],
   ["tensorSplit", ["-ts", "--tensor-split"]],
   ["device", ["-dev", "--device"]],
-  ["slotSavePath", ["--slot-save-path"]],
   // Read, not just written: without these the KV precision an engine is
   // actually running was invisible, so the budget assumed f16 for a cache that
   // was half that size, and the "KV quantization is broken here" warning could
