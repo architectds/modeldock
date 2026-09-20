@@ -27,16 +27,14 @@ import { allProfiles, applyOllamaProfile, publishedSlugFor } from "./profiles.mj
 import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath } from "./vision-overrides.mjs";
-import { createLocalHostDiagnosticSink } from "./local-host-diagnostics.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
 import { mainRouteFromUsageEvent, readLatestMainRoute, usageEventsPath, usageFromRelayResult } from "./usage-events.mjs";
 import { stateFile } from "./state-dir.mjs";
+import { readSubagentModel } from "./subagent-config.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
-import { readSubagentModel } from "./subagent-config.mjs";
-import { LocalHostRuntime } from "./local-host-runtime.mjs";
 import { DEFAULT_ZSTD_MEMORY_BUDGET_BYTES, WeightedByteBudget } from "./zstd-ingress-budget.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -195,16 +193,6 @@ export function createServices(config = loadConfig()) {
   // endpoint that edits the same file can never disagree about which file it is.
   const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
   const lifecycleFile = mutableConfig.modelLifecycleFile || modelLifecyclePath();
-  // A managed local host is a separate authority record from a connected local
-  // endpoint. Keep its small metadata alongside the other state files; its
-  // potentially large KV states live only in the directory the user selects
-  // during takeover.
-  const localHostRegistryFile = mutableConfig.localHostRegistryFile || stateFile("local-hosts.json");
-  const localHostRuntime = new LocalHostRuntime({
-    registryFile: localHostRegistryFile,
-    manifestDirectory: stateFile("local-host-kv"),
-    onDiagnostic: createLocalHostDiagnosticSink(),
-  });
   // The Ollama connection snapshot follows the same state-dir redirect. Real
   // configs restore it during loadConfig; this re-apply covers hand-built test
   // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
@@ -415,7 +403,7 @@ export function createServices(config = loadConfig()) {
     refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
     usageRollupFile: rollupFile,
     usageEventsFile,
-    modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile, localHostRegistryFile, localHostRuntime,
+    modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,
     sessionNames: new SessionNames({ sessionsRoot: path.join(codexHome, "sessions") }),
     attachmentIndex,
   });

@@ -22,19 +22,10 @@ import { createServer } from "node:net";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
 import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
-import {
-  beginHostApply,
-  createObservedHost,
-  markHostApplying,
-  markHostVerified,
-  markHostVerifying,
-  takeOverHost,
-} from "../src/local-hosts.mjs";
-import { createLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
-const TABS = ["dashboard", "cloud", "local", "stats", "models", "hostmonitor"];
+const TABS = ["dashboard", "cloud", "local", "stats", "models"];
 
 const CHROME_CANDIDATES = {
   win32: [
@@ -66,36 +57,8 @@ async function availablePort() {
 
 // A dashboard on a scratch port with its state in a temp dir, so looking at it
 // cannot touch the developer's own configuration.
-function managedHostSnapshot() {
-  return {
-    managed: true,
-    hostId: "host-monitor-render-test",
-    profile: { laneCount: 1, laneContextTokens: 215040 },
-    maxActiveRequests: 1,
-    activeCount: 0,
-    pendingCount: 0,
-    hotCount: 1,
-    slotAffinity: false,
-    lanes: [{ slot: 0, state: "hot", lastAccessedAt: new Date().toISOString() }],
-    ssd: { totalBytes: 0, budgetBytes: 32 * 1024 ** 3, states: 0 },
-    counters: { saves: 2, restores: 1, coldPrefills: 1, evictions: 0, expired: 0 },
-    telemetry: {
-      windowMs: 300_000,
-      events: [
-        { at: Date.now() - 60_000, kind: "cold_prefill", slot: 0 },
-        { at: Date.now() - 40_000, kind: "hot", slot: 0 },
-        { at: Date.now() - 12_000, kind: "restoring", slot: 0 },
-        { at: Date.now() - 10_800, kind: "restored", slot: 0, durationMs: 1_200 },
-        { at: Date.now() - 1_000, kind: "hot", slot: 0 },
-      ],
-      totals: { requests: 6, inputTokens: 240_000, cachedTokens: 180_000, outputTokens: 12_000, timeSavedMs: 48_000 },
-      coldPrefillTps: 500,
-      coldPrefillSamples: 2,
-    },
-  };
-}
 
-async function startDashboard(t, { managed = false, managedDrawer = false, managedDrawerOffline = false, nativeVision = false, bundled = false } = {}) {
+async function startDashboard(t, { nativeVision = false, bundled = false } = {}) {
   const runtime = bundled ? await import("../dist/modeldock.mjs") : { createServices, createApp };
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const port = await availablePort();
@@ -170,7 +133,6 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     },
   }), "utf8");
   services.localEnginesFile = path.join(dir, "local-engines.json");
-  services.localHostRegistryFile = path.join(dir, "local-hosts.json");
   // One configured endpoint, so the Cloud tab renders a row with a Remove
   // button. Without it that section has nothing to check and the escaped-element
   // assertion below walks an empty page - which is exactly how the button came
@@ -187,10 +149,6 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     addedAt: "2026-01-01T00:00:00.000Z",
   }], null, 2));
   services.engineLogDir = path.join(dir, "engine-logs");
-  // A connected, observed llama.cpp host lets the browser prove that the page
-  // displays gateway routing separately from the ungranted host-control
-  // authority. The server is not real: discovery is injected, so no test ever
-  // touches a developer's engine or GPU.
   writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
     baseUrl: "http://127.0.0.1:11435/v1",
     observation: {
@@ -217,44 +175,8 @@ async function startDashboard(t, { managed = false, managedDrawer = false, manag
     cmdline: "D:/llama-cpp/llama-server.exe -m D:/models/qwen.gguf -c 262144 --parallel 1 --port 11435",
     launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
   };
-  services.discoverEngines = async () => managedDrawerOffline ? [] : [observedEngine];
+  services.discoverEngines = async () => [observedEngine];
   services.probeGpus = async () => [];
-  if (managedDrawer || managedDrawerOffline) {
-    const endpoint = "http://127.0.0.1:11435/v1";
-    const launch = {
-      binary: "D:/llama-cpp/llama-server.exe",
-      args: ["-m", "D:/models/managed-model.gguf", "--mmproj", "D:/models/managed-projector.gguf", "-c", "215040"],
-    };
-    let record = takeOverHost(createObservedHost({
-      id: "llamacpp-drawer-test",
-      adapterId: "llamacpp-nvidia",
-      endpoint,
-      launch,
-    }), { kvState: { directory: "D:/managed-kv", budgetBytes: 32 * 1024 ** 3 } });
-    record = markHostVerified(record);
-    const profile = {
-      adapterId: "llamacpp-nvidia",
-      modelId: "managed-model",
-      profileId: "drawer-p1",
-      laneCount: 1,
-      laneContextTokens: 215_040,
-      totalContextTokens: 215_040,
-    };
-    record = beginHostApply(record, { desiredSpec: launch, desiredProfile: profile });
-    record = markHostApplying(record);
-    record = markHostVerifying(record);
-    record = markHostVerified(record);
-    await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(createLocalHostRegistry(), record));
-  }
-  if (managed) {
-    // This is deliberately a server-authoritative fake runtime, not a DOM
-    // fixture. The dashboard only opens this tab after /api/status reports an
-    // actively managed host, which is the production visibility contract.
-    services.localHostRuntime = {
-      snapshot: () => managedHostSnapshot(),
-      status: async () => managedHostSnapshot(),
-    };
-  }
 
   const { app } = runtime.createApp(services);
   const server = app.listen(port, "127.0.0.1");
@@ -274,11 +196,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
   // needs its own CDP port, not merely a "default versus other" split.
   const instanceOffset = {
     default: 0,
-    hostmonitor: 300,
     narrow: 600,
-    "hostmonitor-narrow": 900,
-    "managed-drawer": 1200,
-    "managed-drawer-offline": 1800,
     "vision-persistence": 2400,
   }[instance] ?? 1500;
   const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
@@ -402,8 +320,6 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
     return;
   }
   const { base, services } = await startDashboard(t);
-  let finishPathPick;
-  services.pickLocalHostPath = async () => new Promise((resolve) => { finishPathPick = resolve; });
   services.recordLatestMainRoute({
     route: { model: "qwen3.8-flash@opencode-go", reason: "client_selected" },
     upstream: "opencode-go",
@@ -820,78 +736,32 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   assert.equal(await evaluate(`document.getElementById('settings-commandcode-token').value`), "",
     "the stored key is never echoed back into the field");
 
-  // A connection publishes models to the gateway but must not silently grant
-  // lifecycle control. This opens the actual drawer and reads rendered text,
-  // rather than only importing the functions that calculate it.
+  // The drawer is the only local surface that talks to an engine, so it is
+  // rendered for real: opening llama.cpp's settings shows the port it was found
+  // on and offers to connect. There is deliberately no launch form any more -
+  // ModelDock replays the command it watched the engine start with, it does not
+  // let a web page compose one, so an assertion that the fields are gone is the
+  // regression guard for the control that used to sit here and do nothing.
   await evaluate(`location.hash = '#local'`);
   await sleep(400);
   await evaluate(`document.getElementById('llamacpp-configure').click()`);
-  await sleep(200);
-  // The managed-host monitor is the hidden local numbers tab: its rail entry
-  // and its content must both stay invisible until a host is under takeover,
-  // and a stale #hostmonitor URL explains itself instead of rendering blank.
-  const monitor = JSON.parse(await evaluate(`JSON.stringify({
-    railHidden: document.getElementById('rail-hostmonitor').hidden,
-    sectionHidden: document.getElementById('local-host-dashboard').hidden,
-    emptyShown: !document.getElementById('hostdash-empty').hidden,
+  await sleep(250);
+  const localDrawer = JSON.parse(await evaluate(`JSON.stringify({
+    open: !document.getElementById('local-drawer').hidden,
+    title: document.getElementById('local-config-title').textContent.trim(),
+    port: document.getElementById('local-config-port').value,
+    launchForm: Boolean(document.getElementById('local-host-control')),
+    modelField: Boolean(document.getElementById('local-host-model-file')),
+    serviceRestart: !document.getElementById('local-service-restart').hidden,
   })`));
-  assert.deepEqual(monitor, { railHidden: true, sectionHidden: true, emptyShown: true },
-    "the host monitor tab stays hidden while nothing is managed");
-
-  const hostControl = JSON.parse(await evaluate(`JSON.stringify({
-    visible: !document.getElementById('local-host-control').hidden,
-    gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
-    control: document.getElementById('local-host-management-state').textContent.trim(),
-    // The takeover action lives on the drawer's bottom primary in "manage"
-    // mode - the standalone "Manage this host" button asked the drawer's own
-    // question a second time and was removed.
-    saveMode: document.getElementById('local-config-save').dataset.mode,
-    saveLabel: document.getElementById('local-config-save').textContent.trim(),
-    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
-    modelPath: document.getElementById('local-host-model-file').value,
-    projectorHidden: document.getElementById('local-host-vision-projector-row').hidden,
-    projectorPath: document.getElementById('local-host-vision-projector').value,
-  })`));
-  assert.deepEqual(hostControl, {
-    visible: true,
-    gateway: "Gateway connection: connected. ModelDock can route requests to this local server.",
-    control: "Host control: user-owned. ModelDock cannot restart this server or manage its SSD KV state.",
-    saveMode: "manage",
-    saveLabel: "Save and Manage",
-    leaveVisible: false,
-    modelPath: "D:/models/previous-connected-model.gguf",
-    projectorHidden: false,
-    projectorPath: "D:/models/previous-connected-projector.gguf",
-  }, "a connected local server stays user-owned until the user explicitly enables host control");
-
-  // A native picker is modal outside the browser. While its one request waits,
-  // every Browse action must show the same busy state; leaving the other two
-  // enabled created parallel invisible dialogs and an apparently frozen drawer.
-  await evaluate(`document.getElementById('local-host-model-browse').click()`);
-  for (let attempt = 0; attempt < 40 && typeof finishPathPick !== "function"; attempt += 1) await sleep(25);
-  assert.equal(typeof finishPathPick, "function", "the browser reached the native picker endpoint");
-  const pickerBusy = JSON.parse(await evaluate(`JSON.stringify([
-    'local-host-model-browse',
-    'local-host-vision-browse',
-    'local-host-kv-browse',
-  ].map((id) => document.getElementById(id).disabled))`));
-  assert.deepEqual(pickerBusy, [true, true, true], "one open native picker disables all three Browse actions");
-  finishPathPick("");
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const ready = JSON.parse(await evaluate(`JSON.stringify([
-      'local-host-model-browse',
-      'local-host-vision-browse',
-      'local-host-kv-browse',
-    ].every((id) => !document.getElementById(id).disabled))`));
-    if (ready) break;
-    await sleep(25);
-  }
-  assert.equal(await evaluate(`[
-    'local-host-model-browse',
-    'local-host-vision-browse',
-    'local-host-kv-browse',
-  ].every((id) => !document.getElementById(id).disabled)`), true,
-  "closing or cancelling the native picker restores every Browse action");
+  assert.deepEqual(localDrawer, {
+    open: true,
+    title: "llama.cpp",
+    port: "11435",
+    launchForm: false,
+    modelField: false,
+    serviceRestart: true,
+  }, "the local drawer configures a port and no longer pretends to own the launch");
 
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
@@ -975,197 +845,6 @@ test("changing only the vision provider persists its selected model across refre
   }
 });
 
-// The monitor redraws whenever an SSE status snapshot arrives. At fractional
-// display scaling a canvas whose bitmap width is also its CSS layout width
-// grows by the DPR on each redraw. This opens the actual managed-only tab at
-// DPR 1.5 and redraws it repeatedly, so a missing CSS size cannot hide behind
-// the headless browser's usual DPR 1.0 default.
-test("the managed-host monitor keeps its canvas geometry and history bounded", { timeout: 120_000 }, async (t) => {
-  if (!chromePath) {
-    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
-    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
-    return;
-  }
-  const { base, services } = await startDashboard(t, { managed: true });
-  const { evaluate } = await openBrowser(t, chromePath, { deviceScaleFactor: 1.5, instance: "hostmonitor" });
-  await evaluate(`location.href = ${JSON.stringify(`${base}#hostmonitor`)}`);
-  for (let i = 0; i < 40; i += 1) {
-    await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && !document.getElementById('local-host-dashboard').hidden`)) break;
-  }
-  await evaluate(`(() => {
-    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
-    if (skip) skip.click();
-    return true;
-  })()`);
-  await sleep(300);
-
-  const localRail = JSON.parse(await evaluate(`JSON.stringify(
-    [...document.querySelectorAll('.rail-link')]
-      .filter((node) => !node.hidden)
-      .map((node) => node.dataset.rail)
-      .filter((name) => ['local', 'hostmonitor', 'stats'].includes(name))
-  )`));
-  assert.deepEqual(localRail, ["local", "hostmonitor", "stats"],
-    "the conditional host monitor stays beside Local Hosts instead of splitting Stats navigation");
-
-  // This uses the same Metrics -> coalesced SSE -> browser render path as a
-  // completed local response. The 100ms spacing intentionally lets every
-  // status event repaint; direct page calls would miss this integration seam.
-  for (let redraw = 0; redraw < 6; redraw += 1) {
-    const finish = services.metrics.begin("responses", {
-      localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] },
-      inputTokens: 1_000,
-      outputTokens: 100,
-      sessionId: `host-session-${redraw % 2}`,
-    });
-    await sleep(8);
-    finish.markFirstResponse();
-    await sleep(8);
-    finish({
-      localCache: { tier: ["gpu", "ssd", "cold", "llama_auto"][redraw % 4] },
-      llamaTimings: {
-        cacheTokens: redraw * 100,
-        promptTokens: 1_000,
-        promptMs: 2_000,
-        promptTps: 500,
-        decodeTokens: 100,
-        decodeMs: 2_000,
-        decodeTps: 50,
-      },
-    });
-    await sleep(160);
-  }
-  await sleep(350);
-  const hostCountsBeforeFilter = JSON.parse(await evaluate(`JSON.stringify({
-    prefill: document.getElementById('hostdash-prefill-count')?.textContent,
-    decode: document.getElementById('hostdash-decode-last')?.textContent,
-  })`));
-
-  // The ordinary dashboard filter scopes trace cards only. Managed-host
-  // telemetry is host-wide and has no per-session authority, so selecting one
-  // conversation must not blank the prefill/decode monitor.
-  await evaluate(`location.hash = '#dashboard'`);
-  await sleep(200);
-  await evaluate(`(() => {
-    const select = document.getElementById('session-select');
-    select.value = 'host-session-0';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    location.hash = '#hostmonitor';
-  })()`);
-  await sleep(200);
-
-  const monitor = JSON.parse(await evaluate(`(() => {
-    const canvases = ['hostdash-prefill-wave', 'hostdash-decode-wave'].map((id) => {
-      const canvas = document.getElementById(id);
-      const box = canvas.getBoundingClientRect();
-      return { cssWidth: box.width, cssHeight: box.height, bitmapWidth: canvas.width, bitmapHeight: canvas.height };
-    });
-    return JSON.stringify({
-      dpr: window.devicePixelRatio,
-      panelHeight: document.getElementById('local-host-dashboard').getBoundingClientRect().height,
-      canvases,
-      swimlanes: document.querySelectorAll('#hostdash-swimlanes .swimlane').length,
-      swimSegments: document.querySelectorAll('#hostdash-swimlanes .swim-segment').length,
-      prefillCount: document.getElementById('hostdash-prefill-count')?.textContent,
-      prefillMs: document.getElementById('hostdash-prefill-ms-last')?.textContent,
-      cacheHit: document.getElementById('hostdash-cache-hit-last')?.textContent,
-      selectedSession: document.getElementById('session-select')?.value,
-      overflowing: [...document.querySelectorAll('#local-host-dashboard, .hostdash-grid, .hostdash-totals, .swimlane-track')]
-        .filter((node) => node.scrollWidth > node.clientWidth + 1)
-        .map((node) => node.id || node.className),
-    });
-  })()`));
-
-  assert.equal(monitor.dpr, 1.5, "the regression must run at fractional display scaling");
-  assert.ok(monitor.panelHeight < 900, `monitor panel grew to ${monitor.panelHeight}px after redraws`);
-  for (const canvas of monitor.canvases) {
-    assert.equal(Math.round(canvas.cssHeight), 92, "monitor canvas keeps its 92px CSS height");
-    assert.ok(Math.abs(canvas.bitmapWidth - Math.round(canvas.cssWidth * monitor.dpr)) <= 1,
-      "bitmap width follows the fixed CSS box once");
-    assert.ok(Math.abs(canvas.bitmapHeight - Math.round(canvas.cssHeight * monitor.dpr)) <= 1,
-      "bitmap height follows the fixed CSS box once");
-  }
-  assert.equal(monitor.swimlanes, 1, "the managed lane renders as one swimlane");
-  assert.ok(monitor.swimSegments >= 2, "the lane timeline renders cold, restore, and hot events");
-  assert.equal(monitor.selectedSession, "host-session-0", "the regression exercises an active dashboard session filter");
-  assert.equal(monitor.prefillCount, "6", "the footer reports every request in the managed run, not the bounded plot length");
-  assert.equal(monitor.prefillMs, "2.0 s", "the prefill card uses llama.cpp prompt_ms directly");
-  assert.equal(monitor.cacheHit, "33.3%", "the cache card uses cache_n / (cache_n + prompt_n)");
-  assert.notEqual(hostCountsBeforeFilter.prefill, "0", "the fixture produced host-wide prefill history");
-  assert.equal(monitor.prefillCount, hostCountsBeforeFilter.prefill, "host-wide prefill history survives a trace-session filter");
-  assert.equal(await evaluate(`document.getElementById('hostdash-decode-last')?.textContent`), hostCountsBeforeFilter.decode,
-    "host-wide decode history survives the same trace-session filter");
-  assert.deepEqual(monitor.overflowing, [], "the managed-host board does not overflow its visible columns");
-
-  for (const [canvasId, tooltipId] of [
-    ["hostdash-prefill-wave", "hostdash-prefill-tooltip"],
-    ["hostdash-decode-wave", "hostdash-decode-tooltip"],
-  ]) {
-    const hover = JSON.parse(await evaluate(`(() => {
-      const canvas = document.getElementById('${canvasId}');
-      const rect = canvas.getBoundingClientRect();
-      canvas.dispatchEvent(new MouseEvent('mousemove', {
-        bubbles: true,
-        clientX: rect.left + rect.width / 2,
-        clientY: rect.top + rect.height / 2,
-      }));
-      const tip = document.getElementById('${tooltipId}');
-      return JSON.stringify({ hidden: tip.hidden, text: tip.textContent, left: tip.style.left });
-    })()`));
-    assert.equal(hover.hidden, false, `${canvasId} opens the shared wave tooltip`);
-    assert.match(hover.text, /tps/i, `${canvasId} reports throughput in the shared format`);
-    assert.match(hover.left, /%$/, `${canvasId} positions the tooltip over the selected sample`);
-    assert.equal(await evaluate(`(() => {
-      const canvas = document.getElementById('${canvasId}');
-      canvas.dispatchEvent(new MouseEvent('mouseleave', { bubbles: true }));
-      return document.getElementById('${tooltipId}').hidden;
-    })()`), true, `${canvasId} hides the tooltip on leave`);
-  }
-});
-
-test("the managed-host board collapses to one column without horizontal overflow", { timeout: 120_000 }, async (t) => {
-  if (!chromePath) {
-    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
-    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
-    return;
-  }
-  const { base } = await startDashboard(t, { managed: true });
-  const { evaluate } = await openBrowser(t, chromePath, { width: 720, height: 900, instance: "hostmonitor-narrow" });
-  await evaluate(`location.href = ${JSON.stringify(`${base}#hostmonitor`)}`);
-  for (let i = 0; i < 40; i += 1) {
-    await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && !document.getElementById('local-host-dashboard').hidden`)) break;
-  }
-  await evaluate("document.body.style.minWidth = '0'");
-  await evaluate(`(() => {
-    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
-    if (skip) skip.click();
-    return true;
-  })()`);
-  await sleep(300);
-  const layout = JSON.parse(await evaluate(`(() => {
-    const board = document.getElementById('local-host-dashboard');
-    const box = board.getBoundingClientRect();
-    const cards = [...board.querySelectorAll('.hostdash-grid > .metric-card')].map((card) => {
-      const rect = card.getBoundingClientRect();
-      return { left: rect.left, right: rect.right, width: rect.width, scrollWidth: card.scrollWidth, clientWidth: card.clientWidth };
-    });
-    return JSON.stringify({
-      viewport: window.innerWidth,
-      documentWidth: document.documentElement.scrollWidth,
-      board: { left: box.left, right: box.right, width: box.width },
-      cards,
-      columns: getComputedStyle(document.querySelector('.hostdash-grid')).gridTemplateColumns,
-    });
-  })()`));
-  assert.ok(layout.documentWidth <= layout.viewport + 1, `host monitor widened document to ${layout.documentWidth}px at ${layout.viewport}px viewport`);
-  assert.equal(layout.columns.split(' ').length, 1, `narrow host monitor must use one column, got ${layout.columns}`);
-  for (const card of layout.cards) {
-    assert.ok(card.left >= layout.board.left - 1 && card.right <= layout.board.right + 1, "host-monitor card escaped its board");
-    assert.ok(card.scrollWidth <= card.clientWidth + 1, "host-monitor card has internal horizontal overflow");
-  }
-});
 
 test("the narrow local drawer is an opaque configuration surface", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {
@@ -1206,151 +885,6 @@ test("the narrow local drawer is an opaque configuration surface", { timeout: 12
   }, "the narrow drawer must cover the engine list with an opaque card");
 });
 
-test("a managed llama drawer keeps its persisted paths visible after takeover", { timeout: 120_000 }, async (t) => {
-  if (!chromePath) {
-    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
-    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
-    return;
-  }
-  const { base } = await startDashboard(t, { managedDrawer: true });
-  const { evaluate } = await openBrowser(t, chromePath, { instance: "managed-drawer" });
-  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
-  for (let i = 0; i < 40; i += 1) {
-    await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && document.querySelector('#local-engine-list')?.textContent.includes('Managed profile')`)) break;
-  }
-  await evaluate(`(() => {
-    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
-    if (skip) skip.click();
-    document.getElementById('llamacpp-configure').click();
-    return true;
-  })()`);
-  await sleep(400);
-  const drawer = JSON.parse(await evaluate(`JSON.stringify({
-    visible: document.getElementById('local-drawer').offsetParent !== null,
-    formVisible: document.getElementById('local-host-management-form').offsetParent !== null,
-    port: document.getElementById('local-config-port').value,
-    model: document.getElementById('local-host-model-file').value,
-    projector: document.getElementById('local-host-vision-projector').value,
-    cacheDirectory: document.getElementById('local-host-kv-directory').value,
-    budget: document.getElementById('local-host-kv-budget').value,
-    vision: document.getElementById('local-host-vision-enabled').checked,
-    modelReadonly: document.getElementById('local-host-model-file').readOnly,
-    cacheReadonly: document.getElementById('local-host-kv-directory').readOnly,
-    visionDisabled: document.getElementById('local-host-vision-enabled').disabled,
-    budgetDisabled: document.getElementById('local-host-kv-budget').disabled,
-    portReadonly: document.getElementById('local-config-port').readOnly,
-    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
-    startVisible: document.getElementById('local-config-start').offsetParent !== null,
-    leftStartRemoved: document.getElementById('llamacpp-restart') === null,
-    restartVisible: document.getElementById('local-service-restart').offsetParent !== null,
-    // Rendered text, not the key: a missing translation would show the raw
-    // "host.restartService" to the user.
-    restartLabel: document.getElementById('local-service-restart').textContent.trim(),
-    // Adjacency is the request: it sits beside Leave management, not somewhere
-    // the operator has to go looking for it.
-    restartNextToLeave: (() => {
-      const leave = document.getElementById('local-host-unmanage');
-      const restart = document.getElementById('local-service-restart');
-      return Boolean(leave && leave.parentElement && leave.parentElement === restart.parentElement);
-    })(),
-  })`));
-  assert.deepEqual(drawer, {
-    visible: true,
-    formVisible: true,
-    port: "11435",
-    model: "D:/models/managed-model.gguf",
-    projector: "D:/models/managed-projector.gguf",
-    cacheDirectory: "D:/managed-kv",
-    budget: "32",
-    vision: true,
-    modelReadonly: true,
-    cacheReadonly: true,
-    visionDisabled: true,
-    budgetDisabled: true,
-    portReadonly: true,
-    leaveVisible: true,
-    startVisible: false,
-    leftStartRemoved: true,
-    restartVisible: true,
-    restartLabel: "Restart service",
-    restartNextToLeave: true,
-  });
-});
-
-test("a stopped managed llama keeps its full drawer and moves Start service there", { timeout: 120_000 }, async (t) => {
-  if (!chromePath) {
-    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
-    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
-    return;
-  }
-  const { base } = await startDashboard(t, { managedDrawerOffline: true });
-  const { evaluate } = await openBrowser(t, chromePath, { instance: "managed-drawer-offline" });
-  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
-  for (let i = 0; i < 40; i += 1) {
-    await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && document.querySelector('#local-engine-list')?.textContent.includes('engine is not answering')`)) break;
-  }
-  await evaluate(`(() => {
-    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
-    if (skip) skip.click();
-    document.getElementById('llamacpp-configure').click();
-    return true;
-  })()`);
-  await sleep(400);
-  const drawer = JSON.parse(await evaluate(`JSON.stringify({
-    visible: document.getElementById('local-drawer').offsetParent !== null,
-    formVisible: document.getElementById('local-host-management-form').offsetParent !== null,
-    port: document.getElementById('local-config-port').value,
-    model: document.getElementById('local-host-model-file').value,
-    projector: document.getElementById('local-host-vision-projector').value,
-    cacheDirectory: document.getElementById('local-host-kv-directory').value,
-    budget: document.getElementById('local-host-kv-budget').value,
-    portReadonly: document.getElementById('local-config-port').readOnly,
-    modelReadonly: document.getElementById('local-host-model-file').readOnly,
-    startVisible: document.getElementById('local-config-start').offsetParent !== null,
-    startLabel: document.getElementById('local-config-start').textContent.trim(),
-    saveVisible: document.getElementById('local-config-save').offsetParent !== null,
-    disconnectVisible: document.getElementById('local-config-disconnect').offsetParent !== null,
-    leaveVisible: document.getElementById('local-host-unmanage').offsetParent !== null,
-    managedActionsTogether: document.getElementById('local-host-unmanage').parentElement === document.getElementById('local-config-start').parentElement,
-    startImmediatelyAfterLeave: document.getElementById('local-host-unmanage').nextElementSibling === document.getElementById('local-config-start'),
-    // The engine is not answering in this state, which is exactly when the
-    // service restart has to be there: the host cannot be released, so the only
-    // way out is to restart the service and drop the warm KV.
-    restartVisible: document.getElementById('local-service-restart').offsetParent !== null,
-    restartBeforeLeave: document.getElementById('local-service-restart').nextElementSibling === document.getElementById('local-host-unmanage'),
-    gateway: document.getElementById('local-host-gateway-state').textContent.trim(),
-    management: document.getElementById('local-host-management-state').textContent.trim(),
-    leftStartRemoved: document.getElementById('llamacpp-restart') === null,
-  })`));
-  assert.deepEqual(drawer, {
-    visible: true,
-    formVisible: true,
-    port: "11435",
-    model: "D:/models/managed-model.gguf",
-    projector: "D:/models/managed-projector.gguf",
-    cacheDirectory: "D:/managed-kv",
-    budget: "32",
-    portReadonly: true,
-    modelReadonly: true,
-    startVisible: true,
-    startLabel: "Start service",
-    saveVisible: false,
-    // The stuck state: managed, and the engine is not answering. This is exactly
-    // when Disconnect used to vanish - hidden while managed, with the release it
-    // demanded unable to verify a dead server. It has to be on screen here.
-    disconnectVisible: true,
-    leaveVisible: true,
-    managedActionsTogether: true,
-    startImmediatelyAfterLeave: true,
-    restartVisible: true,
-    restartBeforeLeave: true,
-    gateway: "Gateway: connected - 1 model(s), but the engine is not answering",
-    management: "Managed profile: --parallel 1 \u00b7 --ctx-size 215,040. Multiple sessions available.",
-    leftStartRemoved: true,
-  });
-});
 
 // A canvas is sized from its CSS box, and from nothing else.
 //

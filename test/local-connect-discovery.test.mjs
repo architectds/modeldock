@@ -9,7 +9,6 @@ import { recordUsageEvent } from "../src/usage-events.mjs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { probeLocalEngine, readLocalEnginesSnapshot, writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 import { parseLlamaArgs } from "../src/engine-processes.mjs";
-import { readLocalHostRegistry, upsertLocalHost, writeLocalHostRegistry } from "../src/local-host-registry.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -79,7 +78,6 @@ async function startApp(t, { discoverEngines }) {
     codexCatalogFile: path.join(dir, "codex-model-catalog.json"),
     nativeCatalogFile: path.join(dir, "native-catalog.json"),
     codexHome: path.join(dir, "codex"),
-    localHostRegistryFile: path.join(dir, "local-hosts.json"),
     // Without this the boot prime would read the developer's real metering log.
     usageEventsFile: path.join(dir, "usage-events.jsonl"),
   };
@@ -245,663 +243,6 @@ test("discovery refreshes a legacy single-model snapshot from its GGUF header", 
   }]);
 });
 
-test("gateway connection and explicit host takeover stay separate", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const discovered = {
-    engine: "llamacpp",
-    label: "llama.cpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["qwen3.8:27b"],
-    connectable: true,
-    binary: "D:/llama-cpp-cuda/bin/llama-server.exe",
-    cmdline: `"D:/llama-cpp-cuda/bin/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --host 127.0.0.1 --port ${port}`,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: {
-      weightBytes: 12 * 1024 ** 3,
-      attentionLayers: 16,
-      headCountKv: 4,
-      keyLength: 256,
-      valueLength: 256,
-      trainedContext: 262144,
-    },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => {
-    const usedBytes = discovered.launch.ctxSize === 8_192
-      ? Math.round(15.125 * 1024 ** 3)
-      : 1 * 1024 ** 3;
-    return [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes }];
-  };
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() {},
-    async stop() {},
-    async start(spec) {
-      discovered.binary = spec.binary;
-      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
-      discovered.launch = parseLlamaArgs(discovered.cmdline);
-    },
-    async verify() { return true; },
-  });
-
-  const connected = await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  });
-  assert.equal(connected.status, 200);
-
-  const before = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(before.engines[0].connected, true, "the gateway route is connected");
-  assert.equal(before.engines[0].management, null, "connection did not grant process-management authority");
-
-  const managed = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 64 }),
-  });
-  const managedBody = await managed.json();
-  assert.equal(managed.status, 200, JSON.stringify(managedBody));
-  assert.equal(managedBody.management.state, "ready");
-  assert.equal(managedBody.management.ssdState, "configured", "takeover completed the verified managed restart");
-  assert.equal(managedBody.management.cacheBudgetBytes, 64 * 1024 ** 3);
-
-  const after = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(after.engines[0].connected, true, "gateway connection survives takeover");
-  assert.equal(after.engines[0].management.state, "ready");
-  assert.equal(after.engines[0].management.ssdState, "configured");
-
-  // The escape hatch. Disconnect used to answer 409 while the host was managed -
-  // "leave control first" - and leaving control needed the server to verify, which
-  // a dead or draining host can never do. Refusing on a prerequisite that the same
-  // broken host controls is how the drawer became unusable with no way out.
-  // Disconnect now releases the authority itself, in one shot, with no detection.
-  const disconnected = await fetch(`${base}/api/local/disconnect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  });
-  const disconnectBody = await disconnected.json();
-  assert.equal(disconnected.status, 200, JSON.stringify(disconnectBody));
-  assert.equal(disconnectBody.releasedHosts, 1, "management is released by the disconnect, not demanded as a precondition");
-
-  // Authority really went with it: the host is no longer managed, so a follow-up
-  // release has nothing left to do.
-  const afterRelease = await fetch(`${base}/api/local/unmanage`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: managedBody.management.id }),
-  });
-  assert.equal(afterRelease.status, 404, "no managed authority survives the disconnect");
-  const finalState = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(finalState.engines[0].management ?? null, null, "the engine reports unmanaged");
-  assert.equal(finalState.engines[0].connected, false, "and the gateway route was dropped in the same action");
-  assert.equal(services.localHostRegistryFile.endsWith("local-hosts.json"), true);
-});
-
-test("a sub-32-GiB host never starts a P2 calibration probe", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const discovered = {
-    engine: "llamacpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["qwen"],
-    connectable: true,
-    binary: "D:/llama/llama-server.exe",
-    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: {
-      weightBytes: 2 * 1024 ** 3,
-      attentionLayers: 1,
-      headCountKv: 1,
-      keyLength: 256,
-      valueLength: 256,
-      trainedContext: 262144,
-    },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [0, 1].map((index) => ({
-    index,
-    uuid: `gpu-${index}`,
-    vendor: "nvidia",
-    totalBytes: Math.round(15.9 * 1024 ** 3),
-    usedBytes: 4 * 1024 ** 3,
-    freeBytes: Math.round(11.9 * 1024 ** 3),
-  }));
-  const startedParallels = [];
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() {},
-    async stop() {},
-    async start(spec) {
-      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
-      discovered.launch = parseLlamaArgs(discovered.cmdline);
-      startedParallels.push(discovered.launch.parallel);
-    },
-    async verify() { return true; },
-  });
-
-  assert.equal((await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  })).status, 200);
-  const managed = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 8 }),
-  });
-  const body = await managed.json();
-  assert.equal(managed.status, 200, JSON.stringify(body));
-  assert.equal(body.management.profile.laneCount, 1);
-  assert.ok(startedParallels.length >= 3, "P1 bootstrap, slope, and final profile all started");
-  assert.ok(startedParallels.every((parallel) => parallel === 1),
-    "a small host never pays for a P2 or P3 calibration launch");
-});
-
-test("managed setup applies selected model, projector, and SSD paths as one verified launch", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const originalFacts = {
-    weightBytes: 17_559_178_144,
-    attentionLayers: 16,
-    headCountKv: 4,
-    keyLength: 256,
-    valueLength: 256,
-    trainedContext: 262144,
-    modelName: "Qwen3.8-27B",
-    modelSlug: "Qwen3.8-27B",
-  };
-  const selectedFacts = {
-    ...originalFacts,
-    weightBytes: 13_575_223_296,
-    modelName: "Qwen3-VL-27B",
-    modelSlug: "Qwen3-VL-27B",
-  };
-  const discovered = {
-    engine: "llamacpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["D:/models/Qwen3.8-27B-Q4.gguf"],
-    connectable: true,
-    binary: "D:/llama/llama-server.exe",
-    cmdline: `"D:/llama/llama-server.exe" -m D:/models/Qwen3.8-27B-Q4.gguf -c 262144 --parallel 1 --port ${port}`,
-    launch: { model: "D:/models/Qwen3.8-27B-Q4.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: originalFacts,
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  const projector = path.join(dir, "mmproj-Qwen3-VL.gguf");
-  await writeFile(projector, "projector", "utf8");
-  const selectedModel = path.join(dir, "Qwen3-VL-27B.gguf");
-  services.readModelFacts = (file) => {
-    assert.equal(file, selectedModel);
-    return selectedFacts;
-  };
-  services.probeGpus = async () => {
-    const usedBytes = discovered.launch.ctxSize === 8_192
-      ? Math.round(16.8 * 1024 ** 3)
-      : 1 * 1024 ** 3;
-    return [{ index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes }];
-  };
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() {},
-    async stop() {},
-    async start(spec) {
-      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
-      discovered.launch = parseLlamaArgs(discovered.cmdline);
-      discovered.models = ["D:/models/Qwen3-VL-27B.gguf"];
-      discovered.modelFacts = selectedFacts;
-    },
-    async verify() { return true; },
-  });
-  let primedWarmBase = null;
-  // The newest Codex task belongs to an unrelated project; only the metering log
-  // knows which conversation really ran on the local model.
-  const localThread = "01a09347-cfc3-7723-ae4b-4f43a7b890da";
-  recordUsageEvent({
-    model: "Qwen3-VL-27B@llamacpp", provider: "llamacpp", route: "client_selected", status: 200,
-    threadId: localThread, at: "2026-09-17T12:00:00.000Z", filePath: services.usageEventsFile,
-  });
-  recordUsageEvent({
-    model: "deepseek-v4-flash@opencode-go", provider: "opencode-go", route: "client_selected", status: 200,
-    threadId: "01a0a18d-ac81-7531-88e7-fbe704c173ea", at: "2026-09-17T13:00:00.000Z", filePath: services.usageEventsFile,
-  });
-  let openingQuery = null;
-  services.latestCodexSessionOpening = async (options) => {
-    openingQuery = options;
-    return {
-      instructions: "Current Codex base instructions.",
-      developerMessages: [{ type: "message", role: "developer", content: [{ type: "input_text", text: "Current workspace instructions." }] }],
-      tools: [{ type: "function", name: "exec_command", parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }],
-    };
-  };
-  services.localHostRuntime.primeWarmBase = async (warmBase) => {
-    primedWarmBase = warmBase;
-    return { primed: true, reused: false };
-  };
-
-  assert.equal((await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  })).status, 200);
-  const managed = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      engine: "llamacpp",
-      modelPath: selectedModel,
-      visionProjectorPath: projector,
-      cacheDirectory: path.join(dir, "kv"),
-      cacheBudgetGiB: 8,
-    }),
-  });
-  const body = await managed.json();
-  assert.equal(managed.status, 200, JSON.stringify(body));
-  assert.equal(body.management.modelPath, selectedModel);
-  assert.equal(body.management.visionProjectorPath, projector);
-  assert.equal(discovered.launch.model, selectedModel);
-  assert.equal(discovered.launch.visionProjectorPath, projector);
-  assert.ok(primedWarmBase?.sessionKey, "managed setup derives a base from the current Codex opening before any local user turn");
-  assert.deepEqual(body.warmBase, { primed: true, reused: false });
-  assert.deepEqual(openingQuery?.preferredSessionIds, [localThread],
-    "only the conversations that sent traffic to this host are offered as the prime source");
-
-  const snapshot = readLocalEnginesSnapshot(services.localEnginesFile);
-  assert.deepEqual(snapshot.llamacpp.models, [{
-    id: "Qwen3-VL-27B",
-    upstreamId: "D:/models/Qwen3-VL-27B.gguf",
-    label: "Qwen3-VL-27B",
-    supportsVision: true,
-    contextWindow: body.management.capacity.maxSingleRequestTokens,
-  }], "only the verified managed visual model reaches the Codex catalog");
-
-  // A ModelDock update can restart the gateway before llama.cpp has answered
-  // its first discovery probe. The durable managed record, not a live process
-  // observation, must keep the drawer's user-owned choices intact.
-  services.discoverEngines = async () => [];
-  const afterGatewayRestart = await (await fetch(`${base}/api/local/discover`)).json();
-  const remembered = afterGatewayRestart.engines.find((candidate) => candidate.engine === "llamacpp");
-  assert.equal(remembered.offline, true);
-  assert.equal(remembered.management.modelPath, selectedModel);
-  assert.equal(remembered.management.visionProjectorPath, projector);
-  assert.equal(remembered.management.cacheDirectory, path.join(dir, "kv"));
-  assert.equal(remembered.management.cacheBudgetBytes, 8 * 1024 ** 3);
-});
-
-test("the local picker API permits only the fixed native dialog kinds", async (t) => {
-  const { base, services } = await startApp(t, { discoverEngines: async () => [] });
-  let received = "";
-  services.pickLocalHostPath = async (kind) => {
-    received = kind;
-    return "D:/models/Qwen3-VL.gguf";
-  };
-  const response = await fetch(`${base}/api/local/pick`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "model" }),
-  });
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).path, "D:/models/Qwen3-VL.gguf");
-  assert.equal(received, "model");
-});
-
-test("a failed first takeover restores observation without leaving managed authority", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const originalCmdline = `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`;
-  const discovered = {
-    engine: "llamacpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["qwen"],
-    connectable: true,
-    binary: "D:/llama/llama-server.exe",
-    cmdline: originalCmdline,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: {
-      weightBytes: 12 * 1024 ** 3,
-      attentionLayers: 16,
-      headCountKv: 4,
-      keyLength: 256,
-      valueLength: 256,
-      trainedContext: 262144,
-    },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [
-    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
-  ];
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() {},
-    async stop() {},
-    async start(spec) {
-      discovered.binary = spec.binary;
-      discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`;
-      discovered.launch = parseLlamaArgs(discovered.cmdline);
-    },
-    async verify(_spec, record) {
-      return record.desiredProfile === null;
-    },
-  });
-
-  assert.equal((await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  })).status, 200);
-  const response = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
-  });
-  const body = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(body));
-  assert.equal(body.outcome, "recovered");
-  assert.equal(body.error?.type, "managed_profile_unverified");
-  assert.match(body.error?.message || "", /restored the exact pre-takeover command line/);
-  assert.equal(body.management, null);
-  assert.equal(discovered.cmdline, originalCmdline, "recovery used the exact command seen before takeover");
-  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-  assert.deepEqual(registry.hosts, {}, "failed activation leaves no process-management authority behind");
-  const after = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(after.engines[0].connected, true);
-  assert.equal(after.engines[0].management, null);
-});
-
-test("a double verification failure retains degraded recovery authority", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const discovered = {
-    engine: "llamacpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["qwen"],
-    connectable: true,
-    binary: "D:/llama/llama-server.exe",
-    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: {
-      weightBytes: 12 * 1024 ** 3,
-      attentionLayers: 16,
-      headCountKv: 4,
-      keyLength: 256,
-      valueLength: 256,
-      trainedContext: 262144,
-    },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [
-    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
-  ];
-  let verificationCount = 0;
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() {},
-    async stop() {},
-    async start() {},
-    async verify() {
-      verificationCount += 1;
-      if (verificationCount === 1) return true;
-      throw new Error("verification failed");
-    },
-  });
-  assert.equal((await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  })).status, 200);
-  const response = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
-  });
-  const body = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(body));
-  assert.equal(body.outcome, "degraded");
-  assert.equal(body.management.state, "degraded");
-  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-  assert.equal(Object.values(registry.hosts)[0].state, "degraded");
-});
-
-test("a KV budget the volume cannot hold is refused with the usable figure", async (t) => {
-  // The default directory sits under the user profile - usually the system
-  // drive - so the budget must fit inside the measured free space minus the
-  // OS reserve (20 GiB). 30 GiB free leaves 10 GiB usable: 16 is refused,
-  // and the message names the number the user should type instead.
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [] });
-  services.probeKvFreeBytes = () => 30 * 1024 ** 3;
-  const refused = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
-  });
-  const body = await refused.json();
-  assert.equal(refused.status, 400, JSON.stringify(body));
-  assert.equal(body.error?.type, "kv_budget_disk");
-  assert.match(body.error?.message, /at most 10 GiB/);
-  // And the discover payload derives its suggested default from the same
-  // measurement: min(8, usable) with the reserve already subtracted.
-  const discover = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(discover.kvBudgetDefaultGiB, 8);
-  services.probeKvFreeBytes = () => 23 * 1024 ** 3;
-  const tight = await (await fetch(`${base}/api/local/discover`)).json();
-  assert.equal(tight.kvBudgetDefaultGiB, 3, "a tight volume suggests only what it can spare");
-});
-
-test("clearing SSD KV state without a managed host is a readable refusal", async (t) => {
-  const { base } = await startApp(t, { discoverEngines: async () => [] });
-  const refused = await fetch(`${base}/api/local/kv/clear`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  });
-  const body = await refused.json();
-  assert.equal(refused.status, 409, JSON.stringify(body));
-  assert.equal(body.error?.type, "not_managed");
-});
-
-test("restart checkpoint endpoint delegates slot matching to the managed runtime", async (t) => {
-  const { base, services } = await startApp(t, { discoverEngines: async () => [] });
-  let released = 0;
-  services.localHostRuntime = {
-    prepareGatewayRestart: async () => ({ managed: true, saved: 2, failed: 0, holdMs: 45_000 }),
-    releaseGatewayRestartPreparation: () => { released += 1; return true; },
-  };
-  const checkpoint = await fetch(`${base}/api/local/restart-checkpoint`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  });
-  assert.equal(checkpoint.status, 200);
-  assert.deepEqual(await checkpoint.json(), { managed: true, saved: 2, failed: 0, holdMs: 45_000 });
-  const release = await fetch(`${base}/api/local/restart-checkpoint/release`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
-  });
-  assert.equal(release.status, 200);
-  assert.deepEqual(await release.json(), { released: true });
-  assert.equal(released, 1);
-});
-
-test("unmanage releases a host whose first takeover verification failed", async (t) => {
-  // activeSpec === null means ModelDock never replaced the original process,
-  // so there is nothing to restore: unmanage must re-verify the pre-takeover
-  // command and revoke management directly. Routing this shape through
-  // applyLocalHostPlan drained a process this gateway never touched - and a
-  // failing drain then stranded the record in "draining" (reproduced live).
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const discovered = {
-    engine: "llamacpp",
-    baseUrl: `http://127.0.0.1:${port}`,
-    port,
-    models: ["qwen"],
-    connectable: true,
-    binary: "D:/llama/llama-server.exe",
-    cmdline: `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: {
-      weightBytes: 12 * 1024 ** 3,
-      attentionLayers: 16,
-      headCountKv: 4,
-      keyLength: 256,
-      valueLength: 256,
-      trainedContext: 262144,
-    },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [
-    { index: 0, uuid: "gpu-0", vendor: "nvidia", totalBytes: 24 * 1024 ** 3, usedBytes: 18 * 1024 ** 3 },
-  ];
-  const lifecycleCalls = [];
-  let originalServing = false;
-  let releaseVisionProjector = null;
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) {
-      const registry = await readLocalHostRegistry(registryFile);
-      await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record));
-    },
-    async drain() { lifecycleCalls.push("drain"); throw new Error("must never drain a process ModelDock never replaced"); },
-    async stop() { lifecycleCalls.push("stop"); },
-    async start() { lifecycleCalls.push("start"); },
-    async verify(_spec, record) {
-      releaseVisionProjector = record.capabilities?.visionProjectorPath || "";
-      return originalServing;
-    },
-  });
-  assert.equal((await fetch(`${base}/api/local/connect`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }),
-  })).status, 200);
-  const managed = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 16 }),
-  });
-  const managedBody = await managed.json();
-  assert.equal(managed.status, 409, JSON.stringify(managedBody));
-  assert.equal(managedBody.error?.type, "takeover_failed", "the standard envelope carries the verification failure");
-  assert.ok(managedBody.error?.message, "the dashboard reads body.error.message; without it the user saw 'Manage 409'");
-  const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-  const record = Object.values(registry.hosts)[0];
-  assert.equal(record.state, "degraded");
-  assert.equal(record.activeSpec, null, "the original process was never replaced");
-  const targetCap = { ...record, capabilities: { ...record.capabilities, visionProjectorPath: "D:/models/mmproj.gguf" } };
-  await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(registry, targetCap));
-
-  originalServing = true;
-  const released = await fetch(`${base}/api/local/unmanage`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: record.id }),
-  });
-  const releasedBody = await released.json();
-  assert.equal(released.status, 200, JSON.stringify(releasedBody));
-  assert.equal(releaseVisionProjector, "", "releasing a never-started target must verify only the original process capability");
-  assert.deepEqual(lifecycleCalls, [], "release re-verifies and revokes; it never drains, stops, or starts");
-  const cleared = await readLocalHostRegistry(services.localHostRegistryFile);
-  assert.deepEqual(cleared.hosts, {}, "management authority is fully revoked");
-});
-
-test("unmanage clears a failed target projector before restoring the original command", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const original = `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`;
-  const discovered = {
-    engine: "llamacpp", baseUrl: `http://127.0.0.1:${port}`, port, models: ["qwen"], connectable: true,
-    binary: "D:/llama/llama-server.exe", cmdline: original,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: { weightBytes: 12 * 1024 ** 3, attentionLayers: 16, headCountKv: 4, keyLength: 256, valueLength: 256, trainedContext: 262144 },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  services.probeGpus = async () => [{
-    index: 0,
-    uuid: "gpu-0",
-    vendor: "nvidia",
-    totalBytes: 24 * 1024 ** 3,
-    usedBytes: discovered.launch.ctxSize === 8_192 ? 16 * 1024 ** 3 : 1 * 1024 ** 3,
-  }];
-  let projectorSeen = "";
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) { const registry = await readLocalHostRegistry(registryFile); await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record)); },
-    async drain() {}, async stop() {}, async start(spec) { discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`; discovered.launch = parseLlamaArgs(discovered.cmdline); },
-    async verify(_spec, record) { projectorSeen = record.capabilities?.visionProjectorPath || ""; return !projectorSeen; },
-  });
-  assert.equal((await fetch(`${base}/api/local/connect`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }) })).status, 200);
-  const managed = await fetch(`${base}/api/local/manage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp", cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 8 }) });
-  const managedBody = await managed.json();
-  assert.equal(managed.status, 200, JSON.stringify(managedBody));
-  const record = Object.values((await readLocalHostRegistry(services.localHostRegistryFile)).hosts)[0];
-  const failedTarget = { ...record, state: "degraded", capabilities: { ...record.capabilities, visionProjectorPath: "D:/models/mmproj.gguf" } };
-  await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(await readLocalHostRegistry(services.localHostRegistryFile), failedTarget));
-  const released = await fetch(`${base}/api/local/unmanage`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hostId: record.id }) });
-  const releasedBody = await released.json();
-  assert.equal(released.status, 200, JSON.stringify(releasedBody));
-  assert.equal(projectorSeen, "");
-});
-
-test("managed setup rejects a served profile that leaves less than one GiB on a participating card", async (t) => {
-  const engine = fakeEngine();
-  engine.listen(0, "127.0.0.1");
-  await new Promise((resolve) => engine.once("listening", resolve));
-  const port = engine.address().port;
-  t.after(() => new Promise((resolve) => engine.close(resolve)));
-  const original = `"D:/llama/llama-server.exe" -m D:/models/qwen.gguf -c 262144 --parallel 1 --port ${port}`;
-  const discovered = {
-    engine: "llamacpp", baseUrl: `http://127.0.0.1:${port}`, port, models: ["qwen"], connectable: true,
-    binary: "D:/llama/llama-server.exe", cmdline: original,
-    launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
-    modelFacts: { weightBytes: 12 * 1024 ** 3, attentionLayers: 16, headCountKv: 4, keyLength: 256, valueLength: 256, trainedContext: 262144 },
-  };
-  const { base, services, dir } = await startApp(t, { discoverEngines: async () => [discovered] });
-  const projector = path.join(dir, "mmproj.gguf");
-  await writeFile(projector, "projector", "utf8");
-  services.probeGpus = async () => [{
-    index: 0,
-    uuid: "gpu-0",
-    vendor: "nvidia",
-    totalBytes: 24 * 1024 ** 3,
-    usedBytes: discovered.launch.ctxSize === 8_192
-      ? 16 * 1024 ** 3
-      : (discovered.launch.visionProjectorPath ? Math.round(23.5 * 1024 ** 3) : 1 * 1024 ** 3),
-    freeBytes: discovered.launch.visionProjectorPath ? Math.round(0.5 * 1024 ** 3) : 20 * 1024 ** 3,
-  }];
-  services.createLocalHostLifecycleOperations = ({ registryFile }) => ({
-    async persist(record) { const registry = await readLocalHostRegistry(registryFile); await writeLocalHostRegistry(registryFile, upsertLocalHost(registry, record)); },
-    async drain() {}, async stop() {},
-    async start(spec) { discovered.cmdline = `"${spec.binary}" ${spec.args.join(" ")}`; discovered.launch = parseLlamaArgs(discovered.cmdline); },
-    async verify() { return true; },
-  });
-  assert.equal((await fetch(`${base}/api/local/connect`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ engine: "llamacpp" }) })).status, 200);
-  const response = await fetch(`${base}/api/local/manage`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp", visionProjectorPath: projector, cacheDirectory: path.join(dir, "kv"), cacheBudgetGiB: 8 }),
-  });
-  const body = await response.json();
-  assert.equal(response.status, 502, JSON.stringify(body));
-  assert.equal(body.outcome, "recovered");
-  assert.match(body.message, /(1 GiB GPU headroom|No calculated P1 NVIDIA profile)/);
-  assert.equal(discovered.launch.visionProjectorPath, undefined, "recovery returned to the original text-only command");
-});
 
 test("connect says nothing is running instead of failing against a default port", async (t) => {
   const { base } = await startApp(t, { discoverEngines: async () => [] });
@@ -1058,4 +399,52 @@ test("a window the engine no longer serves is republished, and asks for a restar
   await fetch(`${base}/api/local/discover`);
   const settled = await services.configSwitcher.status();
   assert.equal(settled.restartRequired, false, "a steady engine is not a reason to restart Codex");
+});
+
+// Host control is gone. ModelDock listens to a port, remembers the command it
+// watched that engine start with, and replays that command. Everything that used
+// to take a server over - choosing its model file, budgeting its KV cache,
+// checkpointing it across a restart, releasing it back - has to answer 404 rather
+// than a polite 410, because a route that still exists is a route a stale
+// dashboard can call. And the one launch route that stays must read an engine
+// name and nothing else: an HTTP body is no longer allowed to describe a process.
+test("the host-control routes are gone and restart reads only an engine name", async (t) => {
+  const { base } = await startApp(t, {
+    discoverEngines: async () => [
+      { engine: "llamacpp", baseUrl: "http://127.0.0.1:11435", port: 11435, models: ["a"], connectable: true },
+    ],
+  });
+  const post = (route, body) => fetch(`${base}/api/local/${route}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  for (const route of [
+    "pick",
+    "manage",
+    "unmanage",
+    "kv/clear",
+    "restart-checkpoint",
+    "restart-checkpoint/release",
+    "apply",
+  ]) {
+    const response = await post(route, { engine: "llamacpp" });
+    assert.equal(response.status, 404, `/api/local/${route} survived the host-control removal`);
+  }
+
+  // Nothing was remembered in this app's state dir, so the honest answer is that
+  // there is no launch to replay. The extra fields are what the removed drawer
+  // form used to send; they must change nothing, because nothing reads them.
+  const bare = await post("restart", { engine: "llamacpp" });
+  const withSpec = await post("restart", {
+    engine: "llamacpp",
+    port: 11435,
+    modelPath: "D:/models/anything.gguf",
+    visionProjectorPath: "D:/models/mmproj.gguf",
+  });
+  assert.equal(bare.status, 404, "an engine with no remembered command reports that instead of guessing one");
+  assert.equal((await bare.json()).error.type, "no_launch");
+  assert.equal(withSpec.status, bare.status, "a launch spec in the body is not a second way to start a process");
+  assert.equal((await withSpec.json()).error.type, "no_launch");
 });

@@ -190,12 +190,6 @@ function appendResponseMetric(history, recent, project) {
   return history;
 }
 
-function appendBoundedPoint(history, point) {
-  history.push(point);
-  history.sort((a, b) => a.t - b.t);
-  if (history.length > WAVE_MAX_POINTS) history.splice(0, history.length - WAVE_MAX_POINTS);
-}
-
 function shortModel(model) {
   return String(model || "—").split("@")[0];
 }
@@ -549,161 +543,6 @@ function usd(value) {
   }).format(amount);
 }
 
-function renderLocalHostDashboard(data) {
-  const section = $("local-host-dashboard");
-  if (!section) return;
-  const localHost = data.localHost;
-  const managed = Boolean(localHost?.managed);
-  // The monitor lives on its own rail tab so it can never collide with the
-  // manage drawer; the tab itself is the gate - present only while a host is
-  // under management. A stale #hostmonitor URL without a managed host shows
-  // the explanation instead of a blank page.
-  const rail = $("rail-hostmonitor");
-  if (rail) rail.hidden = !managed;
-  const empty = $("hostdash-empty");
-  if (empty) empty.hidden = managed;
-  section.hidden = !managed;
-  if (!managed) {
-    hostDash.prefillHover.hover = -1;
-    hostDash.decodeHover.hover = -1;
-    const prefillTooltip = $("hostdash-prefill-tooltip");
-    const decodeTooltip = $("hostdash-decode-tooltip");
-    if (prefillTooltip) prefillTooltip.hidden = true;
-    if (decodeTooltip) decodeTooltip.hidden = true;
-    return;
-  }
-
-  const runKey = `${Number(data.startedAt) || 0}:${localHost.hostId || ""}`;
-  if (hostDash.runKey !== runKey) {
-    hostDash.runKey = runKey;
-    hostDash.prefill.length = 0;
-    hostDash.decode.length = 0;
-    hostDash.seen.clear();
-  }
-
-  // The backend exposes a bounded recent window. Retain dedupe ids only while
-  // they remain in that window: otherwise a long-running browser tab retains
-  // one Set entry for every completed local request forever.
-  const recent = data.recent || [];
-  const currentRecentIds = new Set(recent.map((item) => item?.id).filter(Boolean));
-  for (const id of hostDash.seen) {
-    if (!currentRecentIds.has(id)) hostDash.seen.delete(id);
-  }
-
-  for (const item of recent) {
-    if (item.kind !== "responses" || item.status !== "ok" || !item.localCache?.tier || hostDash.seen.has(item.id)) continue;
-    hostDash.seen.add(item.id);
-    const timings = item.llamaTimings || {};
-    const promptTokens = Math.max(0, Number(timings.promptTokens) || 0);
-    const cacheTokens = Math.max(0, Number(timings.cacheTokens) || 0);
-    const promptMs = Math.max(0, Number(timings.promptMs) || 0);
-    const promptTps = Math.max(0, Number(timings.promptTps) || 0);
-    if (promptTokens > 0 && promptMs > 0 && promptTps > 0) {
-      appendBoundedPoint(hostDash.prefill, {
-        id: item.id,
-        t: item.startedAt || 0,
-        v: promptTps,
-        promptMs,
-        promptTokens,
-        cacheTokens,
-        cacheRate: cacheTokens / (cacheTokens + promptTokens),
-      });
-    }
-    const decodeTokens = Math.max(0, Number(timings.decodeTokens) || 0);
-    const decodeMs = Math.max(0, Number(timings.decodeMs) || 0);
-    const decodeTps = Math.max(0, Number(timings.decodeTps) || 0);
-    if (decodeTokens > 0 && decodeMs > 0 && decodeTps > 0) {
-      appendBoundedPoint(hostDash.decode, { id: item.id, t: item.startedAt || 0, v: decodeTps, decodeMs, decodeTokens });
-    }
-  }
-
-  // The dashboard session filter belongs to gateway traces. Managed-host lanes
-  // are host-wide telemetry and intentionally carry no Codex session identity;
-  // filtering them by a UI selection made both host plots disappear.
-  const prefillVisible = hostDash.prefill;
-  hostDash.prefillPeak.peak = prefillVisible.reduce((max, point) => Math.max(max, point.v), 0);
-  const prefillCanvas = $("hostdash-prefill-wave");
-  if (prefillCanvas) drawWave(prefillCanvas, prefillVisible, hostDash.prefillPeak.peak, hostDash.prefillHover.hover, WAVE_BLUE, hostDash.prefillPoints);
-  const lastPrefill = prefillVisible[prefillVisible.length - 1];
-  set("hostdash-prefill-last", lastPrefill ? number(Math.round(lastPrefill.v)) : "—");
-  set("hostdash-prefill-ms-last", lastPrefill ? duration(lastPrefill.promptMs) : "—");
-  set("hostdash-cache-hit-last", lastPrefill ? percent(lastPrefill.cacheRate) : "—");
-
-  const decodeVisible = hostDash.decode;
-  hostDash.decodePeak.peak = decodeVisible.reduce((max, point) => Math.max(max, point.v), 0);
-  const decodeCanvas = $("hostdash-decode-wave");
-  if (decodeCanvas) drawWave(decodeCanvas, decodeVisible, hostDash.decodePeak.peak, hostDash.decodeHover.hover, WAVE_VIOLET, hostDash.decodePoints);
-  set("hostdash-decode-last", decodeVisible.length ? number(Math.round(decodeVisible[decodeVisible.length - 1].v)) : "—");
-  set("hostdash-decode-avg", decodeVisible.length ? number(Math.round(hostDashAvg(decodeVisible))) : "—");
-
-  const telemetry = localHost.telemetry || {};
-  const totals = telemetry.totals || {};
-  const counters = localHost.counters || {};
-  const events = hostDashEvents(telemetry);
-  const lastRestore = [...events].reverse().find((event) => event.kind === "restored" && Number(event.durationMs) > 0);
-  set("hostdash-read-total", compactTokens(totals.inputTokens));
-  set("hostdash-reused-total", compactTokens(totals.cachedTokens));
-  set("hostdash-output-total", compactTokens(totals.outputTokens));
-  set("hostdash-prefill-count", number(totals.requests || 0));
-  const calibrated = Number(telemetry.coldPrefillSamples) > 0;
-  set("hostdash-time-saved", calibrated ? duration(totals.timeSavedMs || 0) : "—");
-  set("hostdash-time-saved-label", calibrated ? t("hostdash.timeSaved") : t("hostdash.calibrating"));
-  set("hostdash-active-count", number(localHost.activeCount || 0));
-  set("hostdash-pending-count", number(localHost.pendingCount || 0));
-  renderHostSwimlanes(localHost, telemetry);
-  set("hostdash-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
-  set("hostdash-gpu-hot-lanes", `${localHost.hotCount || 0}/${(localHost.lanes || []).length || 0}`);
-  set("hostdash-restores", number(counters.restores || 0));
-  set("hostdash-restore-last", lastRestore ? duration(lastRestore.durationMs) : "—");
-  const slots = $("hostdash-gpu-slots");
-  if (slots) {
-    slots.replaceChildren(...(localHost.lanes || []).map((lane) => {
-      const slot = document.createElement("i");
-      slot.className = `kv-slot${lane.state === "active" ? " is-active" : lane.state === "hot" ? " is-hot" : ""}`;
-      slot.title = lane.state || "empty";
-      return slot;
-    }));
-  }
-
-  const ssd = localHost.ssd;
-  const fill = $("hostdash-ssd-fill");
-  if (ssd && ssd.budgetBytes > 0) {
-    const ratio = Math.min(1, (Number(ssd.totalBytes) || 0) / Number(ssd.budgetBytes));
-    if (fill) {
-      fill.style.width = `${Math.round(ratio * 100)}%`;
-      fill.classList.toggle("is-tight", ratio > 0.85);
-    }
-    set("hostdash-ssd-used", `${gib(ssd.totalBytes)} / ${gib(ssd.budgetBytes)}`);
-  } else {
-    if (fill) fill.style.width = "0";
-    set("hostdash-ssd-used", "—");
-  }
-  set("hostdash-ssd-states", number(ssd?.states || 0));
-  set("hostdash-checkpoints", number(counters.saves || 0));
-  set("hostdash-cold-prefills", number(counters.coldPrefills || 0));
-}
-
-function gib(bytes) {
-  const value = Number(bytes) / 1024 ** 3;
-  if (!Number.isFinite(value) || value <= 0) return "0 GiB";
-  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} GiB`;
-}
-
-$("hostdash-ssd-clear")?.addEventListener("click", async () => {
-  if (!window.confirm(t("hostdash.clearConfirm"))) return;
-  const button = $("hostdash-ssd-clear");
-  if (button) button.disabled = true;
-  try {
-    const response = await fetch("/api/local/kv/clear", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Clear ${response.status}`);
-  } catch (error) {
-    window.alert(error.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
-});
-
 function render(data) {
   lastData = data;
   const ready = data.ready;
@@ -732,7 +571,6 @@ function render(data) {
 
   renderContextWave(data.recent || []);
   renderCacheWave(data.recent || []);
-  renderLocalHostDashboard(data);
   renderDataWave(data.recent || []);
   renderTpsWave(data.recent || []);
   renderSessions(data.recent || [], data.sessionNames || {});
@@ -1232,8 +1070,6 @@ events.onerror = () => {
   attachAreaWaveHover({ canvasId: "cache-wave", tooltipId: "cache-wave-tooltip", pointsRef: cacheWavePoints, hoverState: cacheHoverState, draw: (canvas, hover) => drawWave(canvas, visibleCacheHistory, 1, hover, WAVE_BLUE, cacheWavePoints), formatValue: percent });
   attachAreaWaveHover({ canvasId: "data-wave", tooltipId: "data-wave-tooltip", pointsRef: dataWavePoints, hoverState: dataHoverState, draw: (canvas, hover) => drawWave(canvas, visibleDataHistory, dataPeakState.peak, hover, WAVE_GREEN, dataWavePoints), formatValue: bytes });
   attachAreaWaveHover({ canvasId: "tps-wave", tooltipId: "tps-wave-tooltip", pointsRef: tpsWavePoints, hoverState: tpsHoverState, draw: (canvas, hover) => drawWave(canvas, visibleTpsHistory, tpsPeakState.peak, hover, WAVE_VIOLET, tpsWavePoints), formatValue: tps });
-  attachAreaWaveHover({ canvasId: "hostdash-prefill-wave", tooltipId: "hostdash-prefill-tooltip", pointsRef: hostDash.prefillPoints, hoverState: hostDash.prefillHover, draw: (canvas, hover) => drawWave(canvas, hostDash.prefill, hostDash.prefillPeak.peak, hover, WAVE_BLUE, hostDash.prefillPoints), formatValue: tps });
-  attachAreaWaveHover({ canvasId: "hostdash-decode-wave", tooltipId: "hostdash-decode-tooltip", pointsRef: hostDash.decodePoints, hoverState: hostDash.decodeHover, draw: (canvas, hover) => drawWave(canvas, hostDash.decode, hostDash.decodePeak.peak, hover, WAVE_VIOLET, hostDash.decodePoints), formatValue: tps });
 
 poll().catch(() => set("event-connection", t("event.unavailable")));
 pollConfig().catch((error) => {
@@ -2343,28 +2179,6 @@ function formatContextSize(tokens) {
   return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : String(tokens);
 }
 
-function formatContextTokens(tokens) {
-  const value = Number(tokens);
-  return Number.isSafeInteger(value) && value > 0 ? value.toLocaleString() : "?";
-}
-
-function managedPlanSummary(profile) {
-  if (!profile?.laneCount || !profile?.laneContextTokens) return "";
-  return t("host.plan", {
-    context: formatContextTokens(profile.totalContextTokens),
-    lanes: profile.laneCount,
-  });
-}
-
-function hostControlSummary(management) {
-  if (!management) return t("host.userOwned");
-  if (management.state !== "ready") return t("host.state", {
-    state: management.state,
-    failure: management.failure ? ` - ${management.failure}` : "",
-  });
-  return managedPlanSummary(management.profile) || "automatic profile pending";
-}
-
 async function renderLocalEngines() {
   const list = $("local-engine-list");
   const note = $("local-discovery-note");
@@ -2380,19 +2194,16 @@ async function renderLocalEngines() {
     for (const definition of data.engineDefinitions || []) {
       if (definition?.id) localEngineDefinitions.set(definition.id, definition);
     }
-    localKvDirectoryDefault = String(data.kvDirectoryDefault || "");
-    localKvBudgetDefaultGiB = Number(data.kvBudgetDefaultGiB) || 0;
-    localNativeHostPicker = Boolean(data.nativeLocalHostPicker);
     // Feed the dialog: a discovered engine opens pre-filled and its button goes
     // blue. An engine that has stopped answering is dropped from the map so the
     // colour follows reality rather than the last good scan.
     localDiscovery.clear();
     localKnownEngines.clear();
     for (const engine of engines) {
-      // Reachability and identity are different facts. A stopped managed host
-      // must remain available to the drawer even though it must not paint the
-      // engine as online. Its durable record is what carries the saved model,
-      // projector, SSD KV directory, budget, port, and launch profile.
+      // Reachability and identity are different facts. A stopped engine must
+      // remain available to the drawer even though it must not paint the engine
+      // as online: its saved record is what carries the model, projector, port
+      // and launch arguments the Start action replays.
       if (preferKnownEngine(engine, localKnownEngines.get(engine.engine))) {
         localKnownEngines.set(engine.engine, engine);
       }
@@ -2408,9 +2219,8 @@ async function renderLocalEngines() {
     }
     for (const engineId of localEngineIds) paintEngineButton(engineId);
     if (localConfigEngine) {
-      const found = localKnownEngines.get(localConfigEngine) || localDiscovery.get(localConfigEngine);
-      if (localConfigEngine === "llamacpp") renderLocalHostControl(localConfigEngine, found);
-      renderLocalStartAction(localConfigEngine, found);
+      renderLocalDrawerActions(localConfigEngine);
+      renderLocalStartAction(localConfigEngine);
     }
     for (const engine of engines) {
       const item = document.createElement("li");
@@ -2452,12 +2262,6 @@ async function renderLocalEngines() {
         state.textContent = t("local.gatewayNotConnected");
       }
       item.append(state);
-      if (engine.engine === "llamacpp") {
-        const control = document.createElement("p");
-        control.className = "local-engine-state";
-        control.textContent = hostControlSummary(engine.management);
-        item.append(control);
-      }
       list.append(item);
     }
     if (note) note.textContent = engines.length ? "" : t("local.none");
@@ -2914,7 +2718,7 @@ function renderOllamaSection(state) {
   // Same rule the other two get: something to replay, and nothing answering.
   localCanRestart.set("ollama", Boolean(ollamaState.canRestart));
   if (localConfigEngine === "ollama") {
-    renderLocalStartAction("ollama", localKnownEngines.get("ollama") || localDiscovery.get("ollama"));
+    renderLocalStartAction("ollama");
   }
 }
 
@@ -2934,30 +2738,31 @@ function renderOllamaSection(state) {
 // enforced by assertLocalBase on the server.
 const localEngineIds = ["ollama", "llamacpp", "vllm"];
 const localDiscovery = new Map();
-// Includes stopped managed/remembered hosts. Never use this map to paint an
-// engine as reachable; it exists so Manage always describes the saved host.
+// Includes stopped engines ModelDock still remembers. Never use this map to
+// paint an engine as reachable; it exists so the drawer always describes the
+// saved host.
 const localKnownEngines = new Map();
 const localCanRestart = new Map();
 
-// Start belongs in the management drawer, beside the configuration it will
-// launch. The server independently refuses a second copy if the process came
-// back between this render and the click.
-function renderLocalStartAction(engine, found) {
+// Start belongs in the engine drawer, beside the configuration it will launch.
+// The server independently refuses a second copy if the process came back
+// between this render and the click.
+function renderLocalStartAction(engine) {
   const button = $("local-config-start");
   const hint = $("local-config-start-hint");
   if (!button) return;
   const offer = localConfigEngine === engine
-    && Boolean(found?.management || localCanRestart.get(engine))
+    && Boolean(localCanRestart.get(engine))
     && !localDiscovery.has(engine);
   button.hidden = !offer;
   button.dataset.engine = offer ? engine : "";
-  // A managed host has an exact activeSpec. Only user-owned replay needs the
-  // warning that environment-only arguments were not captured.
-  if (hint) hint.hidden = !offer || Boolean(found?.management);
+  // Replay starts from what was written down while the engine served, so the
+  // hint has to say that environment-only arguments were not captured.
+  if (hint) hint.hidden = !offer;
   if (offer) {
     const save = $("local-config-save");
     if (save) save.hidden = true;
-  } else if (!found?.management && localConfigEngine === engine) {
+  } else if (localConfigEngine === engine) {
     // A service can come online from another route while its drawer is open.
     // Restore the ordinary action instead of leaving the previous Start state
     // frozen in the UI until the drawer is closed and reopened.
@@ -2975,27 +2780,16 @@ function preferEngine(next, current) {
   if (Boolean(next.pid) !== Boolean(current.pid)) return Boolean(next.pid);
   return false;
 }
+// A stopped engine must not be forgotten: the saved record is what the drawer
+// shows and what Start replays. Reachability itself is preferEngine's job.
 function preferKnownEngine(next, current) {
   if (!current) return true;
-  if (Boolean(next.management) !== Boolean(current.management)) return Boolean(next.management);
   if (Boolean(next.offline) !== Boolean(current.offline)) return !next.offline;
   return preferEngine(next, current);
 }
 const localConnectedState = new Map();
 const localEngineDefinitions = new Map();
 let localConfigEngine = "";
-// Server-computed manage-form default (the install's own state dir): the
-// server knows the platform and the directory it owns; the frontend does not
-// guess at drive letters.
-let localKvDirectoryDefault = "";
-// Also server-computed: derived from the free space of the volume holding the
-// default directory, minus a system reserve - never a constant that assumes
-// the disk has room.
-let localKvBudgetDefaultGiB = 0;
-// The browser still permits typing an absolute path anywhere. Browse appears
-// only when this local gateway can open a Windows-native dialog for it.
-let localNativeHostPicker = false;
-let localHostPickerBusy = false;
 
 function localEngineLabel(engine) {
   return localEngineDefinitions.get(engine)?.label || localKnownEngines.get(engine)?.label || engine;
@@ -3003,10 +2797,10 @@ function localEngineLabel(engine) {
 
 function paintEngineButton(engine) {
   // Two controls that mirror the two authorities: Connect is the light,
-  // reversible decision (route requests through the gateway), Manage opens the
-  // drawer where the heavy boundaries live (host takeover, SSD KV). One
-  // "Configurations" button used to carry both, and users could not tell the
-  // weight of what they were about to click.
+  // reversible decision (route requests through the gateway), Open brings up
+  // the drawer holding that engine's own settings. One "Configurations" button
+  // used to carry both, and users could not tell the weight of what they were
+  // about to click.
   const connected = Boolean(localConnectedState.get(engine));
   // Reachable means a probe answered - discovery answers /props and /v1/models
   // before reporting an engine, and a hand-typed port only counts once connect
@@ -3050,7 +2844,7 @@ function renderLocalEngineState(engine, state) {
   // and offering it would read as a control that does not work.
   localCanRestart.set(engine, Boolean(state?.canRestart));
   if (localConfigEngine === engine) {
-    renderLocalStartAction(engine, localKnownEngines.get(engine) || localDiscovery.get(engine));
+    renderLocalStartAction(engine);
   }
 }
 
@@ -3059,142 +2853,29 @@ const renderLocalSections = {
   vllm: (state) => renderLocalEngineState("vllm", state),
 };
 
-function showLocalHostManageStatus(message, isError = false) {
-  const status = $("local-host-manage-status");
-  if (!status) return;
-  status.hidden = !message;
-  status.textContent = message || "";
-  status.classList.toggle("is-error", Boolean(isError));
-}
-
-function renderLocalHostControl(engine, found) {
-  const control = $("local-host-control");
-  if (!control) return;
-  const supported = engine === "llamacpp";
-  control.hidden = !supported;
-  if (!supported) return;
-
-  const online = Boolean(found && !found.offline && localDiscovery.has("llamacpp"));
-  const routed = Boolean(localConnectedState.get("llamacpp"));
-  const connected = online && routed;
-  const management = found?.management || null;
-  const gateway = $("local-host-gateway-state");
-  if (gateway) {
-    gateway.textContent = connected
-      ? t("host.gatewayConnected")
-      : (routed && !online
-        ? t("local.gatewayOffline", { count: found?.connectedModels || 0 })
-        : t("host.gatewayNotConnected"));
-  }
-  const state = $("local-host-management-state");
-  if (state) {
-    state.textContent = management
-      ? hostControlSummary(management)
-      : (found?.recommendedProfile
-        ? t("host.automaticTarget", {
-            state: t("host.userOwned"),
-            lanes: found.recommendedProfile.laneCount,
-            context: formatContextSize(found.recommendedProfile.laneContextTokens),
-          })
-        : t("host.userOwned"));
-  }
-  const form = $("local-host-management-form");
-  // A managed host still needs to show the exact model, projector, and SSD KV
-  // paths that ModelDock will reuse after a restart. Hiding this form made a
-  // successful takeover look like a blank drawer and forced users to wonder
-  // whether their choices had been retained. The values are read-only while
-  // managed; Leave management returns the form to its editable setup state.
-  if (form) form.hidden = false;
-  // The drawer's bottom primary is contextual: before the gateway route exists
-  // it connects ("Connect and Save" - the manual-port path); once connected
-  // and unmanaged it performs the takeover ("Save and Manage"); once managed
-  // there is nothing left for it to save - Leave management is the action.
+// The drawer's contextual actions. There is deliberately no launch form:
+// this product connects to a port and replays the command it watched that
+// engine start with, it never composes a command line for somebody else's
+// process, so what is left to decide is which controls apply right now.
+function renderLocalDrawerActions(engine) {
+  const routed = Boolean(localConnectedState.get(engine));
+  // While the route exists the port is a fact to read, not a value to type.
+  const port = $("local-config-port");
+  if (port) port.readOnly = routed;
   const save = $("local-config-save");
-  if (save && localConfigEngine === engine) {
-    const manageMode = connected && !management;
-    save.dataset.mode = manageMode ? "manage" : "connect";
-    save.textContent = t(manageMode ? "local.saveManage" : "local.connect");
-    save.hidden = Boolean(management);
-  }
-  const release = $("local-host-unmanage");
-  if (release) {
-    release.hidden = !management;
-    release.dataset.hostId = management?.id || "";
-  }
-  // The restart escape hatch is offered whether or not this host is managed.
-  // The state it exists for is a local host that can be neither released nor
-  // drained, and an action that only appears once everything is healthy is not
-  // an escape hatch. It also never depends on the engine being reachable: it
-  // restarts ModelDock, not llama.cpp.
+  if (save && localConfigEngine === engine) save.hidden = false;
+  // The restart escape hatch never depends on the engine being reachable: it
+  // restarts ModelDock, not the engine.
   const serviceRestart = $("local-service-restart");
   if (serviceRestart) serviceRestart.hidden = false;
-  const directory = $("local-host-kv-directory");
-  if (directory && management?.cacheDirectory) directory.value = management.cacheDirectory;
-  if (directory && !management && !directory.value && localKvDirectoryDefault) {
-    directory.value = localKvDirectoryDefault;
-  }
-  const budget = $("local-host-kv-budget");
-  if (budget && management?.cacheBudgetBytes) budget.value = String(Math.round(Number(management.cacheBudgetBytes) / 1024 ** 3));
-  const observation = found?.observation || null;
-  const model = $("local-host-model-file");
-  if (model && management?.modelPath) model.value = management.modelPath;
-  if (model && !management && !model.value) model.value = observation?.modelPath || found?.launch?.model || "";
-  const visionToggle = $("local-host-vision-enabled");
-  const projector = $("local-host-vision-projector");
-  if (projector && management?.visionProjectorPath) projector.value = management.visionProjectorPath;
-  if (projector && !management && !projector.value) projector.value = observation?.visionProjectorPath || found?.launch?.visionProjectorPath || "";
-  if (visionToggle && management) visionToggle.checked = Boolean(management.visionProjectorPath);
-  if (visionToggle && !management && !visionToggle.dataset.observationApplied) {
-    visionToggle.checked = Boolean(observation?.supportsVision || projector?.value);
-    visionToggle.dataset.observationApplied = "true";
-  }
-  const projectorRow = $("local-host-vision-projector-row");
-  if (projectorRow) projectorRow.hidden = !Boolean(visionToggle?.checked);
-  const managedReadonly = Boolean(management);
-  for (const field of [model, projector, directory]) {
-    if (field) field.readOnly = managedReadonly;
-  }
-  if (budget) budget.disabled = managedReadonly;
-  if (visionToggle) visionToggle.disabled = managedReadonly;
-  const port = $("local-config-port");
-  if (port) port.readOnly = managedReadonly;
-  for (const id of ["local-host-model-browse", "local-host-vision-browse", "local-host-kv-browse"]) {
-    const browse = $(id);
-    if (browse) {
-      browse.hidden = !localNativeHostPicker;
-      browse.disabled = managedReadonly || localHostPickerBusy;
-    }
-  }
-  // Translate GiB into sessions: the default budget is deliberately small, and
-  // whether it is enough depends entirely on this model's full-context state
-  // size - a number the server already computed from the GGUF shape.
-  const hint = $("local-host-kv-hint");
-  if (hint) {
-    const stateBytes = Number(found?.kvFullStateBytes) || 0;
-    const budgetGiB = Number(budget?.value) || 0;
-    if (stateBytes > 0 && budgetGiB > 0) {
-      const stateGiB = stateBytes / 1024 ** 3;
-      hint.hidden = false;
-      hint.textContent = t("host.budgetHint", {
-        state: `${stateGiB >= 10 ? Math.round(stateGiB) : stateGiB.toFixed(1)} GiB`,
-        count: String(Math.max(0, Math.floor((budgetGiB * 1024 ** 3) / stateBytes))),
-      });
-    } else {
-      hint.hidden = true;
-      hint.textContent = "";
-    }
-  }
   const disconnect = $("local-config-disconnect");
-  // Offered while managed as well. Disconnect used to be hidden exactly when it
-  // was the only control that could still work: a managed host had to leave
-  // control first, and leaving control needed a server that could verify.
   if (disconnect) disconnect.hidden = !routed;
 }
 
 function localEnginePort(found, engine) {
   const direct = Number(found?.port);
   if (Number.isInteger(direct) && direct > 0 && direct <= 65535) return direct;
-  for (const value of [found?.baseUrl, found?.management?.endpoint]) {
+  for (const value of [found?.baseUrl]) {
     try {
       const parsed = new URL(String(value || ""));
       const port = Number(parsed.port);
@@ -3211,22 +2892,10 @@ async function openLocalConfig(engine) {
   const drawer = $("local-drawer");
   if (!drawer) return;
   // Configuration buttons render before the asynchronous first discovery
-  // completes. A managed host must not open as a blank editable form merely
-  // because that scan is still in flight: finish the one read, then show its
-  // durable paths read-only.
+  // completes. A remembered engine must not open as a blank form merely because
+  // that scan is still in flight: finish the one read, then show what it holds.
   if (!localKnownEngines.has(engine) && !localEngineDefinitions.has(engine)) await renderLocalEngines();
   const found = localKnownEngines.get(engine) || localDiscovery.get(engine);
-  if (engine === "llamacpp") {
-    const model = $("local-host-model-file");
-    const projector = $("local-host-vision-projector");
-    const toggle = $("local-host-vision-enabled");
-    if (model) model.value = "";
-    if (projector) projector.value = "";
-    if (toggle) {
-      toggle.checked = false;
-      delete toggle.dataset.observationApplied;
-    }
-  }
   const title = $("local-config-title");
   if (title) title.textContent = localEngineLabel(engine);
 
@@ -3251,29 +2920,19 @@ async function openLocalConfig(engine) {
     runtime.hidden = parts.length === 0;
   }
   renderEngineWarnings(found?.warnings);
-  // Fresh suggestions on every open: the server's default directory and a
-  // budget derived from what the volume can actually spare. A managed host
-  // shows its stored values instead (renderLocalHostControl overwrites).
-  const budgetField = $("local-host-kv-budget");
-  if (budgetField && !found?.management && localKvBudgetDefaultGiB > 0) {
-    budgetField.value = String(localKvBudgetDefaultGiB);
-  }
-  showLocalHostManageStatus("");
-
   const disconnect = $("local-config-disconnect");
   if (disconnect) disconnect.hidden = !localConnectedState.get(engine);
   const errorLine = $("local-config-error");
   if (errorLine) errorLine.hidden = true;
   const save = $("local-config-save");
   if (save) {
-    save.dataset.mode = "connect";
     save.hidden = false;
     save.textContent = t("local.connect");
   }
-  // After the defaults above: for a connected, unmanaged llama.cpp this
-  // switches the bottom primary into its "Save and Manage" mode.
-  renderLocalHostControl(engine, found);
-  renderLocalStartAction(engine, found);
+  // After the defaults above: for a connected llama.cpp this switches the
+  // bottom primary into its "Save and Manage" (launch spec) mode.
+  renderLocalDrawerActions(engine);
+  renderLocalStartAction(engine);
 
   // Not modal: the row this drawer describes stays readable beside it, which
   // is the whole reason it is not the dialog it replaced.
@@ -3286,8 +2945,6 @@ function closeLocalConfig() {
   const drawer = $("local-drawer");
   if (drawer) drawer.hidden = true;
   localConfigEngine = "";
-  const hostControl = $("local-host-control");
-  if (hostControl) hostControl.hidden = true;
   for (const engineId of localEngineIds) paintEngineButton(engineId);
 }
 
@@ -3365,8 +3022,7 @@ for (const engineId of localEngineIds) {
   // One-click routing toggle. Connect posts with no baseUrl so the server
   // discovers the address the same way the drawer prefill does; when nothing
   // was discovered the drawer opens instead, which already carries the manual
-  // port hint. Disconnect of a managed llama.cpp host is refused by the server
-  // (409) and the message lands on the engine's error line.
+  // port hint. Disconnect is the escape hatch and never asks the engine first.
   $(`${engineId}-connect`)?.addEventListener("click", async () => {
     const button = $(`${engineId}-connect`);
     const ollama = engineId === "ollama";
@@ -3454,11 +3110,11 @@ $("local-config-start")?.addEventListener("click", async () => {
 });
 $("local-config-close")?.addEventListener("click", closeLocalConfig);
 
-// Restart the gateway service and stop for nothing. This route is deliberately
-// outside the config mutation queue and deliberately skips the KV handoff, so a
-// request that has wedged the coordinator - and therefore the release and
-// checkpoint routes behind it - cannot also block its own recovery. Dropping warm
-// KV costs the next turn a prefill; refusing to restart would cost the session.
+// Restart the ModelDock service itself and stop for nothing. The route is
+// deliberately outside the config mutation queue: the state it exists for is a
+// gateway that has wedged a config mutation, so an action queued behind that
+// mutation could never run. Losing the warm prefix costs the next turn one
+// prefill; refusing to restart would cost the session.
 $("local-service-restart")?.addEventListener("click", async () => {
   const button = $("local-service-restart");
   if (!button || button.disabled) return;
@@ -3490,10 +3146,7 @@ $("local-service-restart")?.addEventListener("click", async () => {
     button.textContent = t("host.restartService");
   }
 });
-$("local-config-save")?.addEventListener("click", () => {
-  if ($("local-config-save")?.dataset.mode === "manage") submitLocalManage().catch(() => {});
-  else submitLocalConfig("connect").catch(() => {});
-});
+$("local-config-save")?.addEventListener("click", () => { submitLocalConfig("connect").catch(() => {}); });
 // Folding a section away. The button carries the state on aria-expanded, so
 // the stylesheet turns the glyph and assistive technology reads the same fact
 // from the same place rather than from a class that has to be kept in step.
@@ -3511,125 +3164,6 @@ for (const engineId of localEngineIds) {
 
 
 $("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
-
-// The sessions estimate must follow the number being typed, not the number
-// that was there when the drawer opened.
-$("local-host-kv-budget")?.addEventListener("input", () => {
-  if (localConfigEngine !== "llamacpp") return;
-  renderLocalHostControl("llamacpp", localDiscovery.get("llamacpp"));
-});
-
-function showLocalHostVisionProjector() {
-  const enabled = Boolean($("local-host-vision-enabled")?.checked);
-  const row = $("local-host-vision-projector-row");
-  if (row) row.hidden = !enabled;
-}
-
-async function browseLocalHostPath(kind, inputId) {
-  if (localHostPickerBusy) return;
-  localHostPickerBusy = true;
-  renderLocalHostControl(localConfigEngine, localDiscovery.get(localConfigEngine));
-  showLocalHostManageStatus("");
-  try {
-    const response = await fetch("/api/local/pick", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ kind }),
-    });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Pick ${response.status}`);
-    const field = $(inputId);
-    if (field && body.path) field.value = body.path;
-  } catch (error) {
-    showLocalHostManageStatus(error.message, true);
-  } finally {
-    localHostPickerBusy = false;
-    renderLocalHostControl(localConfigEngine, localDiscovery.get(localConfigEngine));
-  }
-}
-
-$("local-host-vision-enabled")?.addEventListener("change", showLocalHostVisionProjector);
-$("local-host-model-browse")?.addEventListener("click", () => { browseLocalHostPath("model", "local-host-model-file").catch(() => {}); });
-$("local-host-vision-browse")?.addEventListener("click", () => { browseLocalHostPath("vision_projector", "local-host-vision-projector").catch(() => {}); });
-$("local-host-kv-browse")?.addEventListener("click", () => { browseLocalHostPath("kv_directory", "local-host-kv-directory").catch(() => {}); });
-
-// The takeover action lives on the drawer's bottom primary button ("Save and
-// Manage") once the host is connected - the first-level Manage button already
-// said what the drawer is for, so a second "Manage this host" inside it was
-// the same decision asked twice.
-async function submitLocalManage() {
-  if (localConfigEngine !== "llamacpp") return;
-  const modelPath = String($("local-host-model-file")?.value || "").trim();
-  const visionEnabled = Boolean($("local-host-vision-enabled")?.checked);
-  const visionProjectorPath = String($("local-host-vision-projector")?.value || "").trim();
-  const directory = String($("local-host-kv-directory")?.value || "").trim();
-  const budgetGiB = Number($("local-host-kv-budget")?.value || 0);
-  if (!modelPath) {
-    showLocalHostManageStatus(t("host.chooseModel"), true);
-    return;
-  }
-  if (visionEnabled && !visionProjectorPath) {
-    showLocalHostManageStatus(t("host.chooseVisionProjector"), true);
-    return;
-  }
-  if (!directory) {
-    showLocalHostManageStatus(t("host.chooseFolder"), true);
-    return;
-  }
-  if (!Number.isSafeInteger(budgetGiB) || budgetGiB < 1 || budgetGiB > 1024) {
-    showLocalHostManageStatus(t("host.chooseBudget"), true);
-    return;
-  }
-  const button = $("local-config-save");
-  if (button) button.disabled = true;
-  showLocalHostManageStatus(t("host.verifying"));
-  try {
-    const response = await fetch("/api/local/manage", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        engine: "llamacpp",
-        modelPath,
-        visionProjectorPath: visionEnabled ? visionProjectorPath : "",
-        cacheDirectory: directory,
-        cacheBudgetGiB: budgetGiB,
-      }),
-    });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || body.message || `Manage ${response.status}`);
-    await renderLocalEngines();
-    openLocalConfig("llamacpp");
-    showLocalHostManageStatus(managedPlanSummary(body.management?.profile));
-  } catch (error) {
-    showLocalHostManageStatus(error.message, true);
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-$("local-host-unmanage")?.addEventListener("click", async () => {
-  const button = $("local-host-unmanage");
-  const hostId = String(button?.dataset.hostId || "").trim();
-  if (!hostId) return;
-  if (button) button.disabled = true;
-  showLocalHostManageStatus(t("host.releasing"));
-  try {
-    const response = await fetch("/api/local/unmanage", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ hostId }),
-    });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error?.message || `Unmanage ${response.status}`);
-    await renderLocalEngines();
-    openLocalConfig("llamacpp");
-  } catch (error) {
-    showLocalHostManageStatus(error.message, true);
-  } finally {
-    if (button) button.disabled = false;
-  }
-});
-
 
 // --- xAI (Grok) subscription sign-in ---
 //
@@ -3859,7 +3393,7 @@ function redrawWaves() {
 // class, so the SSE stream, poll timers, and every listener registered below
 // survive navigation - a per-page reload would tear all of that down and
 // rebuild it on every click.
-const VIEWS = ["dashboard", "cloud", "local", "stats", "models", "hostmonitor"];
+const VIEWS = ["dashboard", "cloud", "local", "stats", "models"];
 const LEGACY_VIEWS = { subscriptions: "cloud", api: "cloud" };
 
 function routeToView(name) {
@@ -3882,7 +3416,6 @@ function currentView() {
   // The canvases could not draw while this view was hidden, so returning to
   // it has to repaint rather than wait for the next datum to arrive.
   if (view === "dashboard") redrawWaves();
-  if (view === "hostmonitor" && lastData) renderLocalHostDashboard(lastData);
   if (view === "stats") loadStats().catch(() => {});
   if (view === "models") renderModelRoster().catch(() => {});
   return view;

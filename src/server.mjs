@@ -1,7 +1,7 @@
 import path from "node:path";
 import os from "node:os";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, statfsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express from "express";
@@ -14,7 +14,7 @@ import { nativeModelSlugs, refreshNativeCatalog } from "./native-catalog.mjs";
 import { MediaStore } from "./media-store.mjs";
 import { CodexAttachmentIndex } from "./codex-attachment-index.mjs";
 import { Metrics } from "./metrics.mjs";
-import { NATIVE_AUXILIARY_PATHS, localWarmBaseFromSessionOpening, relayNativeAuxiliary, relayResponses as relayGatewayResponses } from "./gateway.mjs";
+import { NATIVE_AUXILIARY_PATHS, relayNativeAuxiliary, relayResponses as relayGatewayResponses } from "./gateway.mjs";
 import { createUpstreams } from "./upstreams.mjs";
 import { createMcpNodeHandler, recordMcpError } from "./mcp.mjs";
 import { memoryStoreFor } from "./memory.mjs";
@@ -27,7 +27,6 @@ import { clearOwnerFile, describeOwnerConflict, writeOwnerFile } from "./instanc
 import { runGatewayVerifierCli } from "../scripts/gateway-verifier.mjs";
 import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
-import { latestCodexSessionOpening } from "./codex-session-prefix.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
@@ -48,7 +47,7 @@ import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomR
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
-import { readRecentConversations, usageEventsPath } from "./usage-events.mjs";
+import { usageEventsPath } from "./usage-events.mjs";
 import { attachSseKeepAlive } from "./sse.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath, writeVisionOverrides } from "./vision-overrides.mjs";
@@ -57,32 +56,12 @@ import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { canonicalUsageModelId, foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
-import { launchSpecFrom, managedLlamaLaunchArgs, spawnEngineDetached } from "./engine-processes.mjs";
+import { launchSpecFrom, spawnEngineDetached } from "./engine-processes.mjs";
 import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
 import { localEngineDefinitions } from "./local-engine-definitions.mjs";
-import { createObservedHost, takeOverHost } from "./local-hosts.mjs";
-import { readLocalHostRegistry, removeLocalHost, upsertLocalHost, writeLocalHostRegistry } from "./local-host-registry.mjs";
-import { applyLocalHostPlan, calibrateAndApplyLocalHostPlan, reconcileInterruptedLocalHost, verifyLocalHost } from "./local-host-runner.mjs";
-import {
-  backoffNvidiaRuntimeProfile,
-  createNvidiaProfileInput,
-  estimateNvidiaRuntimeCapacity,
-  LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS,
-  LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS,
-  optimisticNvidiaParallelContext,
-  rebalanceNvidiaProfileInput,
-  sampleGpuMetrics,
-  selectNvidiaRuntimeProfile,
-  shouldProbeNvidiaParallelism,
-} from "./local-host-nvidia.mjs";
-import { createLocalHostLifecycleOperations, probeLlamaRequestSlotAffinity } from "./local-host-lifecycle.mjs";
-import { createLocalHostCapacityFromLaneProfile } from "./local-host-capacity.mjs";
-import { sameKvStorageDirectory } from "./local-host-kv-state.mjs";
-import { LocalHostPickerError, nativeLocalHostPickerAvailable, pickLocalHostPath } from "./local-host-picker.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
 import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
-import { kvBytesPerToken, readModelFacts } from "./gguf.mjs";
 import staticFiles from "./static-inline.mjs";
 import {
   DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
@@ -141,78 +120,10 @@ function serveInlineStatic(app) {
   });
 }
 
-function managedHostId(engine, baseUrl) {
-  const type = String(engine || "").trim();
-  try {
-    const parsed = new URL(baseUrl);
-    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-    return `${type}-${port}`;
-  } catch {
-    return "";
-  }
-}
-
-function engineSummaryKey(engine) {
-  try {
-    return `${engine?.engine || ""}:${new URL(engine?.baseUrl || "").host}`;
-  } catch {
-    return "";
-  }
-}
-
-// One shared spelling with the KV store's manifest adoption (see
-// sameKvStorageDirectory): the two comparing differently is how a re-spelled
-// Windows path once bricked the store while this route said everything matched.
-const sameStorageDirectory = sameKvStorageDirectory;
-
-function isAbsoluteStorageDirectory(value) {
-  const directory = String(value || "").trim();
-  return path.isAbsolute(directory) || /^[a-z]:[\\/]/i.test(directory);
-}
-
 function llamaLaunchArgument(launch, spellings) {
   const args = Array.isArray(launch?.args) ? launch.args : [];
   const index = args.findIndex((value) => spellings.includes(value));
   return index >= 0 ? String(args[index + 1] || "").trim() : "";
-}
-
-function readManagedModelFacts(file, read = readModelFacts) {
-  const model = String(file || "").trim();
-  if (!isAbsoluteStorageDirectory(model)) {
-    throw new LocalEngineError("model_file", "Choose an absolute GGUF model file for managed local inference.");
-  }
-  try {
-    return read(model);
-  } catch (error) {
-    throw new LocalEngineError("model_file", `ModelDock could not read that GGUF model file: ${error.message}`);
-  }
-}
-
-function readManagedVisionProjector(file) {
-  const projector = String(file || "").trim();
-  if (!projector) return "";
-  if (!isAbsoluteStorageDirectory(projector)) {
-    throw new LocalEngineError("vision_projector", "Choose an absolute local vision projector file.");
-  }
-  try {
-    if (!statSync(projector).isFile()) throw new Error("not a file");
-  } catch {
-    throw new LocalEngineError("vision_projector", "The selected local vision projector file is not readable.");
-  }
-  return projector;
-}
-
-function managedLaunchHasVision(record) {
-  const args = record?.activeSpec?.args;
-  const position = Array.isArray(args) ? args.indexOf("--mmproj") : -1;
-  return position >= 0 && Boolean(String(args[position + 1] || "").trim());
-}
-
-function managedCapacity(profile) {
-  if (!profile) return null;
-  return createLocalHostCapacityFromLaneProfile(profile, {
-    outputReserveTokens: Math.min(16_384, Math.max(1, Math.floor(profile.laneContextTokens / 4))),
-  });
 }
 
 // One projection owns the catalog-facing model facts learned from a local
@@ -241,141 +152,6 @@ function projectLocalModel(current, {
     ...(typeof mediaMarker === "string" ? { mediaMarker } : {}),
     ...(contextWindow > 0 ? { contextWindow } : {}),
   };
-}
-
-function managedHostSummary(record, engine) {
-  if (!record || record.adapterId !== "llamacpp-nvidia") return null;
-  const storage = record.kvState;
-  const launchDirectory = engine?.launch?.slotSavePath || "";
-  const profile = record.activeProfile || record.desiredProfile || null;
-  const capacity = managedCapacity(profile);
-  return {
-    id: record.id,
-    state: record.state,
-    // These choices are durable managed facts. The active argv is the fallback
-    // for a record written by an earlier build that did not mirror one of them
-    // into capabilities; a newly observed process must never erase either.
-    modelPath: record.capabilities?.model || llamaLaunchArgument(record.activeSpec, ["-m", "--model"]) || engine?.launch?.model || "",
-    modelName: record.capabilities?.modelFacts?.modelName || engine?.modelFacts?.modelName || "",
-    visionProjectorPath: record.capabilities?.visionProjectorPath || llamaLaunchArgument(record.activeSpec, ["--mmproj"]) || "",
-    cacheDirectory: storage?.directory || llamaLaunchArgument(record.activeSpec, ["--slot-save-path"]) || "",
-    cacheBudgetBytes: storage?.budgetBytes || 0,
-    profile,
-    capacity,
-    preTakeoverContextTokens: Number(record.capabilities?.contextTokens) || 0,
-    // A takeover verifies the observed engine without disturbing it. The
-    // explicit restart that adds --slot-save-path is a later, separate action,
-    // so the UI must distinguish authority from an active cache launch.
-    ssdState: storage && sameStorageDirectory(storage.directory, launchDirectory)
-      ? "configured"
-      : "restart_required",
-    failure: record.failure || "",
-  };
-}
-
-async function localHostSummaries(engines, registryFile) {
-  let registry;
-  try {
-    registry = await readLocalHostRegistry(registryFile);
-  } catch (error) {
-    console.log(`[gate] local host registry ignored: ${error.message}`);
-    return new Map();
-  }
-  const summaries = new Map();
-  for (const engine of engines) {
-    if (engine.engine !== "llamacpp" || !engine.baseUrl) continue;
-    const record = Object.values(registry.hosts).find((candidate) => (
-      candidate.adapterId === "llamacpp-nvidia" && sameLocalHost(candidate.endpoint, engine.baseUrl)
-    ));
-    const summary = managedHostSummary(record, engine);
-    if (summary) summaries.set(engineSummaryKey(engine), summary);
-  }
-  return summaries;
-}
-
-async function publishManagedLocalEngine(services, record, running) {
-  const file = services.localEnginesFile || localEnginesSnapshotPath();
-  const snapshot = readLocalEnginesSnapshot(file)?.llamacpp;
-  if (!snapshot?.models?.length || !record?.activeSpec) return false;
-  const capacity = managedCapacity(record.activeProfile);
-  const contextWindow = Number(capacity?.maxSingleRequestTokens)
-    || Number(running?.launch?.ctxSize)
-    || Number(record.capabilities?.contextTokens)
-    || 0;
-  const facts = running?.modelFacts || record.capabilities?.modelFacts || null;
-  const endpointModel = Array.isArray(running?.models) && running.models.length === 1 ? running.models[0] : "";
-  // A managed argv is useful fallback during recovery, but a running
-  // llama.cpp /props response is the authoritative answer. This matters when
-  // the process was manually changed between gateway starts.
-  const supportsVision = typeof running?.supportsVision === "boolean"
-    ? running.supportsVision
-    : managedLaunchHasVision(record);
-  const models = snapshot.models.map((model) => projectLocalModel(model, {
-    modelFacts: facts,
-    upstreamId: endpointModel,
-    supportsVision,
-    chatTemplateSupportsObjectArguments: running?.chatTemplateSupportsObjectArguments,
-    mediaMarker: running?.mediaMarker,
-    contextWindow,
-  }));
-  // What decides "restart Codex" is the published catalog projection, not the
-  // snapshot file: the llama.cpp entry publishes under a stable id, so a model
-  // swap changes the wire id and the drawer facts without changing anything
-  // Codex was told. Diffing the file nagged a restart for an invisible edit.
-  const publishedBefore = publishedCatalogFingerprint("llamacpp");
-  const next = { ...snapshot, launch: record.activeSpec, models };
-  writeLocalEngineSnapshot(file, "llamacpp", next);
-  applyLocalEngineProfile("llamacpp", next);
-  const publishedAfter = publishedCatalogFingerprint("llamacpp");
-  services.writeCatalogFile?.();
-  const changed = publishedAfter !== publishedBefore;
-  if (changed) await services.configSwitcher.markRestartRequired();
-  return changed;
-}
-
-// A managed host is prewarmed from Codex's real opening envelope, not from a
-// hand-written calibration prompt. The envelope is read into memory only; the
-// durable KV manifest keeps just the resulting fingerprint and bootstrap
-// transcript. A miss is non-fatal: the host is still fully usable cold.
-//
-// The envelope is taken from the conversations that actually sent traffic to
-// this host, newest first, and only then from the newest Codex task on disk.
-// A base is a prefix-specific cache: priming the newest task of an unrelated
-// project writes a base no local request will ever name, while the conversation
-// that really uses the local model cold-prefills on every turn.
-async function primeManagedLocalWarmBase(services, record) {
-  if (!record?.activeSpec || !services.localHostRuntime?.primeWarmBase) return { primed: false, reason: "unavailable" };
-  // The base must be built under the identity a live request will arrive with.
-  // That is the stable entry the profile publishes, not whatever id the
-  // snapshot file was written under by an older build.
-  const localModel = profileById("llamacpp")?.availableModels?.[0]?.id;
-  if (!localModel) return { primed: false, reason: "model_unavailable" };
-  const conversations = await (services.readRecentConversations || readRecentConversations)({
-    provider: "llamacpp",
-    filePath: services.usageEventsFile || usageEventsPath(),
-  });
-  const opening = await (services.latestCodexSessionOpening || latestCodexSessionOpening)({
-    sessionsRoot: path.join(services.config.codexHome, "sessions"),
-    preferredSessionIds: conversations,
-  });
-  if (!opening) return { primed: false, reason: "opening_unavailable" };
-  if (conversations.length && !conversations.includes(opening.sessionId)) {
-    // A Codex rollout has to record both the global instructions and the dynamic
-    // tool envelope for its prefix to be reproducible. When the conversations
-    // that really used this host stopped recording one, every candidate is
-    // rejected and the scan walks back to an unrelated older task; a base built
-    // from it cannot match a live request, so saying nothing would leave the
-    // user with a warm base that is warm for nobody.
-    console.log(`[gate] local host has ${conversations.length} local conversation(s) (newest ${String(conversations[0]).slice(0, 8)}), but none of their Codex rollouts supply a complete opening envelope; prewarmed from ${String(opening.sessionId || "unknown").slice(0, 8)} instead, which a current request is unlikely to name.`);
-  }
-  const model = publishedSlugFor("llamacpp", localModel);
-  const warmBase = localWarmBaseFromSessionOpening({ config: services.config, model, opening });
-  if (!warmBase) return { primed: false, reason: "prefix_unavailable" };
-  const primed = await services.localHostRuntime.primeWarmBase(warmBase);
-  // Which conversation the base was built for, and whether it was already
-  // stored: this is the pair of facts that made a wrong-prime invisible.
-  console.log(`[gate] local host warm base ${primed?.reused ? "reused" : primed?.primed ? "primed" : `not primed (${primed?.reason || "unknown"})`} for conversation ${String(opening.sessionId || "unknown").slice(0, 8)} of ${conversations.length ? "a local conversation" : "the newest Codex task"}.`);
-  return primed;
 }
 
 // Pick one complete route for ON mode. The current provider wins when it is
@@ -624,43 +400,6 @@ function engineWarnings(engine, gpus = []) {
   return warnings;
 }
 
-// KV slot states are the biggest thing this gateway ever writes, and the
-// default directory sits under the user profile - usually the system drive.
-// So the budget default is derived from what that volume can actually spare,
-// and a manage request is refused when its budget could not fit: the reserve
-// stays untouched for the OS (updates, pagefile, hibernation), never handed
-// to cache.
-const KV_DISK_RESERVE_BYTES = 20 * 1024 ** 3;
-const KV_BUDGET_DEFAULT_MAX_GIB = 8;
-
-// Free bytes on the volume that holds (or will hold) the directory. The
-// directory itself may not exist yet, so the nearest existing ancestor
-// answers for its volume. -1 means "could not measure" - callers must treat
-// that as unknown, not as empty.
-function kvVolumeFreeBytes(directory) {
-  let probe = path.resolve(String(directory || ""));
-  for (let depth = 0; depth < 100; depth += 1) {
-    if (existsSync(probe)) {
-      try {
-        const stats = statfsSync(probe);
-        return Number(stats.bavail) * Number(stats.bsize);
-      } catch {
-        return -1;
-      }
-    }
-    const parent = path.dirname(probe);
-    if (parent === probe) return -1;
-    probe = parent;
-  }
-  return -1;
-}
-
-function kvBudgetDefaultFor(freeBytes) {
-  if (!(freeBytes > 0)) return 1;
-  const usable = Math.floor((freeBytes - KV_DISK_RESERVE_BYTES) / 1024 ** 3);
-  return Math.max(1, Math.min(KV_BUDGET_DEFAULT_MAX_GIB, usable));
-}
-
 // Connection snapshots predate GGUF header names, so a previously connected
 // llama.cpp server still publishes its disk path after an upgrade until the
 // user presses Connect again. Discovery already observes both sides without
@@ -691,12 +430,11 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
   });
   if (JSON.stringify(current) === JSON.stringify(next)) return null;
   // A swapped file is a real event even when the published identity hides it:
-  // KV slots, warm bases, and the drawer facts all reset against the new
-  // fingerprint. Silent in the log meant "the engine changed and nothing said
-  // why the first turn is cold."
+  // the drawer facts reset against the new fingerprint. Silent in the log
+  // meant "the engine changed and nothing said why."
   if ((current.upstreamId || "") !== (next.upstreamId || "")) {
     const base = (value) => String(value || "").replace(/\\/g, "/").split("/").pop() || "unknown";
-    console.log(`[gate] local engine model changed: ${base(current.upstreamId)} -> ${base(next.upstreamId)}; published entry stays stable, warm KV rebuilds from the new fingerprint.`);
+    console.log(`[gate] local engine model changed: ${base(current.upstreamId)} -> ${base(next.upstreamId)}; the published entry stays stable.`);
   }
   return {
     ...snapshot,
@@ -704,59 +442,10 @@ function refreshedSingleModelSnapshot(snapshot, engine) {
   };
 }
 
-async function probeManagedNvidiaGpus(services) {
-  const probe = services.probeGpus || probeGpus;
-  return probe({});
-}
-
 async function discoveredLocalEngine(services, engine, baseUrl = "") {
   const found = await (services.discoverEngines || discoverLocalEngines)({});
   return found.find((candidate) => candidate.engine === engine
     && (!baseUrl || sameLocalHost(candidate.baseUrl, baseUrl))) || null;
-}
-
-function managedLifecycleOperations(services, record) {
-  return (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
-    hostId: record.id,
-    endpoint: record.endpoint,
-    registryFile: services.localHostRegistryFile,
-    discover: () => (services.discoverEngines || discoverLocalEngines)({}),
-    runtime: services.localHostRuntime,
-    logDir: services.engineLogDir || stateFile("engine-logs"),
-  });
-}
-
-function calibrationLaneProfile(target, { laneCount = 1, laneContextTokens = LOCAL_HOST_NVIDIA_CALIBRATION_CONTEXT_TOKENS, id = "bootstrap" } = {}) {
-  const context = laneContextTokens;
-  return Object.freeze({
-    adapterId: target.adapterId,
-    modelId: target.modelId,
-    profileId: `calibration-${id}-p${laneCount}-c${context}`,
-    laneCount,
-    laneContextTokens: context,
-    totalContextTokens: laneCount * context,
-    deviceIndices: target.deviceIndices,
-    tensorSplit: target.tensorSplit,
-  });
-}
-
-async function requireManagedGpuHeadroom(services, profile) {
-  if (!profile || String(profile.profileId || "").startsWith("calibration-")) return;
-  // CUDA can finish graph/workspace allocation just after llama.cpp starts
-  // serving /props. Sampling on the same turn would certify a profile that
-  // becomes overcommitted before its first real prompt.
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  const sample = await probeManagedNvidiaGpus(services);
-  const shortages = [];
-  for (const allocation of profile.gpus || []) {
-    const { freeBytes } = sampleGpuMetrics(sample, allocation);
-    if (freeBytes < 1024 ** 3) {
-      shortages.push(`${allocation.id} has ${(freeBytes / 1024 ** 3).toFixed(2)} GiB free`);
-    }
-  }
-  if (shortages.length) {
-    throw new Error(`The managed profile did not retain the required 1 GiB GPU headroom: ${shortages.join(", ")}.`);
-  }
 }
 
 function statusPayload(services) {
@@ -818,7 +507,6 @@ function statusPayload(services) {
     subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
-    localHost: services.localHostRuntime?.snapshot?.() || { managed: false, activeCount: 0, pendingCount: 0, hotCount: 0, lanes: [] },
     runtime: {
       nodeVersion: process.version,
       zstdBackend: typeof zlib.zstdDecompress === "function" ? "native" : "fallback",
@@ -1049,7 +737,6 @@ async function relayGatewayRequest(req, res, services) {
       // values instead of inferring a second serialized copy for metrics.
       ingressBytes: req.modeldockIngressBytes,
       requestUrl: req.originalUrl,
-      localHostRuntime: services.localHostRuntime,
       usageEventsFile: services.usageEventsFile,
       signal: controller.signal,
     });
@@ -2116,24 +1803,11 @@ export function createApp(services = createServices()) {
         ...engine,
         connected: attached(engine),
         connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
-        // A final managed profile requires a target-process calibration after
-        // the previous server is stopped. Do not display an unverified static
-        // estimate as an "automatic target" before that transaction occurs.
-        recommendedProfile: null,
-        // What one full-context session state costs on disk, so the SSD budget
-        // field can say "this holds about N sessions" instead of asking the
-        // user to intuit GiB. f16 is the state llama.cpp writes by default;
-        // a quantized cache only makes the estimate conservative.
-        kvFullStateBytes: (() => {
-          const perToken = kvBytesPerToken(engine.modelFacts);
-          const context = Number(engine.launch?.ctxSize) || Number(engine.modelFacts?.trainedContext) || 0;
-          return perToken && context ? perToken * context : 0;
-        })(),
       })).map((engine) => ({ ...engine, warnings: engineWarnings(engine, gpus) }));
       // A gateway update can come up before a managed local engine has started
       // answering again. Keep its durable row in this scan so the drawer can
-      // still show the user's selected model, projector, and SSD KV settings
-      // instead of replacing them with empty defaults while the host returns.
+      // still show the user's selected model and projector instead of
+      // replacing them with empty defaults while the host returns.
       for (const [engine, snapshot] of Object.entries(saved)) {
         if (engines.some((found) => found.engine === engine && found.connected)) continue;
         engines.push({
@@ -2147,11 +1821,8 @@ export function createApp(services = createServices()) {
           offline: true,
         });
       }
-      const hostSummaries = await localHostSummaries(engines, services.localHostRegistryFile);
-      // The window Codex is told about has to follow the per-lane window the
-      // engine is actually serving. In managed P2/P3 mode llama.cpp's -c is the
-      // total KV pool, while Codex must receive only one equal lane's C.
-      // A connected engine publishes its context from meta.n_ctx, read once at
+      // The window Codex is told about has to follow the window the engine is
+      // actually serving. A connected engine publishes its context from meta.n_ctx, read once at
       // connect time. Restart it on a smaller -c - through the drawer, or by
       // hand - and the published figure stays where it was, so Codex keeps
       // packing against the old number and auto-compacts near 80% of it. An
@@ -2163,9 +1834,7 @@ export function createApp(services = createServices()) {
       // which is what the restart banner is for.
       for (const engine of engines) {
         const snapshot = saved[engine.engine];
-        const running = Number(engine.launch?.ctxSize) || 0;
-        const managedContext = Number(hostSummaries.get(engineSummaryKey(engine))?.profile?.laneContextTokens) || 0;
-        const declared = managedContext || running;
+        const declared = Number(engine.launch?.ctxSize) || 0;
         if (!engine.connected || !declared || !snapshot?.models?.length) continue;
         if (snapshot.models.every((model) => Number(model.contextWindow) === declared)) continue;
         const models = snapshot.models.map((model) => ({ ...model, contextWindow: declared }));
@@ -2194,33 +1863,11 @@ export function createApp(services = createServices()) {
         await services.configSwitcher.markRestartRequired();
         recordConfigAction(metrics, `local_model_name_refreshed_${engine.engine}`, { ok: true });
       }
-      const runtimeStatus = await services.localHostRuntime?.status?.() || services.localHostRuntime?.snapshot?.() || null;
       return res.json({
         engineDefinitions: localEngineDefinitions(),
-        // The manage form's suggested SSD KV directory and budget.
-        // Server-computed so the default directory is one this install already
-        // owns (state dir, correct permissions, removed with the install) on
-        // every platform, and the default budget follows the volume's real
-        // free space minus the system reserve instead of assuming the disk
-        // has room.
-        ...(() => {
-          const kvDirectoryDefault = services.kvDirectoryDefault || stateFile("kv");
-          const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(kvDirectoryDefault);
-          return {
-            kvDirectoryDefault,
-            kvBudgetDefaultGiB: kvBudgetDefaultFor(freeBytes),
-            nativeLocalHostPicker: (services.nativeLocalHostPickerAvailable || nativeLocalHostPickerAvailable)(),
-          };
-        })(),
         engines: engines.map((engine) => ({
           ...engine,
           observation: attached(engine) ? saved[engine.engine]?.observation || null : null,
-          management: (() => {
-            const management = hostSummaries.get(engineSummaryKey(engine)) || null;
-            return management && runtimeStatus?.hostId === management.id
-              ? { ...management, runtime: runtimeStatus }
-              : management;
-          })(),
         })),
       });
     } catch (error) {
@@ -2347,501 +1994,15 @@ export function createApp(services = createServices()) {
     }
   });
 
-  // The browser cannot reveal an absolute path from an <input type=file>, but
-  // llama.cpp must receive one in argv. This endpoint exposes only fixed
-  // native-dialog kinds; it never executes a caller-provided command or path.
-  app.post("/api/local/pick", localPostGuard, async (req, res) => {
-    try {
-      const selected = await (services.pickLocalHostPath || pickLocalHostPath)(req.body?.kind);
-      return res.json({ path: selected });
-    } catch (error) {
-      const status = error instanceof LocalHostPickerError
-        ? (error.code === "picker_timeout" ? 408 : (["picker_unsupported", "picker_busy"].includes(error.code) ? 409 : 400))
-        : 502;
-      return res.status(status).json({ error: { type: error.code || "picker_failed", message: error.message } });
-    }
-  });
-
-  // Connecting is observation and routing only. Takeover is the one automatic
-  // path that chooses a per-GPU profile, drains work, restarts with fixed equal
-  // slots plus SSD state, verifies the real process and rolls back to the exact
-  // pre-takeover argv on any failure.
-  // Serialized behind the config mutation queue: manage rewrites the registry
-  // and restarts a process, and the runtime's beginTransition() answers a
-  // concurrent attempt with an error - but a double-click deserves "wait your
-  // turn", not a 502.
-  app.post("/api/local/manage", mutateConfig, async (req, res) => {
-    const { engine, cacheDirectory, cacheBudgetGiB } = req.body || {};
-    try {
-      if (engine !== "llamacpp") throw new LocalEngineError("engine", "Managed host control currently supports NVIDIA llama.cpp only.");
-      if (!isAbsoluteStorageDirectory(cacheDirectory)) {
-        throw new LocalEngineError("kv_directory", "Choose an absolute SSD cache directory for managed KV state.");
-      }
-      const budgetGiB = Number(cacheBudgetGiB);
-      if (!Number.isSafeInteger(budgetGiB) || budgetGiB < 1 || budgetGiB > 1024) {
-        throw new LocalEngineError("kv_budget", "Choose a whole-number SSD KV budget from 1 through 1024 GiB.");
-      }
-      // The chosen volume must actually hold the budget, with the system
-      // reserve untouched. Measured on the nearest existing ancestor, so a
-      // not-yet-created folder still answers; files already inside the KV
-      // directory count against "free", which makes a re-manage at the same
-      // budget slightly conservative - the safe direction.
-      const freeBytes = (services.probeKvFreeBytes || kvVolumeFreeBytes)(cacheDirectory);
-      if (freeBytes >= 0 && budgetGiB * 1024 ** 3 > freeBytes - KV_DISK_RESERVE_BYTES) {
-        const usable = Math.max(0, Math.floor((freeBytes - KV_DISK_RESERVE_BYTES) / 1024 ** 3));
-        throw new LocalEngineError(
-          "kv_budget_disk",
-          `That volume has ${(freeBytes / 1024 ** 3).toFixed(1)} GiB free; keeping ${Math.round(KV_DISK_RESERVE_BYTES / 1024 ** 3)} GiB for the system leaves at most ${usable} GiB for the KV budget.`,
-        );
-      }
-      const snapshot = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath())?.llamacpp;
-      if (!snapshot?.baseUrl) {
-        throw new LocalEngineError("not_connected", "Connect this llama.cpp server to the gateway before taking over host control.");
-      }
-      const running = await discoveredLocalEngine(services, "llamacpp", snapshot.baseUrl);
-      if (!running) throw new LocalEngineError("not_found", "The connected llama.cpp server is not answering. Start it, then take over host control.");
-      const launch = launchSpecFrom(running);
-      if (!launch) {
-        throw new LocalEngineError("not_attributable", "ModelDock cannot read this llama.cpp process command. Start it from an attributable local executable, then try again.");
-      }
-      if (running.launch?.model && !isAbsoluteStorageDirectory(running.launch.model)) {
-        throw new LocalEngineError("relative_model_path", "Host control needs an absolute model path so the exact command can be restarted and recovered safely.");
-      }
-      const modelSelectedByUser = req.body?.modelPath !== undefined;
-      const modelPath = String(modelSelectedByUser ? req.body.modelPath || "" : running.launch?.model || "").trim();
-      // Existing adoption already carries facts read from the running process.
-      // Re-reading a twelve-gigabyte file just to preserve that same launch is
-      // pointless, and test/remote process attribution may expose facts while
-      // its Windows path is not readable from this Node process.
-      const targetModelFacts = !modelSelectedByUser && running.modelFacts
-        ? running.modelFacts
-        : readManagedModelFacts(modelPath, services.readModelFacts || readModelFacts);
-      const visionProjectorPath = readManagedVisionProjector(
-        req.body?.visionProjectorPath === undefined ? running.launch?.visionProjectorPath : req.body.visionProjectorPath,
-      );
-      const id = managedHostId("llamacpp", snapshot.baseUrl);
-      if (!id) throw new LocalEngineError("base", "The connected llama.cpp server has no usable local address.");
-      let registry = await readLocalHostRegistry(services.localHostRegistryFile);
-      if (registry.hosts[id]) throw new LocalEngineError("already_managed", "This llama.cpp host is already under ModelDock management. Leave management before changing its SSD budget.");
-      const gpus = await probeManagedNvidiaGpus(services);
-      const visionProjectorBytes = visionProjectorPath ? statSync(visionProjectorPath).size : 0;
-      // This is a target-only preflight ledger. It selects CUDA devices and a
-      // tensor split for the fixed 8K calibration launch; it does not publish
-      // P or context. The final profile comes only after the old server is
-      // stopped and the target process has been measured on every card.
-      let target = (services.createNvidiaProfileInput || createNvidiaProfileInput)({
-        gpus,
-        targetModelFacts,
-        targetModelId: modelPath,
-        cacheTypeK: "q4_0",
-        cacheTypeV: "q4_0",
-        visionProjectorBytes,
-      });
-      const bootstrapProfile = calibrationLaneProfile(target);
-      await mkdir(String(cacheDirectory).trim(), { recursive: true });
-      const specForProfile = (profile) => ({
-        binary: launch.binary,
-        args: managedLlamaLaunchArgs(launch.args, {
-          profile,
-          slotSavePath: String(cacheDirectory).trim(),
-          modelPath,
-          // Managed setup owns this switch: an empty field removes an old
-          // projector instead of silently retaining image capability.
-          visionProjectorPath: visionProjectorPath || null,
-          cacheTypeK: "q4_0",
-          cacheTypeV: "q4_0",
-        }),
-      });
-      const observed = createObservedHost({
-        id,
-        adapterId: "llamacpp-nvidia",
-        endpoint: snapshot.baseUrl,
-        launch,
-        capabilities: {
-          // Ownership is verified against the server that is actually alive.
-          // The selected model/projector becomes required only for the target
-          // calibration restart below.
-          model: running.launch?.model || modelPath,
-          modelFacts: running.modelFacts || targetModelFacts,
-          visionProjectorPath: running.launch?.visionProjectorPath || "",
-          contextTokens: Number(running.launch?.ctxSize) || 0,
-          slots: Number(running.launch?.parallel) || 0,
-          gpuCount: target.gpus.length,
-          requestSlotAffinity: false,
-        },
-      });
-      const takenOver = takeOverHost(observed, {
-        kvState: {
-          directory: String(cacheDirectory).trim(),
-          budgetBytes: budgetGiB * 1024 ** 3,
-        },
-      });
-      const releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      const operations = managedLifecycleOperations(services, takenOver);
-      // Slot shape alone is not enough. llama.cpp creates some CUDA graph and
-      // workspace allocations only at the final context size, so a target must
-      // also leave one real GiB free on every participating card after it is
-      // serving. This check turns a launch that merely bound its port into a
-      // capacity proof before it can reach the Codex catalog.
-      const verifyLifecycle = operations.verify.bind(operations);
-      operations.verify = async (spec, record) => {
-        const verification = await verifyLifecycle(spec, record);
-        if (verification === true || verification?.ok === true) {
-          await requireManagedGpuHeadroom(services, record.desiredProfile);
-        }
-        return verification;
-      };
-      try {
-        const authorized = await verifyLocalHost(takenOver, operations);
-        if (authorized.outcome !== "verified") {
-          recordConfigAction(metrics, "local_manage_llamacpp", { ok: false, error: authorized.failure });
-          // The standard error envelope rides alongside the outcome fields:
-          // the dashboard reads body.error?.message like every other route,
-          // and without it a failed takeover displayed as literally
-          // "Manage 409" instead of the verification failure text.
-          return res.status(409).json({
-            error: { type: "takeover_failed", message: authorized.failure },
-            outcome: authorized.outcome,
-            management: managedHostSummary(authorized.record, running),
-            message: authorized.failure,
-          });
-        }
-        let profile = null;
-        let runtimeEstimate = null;
-        let result = await calibrateAndApplyLocalHostPlan(authorized.record, {
-          calibrationSteps: [
-            {
-              id: "bootstrap",
-              desiredSpec: specForProfile(bootstrapProfile),
-              desiredProfile: bootstrapProfile,
-              replanAfterBaseline: ({ baseline }) => {
-                target = (services.rebalanceNvidiaProfileInput || rebalanceNvidiaProfileInput)(target, baseline);
-                const measuredBootstrap = calibrationLaneProfile(target);
-                return { desiredSpec: specForProfile(measuredBootstrap), desiredProfile: measuredBootstrap };
-              },
-            },
-            {
-              id: "slope",
-              createPlan: () => {
-                const measuredSlope = calibrationLaneProfile(target, {
-                  id: "slope",
-                  laneContextTokens: Math.min(LOCAL_HOST_NVIDIA_SLOPE_CONTEXT_TOKENS, target.modelMaxContextTokens),
-                });
-                return { desiredSpec: specForProfile(measuredSlope), desiredProfile: measuredSlope };
-              },
-            },
-            {
-              id: "p2",
-              createPlan: () => {
-                const measuredP2 = calibrationLaneProfile(target, { id: "p2", laneCount: 2 });
-                return { desiredSpec: specForProfile(measuredP2), desiredProfile: measuredP2 };
-              },
-              optional: true,
-              shouldRun: ({ measurements }) => {
-                if (!shouldProbeNvidiaParallelism(target)) return false;
-                const interim = estimateNvidiaRuntimeCapacity({
-                  target,
-                  bootstrapSample: measurements.bootstrap,
-                  slopeSample: measurements.slope,
-                });
-                return optimisticNvidiaParallelContext(interim, 2) >= Math.ceil(target.modelMaxContextTokens * 0.75);
-              },
-            },
-            {
-              id: "p3",
-              createPlan: () => {
-                const measuredP3 = calibrationLaneProfile(target, { id: "p3", laneCount: 3 });
-                return { desiredSpec: specForProfile(measuredP3), desiredProfile: measuredP3 };
-              },
-              optional: true,
-              shouldRun: ({ measurements }) => {
-                if (!measurements.p2) return false;
-                const interim = estimateNvidiaRuntimeCapacity({
-                  target,
-                  bootstrapSample: measurements.bootstrap,
-                  slopeSample: measurements.slope,
-                  parallelSamples: { 2: measurements.p2 },
-                });
-                return interim.lanes.find((lane) => lane?.laneCount === 2)?.nominalContextTokens >= target.modelMaxContextTokens;
-              },
-            },
-          ],
-          targetCapabilities: {
-            ...authorized.record.capabilities,
-            model: modelPath,
-            modelFacts: targetModelFacts,
-            visionProjectorPath,
-          },
-          measureBaseline: async () => {
-            // Give the driver one short scheduling turn after the verified stop
-            // before recording Windows, display and other-process usage.
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            return probeManagedNvidiaGpus(services);
-          },
-          measureCalibration: async () => {
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            return probeManagedNvidiaGpus(services);
-          },
-          createFinalPlan: async ({ measurements }) => {
-            runtimeEstimate = (services.estimateNvidiaRuntimeCapacity || estimateNvidiaRuntimeCapacity)({
-              target,
-              bootstrapSample: measurements.bootstrap,
-              slopeSample: measurements.slope,
-              parallelSamples: { 2: measurements.p2, 3: measurements.p3 },
-            });
-            profile = (services.selectNvidiaRuntimeProfile || selectNvidiaRuntimeProfile)(runtimeEstimate);
-            return {
-              desiredProfile: profile,
-              desiredSpec: {
-                binary: launch.binary,
-                args: managedLlamaLaunchArgs(launch.args, {
-                  profile,
-                  slotSavePath: String(cacheDirectory).trim(),
-                  modelPath,
-                  visionProjectorPath: visionProjectorPath || null,
-                  cacheTypeK: "q4_0",
-                  cacheTypeV: "q4_0",
-                }),
-              },
-            };
-          },
-          createFallbackPlan: async ({ final }) => {
-            if (!runtimeEstimate) return null;
-            const fallback = (services.backoffNvidiaRuntimeProfile || backoffNvidiaRuntimeProfile)(runtimeEstimate, final.desiredProfile);
-            if (fallback.laneCount === final.desiredProfile.laneCount && fallback.laneContextTokens === final.desiredProfile.laneContextTokens) return null;
-            profile = fallback;
-            return {
-              desiredProfile: fallback,
-              desiredSpec: {
-                binary: launch.binary,
-                args: managedLlamaLaunchArgs(launch.args, {
-                  profile: fallback,
-                  slotSavePath: String(cacheDirectory).trim(),
-                  modelPath,
-                  visionProjectorPath: visionProjectorPath || null,
-                  cacheTypeK: "q4_0",
-                  cacheTypeV: "q4_0",
-                }),
-              },
-            };
-          },
-        }, operations);
-        if (result.outcome === "applied") profile = result.record.activeProfile;
-        if (result.outcome === "applied") {
-          const requestSlotAffinity = profile.laneCount === 1 || await (services.probeLlamaRequestSlotAffinity || probeLlamaRequestSlotAffinity)({
-            endpoint: snapshot.baseUrl,
-            model: profile.modelId,
-            slot: profile.laneCount - 1,
-          });
-          const updated = {
-            ...result.record,
-            capabilities: { ...result.record.capabilities, requestSlotAffinity },
-          };
-          const latest = await readLocalHostRegistry(services.localHostRegistryFile);
-          await writeLocalHostRegistry(services.localHostRegistryFile, upsertLocalHost(latest, updated));
-          result = { ...result, record: updated };
-        }
-        const current = await discoveredLocalEngine(services, "llamacpp", snapshot.baseUrl);
-        await publishManagedLocalEngine(services, result.record, current);
-        const ok = result.outcome === "applied";
-        const restored = result.outcome === "recovered";
-        let warmBase = null;
-        if (ok) {
-          await services.localHostRuntime?.refresh?.(result.record);
-          warmBase = await primeManagedLocalWarmBase(services, result.record);
-        } else if (restored) {
-          // A failed first takeover has already restored the immutable original
-          // command. Revoke the unused authority too, so the user is left in
-          // the same connected/observed state without a cleanup step.
-          const latest = await readLocalHostRegistry(services.localHostRegistryFile);
-          await writeLocalHostRegistry(services.localHostRegistryFile, removeLocalHost(latest, id));
-          services.localHostRuntime?.invalidate?.();
-        } else {
-          // Neither launch verified. Retain the durable authority and recovery
-          // facts so a later explicit recovery can identify the process safely.
-          await services.localHostRuntime?.refresh?.(null);
-        }
-        const message = ok
-          ? `Host control is active at ${profile.laneCount} lane(s) x ${profile.laneContextTokens} tokens. Session placement and SSD state are automatic.`
-          : restored
-            ? `The managed profile did not verify. ModelDock restored the exact pre-takeover command line. ${result.failure || ""}`.trim()
-            : `Neither the managed profile nor the pre-takeover command verified. Host control remains in degraded recovery state. ${result.recoveryFailure || result.failure || ""}`.trim();
-        recordConfigAction(metrics, "local_manage_llamacpp", {
-          ok,
-          error: ok ? "" : message,
-          outcome: result.outcome,
-          lanes: result.record.activeProfile?.laneCount || 0,
-          contextWindow: result.record.activeProfile?.laneContextTokens || 0,
-          warmBasePrimed: Boolean(warmBase?.primed),
-        });
-        return res.status(ok ? 200 : 502).json({
-          outcome: result.outcome,
-          management: ok || !restored ? managedHostSummary(result.record, current) : null,
-          ...(ok ? {} : { error: { type: restored ? "managed_profile_unverified" : "managed_host_degraded", message } }),
-          message,
-          ...(ok ? { warmBase } : {}),
-        });
-      } finally {
-        releaseTransition();
-      }
-    } catch (error) {
-      recordConfigAction(metrics, "local_manage_llamacpp", { ok: false, error: error.message });
-      const status = error instanceof LocalEngineError ? 400 : 502;
-      return res.status(status).json({ error: { type: error.code || "local_manage_failed", message: error.message } });
-    }
-  });
-
-  // Releasing management returns process ownership as well as metadata: restore
-  // the immutable pre-takeover argv first, verify it, then revoke authority.
-  // SSD files are retained because deleting a user-selected directory would be
-  // a separate destructive action.
-  app.post("/api/local/unmanage", mutateConfig, async (req, res) => {
-    const id = String(req.body?.hostId || "").trim();
-    if (!id) return res.status(400).json({ error: { type: "host", message: "A managed local host id is required." } });
-    try {
-      let registry = await readLocalHostRegistry(services.localHostRegistryFile);
-      const record = registry.hosts[id];
-      if (!record) return res.status(404).json({ error: { type: "not_managed", message: "That local host is not under ModelDock management." } });
-      const releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      let result;
-      try {
-        const operations = (services.createLocalHostLifecycleOperations || createLocalHostLifecycleOperations)({
-          hostId: id,
-          endpoint: record.endpoint,
-          registryFile: services.localHostRegistryFile,
-          discover: () => (services.discoverEngines || discoverLocalEngines)({}),
-          runtime: services.localHostRuntime,
-          logDir: services.engineLogDir || stateFile("engine-logs"),
-        });
-        // Detect the dead run instead of waiting for it. `verify()` polls for its
-        // whole timeout (three minutes) for a server that is never going to
-        // arrive, then reports failure - which made this route refuse to release a
-        // host that no longer exists. Verification exists to keep ModelDock from
-        // walking away from a live process the user still owns; when nothing is
-        // listening at the endpoint there is nothing left to protect, and refusing
-        // only strands the record in "draining" forever.
-        const serving = (await (services.discoverEngines || discoverLocalEngines)({}))
-          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
-        if (!serving) {
-          await writeLocalHostRegistry(services.localHostRegistryFile, removeLocalHost(registry, id));
-          services.localHostRuntime?.invalidate?.();
-          recordConfigAction(metrics, "local_unmanage", { ok: true, releasedDeadHost: true });
-          return res.json({ released: true, hostId: id, restoredPreTakeover: false, deadHostReleased: true });
-        }
-        // activeSpec === null is the failed-first-takeover shape: ModelDock
-        // never replaced the original process, so there is nothing to restore
-        // via apply/drain - routing it through applyLocalHostPlan put the
-        // record into "draining" against a process this gateway never touched
-        // (and, before the runner guard, stranded it there). Re-verify the
-        // pre-takeover command and release management directly, exactly like
-        // the never-changed case below.
-        if (record.activeSpec === null || JSON.stringify(record.activeSpec) === JSON.stringify(record.preTakeoverSpec)) {
-          const verification = await operations.verify(record.preTakeoverSpec, {
-            ...record,
-            desiredSpec: record.preTakeoverSpec,
-            desiredProfile: null,
-            // This is the failed-first-takeover shape: the selected target
-            // never started, so its requested projector cannot be a condition
-            // for verifying and releasing the still-original argv.
-            capabilities: { ...record.capabilities, visionProjectorPath: "" },
-          });
-          if (!(verification === true || verification?.ok === true)) {
-            throw new Error("The pre-takeover llama.cpp command is not serving and cannot be released safely.");
-          }
-          result = { outcome: "applied", record };
-        } else {
-          result = await applyLocalHostPlan(record, {
-            desiredSpec: record.preTakeoverSpec,
-            desiredProfile: null,
-            // Releasing control restores the immutable user command. Its
-            // verification must not retain capability requirements that
-            // belonged only to a managed target which failed to start.
-            capabilities: { ...record.capabilities, visionProjectorPath: "" },
-          }, operations);
-        }
-        if (result.outcome !== "applied") {
-          recordConfigAction(metrics, "local_unmanage", { ok: false, outcome: result.outcome });
-          return res.status(502).json({
-            error: { type: "restore_failed", message: "The pre-takeover llama.cpp command did not verify, so host control remains active." },
-          });
-        }
-        const current = (await (services.discoverEngines || discoverLocalEngines)({}))
-          .find((candidate) => candidate.engine === "llamacpp" && sameLocalHost(candidate.baseUrl, record.endpoint));
-        await publishManagedLocalEngine(services, result.record, current);
-        registry = await readLocalHostRegistry(services.localHostRegistryFile);
-        await writeLocalHostRegistry(services.localHostRegistryFile, removeLocalHost(registry, id));
-        services.localHostRuntime?.invalidate?.();
-      } finally {
-        releaseTransition();
-      }
-      recordConfigAction(metrics, "local_unmanage", { ok: true });
-      return res.json({ released: true, hostId: id, restoredPreTakeover: true });
-    } catch (error) {
-      recordConfigAction(metrics, "local_unmanage", { ok: false, error: error.message });
-      return res.status(502).json({ error: { type: "local_unmanage_failed", message: error.message } });
-    }
-  });
-
-  // Explicit destructive reclaim of the SSD KV checkpoints. unmanage retains
-  // them on purpose (deleting a user-chosen directory is its own decision);
-  // this is that decision, made from the dashboard with its own confirm. GPU
-  // lanes keep their warm state - only the on-disk checkpoints go.
-  app.post("/api/local/kv/clear", mutateConfig, async (req, res) => {
-    try {
-      const result = await services.localHostRuntime?.clearKvStates?.();
-      if (!result) {
-        return res.status(409).json({ error: { type: "not_managed", message: "No managed local host holds SSD KV state to clear." } });
-      }
-      recordConfigAction(metrics, "local_kv_clear", { ok: true });
-      return res.json({ cleared: result.cleared || 0 });
-    } catch (error) {
-      recordConfigAction(metrics, "local_kv_clear", { ok: false, error: error.message });
-      return res.status(502).json({ error: { type: "local_kv_clear_failed", message: error.message } });
-    }
-  });
-
-  // The process-level restart scripts call this while the old gateway is
-  // still alive. The runtime, unlike the script, knows the private mapping
-  // from a Codex session hash to its llama.cpp slot and can make a durable
-  // checkpoint of completed lanes before Node is stopped. Active requests are
-  // cancelled; partial assistant output is never persisted as a valid turn.
-  // Admission stays closed briefly; the companion release route reopens it
-  // when the outer script cannot stop the gateway.
-  app.post("/api/local/restart-checkpoint", mutateConfig, async (_req, res) => {
-    try {
-      const result = await services.localHostRuntime?.prepareGatewayRestart?.();
-      recordConfigAction(metrics, "local_restart_checkpoint", {
-        ok: true,
-        managed: Boolean(result?.managed),
-        saved: result?.saved || 0,
-        interrupted: result?.interrupted || 0,
-        idle: result?.idle !== false,
-      });
-      return res.json(result || { managed: false, saved: 0, failed: 0, interrupted: 0, idle: true, holdMs: 0 });
-    } catch (error) {
-      recordConfigAction(metrics, "local_restart_checkpoint", { ok: false, error: error.message });
-      return res.status(503).json({ error: { type: "local_restart_checkpoint_failed", message: error.message } });
-    }
-  });
-
-  app.post("/api/local/restart-checkpoint/release", mutateConfig, (_req, res) => {
-    const released = Boolean(services.localHostRuntime?.releaseGatewayRestartPreparation?.());
-    recordConfigAction(metrics, "local_restart_checkpoint_release", { ok: true, released });
-    return res.json({ released });
-  });
-
-  // Restart the gateway service itself, immediately, with no KV handoff.
+  // Restart the gateway service itself, immediately.
   //
   // Two refusals make this route what it is, and both are the point:
   //   - It is guarded by `localPostGuard` alone, NOT `serializeConfigMutation`.
-  //     The mutation queue is exactly what a wedged local host blocks: a release
-  //     or a checkpoint waiting on the KV coordinator sits in that queue and
+  //     The mutation queue is exactly what a wedged local host blocks, and it
   //     takes everything behind it down with it. The one action that clears the
   //     wedge must not have to queue behind it.
   //   - It never calls `prepareGatewayRestart()`. Checkpointing is a courtesy the
-  //     wedge can veto; a slot state that cannot be saved or erased would hold
-  //     the restart hostage forever. Warm KV is simply dropped - the next turn
-  //     cold-prefills, which is a cost, not a failure.
+  //     wedge can veto, and a restart that can be held hostage is not a recovery.
   //
   // The response goes out before the supervisor is spawned so the caller learns
   // it was accepted; the process then stops underneath it.
@@ -2868,19 +2029,10 @@ export function createApp(services = createServices()) {
   // on the GPU - would be a guess wearing the clothes of a memory.
   app.post("/api/local/restart", mutateConfig, async (req, res) => {
     const { engine } = req.body || {};
-    let managed = null;
-    if (engine === "llamacpp") {
-      try {
-        const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-        managed = Object.values(registry.hosts).find((record) => record.adapterId === "llamacpp-nvidia") || null;
-      } catch {
-        managed = null;
-      }
-    }
     const remembered = engine === "ollama"
       ? readOllamaSnapshot(services.ollamaSnapshotFile)?.launch
       : (CONNECTABLE_ENGINES.includes(engine)
-        ? managed?.activeSpec || rememberedLaunch(engine, services.localEnginesFile || localEnginesSnapshotPath())
+        ? rememberedLaunch(engine, services.localEnginesFile || localEnginesSnapshotPath())
         : null);
     if (!remembered?.binary || !Array.isArray(remembered.args)) {
       return res.status(404).json({
@@ -2900,32 +2052,6 @@ export function createApp(services = createServices()) {
         error: { type: "already_running", message: `${LOCAL_ENGINE_LABELS[engine] || engine} is already answering.` },
       });
     }
-    if (managed?.activeSpec) {
-      const releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      try {
-        const operations = managedLifecycleOperations(services, managed);
-        const result = await applyLocalHostPlan(managed, {
-          desiredSpec: managed.activeSpec,
-          desiredProfile: managed.activeProfile,
-        }, operations);
-        const current = await discoveredLocalEngine(services, "llamacpp", managed.endpoint);
-        await publishManagedLocalEngine(services, result.record, current);
-        await services.localHostRuntime?.refresh?.(result.record);
-        const ok = result.outcome === "applied";
-        recordConfigAction(metrics, "local_restart_llamacpp", { ok, outcome: result.outcome });
-        return res.status(ok ? 200 : 502).json({
-          engine,
-          started: ok,
-          outcome: result.outcome,
-          restoredPreTakeover: result.outcome === "recovered",
-        });
-      } catch (error) {
-        recordConfigAction(metrics, "local_restart_llamacpp", { ok: false, error: error.message });
-        return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
-      } finally {
-        releaseTransition();
-      }
-    }
     try {
       const { logFile } = spawnEngineDetached({
         binary: remembered.binary,
@@ -2944,13 +2070,6 @@ export function createApp(services = createServices()) {
       return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
     }
   });
-
-  app.post("/api/local/apply", mutateConfig, (_req, res) => res.status(410).json({
-    error: {
-      type: "managed_only",
-      message: "Manual local-engine tuning has been replaced by automatic host management. Connect the engine, then enable host control.",
-    },
-  }));
 
   // Disconnect is the last resort, so it may not depend on anything the host it
   // is leaving can still hold: no queue behind a wedged mutation, no engine
@@ -2972,27 +2091,12 @@ export function createApp(services = createServices()) {
     if (!CONNECTABLE_ENGINES.includes(engine)) {
       return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
     }
-    let releasedHosts = 0;
-    if (engine === "llamacpp") {
-      const registry = await readLocalHostRegistry(services.localHostRegistryFile);
-      const managed = Object.values(registry.hosts).filter((record) => record.adapterId === "llamacpp-nvidia");
-      if (managed.length) {
-        let released = registry;
-        for (const record of managed) released = removeLocalHost(released, record.id);
-        await writeLocalHostRegistry(services.localHostRegistryFile, released);
-        releasedHosts = managed.length;
-        // Drops the coordinator and its KV lanes in memory without touching the
-        // engine. On-disk checkpoints survive; deleting them stays an explicit
-        // action behind /api/local/kv/clear.
-        services.localHostRuntime?.invalidate?.();
-      }
-    }
     clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
     applyLocalEngineProfile(engine, null);
     reconcileModelSelection(services);
     services.writeCatalogFile?.();
-    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true, releasedHosts });
-    return res.json({ engine, models: [], releasedHosts, settings: settingsPayload(services) });
+    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
+    return res.json({ engine, models: [], settings: settingsPayload(services) });
   });
   // Signing in to xAI. Three routes because a device grant is three moments:
   // ask for a code, wait for a person, then use what they approved.
@@ -3347,59 +2451,6 @@ function foldUsageOnce(services) {
 
 const USAGE_FOLD_INTERVAL_MS = 10 * 60 * 1000;
 
-export async function reconcileLocalHostsOnBoot(services) {
-  let registry;
-  try {
-    registry = await readLocalHostRegistry(services.localHostRegistryFile);
-  } catch (error) {
-    console.log(`[gate] local host boot reconciliation skipped: ${error.message}`);
-    return;
-  }
-  for (const record of Object.values(registry.hosts)) {
-    if (record.state === "ready") {
-      try {
-        // The durable ready record is sufficient to rebuild the KV runtime and
-        // prepare its opening cache. Do that before optional discovery probes:
-        // an unreachable stale endpoint must not put a known-good managed host
-        // behind a multi-second scan before its base KV can be restored.
-        await services.localHostRuntime?.refresh?.(record);
-        void primeManagedLocalWarmBase(services, record).catch((error) => {
-          console.log(`[gate] local host ${record.id} warm base preparation failed: ${error.message}`);
-        });
-        // Capability discovery is auxiliary to the cache/runtime recovery.
-        // A just-restarted llama.cpp can answer Chat before its probe does, so
-        // only publish live capability details when the probe is available.
-        try {
-          const current = await discoveredLocalEngine(services, "llamacpp", record.endpoint);
-          if (current && await publishManagedLocalEngine(services, record, current)) {
-            console.log(`[gate] local host ${record.id} boot capability refresh: updated`);
-          }
-        } catch (error) {
-          console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
-        }
-      } catch (error) {
-        console.log(`[gate] local host ${record.id} boot capability refresh failed: ${error.message}`);
-      }
-      continue;
-    }
-    if (!["draining", "applying", "verifying", "recovering"].includes(record.state)) continue;
-    let releaseTransition;
-    try {
-      releaseTransition = services.localHostRuntime?.beginTransition?.() || (() => {});
-      const operations = managedLifecycleOperations(services, record);
-      const result = await reconcileInterruptedLocalHost(record, operations);
-      const current = await discoveredLocalEngine(services, "llamacpp", record.endpoint);
-      await publishManagedLocalEngine(services, result.record, current);
-      await services.localHostRuntime?.refresh?.(result.record);
-      console.log(`[gate] local host ${record.id} boot reconciliation: ${result.outcome}`);
-    } catch (error) {
-      console.log(`[gate] local host ${record.id} boot reconciliation failed: ${error.message}`);
-    } finally {
-      releaseTransition?.();
-    }
-  }
-}
-
 export async function startServer(config = loadConfig()) {
   const instance = createApp(createServices(config));
   // Tests opt out with autostartDefault: false so they never touch the real
@@ -3423,7 +2474,6 @@ export async function startServer(config = loadConfig()) {
     });
     listener.once("error", reject);
   });
-  void reconcileLocalHostsOnBoot(instance.services);
   return {
     ...instance,
     server,

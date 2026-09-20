@@ -376,23 +376,6 @@
         </label>
         <p id="local-config-runtime" class="local-engine-runtime" hidden></p>
         <ul id="local-warnings" class="engine-warnings" hidden></ul>
-        <section id="local-host-control" class="field" hidden aria-labelledby="local-host-control-title">
-          <div class="field-head"><span id="local-host-control-title" data-i18n="host.title">Host control</span></div>
-          <label class="field">
-            <div class="field-head"><span data-i18n="host.model">Model file</span></div>
-            <input id="local-host-model-file" class="lang-select" type="text" spellcheck="false" />
-            <p class="custom-hint" data-i18n="host.modelHint">Choose the GGUF ModelDock will launch and manage.</p>
-          </label>
-          <label class="chip-toggle" id="local-host-vision-row">
-            <input id="local-host-vision-enabled" type="checkbox" />
-            <span data-i18n="host.vision">Enable local vision</span>
-          </label>
-          <label id="local-host-vision-projector-row" class="field" hidden>
-            <div class="field-head"><span data-i18n="host.visionProjector">Vision projector</span></div>
-            <input id="local-host-vision-projector" class="lang-select" type="text" spellcheck="false" />
-            <p class="custom-hint" data-i18n="host.visionHint">Requires a compatible vision GGUF base model and llama.cpp projector.</p>
-          </label>
-        </section>
         <p id="local-config-error" class="custom-error" aria-live="polite" hidden></p>
         <p id="local-config-start-hint" class="custom-hint" data-i18n="local.restartHint" hidden>Starts this service from its saved command. Settings passed through environment variables are not captured.</p>
         <div class="custom-row local-config-actions">
