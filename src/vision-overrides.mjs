@@ -9,7 +9,7 @@ export const writeVisionOverrides = (file, values) => writeModelToggles(file, va
 
 const defaults = new WeakMap();
 
-export function applyVisionOverrides(profiles, overrides, { publishedSlugFor }) {
+export function applyVisionOverrides(profiles, overrides, { modelAddressFor }) {
   for (const profile of profiles) {
     // Remote directory discovery and the stable llama.cpp row both expose a
     // user correction surface. /props remains the observed default for local,
@@ -17,7 +17,7 @@ export function applyVisionOverrides(profiles, overrides, { publishedSlugFor }) 
     // not make the correction disappear on the next catalog refresh.
     if (!profile.modelDiscovery && profile.id !== "llamacpp") continue;
     for (const model of profile.availableModels || []) {
-      const value = overrides?.[publishedSlugFor(profile.id, model)];
+      const value = overrides?.[modelAddressFor(profile.id, model)];
       if (typeof value === "boolean") {
         if (!defaults.has(model)) defaults.set(model, {
           supportsVision: model.supportsVision,

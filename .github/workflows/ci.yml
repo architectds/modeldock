@@ -75,6 +75,18 @@ jobs:
           curl -sf -o /dev/null http://127.0.0.1:4979/ || { kill $SERVER_PID; exit 1; }
           curl -sf -o /dev/null http://127.0.0.1:4979/app.js || { kill $SERVER_PID; exit 1; }
           kill $SERVER_PID
+      # Publish the bytes that passed the release gate. The release job downloads
+      # this artifact instead of rebuilding a second, untested bundle from the tag.
+      - name: Preserve tested gateway bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-modeldock-bundle
+          path: |
+            dist/modeldock.mjs
+            dist/mcp-standalone.mjs
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
 
   # install.ps1 only runs on Windows; exercise the Windows mock install end to end.
   install-windows:
@@ -88,9 +100,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node --test test/install-mock.test.mjs
-      # The macOS install branch is modeled with fake uname/launchctl; Windows
-      # runners without WSL skip it automatically.
-      - run: node --test test/install-macos-sim.test.mjs
 
   # install.sh on a real macOS runner. macos-latest is an Apple Silicon (arm64)
   # hosted image, so this leg exercises the launchd paths, the /opt/homebrew node
@@ -106,29 +115,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: node --test test/stt-mac-helper.test.mjs
-      # Lifecycle test (native macOS install.sh + fake launchctl sandbox).
-      # tee the test output and surface the tail in the run summary on failure:
-      # summaries are readable without signing in, job logs are not, and this
-      # job has never been green - the summary is the only anonymous diagnostic.
+      # Native Darwin lifecycle proof: install.sh, the launchd plist, relaunch,
+      # restart, MCP wiring and uninstall all run on a real macOS host here.
       - name: Mock install test
-        # Advisory until it has passed once: a leg that has never been green
-        # trains everyone to ignore the whole CI run, which is worse than not
-        # gating on it. The summary tail below still surfaces the diagnostic;
-        # remove this line the first time the step passes so regressions gate
-        # again.
         id: mock-install
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
           node --test test/install-mock.test.mjs 2>&1 | tee mock-install.log
-      - name: macOS branch simulation
-        shell: bash
-        run: node --test test/install-macos-sim.test.mjs
       - name: Surface failure output in the run summary
-        # continue-on-error makes the step's conclusion "success", so a plain
-        # failure() would never fire again; the outcome still says what happened.
-        if: failure() || steps.mock-install.outcome == 'failure'
+        if: always() && steps.mock-install.outcome == 'failure'
         shell: bash
         run: |
           {
@@ -137,3 +133,13 @@ jobs:
             tail -120 mock-install.log 2>/dev/null || echo "(no log captured)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # This is the helper that was compiled and launched above. Publishing this
+      # exact artifact removes the second macOS build from release.yml.
+      - name: Preserve tested macOS STT helper
+        uses: actions/upload-artifact@v4
+        with:
+          name: modeldock-stt-helper
+          path: dist/modeldock-stt-helper
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true

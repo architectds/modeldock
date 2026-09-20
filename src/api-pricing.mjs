@@ -127,8 +127,8 @@ for (const [sourceKey, rate] of PRICE_OFFERS) {
 
 const perMillion = (tokens, rate) => (Math.max(0, Number(tokens) || 0) * rate) / 1_000_000;
 
-function cheapestOffer(model, provider, { input = 0, cached = 0, output = 0 } = {}) {
-  const offers = OFFERS_BY_MODEL.get(canonicalModelId(`${model}@${provider}`)) || [];
+function cheapestOffer(model, { input = 0, cached = 0, output = 0 } = {}) {
+  const offers = OFFERS_BY_MODEL.get(canonicalModelId(model)) || [];
   if (!offers.length) return null;
   const costFor = (rate) => perMillion(input - cached, rate.input)
     + perMillion(cached, rate.cached)
@@ -141,7 +141,7 @@ export function estimateApiCost({ model, provider, inputTokens, cachedTokens, ou
   const cached = Math.max(0, Math.min(input, Number(cachedTokens) || 0));
   const output = Math.max(0, Number(outputTokens) || 0);
   const totalTokens = input + output;
-  const rate = cheapestOffer(model, provider, { input, cached, output });
+  const rate = cheapestOffer(model, { input, cached, output });
   if (!rate) return { usd: 0, pricedTokens: 0, unpricedTokens: totalTokens };
   return {
     usd: perMillion(input - cached, rate.input)
@@ -156,7 +156,7 @@ export function apiRate(model, provider) {
   // apiRate has no workload. Use an equal one-million-token mix only to expose
   // a deterministic representative offer; estimateApiCost performs the actual
   // workload-aware comparison used by Stats.
-  const selected = cheapestOffer(model, provider, {
+  const selected = cheapestOffer(model, {
     input: 2_000_000,
     cached: 1_000_000,
     output: 1_000_000,

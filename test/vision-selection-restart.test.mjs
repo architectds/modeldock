@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { codexSlugFor } from "../src/profiles.mjs";
 
 const bundle = pathToFileURL(path.resolve("dist/modeldock.mjs")).href;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,6 +63,7 @@ test("built gateway retains native vision through stale-parent restart and ON mo
   t.after(() => rm(root, { recursive: true, force: true }));
   const codexHome = path.join(root, "codex");
   await mkdir(codexHome);
+  await mkdir(path.join(codexHome, "agents"));
   await writeFile(path.join(codexHome, "auth.json"), JSON.stringify({ tokens: { access_token: "native-fixture-token" } }));
   await writeFile(path.join(codexHome, "config.toml"), 'model = "gpt-5.6-luna"\n');
   const nativeCatalog = path.join(root, "native-catalog.json");
@@ -70,6 +72,14 @@ test("built gateway retains native vision through stale-parent restart and ON mo
   })) }));
   const envFile = path.join(root, ".env");
   await writeFile(envFile, "MODELDOCK_VISION_MODEL=gpt-5.6-luna@opencode-go\n");
+  await writeFile(path.join(root, "codex-model-catalog.json"), JSON.stringify({
+    models: [{
+      slug: "deepseek-v4-flash@opencode-go",
+      auto_review_model_override: "gpt-5.6-luna@opencode-go",
+    }],
+  }));
+  const subagentFile = path.join(codexHome, "agents", "modeldock-subagent.toml");
+  await writeFile(subagentFile, 'model = "deepseek-v4-flash@opencode-go"\n');
   const image = path.join(root, "pixel.png");
   await writeFile(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=", "base64"));
 
@@ -100,6 +110,17 @@ test("built gateway retains native vision through stale-parent restart and ON mo
   });
   let gateway = await boot(env);
   t.after(() => gateway.stop());
+  const safeFlash = codexSlugFor("opencode-go", "deepseek-v4-flash");
+  const migratedCatalog = JSON.parse(await readFile(path.join(root, "codex-model-catalog.json"), "utf8"));
+  assert.ok(migratedCatalog.models.some((entry) => entry.slug === safeFlash));
+  assert.ok((await readFile(subagentFile, "utf8")).split(/\r?\n/).includes(`model = "${safeFlash}"`));
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const state = await (await fetch(`${gateway.base}/api/config`)).json();
+    if (state.restartRequired) break;
+    await pause(25);
+  }
+  assert.equal((await (await fetch(`${gateway.base}/api/config`)).json()).restartRequired, true,
+    "migrating a Codex-facing model identity asks for the required Codex restart");
   const post = async (route, body) => {
     const res = await fetch(`${gateway.base}${route}`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),

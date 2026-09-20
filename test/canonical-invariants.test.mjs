@@ -13,7 +13,7 @@ import {
   localEngineDefinition,
   localEngineDefinitions,
 } from "../src/local-engine-definitions.mjs";
-import { credentialProfiles } from "../src/profiles.mjs";
+import { codexSlugFor, credentialProfiles } from "../src/profiles.mjs";
 
 const event = (at, model, provider, values = {}) => JSON.stringify({
   at,
@@ -54,6 +54,9 @@ test("one canonical model projection drives every stats range and timeline", () 
     "qwen3.8-flash@opencode-go": {
       requests: 1, ok: 1, in: 500, out: 50, cached: 400, ms: 1000, okOut: 50, okMs: 1000,
     },
+    [codexSlugFor("opencode-go", "qwen3.8-flash")]: {
+      requests: 1, ok: 1, in: 300, out: 30, cached: 200, ms: 1000, okOut: 30, okMs: 1000,
+    },
   };
   for (let index = 1; index <= 6; index += 1) {
     rollup.days[day][`model-${index}@provider-${index}`] = {
@@ -75,7 +78,7 @@ test("one canonical model projection drives every stats range and timeline", () 
     }
   }
   assert.equal(stats.modelPeriods.hours24.models[0].id, "qwen3.8-flash");
-  assert.equal(stats.modelPeriods.hours24.models[0].totalTokens, 1320);
+  assert.equal(stats.modelPeriods.hours24.models[0].totalTokens, 1650);
   assert.deepEqual(new Set(Object.keys(stats.series.hours24.at(-1).byModel)),
     new Set(["qwen3.8-flash", "model-6", "model-5", "model-4", "model-3", "model-2", "__other__"]));
 });

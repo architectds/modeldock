@@ -1,12 +1,13 @@
+import { modelRefParts } from "./model-ref.mjs";
+
 // Resolve the endpoint serving a model by the provider-qualified address the
 // model carries. This pure lookup lives below both the endpoint store and the
 // provider registry so those two owners can depend on it without a cycle.
 export function customEndpointFor(endpoints, model) {
   if (!model) return null;
-  const slug = String(model);
-  const separator = slug.lastIndexOf("@");
-  const bare = separator > 0 ? slug.slice(0, separator) : slug;
-  const provider = separator > 0 ? slug.slice(separator + 1) : "";
+  const ref = modelRefParts(model);
+  const bare = ref.model;
+  const provider = ref.provider;
   const list = endpoints || [];
   if (provider) {
     const owned = list.find((entry) =>

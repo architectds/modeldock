@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
+import { codexSlugFor } from "../src/profiles.mjs";
 
 test("built local catalog ignores old 70-percent snapshots and follows context edits at 80 percent", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-local-context-"));
@@ -32,6 +33,7 @@ test("built local catalog ignores old 70-percent snapshots and follows context e
   await mkdir(overrides.MODELDOCK_CODEX_HOME);
   // The slug the catalog publishes for the local endpoint, whatever GGUF is loaded.
   const id = "Local@llamacpp";
+  const wireId = codexSlugFor("llamacpp", "Local");
   writeLocalEngineSnapshot(path.join(root, "local-engines.json"), "llamacpp", {
     baseUrl: "http://127.0.0.1:9/v1",
     models: [{ id: "Qwen3.8-27B", contextWindow: 235_776, autoCompactTokenLimit: 165_043 }],
@@ -49,7 +51,7 @@ test("built local catalog ignores old 70-percent snapshots and follows context e
   const base = `http://127.0.0.1:${server.address().port}`;
   const assertPublished = async (window, limit) => {
     const catalog = JSON.parse(await readFile(path.join(root, "codex-model-catalog.json"), "utf8"));
-    const entry = catalog.models.find((model) => model.slug === id);
+    const entry = catalog.models.find((model) => model.slug === wireId);
     const models = await (await fetch(`${base}/api/models`)).json();
     assert.equal(entry.context_window, window);
     assert.equal(entry.auto_compact_token_limit, limit);
@@ -57,14 +59,14 @@ test("built local catalog ignores old 70-percent snapshots and follows context e
       "the picker and published compaction threshold derive from the same effective window");
   };
   await assertPublished(235_776, 188_620);
-  for (const [contextWindow, expectedWindow, expectedLimit] of [
-    [260_000, 260_000, 208_000],
-    [131_072, 131_072, 104_857],
-    [null, 235_776, 188_620],
+  for (const [requestId, contextWindow, expectedWindow, expectedLimit] of [
+    [wireId, 260_000, 260_000, 208_000],
+    [id, 131_072, 131_072, 104_857],
+    [id, null, 235_776, 188_620],
   ]) {
     const res = await fetch(`${base}/api/models/context`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, contextWindow }),
+      body: JSON.stringify({ id: requestId, contextWindow }),
     });
     assert.equal(res.status, 200, await res.text());
     await assertPublished(expectedWindow, expectedLimit);

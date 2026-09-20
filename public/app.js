@@ -1725,8 +1725,9 @@ function buildStatsPalette(data, periodModels) {
 function entryName(entry, id) {
   const named = typeof entry === "string" ? "" : String(entry?.model || "");
   if (named) return named;
-  const split = String(id || "").lastIndexOf("@");
-  return split > 0 ? String(id).slice(0, split) : String(id || "");
+  // Stats ids are already the server's canonical cross-provider model id.
+  // Do not parse route ownership again in the browser.
+  return String(id || "");
 }
 
 // --- Stats hover layer ---

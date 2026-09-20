@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { baseInstructionsFor, catalogFor, enabledProvidersFor, mergeNativeCatalog } from "../src/catalog.mjs";
 import { modelOptions, modelOwnerOf } from "../src/model-options.mjs";
-import { DEEPSEEK_OFFICIAL_PROFILE, modelEntryFor, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { codexSlugFor, DEEPSEEK_OFFICIAL_PROFILE, modelEntryFor, modelRefParts, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { isNativeModel } from "../src/gateway.mjs";
 import { RouteAffinity, routeResponsesRequest } from "../src/router.mjs";
 import { emptyRollup, rollupTotals } from "../src/usage-rollup.mjs";
@@ -42,10 +42,10 @@ test("DeepSeek Flash and Pro admit images through a configured visual fallback",
   };
   const catalog = catalogFor(config);
   const mediated = [
-    "deepseek-v4-flash@opencode-go",
-    "deepseek-v4-pro@opencode-go",
-    "deepseek-v4-flash@deepseek-official",
-    "deepseek-v4-pro@deepseek-official",
+    codexSlugFor("opencode-go", "deepseek-v4-flash"),
+    codexSlugFor("opencode-go", "deepseek-v4-pro"),
+    codexSlugFor("deepseek-official", "deepseek-v4-flash"),
+    codexSlugFor("deepseek-official", "deepseek-v4-pro"),
   ];
   for (const slug of mediated) {
     const entry = catalog.models.find((model) => model.slug === slug);
@@ -64,7 +64,7 @@ test("DeepSeek Flash and Pro admit images through a configured visual fallback",
     tokens: { "opencode-go": "go-token" },
     visionModel: "deepseek-v4-flash-vision-exp@deepseek-official",
   });
-  const flashWithoutFallback = unserviceable.models.find((model) => model.slug === "deepseek-v4-flash@opencode-go");
+  const flashWithoutFallback = unserviceable.models.find((model) => model.slug === codexSlugFor("opencode-go", "deepseek-v4-flash"));
   assert.deepEqual(flashWithoutFallback?.input_modalities, ["text"], "no serviceable vision route means no mediated image admission");
 
   const route = routeResponsesRequest({
@@ -87,10 +87,10 @@ test("DeepSeek text routes do not admit images when Vision is None", () => {
     tokens: { "opencode-go": "go-token", "deepseek-official": "deepseek-token" },
   });
   for (const slug of [
-    "deepseek-v4-flash@opencode-go",
-    "deepseek-v4-pro@opencode-go",
-    "deepseek-v4-flash@deepseek-official",
-    "deepseek-v4-pro@deepseek-official",
+    codexSlugFor("opencode-go", "deepseek-v4-flash"),
+    codexSlugFor("opencode-go", "deepseek-v4-pro"),
+    codexSlugFor("deepseek-official", "deepseek-v4-flash"),
+    codexSlugFor("deepseek-official", "deepseek-v4-pro"),
   ]) {
     assert.deepEqual(catalog.models.find((entry) => entry.slug === slug)?.input_modalities, ["text"], `${slug} refuses images without a fallback`);
   }
@@ -98,9 +98,9 @@ test("DeepSeek text routes do not admit images when Vision is None", () => {
 
 test("catalogFor writes per-model base instructions for vision capability", () => {
   const catalog = catalogFor(configStub());
-  const text = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
-  const vision = catalog.models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
-  const flashVision = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash-vision-exp@opencode-go");
+  const text = catalog.models.find((entry) => entry.slug === codexSlugFor("opencode-go", "deepseek-v4-flash"));
+  const vision = catalog.models.find((entry) => entry.slug === codexSlugFor("opencode-go", "gpt-5.6-luna"));
+  const flashVision = catalog.models.find((entry) => entry.slug === codexSlugFor("opencode-go", "deepseek-v4-flash-vision-exp"));
   assert.ok(text && vision && flashVision, "both DeepSeek Flash variants and a vision-capable entry are published");
   assert.deepEqual(text.input_modalities, ["text", "image"], "Flash accepts attachments through the visual fallback");
   assert.ok(text.base_instructions.includes("TEXT-ONLY"), "text-only models keep the vision_inspect rule");
@@ -141,7 +141,7 @@ test("native catalog instructions use native web search instead of advertising E
   try {
     const catalog = catalogFor({ ...configStub(), nativeCatalogFile });
     const native = catalog.models.find((entry) => entry.slug === "gpt-5.6-sol");
-    const routed = catalog.models.find((entry) => entry.slug === "deepseek-v4-flash@opencode-go");
+    const routed = catalog.models.find((entry) => entry.slug === codexSlugFor("opencode-go", "deepseek-v4-flash"));
     assert.ok(native && routed);
     assert.doesNotMatch(native.base_instructions, /`search <query>`/, "native GPT does not advertise the Exa CLI fallback");
     assert.match(routed.base_instructions, /`search <query>`/, "routed models retain ModelDock web search");
@@ -153,7 +153,7 @@ test("native catalog instructions use native web search instead of advertising E
 test("a native bare selection keeps its owner when a routed profile has the same model id", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "modeldock-native-owner-"));
   const nativeCatalogFile = path.join(dir, "native-catalog.json");
-  const routed = catalogFor(configStub()).models.find((entry) => entry.slug === "gpt-5.6-luna@opencode-go");
+  const routed = catalogFor(configStub()).models.find((entry) => entry.slug === codexSlugFor("opencode-go", "gpt-5.6-luna"));
   writeFileSync(nativeCatalogFile, JSON.stringify({
     captured_with: "0.149.0",
     models: [{
@@ -168,12 +168,12 @@ test("a native bare selection keeps its owner when a routed profile has the same
     const catalog = catalogFor(config);
     assert.equal(catalog.models[0].slug, "gpt-5.6-luna", "the selected native id stays bare");
     assert.equal(catalog.models[0].provider, "openai", "the catalog records the native owner");
-    assert.ok(catalog.models.some((entry) => entry.slug === "gpt-5.6-luna@opencode-go"), "the routed copy remains explicitly qualified");
+    assert.ok(catalog.models.some((entry) => entry.slug === codexSlugFor("opencode-go", "gpt-5.6-luna")), "the routed copy remains explicitly qualified");
     assert.equal(modelOwnerOf(config, "gpt-5.6-luna"), "openai", "picker ownership agrees with catalog ownership");
     assert.equal(modelOwnerOf(config, "gpt-5.6-luna@opencode-go"), "opencode-go", "an explicitly routed copy keeps its owner");
     assert.equal(modelOwnerOf(config, "vendor-model@retired-provider"), "retired-provider", "an unknown explicit suffix is not reassigned");
     const optedOut = catalogFor({ ...config, nativeMerge: false });
-    assert.notEqual(optedOut.models[0].slug, "gpt-5.6-luna@opencode-go",
+    assert.notEqual(optedOut.models[0].slug, codexSlugFor("opencode-go", "gpt-5.6-luna"),
       "opting out of native publishing must not turn the selected native id into the routed main entry");
     assert.ok(!modelOptions({ ...config, nativeMerge: false }).some((entry) => entry.native),
       "the picker and catalog consume the same native opt-out state");
@@ -223,7 +223,8 @@ test("the generated catalog is accepted by the installed Codex parser", (t) => {
     });
     assert.equal(parsed.status, 0, parsed.stderr || parsed.stdout);
     const models = JSON.parse(parsed.stdout).models || [];
-    assert.ok(models.some((model) => model.slug === "deepseek-v4-flash@opencode-go"));
+    assert.ok(models.some((model) => model.slug === codexSlugFor("opencode-go", "deepseek-v4-flash")));
+    assert.ok(models.every((model) => /^[A-Za-z0-9._/-]+$/.test(model.slug) && !model.slug.includes("@")));
     for (const native of visibleNative) {
       assert.ok(models.some((model) => model.slug === native.slug), `${native.slug} disappeared from the merged catalog`);
     }
@@ -234,7 +235,7 @@ test("the generated catalog is accepted by the installed Codex parser", (t) => {
 
 test("catalogFor keeps the main model first with the profile comp hash", () => {
   const catalog = catalogFor(configStub());
-  assert.equal(catalog.models[0].slug, "deepseek-v4-flash@opencode-go");
+  assert.equal(catalog.models[0].slug, codexSlugFor("opencode-go", "deepseek-v4-flash"));
   assert.equal(catalog.models[0].comp_hash, "modeldock-opencode-go-v1");
   assert.equal(catalog.models[0].context_window, 1_000_000, "deepseek-v4-flash declares its self-reported 1M window");
   assert.equal(catalog.models[0].auto_compact_token_limit, 800_000);
@@ -245,7 +246,7 @@ test("catalogFor covers every available model", () => {
   const available = OPENCODE_GO_PROFILE.availableModels.filter((model) => model.status !== "unavailable").length;
   assert.ok(catalog.models.length >= available, `catalog lists at least the ${available} available models`);
   for (const entry of catalog.models) {
-    const declared = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === entry.slug.replace(/@.*$/, ""));
+    const declared = OPENCODE_GO_PROFILE.availableModels.find((model) => model.id === modelRefParts(entry.slug).model);
     const expected = declared?.supportsVision || declared?.acceptsImagesViaGateway ? ["text", "image"] : ["text"];
     assert.deepEqual(entry.input_modalities, expected, `${entry.slug} declares its direct or mediated image capability`);
   }
@@ -347,21 +348,21 @@ test("enabledProvidersFor includes the active profile and any provider with a to
 test("catalogFor publishes only models owned by enabled providers", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"));
-  assert.ok(!slugs.some((slug) => slug.endsWith("@deepseek-official")), "DeepSeek official models are hidden without a token");
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "deepseek-v4-flash")));
+  assert.ok(!slugs.some((slug) => modelRefParts(slug).provider === "deepseek-official"), "DeepSeek official models are hidden without a token");
 
   const withDeepSeek = {
     ...configStub(),
     tokens: { "opencode-go": "go-token", "deepseek-official": "ds-token" },
   };
   const withDeepSeekCatalog = catalogFor(withDeepSeek);
-  assert.ok(withDeepSeekCatalog.models.some((entry) => entry.slug === "deepseek-v4-flash@deepseek-official"));
+  assert.ok(withDeepSeekCatalog.models.some((entry) => entry.slug === codexSlugFor("deepseek-official", "deepseek-v4-flash")));
 });
 
 test("the bare gpt-5.6-luna slot stays reserved for the native GPT pipeline", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("gpt-5.6-luna@opencode-go"), "our Luna is published under the owner suffix");
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "gpt-5.6-luna")), "our Luna is published under the owner suffix");
   assert.ok(!slugs.includes("gpt-5.6-luna"), "the bare id stays free for the native backend's GPT-5.6-Luna");
   const known = new Set(slugs);
   assert.equal(isNativeModel("gpt-5.6-luna", known), true, "a native request for the bare id passes through to ChatGPT");
@@ -403,7 +404,7 @@ test("catalogFor with nativeMerge=false skips the native GPT merge for non-subsc
   try {
     const catalog = catalogFor({ ...configStub(), nativeCatalogFile: file, nativeMerge: false });
     const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"), "curated Go models stay published");
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "deepseek-v4-flash")), "curated Go models stay published");
     assert.ok(!slugs.includes("gpt-5.6-luna"), "native GPT models are hidden without a subscription (nativeMerge=false)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -413,8 +414,8 @@ test("catalogFor with nativeMerge=false skips the native GPT merge for non-subsc
 test("catalogFor publishes the free models alongside the paid ones", () => {
   const catalog = catalogFor(configStub());
   const slugs = catalog.models.map((entry) => entry.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash-free@opencode-go"));
-  assert.ok(slugs.includes("mimo-v2.5-free@opencode-go"));
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "deepseek-v4-flash-free")));
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "mimo-v2.5-free")));
 });
 
 test("mergeNativeCatalog caps native reasoning levels for an old catalog version", () => {
@@ -561,13 +562,13 @@ test("catalogFor orders the picker by use, with sequential priorities", () => {
       nativeCatalogFile: file,
       usageByModel: { "deepseek-v4-pro@opencode-go": { requests: 4000 } },
     }).models.map((entry) => entry.slug);
-    const natives = ordered.filter((slug) => !slug.includes("@"));
-    const routed = ordered.filter((slug) => slug.includes("@"));
+    const natives = ordered.filter((slug) => !modelRefParts(slug).qualified);
+    const routed = ordered.filter((slug) => modelRefParts(slug).qualified);
     assert.deepEqual(ordered.slice(0, natives.length), natives, "every native entry sits above the divider");
-    assert.equal(routed[0], "deepseek-v4-pro@opencode-go", "the most-used routed model opens the lower half");
+    assert.equal(routed[0], codexSlugFor("opencode-go", "deepseek-v4-pro"), "the most-used routed model opens the lower half");
     assert.deepEqual(
       routed.slice(1),
-      unused.filter((slug) => slug.includes("@") && slug !== "deepseek-v4-pro@opencode-go"),
+      unused.filter((slug) => modelRefParts(slug).qualified && slug !== codexSlugFor("opencode-go", "deepseek-v4-pro")),
       "and the untouched tail keeps its previous order",
     );
   } finally {
@@ -583,10 +584,10 @@ test("catalogFor ranks by rollup heat, not 30-day popularity", () => {
     ...configStub(),
     usageByModel: rollupTotals(rollup, "2026-08-18T12:00:00.000Z"),
   });
-  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => slug.includes("@"));
-  assert.equal(routed[0], "deepseek-v4-flash@opencode-go", "the recent, high-heat model opens the routed half");
+  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => modelRefParts(slug).qualified);
+  assert.equal(routed[0], codexSlugFor("opencode-go", "deepseek-v4-flash"), "the recent, high-heat model opens the routed half");
   assert.ok(
-    routed.indexOf("deepseek-v4-flash@opencode-go") < routed.indexOf("deepseek-v4-pro@opencode-go"),
+    routed.indexOf(codexSlugFor("opencode-go", "deepseek-v4-flash")) < routed.indexOf(codexSlugFor("opencode-go", "deepseek-v4-pro")),
     "heat outranks a model with more 30-day popularity",
   );
 });
@@ -599,8 +600,8 @@ test("catalogFor falls back to popularity when heat is absent", () => {
       "deepseek-v4-pro@opencode-go": { popularity: 100 },
     },
   });
-  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => slug.includes("@"));
-  assert.equal(routed[0], "deepseek-v4-pro@opencode-go", "without heat the 30-day popularity decides");
+  const routed = catalog.models.map((entry) => entry.slug).filter((slug) => modelRefParts(slug).qualified);
+  assert.equal(routed[0], codexSlugFor("opencode-go", "deepseek-v4-pro"), "without heat the 30-day popularity decides");
 });
 
 test("a published native slug routes to the native leg despite being in the catalog", () => {
@@ -617,6 +618,10 @@ test("a published native slug routes to the native leg despite being in the cata
     assert.ok(known.has("gpt-5.6-luna"), "bare native slug is now published so the picker lists it");
     assert.equal(isNativeModel("gpt-5.6-luna", known, nativeSlugs), true, "native slug stays on the native leg");
     assert.equal(isNativeModel("gpt-5.6-luna@opencode-go", known, nativeSlugs), false, "our qualified Luna stays routed");
+    assert.equal(isNativeModel(codexSlugFor("opencode-go", "gpt-5.6-luna"), known, nativeSlugs), false,
+      "the Codex-facing routed slug keeps the same owner");
+    assert.equal(isNativeModel("mdr.not-valid", known, nativeSlugs), false,
+      "a corrupted routed slug fails closed instead of reaching ChatGPT");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -624,12 +629,12 @@ test("a published native slug routes to the native leg despite being in the cata
 
 test("catalogFor publishes a verified chat-dialect model", () => {
   const catalog = catalogFor(configStub());
-  assert.ok(catalog.models.some((entry) => entry.slug === "qwen3.8-flash@opencode-go"), "verified chat model must be published");
+  assert.ok(catalog.models.some((entry) => entry.slug === codexSlugFor("opencode-go", "qwen3.8-flash")), "verified chat model must be published");
 });
 
 test("an unavailable chat-dialect model remains out of the picker", () => {
   const catalog = catalogFor(configStub());
-  assert.ok(!catalog.models.some((entry) => entry.slug === "qwen3.8-max@opencode-go"));
+  assert.ok(!catalog.models.some((entry) => entry.slug === codexSlugFor("opencode-go", "qwen3.8-max")));
 });
 
 test("the native section keeps Codex's own order, not ours", async (t) => {
@@ -660,6 +665,6 @@ test("the native section keeps Codex's own order, not ours", async (t) => {
   }).models.map((entry) => entry.slug);
 
   assert.deepEqual(order.slice(0, 2), ["gpt-5.6-sol", "gpt-5.6-terra"], "captured order survives our traffic counts");
-  assert.equal(order[2], "deepseek-v4-pro@opencode-go", "the busiest routed model opens the lower half");
-  assert.ok(!order.slice(2).some((slug) => !slug.includes("@")), "no native entry falls below the divider");
+  assert.equal(order[2], codexSlugFor("opencode-go", "deepseek-v4-pro"), "the busiest routed model opens the lower half");
+  assert.ok(!order.slice(2).some((slug) => !modelRefParts(slug).qualified), "no native entry falls below the divider");
 });

@@ -1,11 +1,13 @@
+import { modelAddressFor, modelRefParts } from "./model-ref.mjs";
+
 // One model identity is shared by usage aggregation and equivalent API
 // pricing. Providers and vendor namespaces describe where a model was served,
 // not which model did the work.
 export function canonicalModelId(model) {
   const raw = String(model || "").trim();
   if (!raw) return raw;
-  const providerAt = raw.lastIndexOf("@");
-  const withoutProvider = providerAt > 0 ? raw.slice(0, providerAt) : raw;
+  const ref = modelRefParts(raw);
+  const withoutProvider = ref.qualified ? ref.model : raw;
   const vendorSeparator = withoutProvider.lastIndexOf("/");
   const bare = vendorSeparator >= 0 ? withoutProvider.slice(vendorSeparator + 1) : withoutProvider;
   return bare
@@ -24,14 +26,14 @@ export function canonicalModelId(model) {
 // and a replayed boot selection resolves through it - all three must agree on
 // the exact string, so the rule lives beside the other shared identity.
 export const LLAMACPP_LOCAL_MODEL_ID = "Local";
-export const LLAMACPP_LOCAL_SLUG = `${LLAMACPP_LOCAL_MODEL_ID}@llamacpp`;
+export const LLAMACPP_LOCAL_SLUG = modelAddressFor("llamacpp", LLAMACPP_LOCAL_MODEL_ID);
 // "Is this name addressed to the local llama.cpp endpoint?" - the one place that
 // spelling is tested. Routing, the stored vision reference, and the entry resolver
 // each gate the alias on a different authority (the published catalog, the profile,
 // the loaded snapshot), but they must agree on what counts as a llama.cpp name or
 // they will disagree about which requests are aliases.
 export function isLlamaLocalName(value) {
-  return String(value || "").endsWith("@llamacpp");
+  return modelRefParts(value).provider === "llamacpp";
 }
 export function canonicalLlamaLocalKey(key) {
   const raw = String(key || "");

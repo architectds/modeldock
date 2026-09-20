@@ -53,3 +53,4 @@ llama-logs/
 # them because they sit beside the scripts they were poking at.
 scripts/tmp-*
 tmp-check*.mjs
+.preview/

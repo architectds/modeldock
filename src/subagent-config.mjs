@@ -2,6 +2,7 @@ import path from "node:path";
 import { mkdirSync, readFileSync, statSync } from "node:fs";
 import { atomicWriteTextSync } from "./atomic-file.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
+import { codexModelRef, internalModelRef } from "./model-ref.mjs";
 import { modelOptions, providerOptions } from "./model-options.mjs";
 import { NATIVE_PROVIDER } from "./native-provider.mjs";
 export { NATIVE_PROVIDER } from "./native-provider.mjs";
@@ -21,8 +22,16 @@ export const SUBAGENT_AGENT_FILE = "modeldock-subagent.toml";
 // main provider/model pair, and every native GPT slug is selectable alongside
 // the routed catalog so subagents stop silently defaulting to native models.
 // Native roles keep the built-in "openai" provider (base_url pointed at this
-// gate in transparent mode); routed roles keep the published "@provider" slug,
-// which the gateway parses for upstream routing.
+// gate in transparent mode); routed roles carry the Codex-facing slug that
+// codexModelRef encodes, which the gateway parses for upstream routing.
+//
+// That encoding exists because this file is the one place ModelDock hands a
+// model name to the Codex client itself rather than to an upstream: Codex tags
+// its own metrics and session records with the model string it reads here, and
+// the internal "@provider" address is rejected by that telemetry layer. The
+// internal address stays the one identity for the dashboard, persisted
+// preferences and usage rollups; only this wire value is encoded, and reading
+// decodes it back.
 export const SUBAGENT_DEFAULT_MODEL = "deepseek-v4-flash@opencode-go";
 // The built-in native ChatGPT provider, shared by the subagent and vision
 // pickers: one spelling, one label, everywhere it is offered.
@@ -64,11 +73,35 @@ export function readSubagentModel(config) {
   if (subagentCache.file === file && subagentCache.mtimeMs === mtimeMs) return subagentCache.model;
   try {
     const source = readFileSync(file, "utf8");
-    const model = source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
+    const written = source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || null;
+    // The file holds the Codex-facing slug; every consumer of this value (the
+    // picker, the catalog's forced-publish set, the collaboration relay) speaks
+    // the internal address, so the boundary is crossed here, once.
+    const model = written ? internalModelRef(written) : null;
     subagentCache = { file, mtimeMs, model };
     return model;
   } catch {
     return null;
+  }
+}
+
+// One-time upgrade of the ModelDock-owned agent file. Older releases wrote the
+// readable internal address directly into a Codex-facing field, which makes
+// Codex reject every metric carrying that model tag. Keep the selected model,
+// rewrite only the representation, and let the caller request a Codex restart.
+export function migrateSubagentAgentFile(config) {
+  const file = subagentAgentFilePath(config);
+  if (!file) return false;
+  try {
+    const source = readFileSync(file, "utf8");
+    const written = source.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] || "";
+    if (!written) return false;
+    const model = internalModelRef(written);
+    if (written === codexModelRef(model)) return false;
+    writeSubagentAgentFile(config, model);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -82,7 +115,7 @@ export function writeSubagentAgentFile(config, model) {
     'name = "modeldock_subagent"',
     'description = "Default ModelDock-managed role for ordinary delegation; use another named role only when the user explicitly requests it."',
     `model_provider = "${NATIVE_PROVIDER.id}"`,
-    `model = "${model}"`,
+    `model = "${codexModelRef(model)}"`,
     'model_reasoning_effort = "high"',
     'developer_instructions = """',
     "Complete the bounded task assigned by the parent agent.",

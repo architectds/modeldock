@@ -15,6 +15,7 @@ import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
+import { modelAddressFor } from "./model-ref.mjs";
 import { profileById } from "./profiles.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 export { customEndpointFor } from "./custom-endpoint-routing.mjs";
@@ -101,7 +102,7 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
       // slug carries the provider. Keying on the id alone silently dropped the
       // second one.
       if (!item) continue;
-      const key = `${item.providerId}@${item.modelId}`;
+      const key = modelAddressFor(item.providerId, item.modelId);
       if (seen.has(key)) continue;
       seen.add(key);
       clean.push(item);

@@ -4,6 +4,11 @@ import { localEngineDefinition } from "./local-engine-definitions.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 import { foldLlamaLocalKeys, LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
+import {
+  codexSlugFor,
+  modelAddressFor,
+  modelRefParts,
+} from "./model-ref.mjs";
 
 // The context window we declare for relayed models. DeepSeek V4 (flash and pro)
 // advertise a 1M window natively and the OpenCode endpoint held 911k in a live
@@ -153,9 +158,13 @@ function catalogEntry({ slug, displayName, description, compHash, inputModalitie
 }
 
 function modelCatalogDefaults({ profileId, mainModel, displayName, description, compHash, inputModalities, supportsSearchTool, baseInstructions, defaultReasoningLevel = "high", supportedReasoningLevels = GENERAL_REASONING_LEVELS, availableModels = [], applyPatchToolType = "freeform" }) {
-  // The main entry is owner-qualified like every other published entry, even when
-  // the caller passed a bare reference (a legacy .env or a test fixture).
-  const qualifiedMain = publishedSlugFor(profileId, mainModel);
+  // ModelDock keeps a readable owner-qualified address internally. The Codex
+  // catalog is a separate wire boundary: it gets the reversible metric-safe
+  // spelling so the client's telemetry never sees the internal '@' delimiter.
+  const mainReference = modelRefParts(mainModel);
+  const qualifiedMain = mainReference.qualified
+    ? codexSlugFor(mainReference.provider, mainReference.model)
+    : codexSlugFor(profileId, mainModel);
   const base = { compHash, supportsSearchTool, baseInstructions, defaultReasoningLevel, supportedReasoningLevels, applyPatchToolType };
   // The patch-tool shape belongs to whoever will receive the request, and this
   // catalog is cross-provider, so it is resolved per entry from the slug's
@@ -196,9 +205,9 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
   for (const item of routedModelInventory()) {
     const { model } = item;
     if (model.status === "unavailable") continue;
-    if (item.id === qualifiedMain || rest.some((entry) => entry.slug === item.id)) continue;
+    if (item.codexSlug === qualifiedMain || rest.some((entry) => entry.slug === item.codexSlug)) continue;
     rest.push({
-        slug: item.id,
+        slug: item.codexSlug,
         displayName: (model.label || model.id) === item.providerLabel
           ? item.providerLabel
           : `${item.providerLabel} - ${model.label || model.id}`,
@@ -972,7 +981,8 @@ export function routedModelInventory() {
     for (const model of profile.availableModels || []) {
       if (!model?.id) continue;
       inventory.push({
-        id: publishedSlugFor(profile.id, model),
+        id: modelAddressFor(profile.id, model),
+        codexSlug: codexSlugFor(profile.id, model),
         provider: profile.id,
         providerLabel: profile.label,
         model,
@@ -1222,37 +1232,22 @@ export function publishedCatalogFingerprint(profileIdOrObject) {
     status: model.status || "available",
   })));
 }
-// Published routed ids carry their owner in a suffix such as
-// "deepseek-v4-flash@deepseek-official". The suffix is a routing address only
-// and is stripped before the id reaches an upstream. A bare id survives only
-// as a legacy OpenCode Go reference.
-export const PROVIDER_SEPARATOR = "@";
+// The internal routed address remains readable and stable in preferences,
+// usage rollups and diagnostics. It is not the Codex-facing slug; catalog
+// construction encodes that address with codexSlugFor above.
 // The profile whose ids are published bare, so ids already written into Codex configs
 // keep resolving without a suffix.
 export const DEFAULT_PROFILE_ID = "opencode-go";
 
-// The slug under which a model id is published in the Codex catalog. Every model a
-// profile owns is published owner-qualified: the @provider suffix is a routing
-// address that names the upstream, so the picker label, the catalog grouping, and
-// the route can never disagree about which provider a model belongs to. A bare id
-// survives only as a legacy reference (an older config.toml or a stored thread
-// selection): it is never published and routes to the default provider (see
-// providerForModel). Accepts either a profile model object or a bare id string, so
-// the catalog builder and config loading share one rule.
-export function publishedSlugFor(profileId, model) {
+// The canonical internal address. A bare id survives only as a legacy reference
+// and routes to the default provider (see providerForModel). Codex-facing code
+// must call codexSlugFor instead of exposing this storage/routing representation.
+export function routedModelRefFor(profileId, model) {
   const id = typeof model === "string" ? model : model?.id;
   if (!id) return model;
   const pid = profileId || DEFAULT_PROFILE_ID;
   const owned = PROFILES[pid]?.availableModels?.some((candidate) => candidate.id === id);
-  return owned ? `${id}${PROVIDER_SEPARATOR}${pid}` : id;
-}
-
-export function modelRefParts(model) {
-  const raw = String(model || "");
-  const at = raw.lastIndexOf(PROVIDER_SEPARATOR);
-  return at > 0
-    ? { raw, model: raw.slice(0, at), provider: raw.slice(at + 1), qualified: true }
-    : { raw, model: raw, provider: "", qualified: false };
+  return owned ? modelAddressFor(pid, id) : id;
 }
 
 export function bareModelId(model) {
@@ -1327,17 +1322,7 @@ export function effectiveContextWindow(model) {
   return Number(model?.contextWindow) > 0 ? Number(model.contextWindow) : CONTEXT_WINDOW;
 }
 
-// The provider a slug is addressed to, when that provider is one this gateway
-// publishes. An owned address means the model was chosen from the catalog this
-// gateway wrote - not a model id Codex made up - which is what separates a
-// selection to honour from a default to re-route.
-//
-// Native models carry no suffix at all, so they never match here: a bare id is
-// the one case that still falls back.
-export function addressedProviderOf(model) {
-  const parts = modelRefParts(model);
-  return parts.qualified && parts.provider !== NATIVE_PROVIDER_ID ? parts.provider : "";
-}
+export { codexSlugFor, modelAddressFor, modelRefParts } from "./model-ref.mjs";
 
 export function tokenFor(config, model) {
   const provider = providerForModel(config, model);

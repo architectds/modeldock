@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createApp, createServices } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
+import { codexSlugFor, OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 import { readLatestMainRoute } from "../src/usage-events.mjs";
 import { writeSubagentAgentFile } from "../src/subagent-config.mjs";
 
@@ -507,8 +507,8 @@ test("gateway: nativeMerge=false hides native models from /v1/models but the rel
 
   const models = await (await fetch(`${instance.base}/v1/models`)).json();
   const slugs = models.models.map((model) => model.slug);
-  assert.ok(slugs.includes("deepseek-v4-flash@opencode-go"), "curated Go models stay published");
-  assert.ok(slugs.includes("gpt-5.6-luna@opencode-go"), "our qualified Luna stays published");
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "deepseek-v4-flash")), "curated Go models stay published");
+  assert.ok(slugs.includes(codexSlugFor("opencode-go", "gpt-5.6-luna")), "our qualified Luna stays published");
   assert.ok(!slugs.includes("gpt-5.6-luna"), "the native GPT model is hidden for non-subscribers");
 
   const relay = await fetch(`${instance.base}/v1/responses`, {
@@ -546,7 +546,7 @@ test("gateway: a selected zen-free model relays to the zen base", async (t) => {
   t.after(instance.stop);
 
   const models = await (await fetch(`${instance.base}/v1/models`)).json();
-  assert.ok(models.models.some((model) => model.slug === "deepseek-v4-flash-free@opencode-go"));
+  assert.ok(models.models.some((model) => model.slug === codexSlugFor("opencode-go", "deepseek-v4-flash-free")));
 
   const relay = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",

@@ -10,12 +10,12 @@ import {
   bareModelId,
   DEFAULT_PROFILE_ID,
   enabledProviderOptions,
+  modelAddressFor,
   profileById,
   profileOptions,
   modelRefParts,
   providerForModel,
   providerRouteConfigured,
-  publishedSlugFor,
   routedModelInventory,
 } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
@@ -77,7 +77,10 @@ export function legacyBareIds(config) {
 export function publishedModelIds(config) {
   const ids = new Set();
   for (const model of codexModelCatalog(config).models || []) {
-    if (model?.slug) ids.add(model.slug);
+    if (!model?.slug) continue;
+    ids.add(model.slug);
+    const parts = modelRefParts(model.slug);
+    if (parts.qualified) ids.add(modelAddressFor(parts.provider, parts.model));
   }
   for (const id of legacyBareIds(config)) ids.add(id);
   return ids;
@@ -185,7 +188,13 @@ export function modelOwnerOf(config, modelId) {
 // only its other selector.
 export function canonicalModelRefOf(config, modelId) {
   const id = String(modelId || "").trim();
-  if (!id || modelRefParts(id).qualified) return id;
+  if (!id) return id;
+  const parts = modelRefParts(id);
+  if (parts.qualified) {
+    return parts.provider === NATIVE_PROVIDER_ID
+      ? parts.model
+      : modelAddressFor(parts.provider, parts.model);
+  }
   const inventory = modelInventory(config);
   if (inventory.some((entry) => entry.id === id && entry.native)) return id;
   return inventory.find((entry) => !entry.native && entry.provider === DEFAULT_PROFILE_ID && bareModelId(entry.id) === id)?.id || id;

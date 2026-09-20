@@ -11,6 +11,7 @@ import { once } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { ownerFilePath } from "../src/instance-owner.mjs";
+import { codexSlugFor } from "../src/model-ref.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -259,7 +260,8 @@ async function assertBridgeTools(bridgePath, gatewayUrl, memoryDir) {
 // capability declarations the session depends on.
 function assertCatalogTools(catalogPath) {
   const payload = JSON.parse(readFileSync(catalogPath, "utf8"));
-  const entry = (payload.models || []).find((model) => String(model.slug || "").includes("deepseek-v4-flash"));
+  const entry = (payload.models || []).find((model) =>
+    model.slug === codexSlugFor("opencode-go", "deepseek-v4-flash"));
   assert.ok(entry, "catalog should publish the main model entry");
   assert.deepEqual(
     entry.experimental_supported_tools,

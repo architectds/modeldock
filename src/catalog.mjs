@@ -6,10 +6,13 @@ import {
   DEFAULT_PROFILE_ID,
   enabledProviderOptions,
   modelEntryFor,
+  modelAddressFor,
+  modelRefParts,
   profileById,
   providerForModel,
-  publishedSlugFor,
+  routedModelRefFor,
 } from "./profiles.mjs";
+import { codexModelRef } from "./model-ref.mjs";
 import { readNativeCatalog } from "./native-catalog.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
@@ -82,6 +85,7 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
   // reviewer intent for a GPT session is OpenAI's to declare, not ours - and a
   // route never names itself as its own reviewer.
   const reviewModel = String(config?.reviewModel || "");
+  const reviewRef = modelRefParts(reviewModel);
   // A reviewer nobody can serve is worse than no reviewer declared: Codex would
   // name it, the request would fail, and every escalation would block. Same rule
   // the vision route already uses - a native id is checked against the ChatGPT
@@ -91,7 +95,7 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
   // bare value, because the cache is absent on a first boot and must not be what
   // decides whether a reviewer is callable.
   const reviewOwnerIsNative = Boolean(config?.reviewModelIsNative)
-    || reviewModel.endsWith(`@${NATIVE_PROVIDER_ID}`)
+    || reviewRef.provider === NATIVE_PROVIDER_ID
     || nativeSlugs.has(reviewModel);
   const reviewServiceable = Boolean(reviewModel)
     && (reviewOwnerIsNative
@@ -119,7 +123,9 @@ function applyPerModelInstructions(config, models, nativeSlugs = new Set()) {
       },
       ...(reviewServiceable && !native && bareModelId(entry.slug) !== bareModelId(reviewModel)
         ? {
-            auto_review_model_override: reviewModel,
+            auto_review_model_override: reviewOwnerIsNative
+              ? reviewRef.model || reviewModel
+              : codexModelRef(reviewModel),
             ...(reviewEffort ? { multi_agent_reasoning_effort: reviewEffort } : {}),
           }
         : {}),
@@ -146,7 +152,7 @@ export function catalogFor(config) {
     // qualifies its main id. Feed it a real routed fallback, then add the
     // native entry separately, so a native bare id is never rewritten as ours.
     ? profile.availableModels?.find((entry) => entry?.status !== "unavailable")?.id || config.mainModel
-    : publishedSlugFor(config.profileId || profile.id, config.mainModel);
+    : routedModelRefFor(config.profileId || profile.id, config.mainModel);
   const baseCatalog = profile.modelCatalog({
     mainModel,
     visionModel: config.visionModel,
@@ -174,7 +180,8 @@ export function catalogFor(config) {
   // provider. Native models are checked against the Codex login independently
   // because their bare ids have no routed-provider suffix.
   const visionRef = String(config.visionModel || "");
-  const nativeVision = visionRef.endsWith("@openai") || nativeSlugs.has(visionRef);
+  const nativeVision = modelRefParts(visionRef).provider === NATIVE_PROVIDER_ID
+    || nativeSlugs.has(visionRef);
   const visionRouteServiceable = Boolean(visionRef)
     && (nativeVision ? hasChatGptLogin(config.codexHome) : enabledProviderIds.has(providerForModel(config, visionRef)));
   // Stamped by the server next to contextOverrides; absent in callers that only
@@ -209,7 +216,10 @@ export function catalogFor(config) {
     // is published whatever the file says: the selection is the later and
     // stronger statement, and withholding it would leave Codex unable to name
     // the model it is currently talking to.
-    if (!isModelPublished(toggles, entry.slug) && !selected.has(entry.slug)) return false;
+    const internalRef = nativeEntry
+      ? entry.slug
+      : modelAddressFor(owner, bareModelId(entry.slug));
+    if (!isModelPublished(toggles, internalRef) && !selected.has(internalRef)) return false;
     return (nativeEntry ? nativeServiceable : enabledProviderIds.has(owner))
       && modelEntry?.status !== "unavailable";
   });
@@ -321,8 +331,9 @@ function sanitizeNativeReasoningLevels(model, codexVersion) {
 //
 function orderCatalogByUse(models, usage = {}) {
   if (!Array.isArray(models)) return models;
-  // Only the routed half is ever ranked, and every routed slug carries its
-  // owner - which is also how the rollup keys them, so a direct lookup matches.
+  // Only the routed half is ever ranked. The Codex-facing slug carries its
+  // owner in the safe encoding; decode it once to the internal address that
+  // usage rollups key on before looking up traffic.
   // Native slugs are bare and their traffic is filed under "<slug>@openai";
   // nothing looks it up, because their order is Codex's, not ours.
   // Rank the routed half by decayed heat (see usage-rollup.mjs): the
@@ -330,12 +341,14 @@ function orderCatalogByUse(models, usage = {}) {
   // month ago. Older rollups and tests carry only `.requests`, so it is the
   // fallback - the two sources never disagree about which side of a tie wins.
   const score = (entry) => {
-    const found = usage[entry?.slug];
+    const parts = modelRefParts(entry?.slug);
+    const key = parts.qualified ? modelAddressFor(parts.provider, parts.model) : entry?.slug;
+    const found = usage[key];
     return Number(found?.heat ?? found?.popularity ?? found?.requests ?? found ?? 0);
   };
   // A native entry is the one without an owner suffix: it comes from Codex's
   // own catalog rather than a provider of ours.
-  const isNative = (entry) => !String(entry?.slug || "").includes("@");
+  const isNative = (entry) => !modelRefParts(entry?.slug).qualified;
   const decorated = models.map((entry, index) => ({ entry, used: score(entry), index }));
   const native = decorated.filter(({ entry }) => isNative(entry)).sort((a, b) => a.index - b.index);
   const routed = decorated

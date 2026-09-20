@@ -9,7 +9,7 @@ import { appendConfigManifest, assertConfigWriteSafe } from "./toml-guard.mjs";
 // with it present while unmanaged) and puts it back, so the pick is never a
 // second copy that can disagree - it is recovery material for a file it deleted.
 import { SUBAGENT_AGENT_FILE, readSubagentModel, writeSubagentAgentFile } from "./subagent-config.mjs";
-import { PROVIDER_SEPARATOR } from "./profiles.mjs";
+import { modelRefParts } from "./profiles.mjs";
 
 function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
@@ -267,7 +267,7 @@ export function buildManagedCodexConfig(source, { baseUrl, nativeModels = [], ca
   // A native slug is any id without the provider separator. Keep an existing
   // choice when the current catalog still owns it; if discovery is unavailable,
   // preserving the bare value is safer than guessing.
-  const existingIsNative = Boolean(existingModel) && !existingModel.includes(PROVIDER_SEPARATOR);
+  const existingIsNative = Boolean(existingModel) && !modelRefParts(existingModel).qualified;
   // The fallback is a native slug captured from this Codex installation, not a
   // model name compiled into ModelDock. If discovery is unavailable, omit the
   // key and let Codex choose its own built-in default instead of pinning an old
@@ -427,7 +427,7 @@ export class CodexConfigSwitcher {
     if (configExists) current = await readFile(this.configPath, "utf8");
     const routeActive = this.#routeActive(current);
     const topLevelModel = topLevelString(current, "model");
-    const topLevelModelNative = !topLevelModel || !topLevelModel.includes(PROVIDER_SEPARATOR);
+    const topLevelModelNative = !topLevelModel || !modelRefParts(topLevelModel).qualified;
     return {
       enabled: Boolean(state.enabled && routeActive),
       managed: Boolean(state.enabled && routeActive),

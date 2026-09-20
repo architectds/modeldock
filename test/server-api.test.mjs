@@ -6,9 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile, profileById } from "../src/profiles.mjs";
+import { codexSlugFor, OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile, profileById } from "../src/profiles.mjs";
 import { decryptSecret } from "../src/secrets.mjs";
 import {
   ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
@@ -135,7 +135,7 @@ test("without token: healthz and responses return 503, local models catalog stil
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 503);
   const models = await fetch(`${instance.base}/v1/models`);
   assert.equal(models.status, 200, "models catalog is local and does not need the token");
-  assert.equal((await models.json()).models[0].slug, "deepseek-v4-flash@opencode-go");
+  assert.equal((await models.json()).models[0].slug, codexSlugFor("opencode-go", "deepseek-v4-flash"));
   const responses = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -418,7 +418,8 @@ test("subagent API exposes routed + native options and persists the agent file",
   const written = await readFile(agentFile, "utf8");
   assert.match(written, /^name = "modeldock_subagent"$/m, "agent file exposes the role name");
   assert.match(written, /^model_provider = "openai"$/m, "native roles use the built-in openai provider");
-  assert.match(written, /^model = "gpt-5.6-luna"$/m, "agent file stores the chosen model");
+  assert.match(written, /^model = "gpt-5.6-luna"$/m,
+    "a native bare id is already metric-safe and is written unchanged");
   assert.equal((await (await fetch(`${instance.base}/api/config`)).json()).restartRequired, true,
     "agent file changes require a Codex restart banner");
 
@@ -437,8 +438,29 @@ test("subagent API exposes routed + native options and persists the agent file",
   assert.equal(routed.status, 200);
   assert.equal(instance.services.subagentModel, "deepseek-v4-flash@opencode-go",
     "the live subagent model follows subsequent dashboard changes too");
-  assert.match(await readFile(agentFile, "utf8"), /^model = "deepseek-v4-flash@opencode-go"$/m,
-    "routed models persist with the qualified provider slug");
+  // Codex tags its own sessions and metrics with the model string it reads out
+  // of this file, and its tag charset rejects the internal "@" delimiter. The
+  // file therefore carries the encoded slug while every dashboard-facing value
+  // stays the readable internal address.
+  const routedSlug = (await readFile(agentFile, "utf8")).match(/^model = "([^"]+)"$/m)?.[1];
+  assert.equal(routedSlug, codexSlugFor("opencode-go", "deepseek-v4-flash"),
+    "routed models persist as the reversible Codex-facing slug");
+  assert.match(routedSlug, /^[A-Za-z0-9._/-]+$/, "the slug must stay inside the metric tag charset");
+  assert.ok(!routedSlug.includes("@"), "the internal provider delimiter never reaches Codex");
+  assert.equal((await (await fetch(`${instance.base}/api/subagent`)).json()).selected, "deepseek-v4-flash@opencode-go",
+    "reading the encoded file decodes back to the internal address the picker selects");
+
+  // Every install that predates the encoding already has the internal spelling
+  // on disk, and an upgrade does not rewrite it until the user re-picks. Leaving
+  // it unreadable would show an unknown model where the selection used to be.
+  await writeFile(agentFile, (await readFile(agentFile, "utf8"))
+    .replace(/^model = .*$/m, 'model = "kimi-k2.7-code@opencode-go"'), "utf8");
+  // The reader caches on mtime, so bump it: otherwise this assertion would pass
+  // on the cached value instead of on the legacy file being parsed.
+  const stamp = new Date(Date.now() + 2000);
+  await utimes(agentFile, stamp, stamp);
+  assert.equal((await (await fetch(`${instance.base}/api/subagent`)).json()).selected, "kimi-k2.7-code@opencode-go",
+    "an agent file written by an older install still reads as its model");
 });
 
 test("models endpoint serves the local Codex catalog", async (t) => {
@@ -447,7 +469,7 @@ test("models endpoint serves the local Codex catalog", async (t) => {
   const response = await fetch(`${instance.base}/v1/models`);
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.models[0].slug, "deepseek-v4-flash@opencode-go");
+  assert.equal(body.models[0].slug, codexSlugFor("opencode-go", "deepseek-v4-flash"));
   assert.equal(body.models[0].supports_parallel_tool_calls, false);
   // deepseek-v4-flash on Go carries the ladder measured on both endpoints, not
   // the general tier. The old expectation here was the placeholder that the
@@ -466,7 +488,7 @@ test("codexModelCatalog matches Codex schema requirements", () => {
     nativeCatalogFile: path.join(os.tmpdir(), "modeldock-test-native-missing.json"),
   });
   const model = catalog.models[0];
-  assert.equal(model.slug, "deepseek-v4-flash@opencode-go");
+  assert.equal(model.slug, codexSlugFor("opencode-go", "deepseek-v4-flash"));
   assert.equal(model.supports_reasoning_summaries, true);
   assert.equal(model.model_messages.instructions_variables.personality_pragmatic, "");
   assert.equal(model.apply_patch_tool_type, "freeform");
@@ -1736,7 +1758,7 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
 
     // Published to the catalog under the Custom provider.
     const catalog = await (await fetch(`${instance.base}/v1/models`)).json();
-    const customEntry = catalog.models.find((entry) => entry.slug === "vendor/model-x@custom");
+    const customEntry = catalog.models.find((entry) => entry.slug === codexSlugFor("custom", "vendor/model-x"));
     assert.ok(customEntry, "custom model appears in the published catalog");
     assert.equal(customEntry.display_name, "Custom - vendor/model-x");
   } finally {

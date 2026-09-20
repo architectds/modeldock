@@ -15,11 +15,14 @@ Set-Location $root
 
 Write-Host "Building bundles..." -ForegroundColor Cyan
 npm run build
+if ($LASTEXITCODE -ne 0) { throw "bundle build failed with exit $LASTEXITCODE" }
 
 Write-Host "Running install lifecycle tests (Windows native)..." -ForegroundColor Cyan
 node --test test/install-mock.test.mjs
+if ($LASTEXITCODE -ne 0) { throw "Windows install lifecycle failed with exit $LASTEXITCODE" }
 
 Write-Host "Running macOS install-branch simulation (WSL)..." -ForegroundColor Cyan
 node --test test/install-macos-sim.test.mjs
+if ($LASTEXITCODE -ne 0) { throw "macOS install simulation failed with exit $LASTEXITCODE" }
 
 Write-Host "Install behavior verified." -ForegroundColor Green

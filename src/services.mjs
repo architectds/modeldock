@@ -23,7 +23,7 @@ import { createDerivedFallback } from "./derived-fallback.mjs";
 import { callerBasePath, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { allProfiles, applyOllamaProfile, publishedSlugFor } from "./profiles.mjs";
+import { allProfiles, applyOllamaProfile, modelAddressFor } from "./profiles.mjs";
 import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath } from "./vision-overrides.mjs";
@@ -32,7 +32,8 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { readRollup, rollupTotals, usageRollupPath } from "./usage-rollup.mjs";
 import { mainRouteFromUsageEvent, readLatestMainRoute, usageEventsPath, usageFromRelayResult } from "./usage-events.mjs";
 import { stateFile } from "./state-dir.mjs";
-import { readSubagentModel } from "./subagent-config.mjs";
+import { migrateSubagentAgentFile, readSubagentModel } from "./subagent-config.mjs";
+import { modelRefParts } from "./model-ref.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
 import { DEFAULT_ZSTD_MEMORY_BUDGET_BYTES, WeightedByteBudget } from "./zstd-ingress-budget.mjs";
@@ -98,7 +99,7 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
       ...unknown,
     ];
     profile.availableModels = models;
-    applyVisionOverrides([profile], config.visionOverrides, { publishedSlugFor });
+    applyVisionOverrides([profile], config.visionOverrides, { modelAddressFor });
     console.log(`[gate] discovered ${unknown.length} ${profile.id} model(s): ${models.length} total`);
     return { changed: true, discovered: unknown.length };
   } catch (error) {
@@ -126,7 +127,7 @@ export function createServices(config = loadConfig()) {
   const mutableConfig = { ...config };
   const visionOverridesFile = mutableConfig.visionOverridesFile || visionOverridesPath();
   mutableConfig.visionOverrides = readVisionOverrides(visionOverridesFile);
-  applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { publishedSlugFor });
+  applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { modelAddressFor });
   const codexHome = typeof mutableConfig.codexHome === "string" && mutableConfig.codexHome
     ? mutableConfig.codexHome
     : path.join(os.homedir(), ".codex");
@@ -228,6 +229,14 @@ export function createServices(config = loadConfig()) {
     nativeModels: () => nativeSelectableModelSlugs(mutableConfig),
     catalogFile,
   });
+  let slugMigrationRestartRequested = false;
+  const requestCodexRestartForSlugMigration = () => {
+    if (slugMigrationRestartRequested) return;
+    slugMigrationRestartRequested = true;
+    configSwitcher.markRestartRequired().catch((error) => {
+      console.log(`[gate] safe model-slug migration could not request a Codex restart: ${error.message}`);
+    });
+  };
   const autostart = createAutostart();
   autostart.refresh().catch(() => {});
   // Re-check periodically so the Update button stays current without a restart;
@@ -249,7 +258,7 @@ export function createServices(config = loadConfig()) {
   let modelCatalogRevision = 0;
   const writeCatalogFile = () => {
     try {
-      applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { publishedSlugFor });
+      applyVisionOverrides(allProfiles(), mutableConfig.visionOverrides, { modelAddressFor });
       const catalog = codexModelCatalog({
         ...mutableConfig,
         mainModel: modelSelection.mainModel,
@@ -266,6 +275,14 @@ export function createServices(config = loadConfig()) {
       const serialized = JSON.stringify(catalog, null, 2);
       let previous = "";
       try { previous = readFileSync(catalogFile, "utf8"); } catch { /* first write */ }
+      let previousHadLegacyCodexRefs = false;
+      if (previous) {
+        try {
+          previousHadLegacyCodexRefs = (JSON.parse(previous).models || []).some((entry) =>
+            modelRefParts(entry?.slug).format === "legacy"
+              || modelRefParts(entry?.auto_review_model_override).format === "legacy");
+        } catch { /* a malformed old file is replaced below */ }
+      }
       // Atomic replace: Codex reads this file on its own schedule, so a
       // half-written JSON must never be observable. Same-directory rename is
       // atomic on both Windows and POSIX.
@@ -277,6 +294,7 @@ export function createServices(config = loadConfig()) {
         // discovery timers or stale copies of the model directory.
         modelCatalogRevision += 1;
         metrics.emit("change");
+        if (previousHadLegacyCodexRefs) requestCodexRestartForSlugMigration();
       }
       return catalog.models?.length || 0;
     } catch (error) {
@@ -386,6 +404,11 @@ export function createServices(config = loadConfig()) {
     () => runModelTidy(),
   );
 
+  // The managed agent file is another Codex-facing model boundary. Migrate it
+  // before publishing the catalog so both representations change together.
+  if (migrateSubagentAgentFile(mutableConfig)) {
+    requestCodexRestartForSlugMigration();
+  }
   // Write once at boot so the file exists even when the refresh is disabled or fails.
   writeCatalogFile();
   runModelTidy();

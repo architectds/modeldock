@@ -5,7 +5,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { addressedProviderOf, allProfiles, PROVIDER_SEPARATOR, bareModelId, modelEntryFor, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
+import { allProfiles, bareModelId, modelAddressFor, modelEntryFor, modelRefParts, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
+import { codexModelRef } from "./model-ref.mjs";
 import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { compressConversation } from "./compress.mjs";
 import { normalizeOllamaBase } from "./ollama.mjs";
@@ -404,7 +405,7 @@ function mainModelFor(services, sessionId) {
   // the catalog row it seeds cannot disagree with what the picker publishes.
   // A routed selection is provider-qualified or a known legacy bare id; native
   // slugs are bare and are published from Codex's captured catalog.
-  if (selected && (selected.includes("@") || services.knownModels?.has?.(selected))) return selected;
+  if (selected && (modelRefParts(selected).qualified || services.knownModels?.has?.(selected))) return selected;
   return nativeFallbackModel(services);
 }
 
@@ -420,6 +421,12 @@ function recordDerivedFallback(services, sessionId, route) {
 // account"). Map them onto the slug we actually publish before routing.
 export function normalizeLegacySlug(model, knownModels) {
   if (typeof model !== "string") return model;
+  const reference = modelRefParts(model);
+  let normalized = reference.qualified
+    ? reference.provider === NATIVE_PROVIDER_ID
+      ? reference.model
+      : modelAddressFor(reference.provider, reference.model)
+    : model;
   // llama.cpp publishes one stable local entry that replaces whatever name the
   // loaded file has published over time ("Qwen3.8-27B@llamacpp", a GGUF codename
   // like "Src@llamacpp", a raw shard path). A session pinned to an older name
@@ -428,17 +435,18 @@ export function normalizeLegacySlug(model, knownModels) {
   // for a name that is not currently published while the stable one is, so with
   // no local engine connected the request still falls through to the honest
   // 503 configuration error. Bare ids and every other provider pass untouched.
-  if (knownModels && isLlamaLocalName(model) && !knownModels.has(model)) {
-    const stable = canonicalLlamaLocalKey(model);
+  if (knownModels && isLlamaLocalName(normalized) && !knownModels.has(normalized)) {
+    const stable = canonicalLlamaLocalKey(normalized);
     if (knownModels.has(stable)) return stable;
   }
-  const match = model.match(/^([a-z0-9][a-z0-9-]*)\/(.+)$/);
-  if (!match || !knownModels) return model;
+  if (reference.qualified) return normalized;
+  const match = normalized.match(/^([a-z0-9][a-z0-9-]*)\/(.+)$/);
+  if (!match || !knownModels) return normalized;
   const [, provider, id] = match;
-  const qualified = `${id}@${provider}`;
+  const qualified = modelAddressFor(provider, id);
   if (knownModels.has(qualified)) return qualified;
   if (knownModels.has(id)) return id;
-  return model;
+  return normalized;
 }
 
 // A slug we do not serve is native GPT traffic. Empty models (provider defaults
@@ -449,11 +457,12 @@ export function normalizeLegacySlug(model, knownModels) {
 export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
   if (typeof requestedModel !== "string" || requestedModel.length === 0) return false;
   if (nativeSlugs?.has?.(requestedModel)) return true;
+  const reference = modelRefParts(requestedModel);
+  if (reference.qualified) return reference.provider === NATIVE_PROVIDER_ID;
   // A slug carrying a provider suffix this gateway owns is addressed to that
   // provider, whether or not it still resolves. "Unknown means native" is right
   // for a bare Codex slug and wrong here: it sent a request for a removed
   // custom endpoint to chatgpt.com, which has never heard of the model.
-  if (addressedProviderOf(requestedModel)) return false;
   return !(knownModels && knownModels.has(requestedModel));
 }
 
@@ -3719,14 +3728,15 @@ export function capDirectSummary(summary, cap = MAX_COMPACT_RESPONSE_BYTES) {
 
 function writeDirectCompaction(res, payload, summary, v2) {
   if (v2) {
+    const responseModel = codexModelRef(payload.model);
     if (payload.stream === false) {
-      const body = JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), null));
+      const body = JSON.stringify(compactionSnapshot(responseModel, compactionItem(summary), null));
       res.statusCode = 200;
       res.setHeader("Content-Type", "application/json");
       res.end(body);
       return Buffer.byteLength(body);
     }
-    return writeCompactionSse(res, payload.model, summary);
+    return writeCompactionSse(res, responseModel, summary);
   }
   const body = JSON.stringify({ output: compactOutput(payload.input, summary) });
   res.statusCode = 200;
@@ -4025,14 +4035,15 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     const summary = `${extractResponseText(normalizedSummary)}${imageHandoff}`;
     let clientBytes;
     if (v2) {
+      const responseModel = codexModelRef(payload.model);
       if (payload.stream === false) {
-        const body = JSON.stringify(compactionSnapshot(payload.model, compactionItem(summary), usage));
+        const body = JSON.stringify(compactionSnapshot(responseModel, compactionItem(summary), usage));
         res.statusCode = 200;
         res.setHeader("Content-Type", "application/json");
         res.end(body);
         clientBytes = Buffer.byteLength(body);
       } else {
-        clientBytes = writeCompactionSse(res, payload.model, summary);
+        clientBytes = writeCompactionSse(res, responseModel, summary);
       }
     } else {
       const body = JSON.stringify({ output: compactOutput(payload.input, summary) });

@@ -16,6 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { estimateApiCost } from "./api-pricing.mjs";
 import { canonicalLlamaLocalKey, canonicalModelId } from "./model-identity.mjs";
+import { internalModelRef, modelAddressFor, modelRefParts } from "./model-ref.mjs";
 import { stateFile } from "./state-dir.mjs";
 
 // No model decodes this fast. A request that claims to have produced tokens
@@ -145,7 +146,10 @@ function foldLocalBucketKeys(buckets) {
 export function rollupKey(event) {
   const model = String(event?.model || "unknown");
   const provider = String(event?.provider || "unknown");
-  return canonicalLlamaLocalKey(model.includes("@") ? model : `${model}@${provider}`);
+  const ref = modelRefParts(model);
+  return canonicalLlamaLocalKey(ref.qualified
+    ? internalModelRef(model)
+    : modelAddressFor(provider, model));
 }
 
 function addEvent(bucket, event) {
@@ -354,10 +358,10 @@ function shiftedUtcHour(now, offset) {
 }
 
 function modelParts(key) {
-  const split = String(key || "unknown@unknown").lastIndexOf("@");
-  return split > 0
-    ? { model: key.slice(0, split), provider: key.slice(split + 1) }
-    : { model: String(key || "unknown"), provider: "unknown" };
+  const ref = modelRefParts(String(key || "unknown"));
+  return ref.qualified
+    ? { model: ref.model, provider: ref.provider }
+    : { model: ref.model || "unknown", provider: "unknown" };
 }
 
 function addPricedStatsRow(target, key, source = {}) {

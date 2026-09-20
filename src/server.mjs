@@ -29,7 +29,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, profileOptions, profileById, providerForModel, publishedSlugFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { canonicalLlamaLocalKey, foldLlamaLocalKeys } from "./model-identity.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
@@ -185,13 +185,13 @@ function onModeSelection(services) {
   return {
     providerId,
     profile: profileById(providerId),
-    mainModel: publishedSlugFor(providerId, main),
+    mainModel: routedModelRefFor(providerId, main),
     visionModel,
   };
 }
 
 function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
-  const native = !String(id).includes(PROVIDER_SEPARATOR);
+  const native = !modelRefParts(id).qualified;
   return {
     id,
     label: `${labelForModelId(bareModelId(id))} (saved - currently unavailable)`,
@@ -203,7 +203,7 @@ function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
 }
 
 function canShowUnavailableSavedModel(config, id) {
-  return config.visionModelConfigured || String(id).includes(PROVIDER_SEPARATOR) || hasChatGptLogin(config.codexHome);
+  return config.visionModelConfigured || modelRefParts(id).qualified || hasChatGptLogin(config.codexHome);
 }
 
 function modelsPayload(services) {
@@ -319,7 +319,7 @@ function statsModelDirectory(services) {
   // keeps a human name without making those models selectable. Identity and
   // labels come from the same inventory used by every picker.
   for (const entry of modelInventory(services.config)) {
-    const id = entry.native ? `${entry.id}@${NATIVE_PROVIDER.id}` : entry.id;
+    const id = entry.native ? modelAddressFor(NATIVE_PROVIDER.id, entry.id) : entry.id;
     remember(id, entry.label || entry.id);
   }
   // The stable local entry keeps its "llama.cpp (local)" label even while no
@@ -1595,7 +1595,11 @@ export function createApp(services = createServices()) {
     // filing it under a name no entry matches answered 200 with the new value while
     // the published window never moved. Only while that entry is published - a
     // multi-model llama.cpp server keeps per-model ids, and each keeps its own edit.
-    const slug = llamaLocalStableEntry() ? canonicalLlamaLocalKey(requested) : requested;
+    const canonical = canonicalModelRefOf(config, requested);
+    const slug = llamaLocalStableEntry() ? canonicalLlamaLocalKey(canonical) : canonical;
+    if (!modelOptions(config).some((entry) => entry.id === slug)) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a model from the published roster." } });
+    }
     const file = services.contextOverridesFile || contextOverridesPath();
     // Folded on read as well as on write: a value stored before the stable identity
     // is still the user's measurement, and clearing it has to reach the entry it
@@ -1621,7 +1625,7 @@ export function createApp(services = createServices()) {
     // profile, so the pass below cannot reach them; they read this instead.
     // Without it the edit returned 200 and changed nothing for them.
     config.contextOverrides = overrides;
-    applyContextOverrides(allProfiles(), overrides, { publishedSlugFor });
+    applyContextOverrides(allProfiles(), overrides, { modelAddressFor });
     services.writeCatalogFile?.();
     // The override is on disk and in the profiles by now. If marking the
     // restart fails, the edit still happened - reporting it as rejected would
@@ -1644,9 +1648,13 @@ export function createApp(services = createServices()) {
   // Codex restart, which is what restartRequired tells the dashboard to say.
   app.post("/api/models/enabled", mutateConfig, async (req, res) => {
     const { id, enabled } = req.body || {};
-    const slug = String(id || "").trim();
-    if (!slug) {
+    const requested = String(id || "").trim();
+    const slug = canonicalModelRefOf(config, requested);
+    if (!requested) {
       return res.status(400).json({ error: { type: "invalid_model", message: "A model id is required." } });
+    }
+    if (!modelOptions(config).some((entry) => entry.id === slug)) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a model from the published roster." } });
     }
     if (typeof enabled !== "boolean") {
       return res.status(400).json({ error: { type: "invalid_state", message: "enabled must be true or false." } });
@@ -1706,7 +1714,7 @@ export function createApp(services = createServices()) {
   });
   app.post("/api/models/vision", mutateConfig, async (req, res) => {
     const { id, supportsVision } = req.body || {};
-    const slug = String(id || "").trim();
+    const slug = canonicalModelRefOf(config, String(id || "").trim());
     const model = modelOptions(config).find((entry) => entry.id === slug);
     const visionEditable = Boolean(model && (profileById(model.provider)?.modelDiscovery || model.provider === "llamacpp"));
     if (!visionEditable) {
@@ -1723,7 +1731,7 @@ export function createApp(services = createServices()) {
     overrides[slug] = supportsVision;
     writeVisionOverrides(file, overrides);
     config.visionOverrides = overrides;
-    applyVisionOverrides(allProfiles(), overrides, { publishedSlugFor });
+    applyVisionOverrides(allProfiles(), overrides, { modelAddressFor });
     services.writeCatalogFile?.();
     let restartRequired = true;
     try {

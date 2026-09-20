@@ -67,11 +67,11 @@ export function validateContextWindow(value) {
 // pass is therefore idempotent and reversible - call it with the current
 // override set and every entry ends up right, whether it gained one, lost one,
 // or never had one.
-export function applyContextOverrides(profiles, overrides, { publishedSlugFor }) {
+export function applyContextOverrides(profiles, overrides, { modelAddressFor }) {
   let applied = 0;
   for (const profile of profiles) {
     for (const model of profile.availableModels || []) {
-      const slug = publishedSlugFor(profile.id, model.id);
+      const slug = modelAddressFor(profile.id, model.id);
       const window = overrides[slug];
       if (window) {
         if (model.shippedContextWindow === undefined) {

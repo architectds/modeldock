@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -46,6 +46,19 @@ async function waitForGateway(port) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("built gateway did not start");
+}
+
+async function filesContaining(root, needle) {
+  const found = [];
+  const visit = async (dir) => {
+    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) await visit(file);
+      else if ((await readFile(file)).includes(Buffer.from(needle))) found.push(file);
+    }
+  };
+  await visit(root);
+  return found;
 }
 
 function stream(events) {
@@ -98,13 +111,17 @@ test("installed Codex replays bridged Chat reasoning and a custom tool on the ne
         : call?.function?.arguments;
       replayedCustomInput = callArguments?.input || "";
       replayedToolOutput = body.messages.find((message) => message.role === "tool" && message.tool_call_id === "call_reasoning_client")?.content || "";
-      res.end(stream([{
+      res.end(stream(["REASONING_", "ROUND_", "TRIP_", "OK"].map((content, index, parts) => ({
         id: "chatcmpl_reasoning_client_done",
         created: 22,
         model: "qwen3.8-flash",
-        choices: [{ index: 0, delta: { role: "assistant", content: "REASONING_ROUND_TRIP_OK" }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 100, completion_tokens: 4 },
-      }]));
+        choices: [{
+          index: 0,
+          delta: { ...(index === 0 ? { role: "assistant" } : {}), content },
+          finish_reason: index === parts.length - 1 ? "stop" : null,
+        }],
+        ...(index === parts.length - 1 ? { usage: { prompt_tokens: 100, completion_tokens: 4 } } : {}),
+      }))));
       return;
     }
     res.end(stream([
@@ -160,8 +177,12 @@ test("installed Codex replays bridged Chat reasoning and a custom tool on the ne
 
   const catalogFile = path.join(stateDir, "codex-model-catalog.json");
   await access(catalogFile);
+  const catalog = JSON.parse(await readFile(catalogFile, "utf8"));
+  const routedModel = catalog.models.find((entry) => entry.display_name === "OpenCode Go - Qwen 3.8 Flash")?.slug || "";
+  assert.match(routedModel, /^[A-Za-z0-9._/-]+$/, "Codex must receive a metric-safe routed slug");
+  assert.ok(!routedModel.includes("@"), "the internal provider delimiter must not enter the Codex session model");
   await writeFile(path.join(codexHome, "config.toml"), [
-    'model = "qwen3.8-flash@opencode-go"',
+    `model = ${JSON.stringify(routedModel)}`,
     `openai_base_url = ${JSON.stringify(`http://127.0.0.1:${gatewayPort}/v1`)}`,
     `model_catalog_json = ${JSON.stringify(catalogFile.replace(/\\/g, "/"))}`,
     'approval_policy = "never"',
@@ -205,4 +226,9 @@ test("installed Codex replays bridged Chat reasoning and a custom tool on the ne
   });
   assert.equal(written, "CUSTOM_TOOL_OK\n");
   assert.match(stdout, /REASONING_ROUND_TRIP_OK/);
+  assert.doesNotMatch(`${stdout}\n${stderr}`, /tag value contains invalid characters/i,
+    "stream telemetry must accept the published model tag");
+  const telemetryFailures = await filesContaining(codexHome, "tag value contains invalid characters");
+  assert.deepEqual(telemetryFailures, [],
+    `the real Codex client rejected the published model metric tag in: ${telemetryFailures.join(", ")}`);
 });

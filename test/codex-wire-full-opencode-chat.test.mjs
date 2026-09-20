@@ -196,7 +196,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
     sessionHeaders.push(req.headers["x-opencode-session"]);
-    if (!["full-go-chat-fixture", "other-go-task"].includes(req.headers["x-opencode-session"])) {
+    if (!["full-go-chat-fixture", "legacy-go-chat-fixture", "other-go-task"].includes(req.headers["x-opencode-session"])) {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "missing stable x-opencode-session" }));
       return;
@@ -317,6 +317,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       MODELDOCK_MEMORY: "0",
       MODELDOCK_MODEL_DISCOVERY: "1",
       MODELDOCK_NATIVE_MERGE: "0",
+      MODELDOCK_REVIEW_MODEL: "deepseek-v4-pro@opencode-go",
       MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
       MODELDOCK_AUTOSTART_KEY: autostartKey,
       MODELDOCK_AUTOSTART_NAME: autostartName,
@@ -336,11 +337,24 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   let discovered = false;
   let published = false;
   let declaredWithoutDiscovery = false;
+  let wireModels = {};
+  let reviewOverrides = [];
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const models = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models`)).json();
     discovered = models.options.some((model) => model.id === "deepseek-v4.2-flash@opencode-go");
     const catalog = JSON.parse(readFileSync(path.join(root, "state", "codex-model-catalog.json"), "utf8"));
-    published = catalog.models.some((model) => model.slug === "deepseek-v4.2-flash@opencode-go");
+    const byName = (name) => catalog.models.find((model) =>
+      String(model.display_name || "").toLowerCase() === `opencode go - ${name}`.toLowerCase())?.slug || "";
+    wireModels = {
+      qwen: byName("Qwen 3.8 Flash"),
+      v4: byName("DeepSeek V4 Flash"),
+      v41: byName("DeepSeek V4.1 Flash"),
+      v42: byName("DeepSeek V4.2 Flash"),
+    };
+    reviewOverrides = catalog.models
+      .map((model) => model.auto_review_model_override)
+      .filter(Boolean);
+    published = Boolean(wireModels.v42);
     // The directory above never mentions v4.1: it is only here because it is declared.
     const v41 = models.options.find((model) => model.id === "deepseek-v4.1-flash@opencode-go");
     declaredWithoutDiscovery = Boolean(v41?.contextWindow && v41?.inputNormalizer);
@@ -354,7 +368,24 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   );
   assert.equal(directoryCalls, 1, "boot must query the real Go profile directory once");
   assert.ok(published, "Codex must receive the same discovered slug");
-  const send = async (input, sessionId, stream = true, model = "qwen3.8-flash@opencode-go") => {
+  assert.ok(Object.values(wireModels).every(Boolean), `Codex catalog missed a routed wire slug: ${JSON.stringify(wireModels)}`);
+  assert.ok(Object.values(wireModels).every((slug) => /^[A-Za-z0-9._/-]+$/.test(slug) && !slug.includes("@")),
+    `every Codex-facing model slug must be telemetry-safe: ${JSON.stringify(wireModels)}`);
+  assert.ok(reviewOverrides.length > 0, "the built catalog publishes its configured review route");
+  assert.ok(reviewOverrides.every((slug) => /^[A-Za-z0-9._/-]+$/.test(slug) && !slug.includes("@")),
+    `review overrides must use the same telemetry-safe boundary: ${JSON.stringify(reviewOverrides)}`);
+  for (const enabled of [false, true]) {
+    const changed = await fetch(`http://127.0.0.1:${gatewayPort}/api/models/enabled`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: wireModels.qwen, enabled }),
+    });
+    const result = await changed.json();
+    assert.equal(changed.status, 200, JSON.stringify(result));
+    assert.equal(result.id, "qwen3.8-flash@opencode-go",
+      "Codex-facing model edits fold onto the internal preference key");
+  }
+  const send = async (input, sessionId, stream = true, model = wireModels.qwen) => {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-codex-session-id": sessionId },
@@ -426,25 +457,29 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     assert.deepEqual(chatResults.filter((text) => /^ROUND_\d+_RESULT$/.test(text)), markers);
     assert.equal(chatResults.filter((text) => /^PATCH_\d+_RESULT$/.test(text)).length, round);
   }
-  const switched = await send(history, "full-go-chat-fixture", true, "deepseek-v4-flash@opencode-go");
+  const switched = await send(history, "full-go-chat-fixture", true, wireModels.v4);
   assert.match(switched, /RESPONSES_HISTORY_OK/);
   const responseResults = requests.at(-1).input.filter((item) => item.type === "function_call_output").map((item) => item.output);
   assert.deepEqual(responseResults.filter((text) => /^ROUND_\d+_RESULT$/.test(text)), markers);
-  const newlyDiscovered = await send(history, "full-go-chat-fixture", true, "deepseek-v4.2-flash@opencode-go");
+  const newlyDiscovered = await send(history, "full-go-chat-fixture", true, wireModels.v42);
   assert.match(newlyDiscovered, /RESPONSES_HISTORY_OK/);
   assert.equal(requests.at(-1).model, "deepseek-v4.2-flash", "new model must not fall back to the old main model");
   // The declared row must also route now, which is the transition this gateway had to
   // make safe: discovery-only rows used to be missing right after a restart, and the
   // addressed-provider guard answered 503 "endpoint was removed" for them.
-  const declared = await send(history, "full-go-chat-fixture", true, "deepseek-v4.1-flash@opencode-go");
+  const declared = await send(history, "full-go-chat-fixture", true, wireModels.v41);
   assert.match(declared, /RESPONSES_HISTORY_OK/);
   assert.equal(requests.at(-1).model, "deepseek-v4.1-flash", "the declared DeepSeek row must route without discovery");
+  const legacyDeclared = await send(history, "legacy-go-chat-fixture", true, "deepseek-v4.1-flash@opencode-go");
+  assert.match(legacyDeclared, /RESPONSES_HISTORY_OK/);
+  assert.equal(requests.at(-1).model, "deepseek-v4.1-flash", "a stored legacy model@provider session must still reach the same upstream model");
 
   const compact = await send([...history,
     { type: "message", role: "user", content: [{ type: "input_text", text: "Summarize the completed work." }] },
     { type: "compaction_trigger" },
   ], "full-go-chat-fixture", false);
   const compacted = JSON.parse(compact);
+  assert.equal(compacted.model, wireModels.qwen, "compaction returns the same safe model identity Codex selected");
   assert.equal(compacted.output[0].type, "compaction");
   assert.match(compacted.output[0].encrypted_content, /^kcr1:/);
   const resumed = await send([
@@ -461,7 +496,9 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   ], "full-go-chat-fixture");
   const afterResults = requests.at(-1).messages.filter((item) => item.role === "tool").map((item) => item.content);
   assert.deepEqual(afterResults, ["AFTER_COMPACT_RESULT"], "pre-compaction pairing state must not leak into the next history");
-  assert.ok(sessionHeaders.every((id) => id === "full-go-chat-fixture"), "Chat, Responses and compaction retain one conversation identity");
+  assert.equal(sessionHeaders.filter((id) => id === "legacy-go-chat-fixture").length, 1);
+  assert.ok(sessionHeaders.filter((id) => id !== "legacy-go-chat-fixture").every((id) => id === "full-go-chat-fixture"),
+    "Chat, Responses and compaction retain one conversation identity");
   await send(fixture.request.input, "other-go-task");
   assert.equal(sessionHeaders.at(-1), "other-go-task");
   await send(fixture.request.input, "full-go-chat-fixture");
@@ -474,7 +511,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   const compactV1 = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses/compact`, {
     method: "POST",
     headers: { "content-type": "application/json", "session_id": "other-go-task" },
-    body: JSON.stringify({ ...fixture.request, model: "qwen3.8-flash@opencode-go", stream: false }),
+    body: JSON.stringify({ ...fixture.request, model: wireModels.qwen, stream: false }),
   });
   assert.equal(compactV1.status, 200, await compactV1.text());
   assert.equal(sessionHeaders.at(-1), "other-go-task", "the dedicated compact endpoint preserves its task identity too");

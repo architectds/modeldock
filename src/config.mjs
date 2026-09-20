@@ -2,7 +2,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, PROVIDER_SEPARATOR, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, profileById, publishedSlugFor, llamaLocalStableEntry } from "./profiles.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, modelAddressFor, modelRefParts, profileById, routedModelRefFor, llamaLocalStableEntry } from "./profiles.mjs";
 import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
@@ -81,20 +81,27 @@ export function parseEnvFile(source) {
 // decodePersistedModelRef strips it before the selection reaches Codex.
 export function encodePersistedModelRef(model) {
   const id = String(model || "").trim();
-  if (!id || id.includes(PROVIDER_SEPARATOR)) return id;
-  return `${id}${PROVIDER_SEPARATOR}${NATIVE_PROVIDER_ID}`;
+  if (!id) return id;
+  const parts = modelRefParts(id);
+  return parts.qualified
+    ? modelAddressFor(parts.provider, parts.model)
+    : modelAddressFor(NATIVE_PROVIDER_ID, id);
 }
 
 export function decodePersistedModelRef(raw, { nativeSlugs = new Set() } = {}) {
-  const id = String(raw || "").trim();
-  if (!id) return "";
-  const nativeSuffix = `${PROVIDER_SEPARATOR}${NATIVE_PROVIDER_ID}`;
-  if (id.endsWith(nativeSuffix)) return id.slice(0, -nativeSuffix.length);
-  if (id.includes(PROVIDER_SEPARATOR) || nativeSlugs.has(id)) return id;
+  const stored = String(raw || "").trim();
+  if (!stored) return "";
+  const parts = modelRefParts(stored);
+  if (parts.qualified) {
+    return parts.provider === NATIVE_PROVIDER_ID
+      ? parts.model
+      : modelAddressFor(parts.provider, parts.model);
+  }
+  if (nativeSlugs.has(stored)) return stored;
   // Only pre-owner values reach this branch. Before provider-qualified picker
   // slugs, bare routed ids belonged to OpenCode Go. MODELDOCK_PROFILE must not
   // reinterpret that historical value as a different owner.
-  return publishedSlugFor(DEFAULT_PROFILE_ID, id);
+  return routedModelRefFor(DEFAULT_PROFILE_ID, stored);
 }
 
 // The .env format is line-based, so a value carrying a newline would inject
@@ -494,7 +501,7 @@ export function loadConfig() {
     return decodePersistedModelRef(raw, { nativeSlugs: cachedNativeSlugs });
   };
   const customSlug = primaryCustomEndpoint?.modelId
-    ? `${primaryCustomEndpoint.modelId}${PROVIDER_SEPARATOR}custom`
+    ? modelAddressFor("custom", primaryCustomEndpoint.modelId)
     : "";
   // Connecting a backend publishes a model; it does not select one. Publishing
   // is the whole of what "can be the main model" means - the Codex picker
@@ -504,7 +511,7 @@ export function loadConfig() {
   // MODELDOCK_PROFILE still chooses the default external route when no Codex
   // task has selected a model. It does not own or reinterpret any saved model
   // reference; those are decoded independently above.
-  const mainModel = publishedSlugFor(profileId, "deepseek-v4-flash");
+  const mainModel = routedModelRefFor(profileId, "deepseek-v4-flash");
   // Mode-aware default vision model. In native mode the current Codex catalog,
   // not a model name compiled into ModelDock, owns the default. A new native
   // vision model can therefore appear after a Codex update without a ModelDock
@@ -552,7 +559,8 @@ export function loadConfig() {
   // re-derivation has to guess, and guessing from the captured native-slug cache
   // would let a signed-out install - or a first boot with no cache yet - publish a
   // reviewer nobody can answer. The stored ref is the owner statement.
-  const reviewModelIsNative = reviewModel && configuredReviewModel.endsWith(`@${NATIVE_PROVIDER_ID}`);
+  const reviewModelIsNative = reviewModel
+    && modelRefParts(configuredReviewModel).provider === NATIVE_PROVIDER_ID;
   // Published only beside the override. An effort the installed client cannot
   // parse would take the whole catalog down, so catalog.mjs keeps it inside the
   // closed enum older Codex builds accept.
@@ -671,8 +679,8 @@ export function loadConfig() {
   }
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
-  applyContextOverrides(allProfiles(), config.contextOverrides, { publishedSlugFor });
-  applyVisionOverrides(allProfiles(), visionOverrides, { publishedSlugFor });
+  applyContextOverrides(allProfiles(), config.contextOverrides, { modelAddressFor });
+  applyVisionOverrides(allProfiles(), visionOverrides, { modelAddressFor });
   return config;
 }
 
