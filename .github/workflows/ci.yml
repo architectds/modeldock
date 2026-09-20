@@ -38,22 +38,27 @@ jobs:
       # runner with no Codex, so it would only ever report that it skipped. It is a
       # developer's `npm run test:live`, run on a machine that has the client.
       #
-      # The browser render leg drives a real Chrome over CDP, and a runner can fail it
-      # with no product defect: v0.3.85 was blocked by a Chrome that stayed alive without
-      # ever publishing a page target, which is exactly the class of failure that teaches
-      # people to re-run checks instead of reading them. Advisory until it has cleared a
-      # release cleanly, then drop the continue-on-error line so it gates again.
-      - name: Dashboard render check (advisory)
+      # The browser render leg drives a real Chrome over CDP. It was made advisory for one
+      # release after v0.3.85 was blocked by a Chrome that stayed alive without ever
+      # publishing a page target - a runner failure, not a product failure - and it cleared
+      # v0.3.86 with the leg passing and the failure-summary step skipped, which is the
+      # condition for gating again. The relaunch-once handling in the test is what carried
+      # it: if this step goes red again on a startup/timeout line rather than a render
+      # assertion, put the continue-on-error back and fix the launcher, because a leg that
+      # cannot run reliably on a runner is not a gate, it is a coin flip.
+      - name: Dashboard render check
         id: browser
-        continue-on-error: true
         run: |
           set -o pipefail
           npm run test:browser 2>&1 | tee browser-render.log
       - name: Surface browser render output in the run summary
-        if: steps.browser.outcome == 'failure'
+        # Must be always(): now that the leg blocks, a failing step aborts the job before
+        # any later step runs, and the summary - the one readable diagnostic for an
+        # anonymous reader - would never be written.
+        if: always() && steps.browser.outcome == 'failure'
         run: |
           {
-            echo "### dashboard render leg failed (advisory: this does not block the release)"
+            echo "### dashboard render leg failed"
             echo "Only this leg can see what users actually get on screen, so read the tail."
             echo '```'
             tail -120 browser-render.log 2>/dev/null || echo "(no log captured)"
