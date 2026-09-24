@@ -1203,7 +1203,7 @@ async function loadSettings() {
   const status = $("settings-status");
   if (status) status.textContent = "";
   renderAutostart(data);
-  renderCustomSection(data.custom);
+  renderCustomSection();
   renderOllamaSection(data.ollama);
   renderXaiSection(data.xai);
   for (const [engine, render] of Object.entries(renderLocalSections)) render(data.local?.[engine]);
@@ -2311,31 +2311,42 @@ $("endpoint-save")?.addEventListener("click", async () => {
   const status = $("endpoint-save-status");
   button.disabled = true;
   if (status) status.textContent = t("settings.saving");
+  const errors = [];
+  customShow("", false);
   try {
+    try {
+      await saveCustomEndpointDraft();
+    } catch (error) {
+      errors.push(error);
+    }
     // A user-set endpoint keeps its own key, so each changed one is its own
     // write rather than a single payload the server would have to unpick.
     for (const field of document.querySelectorAll("#endpoint-list .field")) {
       const key = field.querySelector(".endpoint-key");
       const value = key?.value.trim();
       if (!value) continue;
-      const reply = await fetch("/api/custom/key", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          modelId: field.dataset.modelId,
-          providerId: field.dataset.providerId,
-          apiKey: value,
-        }),
-      });
-      const body = await reply.json();
-      if (!reply.ok) throw new Error(body.error?.message || `Save ${reply.status}`);
-      key.value = "";
+      try {
+        const reply = await fetch("/api/custom/key", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            modelId: field.dataset.modelId,
+            providerId: field.dataset.providerId,
+            apiKey: value,
+          }),
+        });
+        const body = await reply.json();
+        if (!reply.ok) throw new Error(body.error?.message || `Save ${reply.status}`);
+        key.value = "";
+      } catch (error) {
+        errors.push(error);
+      }
     }
-    if (status) status.textContent = t("settings.saved");
     await renderEndpointList();
+    poll().catch(() => {});
     pollConfig().catch(() => {});
-  } catch (error) {
-    if (status) status.textContent = error.message;
+    renderModelRoster().catch(() => {});
+    if (status) status.textContent = errors[0]?.message || t("settings.saved");
   } finally {
     button.disabled = false;
   }
@@ -2420,10 +2431,11 @@ const customApiKeyInput = $("custom-api-key");
 const customModelSelect = $("custom-model-select");
 const customAsVision = $("custom-as-vision");
 const customListModelsBtn = $("custom-list-models");
-const customAddBtn = $("custom-add-btn");
+const customProviderInput = $("custom-provider");
 const customStatus = $("custom-status");
 const customError = $("custom-error");
 const customEndpointHint = $("custom-endpoint-hint");
+let customDraftInitialized = false;
 
 function customShow(text, error) {
   if (customStatus) customStatus.hidden = !text || Boolean(error);
@@ -2462,30 +2474,77 @@ function customShowHint(url) {
   customEndpointHint.textContent = t("custom.probeUrl", { url });
 }
 
-function renderCustomSection(custom) {
-  const state = custom || {};
+function clearCustomDraft() {
   if (!customEndpointInput || !customApiKeyInput) return;
-  customEndpointInput.value = state.baseUrl || "";
-  customShowHint(customResponsesUrlPreview(state.baseUrl));
-  if (customModelSelect) {
-    fillSelect(customModelSelect, state.model ? [{ id: state.model, label: state.model }] : [], {
-      value: state.model || "",
-      placeholder: false,
-      disabled: !state.model,
-    });
-  }
-  if (customAsVision) customAsVision.checked = Boolean(state.asVision);
-  if (customApiKeyInput) {
-    customApiKeyInput.value = "";
-    customApiKeyInput.placeholder = state.apiKeyConfigured ? t("settings.configured") : "sk-...";
-  }
+  customEndpointInput.value = "";
+  customApiKeyInput.value = "";
+  if (customProviderInput) customProviderInput.value = "";
+  invalidateCustomModelList();
+  if (customAsVision) customAsVision.checked = false;
+  customShowHint("");
   customShow("", false);
+}
+
+function invalidateCustomModelList() {
+  if (!customModelSelect) return;
+  fillSelect(customModelSelect, [], { placeholder: false, disabled: true });
+}
+
+function renderCustomSection() {
+  if (!customEndpointInput || !customApiKeyInput) return;
+  // Configured endpoints have their own canonical rows above this composer.
+  // Rehydrating one of them into the add form created a second editable copy
+  // and made Save re-add an endpoint the user had already persisted.
+  if (!customDraftInitialized) {
+    clearCustomDraft();
+    customDraftInitialized = true;
+  }
+  customApiKeyInput.placeholder = "sk-...";
 }
 
 if (customEndpointInput) {
   customEndpointInput.addEventListener("input", () => {
+    invalidateCustomModelList();
     customShowHint(customResponsesUrlPreview(customEndpointInput.value));
   });
+}
+
+async function saveCustomEndpointDraft() {
+  const baseUrl = customEndpointInput?.value.trim() || "";
+  const apiKey = customApiKeyInput?.value.trim() || "";
+  const modelId = customModelSelect?.value || "";
+  const providerId = customProviderInput?.value.trim() || "";
+  const engaged = Boolean(baseUrl || apiKey || modelId || providerId || customAsVision?.checked);
+  if (!engaged) return false;
+  if (!baseUrl) {
+    throw new Error(t("custom.errEndpointRequired"));
+  }
+  if (!modelId) {
+    throw new Error(t("custom.errModelRequired"));
+  }
+  if (!apiKey) {
+    throw new Error(t("custom.errKeyRequired"));
+  }
+
+  const response = await fetch("/api/custom/add", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      baseUrl,
+      apiKey,
+      modelId,
+      asVision: Boolean(customAsVision?.checked),
+      providerId,
+    }),
+  });
+  const body = await response.json();
+  if (!response.ok) {
+    const error = Object.assign(new Error(body.error?.message || "Save failed"), { code: body.error?.type });
+    error.message = customErrorText(error.code) || error.message;
+    throw error;
+  }
+  clearCustomDraft();
+  return true;
 }
 
 function awaitRuntimeMigrationThenUpdate(expectedVersion) {
@@ -2571,6 +2630,7 @@ if (customEndpointPresetsBtn && customEndpointMenu) {
       button.append(Object.assign(document.createElement("small"), { textContent: preset.url }));
       button.addEventListener("click", () => {
         customEndpointInput.value = preset.url;
+        invalidateCustomModelList();
         customShowHint(customResponsesUrlPreview(customEndpointInput.value));
         customEndpointMenu.hidden = true;
         customEndpointPresetsBtn.setAttribute("aria-expanded", "false");
@@ -2607,6 +2667,7 @@ if (customListModelsBtn) {
       return;
     }
     customListModelsBtn.disabled = true;
+    invalidateCustomModelList();
     try {
       const response = await fetch("/api/custom/list-models", {
         method: "POST",
@@ -2621,7 +2682,7 @@ if (customListModelsBtn) {
         placeholder: false,
         disabled: !(body.models || []).length,
       });
-      // Surface the exact URL the Add probe will hit (server-normalized).
+      // Surface the exact URL the Save probe will hit (server-normalized).
       customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
       customShow(
         body.models?.length ? t("custom.modelsLoaded", { n: body.models.length }) : t("custom.noModels"),
@@ -2631,59 +2692,6 @@ if (customListModelsBtn) {
       customShow(customErrorText(error.code) || error.message, true);
     } finally {
       customListModelsBtn.disabled = false;
-    }
-  });
-}
-
-if (customAddBtn) {
-  customAddBtn.addEventListener("click", async () => {
-    const baseUrl = customEndpointInput.value.trim();
-    const apiKey = customApiKeyInput.value.trim();
-    const modelId = customModelSelect.value;
-    if (!baseUrl) {
-      customShow(t("custom.errEndpointRequired"), true);
-      return;
-    }
-    if (!modelId) {
-      customShow(t("custom.errModelRequired"), true);
-      return;
-    }
-    if (!apiKey) {
-      customShow(t("custom.errKeyRequired"), true);
-      return;
-    }
-    customAddBtn.disabled = true;
-    customAddBtn.textContent = t("custom.adding");
-    customShow("", false);
-    try {
-      const response = await fetch("/api/custom/add", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          baseUrl,
-          apiKey,
-          modelId,
-          asVision: Boolean(customAsVision?.checked),
-          providerId: $("custom-provider")?.value || "",
-        }),
-      });
-      const body = await response.json();
-      if (!response.ok) {
-        throw Object.assign(new Error(body.error?.message || "Add failed"), { code: body.error?.type });
-      }
-      customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
-      customShow(t("custom.added"), false);
-      // Refresh the dashboard so the model list and route card pick up the new
-      // provider immediately.
-      poll().catch(() => {});
-      pollConfig().catch(() => {});
-      renderEndpointList().catch(() => {});
-      renderModelRoster().catch(() => {});
-    } catch (error) {
-      customShow(customErrorText(error.code) || error.message, true);
-    } finally {
-      customAddBtn.disabled = false;
-      customAddBtn.textContent = t("custom.add");
     }
   });
 }
@@ -3354,7 +3362,7 @@ function refreshDynamicText() {
     () => renderLocalEngines().catch(() => {}),
     () => {
       if (!lastSettings) return;
-      renderCustomSection(lastSettings.custom);
+      renderCustomSection();
       renderOllamaSection(lastSettings.ollama);
       renderXaiSection(lastSettings.xai);
       for (const [engine, render] of Object.entries(renderLocalSections)) {

@@ -85,7 +85,8 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
     tokens: { "opencode-go": "tab-render-test" },
     mainModel: "deepseek-v4-flash",
     visionModel: nativeVision ? "qwen3.8-flash@opencode-go" : "gpt-5.6-luna",
-    ...(nativeVision ? { codexHome: dir, nativeMerge: true } : {}),
+    codexHome: dir,
+    ...(nativeVision ? { nativeMerge: true } : {}),
     mediaTtlMs: 60_000,
     mediaMaxBytes: 1024 * 1024,
     mediaMaxEntries: 8,
@@ -200,6 +201,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     default: 0,
     narrow: 600,
     "vision-persistence": 2400,
+    "custom-single-save": 3000,
   }[instance] ?? 1500;
   const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profiles = [];
@@ -788,7 +790,7 @@ test("changing only the vision provider persists its selected model across refre
   const onboarded = await fetch(`${base}/api/onboarding/complete`, {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
   });
-  assert.equal(onboarded.status, 200);
+  assert.equal(onboarded.status, 200, await onboarded.text());
   const { send, evaluate } = await openBrowser(t, chromePath, { instance: "vision-persistence" });
   await evaluate(`location.href = ${JSON.stringify(base)}`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
@@ -845,6 +847,140 @@ test("changing only the vision provider persists its selected model across refre
     const shot = await send("Page.captureScreenshot", { format: "png" });
     writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.none.png`, Buffer.from(shot.result.data, "base64"));
   }
+});
+
+test("the Cloud page saves a discovered custom endpoint with its single Save control", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+
+  const upstreamPort = await availablePort();
+  let probeCalls = 0;
+  const upstream = createHttpServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.end(JSON.stringify({ data: [{ id: "single-save-model", meta: { n_ctx: 64000 } }] }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/responses") {
+      probeCalls += 1;
+      res.end(JSON.stringify({ id: "resp_single_save", status: "completed", output: [], usage: {} }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  upstream.listen(upstreamPort, "127.0.0.1");
+  await new Promise((resolve) => upstream.once("listening", resolve));
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const { base } = await startDashboard(t, { bundled: true });
+  const onboarded = await fetch(`${base}/api/onboarding/complete`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  assert.equal(onboarded.status, 200, await onboarded.text());
+
+  const { evaluate } = await openBrowser(t, chromePath, { instance: "custom-single-save" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#cloud`)}`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(250);
+    if (await evaluate(`document.getElementById('endpoint-list')?.textContent.includes('lab / some-model')`)) break;
+  }
+  await evaluate(`(() => {
+    const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
+    skip?.click();
+    document.getElementById('custom-add').open = true;
+    return true;
+  })()`);
+
+  assert.equal(await evaluate(`document.getElementById('custom-add-btn') === null`), true,
+    "a custom endpoint must not have a second Add commit control");
+  assert.equal(await evaluate(`document.querySelectorAll('.cloud-section #endpoint-save').length`), 1,
+    "the endpoint section exposes one Save control");
+
+  await evaluate(`(() => {
+    const endpoint = document.getElementById('custom-endpoint');
+    endpoint.value = ${JSON.stringify(`http://127.0.0.1:${upstreamPort}/v1`)};
+    endpoint.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('custom-provider').value = 'together';
+    const key = document.getElementById('custom-api-key');
+    key.value = 'single-save-secret';
+    key.dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('custom-list-models').click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(50);
+    if (await evaluate(`document.querySelector('#custom-model-select option[value="single-save-model"]') !== null`)) break;
+  }
+  const listedState = JSON.parse(await evaluate(`JSON.stringify({
+    found: document.querySelector('#custom-model-select option[value="single-save-model"]') !== null,
+    status: document.getElementById('custom-status').textContent,
+    error: document.getElementById('custom-error').textContent,
+  })`));
+  assert.equal(listedState.found, true,
+    `List Models populates the model that the shared Save will persist: ${JSON.stringify(listedState)}`);
+
+  await evaluate(`(() => {
+    document.getElementById('custom-model-select').value = 'single-save-model';
+    document.getElementById('custom-as-vision').checked = true;
+    document.getElementById('endpoint-save').click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(50);
+    if (await evaluate(`document.getElementById('endpoint-list')?.textContent.includes('together / single-save-model')`)) break;
+  }
+
+  const listed = await (await fetch(`${base}/api/custom/endpoints`)).json();
+  const saved = listed.endpoints.find((endpoint) => endpoint.providerId === "together" && endpoint.modelId === "single-save-model");
+  assert.deepEqual(saved && {
+    providerId: saved.providerId,
+    modelId: saved.modelId,
+    contextWindow: saved.contextWindow,
+    supportsVision: saved.supportsVision,
+    apiKeyConfigured: saved.apiKeyConfigured,
+  }, {
+    providerId: "together",
+    modelId: "single-save-model",
+    contextWindow: 64000,
+    supportsVision: true,
+    apiKeyConfigured: true,
+  }, "the single Save persists the provider-qualified endpoint and its capabilities");
+
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify({
+    endpoint: document.getElementById('custom-endpoint').value,
+    provider: document.getElementById('custom-provider').value,
+    key: document.getElementById('custom-api-key').value,
+    modelOptions: document.getElementById('custom-model-select').options.length,
+    status: document.getElementById('endpoint-save-status').textContent,
+  })`)), {
+    endpoint: "",
+    provider: "",
+    key: "",
+    modelOptions: 0,
+    status: "Saved - active now",
+  }, "a completed save clears the add draft and reports the one committed action");
+
+  await evaluate(`(() => {
+    const field = [...document.querySelectorAll('#endpoint-list .field')]
+      .find((candidate) => candidate.dataset.providerId === 'together' && candidate.dataset.modelId === 'single-save-model');
+    field.querySelector('.endpoint-key').value = 'replacement-secret';
+    document.getElementById('endpoint-save-status').textContent = '';
+    document.getElementById('endpoint-save').click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(50);
+    if (await evaluate(`document.getElementById('endpoint-save-status').textContent === 'Saved - active now'
+      && !document.getElementById('endpoint-save').disabled`)) break;
+  }
+  const afterKeySave = await (await fetch(`${base}/api/custom/endpoints`)).json();
+  assert.equal(afterKeySave.endpoints.filter((endpoint) => endpoint.modelId === "single-save-model").length, 1,
+    "saving an existing key does not re-add the cleared custom draft");
+  assert.equal(probeCalls, 1, "the second Save updates the row without probing a duplicate endpoint");
 });
 
 

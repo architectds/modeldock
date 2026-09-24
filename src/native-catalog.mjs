@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
+import { readCodexAuth } from "./codex-auth.mjs";
+import { modelRefParts } from "./model-ref.mjs";
+import { NATIVE_CODEX_BASE } from "./native-endpoint.mjs";
 
 // Async exec so the model-refresh timer and startup capture never block the event
 // loop of a live relay: `codex debug models` can take seconds (or hang to its
@@ -15,10 +18,11 @@ const nativeCatalogCache = new Map();
 // `model_catalog_json` set it shows exactly that file, otherwise it shows the
 // app's bundled native GPT catalog. So native GPT models must be published in
 // our own catalog to stay visible beside ours. This module captures that
-// bundled catalog from the Codex desktop CLI (`codex debug models --bundled`),
-// caches it next to the model catalog file, and exposes the captured slugs so
-// the gateway can route them to the native backend instead of an external
-// upstream. Same approach codex-router uses for its merged catalog.
+// account's live catalog from the native Codex endpoint, caches it next to the
+// model catalog file, and exposes the captured slugs so the gateway can route
+// them to the native backend instead of an external upstream. The installed
+// CLI's bundled catalog is only the offline fallback: it can lag an account
+// rollout even while a refresh appears to succeed.
 
 // The desktop app bundles its CLI in different places per platform. Windows puts
 // it under a version-hashed directory (%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\
@@ -193,24 +197,64 @@ async function codexVersion() {
   }
 }
 
-// Ask the Codex desktop CLI for its bundled native catalog and cache it. A
-// capture is versioned by the app build; a stale capture is replaced on the
-// next refresh. Returns the captured models, or null when the CLI is missing
-// or the capture failed (the catalog then simply keeps the last good cache).
+function nativeModelsFrom(parsed) {
+  if (!Array.isArray(parsed?.models)) return null;
+  const models = parsed.models.filter((model) => (
+    typeof model?.slug === "string"
+    && model.slug
+    && !modelRefParts(model.slug).qualified
+  ));
+  return models.length > 0 ? models : null;
+}
+
+async function liveNativeCatalog(config, version) {
+  const codexHome = config?.codexHome || path.join(os.homedir(), ".codex");
+  const auth = readCodexAuth(codexHome);
+  if (!auth.accessToken) return null;
+  const url = new URL(`${String(NATIVE_CODEX_BASE).replace(/\/+$/, "")}/models`);
+  url.searchParams.set("client_version", version || "unknown");
+  const response = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${auth.accessToken}`,
+      ...(auth.accountId ? { "chatgpt-account-id": auth.accountId } : {}),
+    },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`native models returned HTTP ${response.status}`);
+  return nativeModelsFrom(await response.json());
+}
+
+async function bundledNativeCatalog() {
+  const output = await runCodex(["debug", "models", "--bundled"]);
+  return nativeModelsFrom(JSON.parse(output));
+}
+
+// Read the signed-in account's current native catalog directly from ChatGPT.
+// This deliberately does not run ordinary `codex debug models`: ModelDock sets
+// model_catalog_json for the App, so that command would read ModelDock's merged
+// catalog back into itself and create a discovery loop. When the live request
+// is unavailable, retain the installed CLI's bundled catalog as an offline
+// fallback. A total failure keeps the last good cache on disk.
 export async function refreshNativeCatalog(config) {
-  if (!(await resolveCodexBinary())) {
-    console.log("[gate] native model catalog refresh skipped: Codex CLI not found");
-    return null;
-  }
+  const version = await codexVersion();
+  let models = null;
   try {
-    const output = await runCodex(["debug", "models", "--bundled"]);
-    const parsed = JSON.parse(output);
-    if (!Array.isArray(parsed?.models) || parsed.models.length === 0) return null;
-    const file = nativeCatalogPath(config);
-    atomicWriteJsonSync(file, { captured_with: await codexVersion(), models: parsed.models });
-    return parsed.models;
+    models = await liveNativeCatalog(config, version);
   } catch (error) {
-    console.log(`[gate] native model catalog refresh failed: ${error.message}`);
+    console.log(`[gate] live native model catalog refresh failed: ${error.message}; trying bundled catalog`);
+  }
+  if (!models) {
+    try {
+      models = await bundledNativeCatalog();
+    } catch (error) {
+      console.log(`[gate] bundled native model catalog refresh failed: ${error.message}`);
+    }
+  }
+  if (!models) {
+    console.log("[gate] native model catalog refresh skipped: no live or bundled catalog available");
     return null;
   }
+  const file = nativeCatalogPath(config);
+  atomicWriteJsonSync(file, { captured_with: version, models });
+  return models;
 }

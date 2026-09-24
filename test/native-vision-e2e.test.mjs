@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import os from "node:os";
 import nodePath from "node:path";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
 // End-to-end for native vision, with only the ChatGPT backend faked.
@@ -15,7 +15,7 @@ import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 // silently break (the set is built once; a catalog written after boot is not in
 // it), so this test drives the real createServices/createUpstreams path and
 // asserts what actually arrived at the backend.
-test("a native vision model reaches the ChatGPT backend through the real service wiring", async (t) => {
+test("the built bundle refreshes the live native catalog and routes native vision", async (t) => {
   const dir = mkdtempSync(nodePath.join(os.tmpdir(), "modeldock-native-e2e-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -32,6 +32,14 @@ test("a native vision model reaches the ChatGPT backend through the real service
     JSON.stringify({ tokens: { access_token: "chatgpt-e2e-token", account_id: "acct-e2e" } }),
     "utf8",
   );
+  const selfCatalog = nodePath.join(dir, "modeldock-self-catalog.json");
+  writeFileSync(selfCatalog, JSON.stringify({ models: [{
+    slug: "mdr.bW9kZWxkb2Nr.c2VsZi1yZWZlcmVuY2U",
+    display_name: "ModelDock Self Reference",
+    visibility: "list",
+  }] }), "utf8");
+  writeFileSync(nodePath.join(dir, "config.toml"),
+    `model_catalog_json = ${JSON.stringify(selfCatalog.replace(/\\/g, "/"))}\n`, "utf8");
   const pngPath = nodePath.join(dir, "shot.png");
   writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
 
@@ -40,7 +48,43 @@ test("a native vision model reaches the ChatGPT backend through the real service
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
+      if (req.method === "GET" && req.url.startsWith("/models?client_version=")) {
+        received.push({
+          method: req.method,
+          url: req.url,
+          auth: req.headers.authorization,
+          account: req.headers["chatgpt-account-id"],
+        });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ models: [
+          {
+            slug: "gpt-6-sol",
+            display_name: "GPT-6-Sol",
+            visibility: "list",
+            priority: 1,
+            input_modalities: ["text", "image"],
+            supported_reasoning_levels: [{ effort: "medium", description: "Balanced" }],
+            default_reasoning_level: "medium",
+          },
+          {
+            slug: "gpt-5.6-terra",
+            display_name: "GPT-5.6-Terra",
+            visibility: "list",
+            priority: 2,
+            input_modalities: ["text", "image"],
+            supported_reasoning_levels: [{ effort: "medium", description: "Balanced" }],
+            default_reasoning_level: "medium",
+          },
+          {
+            slug: "mdr.bW9kZWxkb2Nr.cmVtb3RlLWVjaG8",
+            display_name: "Routed Echo",
+            visibility: "list",
+          },
+        ] }));
+        return;
+      }
       received.push({
+        method: req.method,
         url: req.url,
         auth: req.headers.authorization,
         account: req.headers["chatgpt-account-id"],
@@ -64,7 +108,7 @@ test("a native vision model reaches the ChatGPT backend through the real service
   // NATIVE_BASE is read at module load, so the redirect must be in place before
   // src/server.mjs (and through it src/upstreams.mjs) is first evaluated.
   process.env.CODEX_NATIVE_BASE_URL = stubBase;
-  const { createServices } = await import("../src/server.mjs");
+  const { createServices } = await import("../dist/modeldock.mjs");
 
   const services = createServices({
     host: "127.0.0.1",
@@ -89,7 +133,7 @@ test("a native vision model reaches the ChatGPT backend through the real service
     recentLimit: 50,
     debug: { noSessionCheck: true },
     callerKey: "test-caller-key-0123456789abcdefghij",
-    refreshNativeCatalog: false,
+    refreshNativeCatalog: true,
     modelRefreshHours: 0,
     codexHome: dir,
     nativeCatalogFile: nodePath.join(dir, "native-catalog.json"),
@@ -98,10 +142,31 @@ test("a native vision model reaches the ChatGPT backend through the real service
   });
   t.after(() => services.mediaStore.cleanup());
 
+  let captured = null;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    try {
+      captured = JSON.parse(readFileSync(services.config.nativeCatalogFile, "utf8"));
+      if (captured.models?.some((model) => model.slug === "gpt-6-sol")) break;
+    } catch { /* refresh has not committed its atomic file yet */ }
+  }
+  assert.ok(captured?.models?.some((model) => model.slug === "gpt-6-sol"),
+    "a live native model absent from the bundled snapshot is captured");
+  assert.equal(captured.models.some((model) => model.slug.startsWith("mdr.")), false,
+    "routed ModelDock slugs can never enter the native identity set");
+  const published = JSON.parse(readFileSync(services.config.codexCatalogFile, "utf8"));
+  assert.ok(published.models?.some((model) => model.slug === "gpt-6-sol"),
+    "the live native model reaches the Codex-facing merged catalog");
+
   const result = await services.upstreams.inspectVision({ path: pngPath, question: "What does it show?" });
 
-  assert.equal(received.length, 1, "the native backend was called exactly once");
-  const call = received[0];
+  const catalogCalls = received.filter((call) => call.method === "GET");
+  assert.equal(catalogCalls.length, 1, "startup performs one live native catalog request");
+  assert.equal(catalogCalls[0].auth, "Bearer chatgpt-e2e-token");
+  assert.equal(catalogCalls[0].account, "acct-e2e");
+  const responseCalls = received.filter((call) => call.method === "POST");
+  assert.equal(responseCalls.length, 1, "the native backend was called exactly once for vision");
+  const call = responseCalls[0];
   assert.equal(call.url, "/responses", "native vision posts to the Responses path");
   assert.equal(call.auth, "Bearer chatgpt-e2e-token", "the Codex sign-in pays for it, not the OpenCode Go token");
   assert.equal(call.account, "acct-e2e", "the native account header survives the real wiring");
