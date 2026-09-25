@@ -855,8 +855,8 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   await assertGatewayMcpTools(appPort, callerKey);
 
   // 9. Run the exact installed restart helper. This is intentionally not a
-  // string assertion: it proves a release-like bundle creates its fresh owner,
-  // serves /api/status, and reports verified only after the full handoff.
+  // string assertion: Windows proves the launched Node PID runs the installed
+  // bundle; the health and routing checks below remain separate lifecycle proof.
   const installedRestart = path.join(installDir, "scripts", restartScriptName);
   const restarted = isWindows
     ? spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installedRestart], { env, stdio: ["ignore", "pipe", "pipe"] })
@@ -866,8 +866,8 @@ test("mock install lifecycle: first start, second start routes, login relaunch",
   restarted.stdout.on("data", (d) => (restartOut += d));
   restarted.stderr.on("data", (d) => (restartErr += d));
   const restartExit = await new Promise((resolve) => restarted.on("close", resolve));
-  assert.equal(restartExit, 0, `installed restart should verify the replacement\n${restartOut}\n${restartErr}`);
-  assert.match(restartOut + restartErr, /verified gateway/i, "restart must not claim success before verification");
+  assert.equal(restartExit, 0, `installed restart should hand off the replacement\n${restartOut}\n${restartErr}`);
+  assert.match(restartOut + restartErr, /verified gateway/i, "restart must report a verified handoff");
   const restartHealth = await waitForHealth(appPort);
   assert.ok(restartHealth.up, `gateway should stay up after verified restart\n${restartOut}\n${restartErr}`);
   assert.equal(restartHealth.status, 200);

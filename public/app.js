@@ -2454,13 +2454,13 @@ function customErrorText(code, fallback) {
   return key ? t(key) : fallback;
 }
 
-// Lightweight mirror of the server's normalizeBaseUrl: show the completed
-// Responses URL the probe will actually hit, e.g. https://host/v1 -> .../responses.
-function customResponsesUrlPreview(raw) {
+// Lightweight mirror of the server's normalizeBaseUrl: saving first probes
+// Responses, then Chat Completions when the endpoint is Chat-only.
+function customProbeTargetsPreview(raw) {
   const value = String(raw || "").trim().replace(/\/+$/, "");
   if (!/^https?:\/\//i.test(value)) return "";
   const base = /\/v1$/i.test(value) ? value : `${value}/v1`;
-  return `${base}/responses`;
+  return `${base}/responses or ${base}/chat/completions`;
 }
 
 function customShowHint(url) {
@@ -2505,7 +2505,7 @@ function renderCustomSection() {
 if (customEndpointInput) {
   customEndpointInput.addEventListener("input", () => {
     invalidateCustomModelList();
-    customShowHint(customResponsesUrlPreview(customEndpointInput.value));
+    customShowHint(customProbeTargetsPreview(customEndpointInput.value));
   });
 }
 
@@ -2631,7 +2631,7 @@ if (customEndpointPresetsBtn && customEndpointMenu) {
       button.addEventListener("click", () => {
         customEndpointInput.value = preset.url;
         invalidateCustomModelList();
-        customShowHint(customResponsesUrlPreview(customEndpointInput.value));
+        customShowHint(customProbeTargetsPreview(customEndpointInput.value));
         customEndpointMenu.hidden = true;
         customEndpointPresetsBtn.setAttribute("aria-expanded", "false");
         if (preset.autoList) customListModelsBtn?.click();
@@ -2682,8 +2682,12 @@ if (customListModelsBtn) {
         placeholder: false,
         disabled: !(body.models || []).length,
       });
-      // Surface the exact URL the Save probe will hit (server-normalized).
-      customShowHint(body.responsesUrl || customResponsesUrlPreview(baseUrl));
+      // Surface the exact protocol order Save will probe (server-normalized).
+      customShowHint(
+        body.responsesUrl && body.chatUrl
+          ? `${body.responsesUrl} or ${body.chatUrl}`
+          : customProbeTargetsPreview(baseUrl),
+      );
       customShow(
         body.models?.length ? t("custom.modelsLoaded", { n: body.models.length }) : t("custom.noModels"),
         false,

@@ -1681,7 +1681,7 @@ test("initAutostartDefault leaves no mark when the platform is unsupported or en
   await assert.rejects(readFile(path.join(dir, "autostart-initialized"), "utf8"));
 });
 
-test("custom endpoint flow: list models, probe, persist, publish to catalog", async (t) => {
+test("custom endpoint flow: list models, detect Chat, persist, publish to catalog", async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-custom-endpoint-"));
   const envFile = path.join(dir, ".env");
   const instance = await startApp({
@@ -1703,7 +1703,21 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
         return { ok: true, status: 200, json: async () => ({ data: [{ id: "vendor/model-x" }] }) };
       }
       if (value.startsWith("https://vendor.example/") && value.endsWith("/v1/responses")) {
-        return { ok: true, status: 200, json: async () => ({ id: "resp_1", usage: { input_tokens: 5, output_tokens: 1 } }) };
+        return { ok: false, status: 404, json: async () => ({ error: "Responses is not served" }) };
+      }
+      if (value.startsWith("https://vendor.example/") && value.endsWith("/v1/chat/completions")) {
+        const body = JSON.parse(options.body);
+        assert.equal(body.model, "vendor/model-x");
+        assert.deepEqual(body.messages, [{ role: "user", content: "Reply with exactly CUSTOM_OK." }]);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "chatcmpl_1",
+            choices: [{ message: { role: "assistant", content: "CUSTOM_OK" } }],
+            usage: { prompt_tokens: 5, completion_tokens: 1 },
+          }),
+        };
       }
       return originalFetch(url, options);
     };
@@ -1727,7 +1741,8 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     })).json();
     assert.equal(add.ok, true);
     assert.equal(add.model, "vendor/model-x");
-    assert.equal(add.responsesUrl, "https://vendor.example/v1/responses");
+    assert.equal(add.transport, "chat");
+    assert.equal(add.probeUrl, "https://vendor.example/v1/chat/completions");
     assert.equal(add.settings.custom.apiKeyConfigured, true);
     assert.equal(add.settings.custom.model, "vendor/model-x");
     // No asMain: adding an endpoint publishes its model and nothing more. The
@@ -1746,6 +1761,7 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     assert.equal(listed.endpoints.length, 1);
     assert.equal(listed.endpoints[0].modelId, "vendor/model-x");
     assert.equal(listed.endpoints[0].baseUrl, "https://vendor.example/v1");
+    assert.equal(listed.endpoints[0].transport, "chat");
     assert.equal(listed.endpoints[0].apiKeyConfigured, true, "the key is held, not returned");
     assert.ok(!JSON.stringify(listed).includes("sk-test"), "a key must never leave the machine in a response");
 
@@ -1754,6 +1770,7 @@ test("custom endpoint flow: list models, probe, persist, publish to catalog", as
     // that moving the key out of .env preserves a usable secret without
     // returning it over HTTP. Dedicated secret tests cover DPAPI itself.
     assert.equal(decryptSecret(stored[0].apiKey), "sk-test");
+    assert.equal(stored[0].transport, "chat");
     if (stored[0].apiKey.startsWith("dpapi:")) assert.ok(!stored[0].apiKey.includes("sk-test"));
 
     // Published to the catalog under the Custom provider.

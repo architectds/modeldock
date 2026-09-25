@@ -43,7 +43,7 @@ import { NATIVE_PROVIDER } from "./native-provider.mjs";
 // Re-exported: tests and the config switcher import the catalog through
 // server.mjs, and that path stays stable across the model-options split.
 export { codexModelCatalog };
-import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomResponses } from "./custom-endpoint.mjs";
+import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomEndpoint, probeCustomResponses } from "./custom-endpoint.mjs";
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
@@ -1422,7 +1422,7 @@ export function createApp(services = createServices()) {
   }
 
   // Dashboard "Custom model" flow: list the models a user endpoint advertises,
-  // then Add runs a Responses probe before persisting the provider.
+  // then Save detects Responses or Chat before persisting the provider.
   app.post("/api/custom/list-models", localPostGuard, async (req, res) => {
     const { baseUrl, apiKey } = req.body || {};
     try {
@@ -1465,6 +1465,7 @@ export function createApp(services = createServices()) {
       label: entry.label,
       contextWindow: entry.contextWindow,
       supportsVision: entry.supportsVision,
+      transport: entry.transport,
       apiKeyConfigured: Boolean(entry.apiKey),
       addedAt: entry.addedAt,
     }));
@@ -1477,7 +1478,7 @@ export function createApp(services = createServices()) {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
       if (!String(apiKey || "").trim()) throw new CustomEndpointError("key", "An API key is required.");
-      const probe = await probeCustomResponses({ baseUrl, apiKey, modelId: model });
+      const probe = await probeCustomEndpoint({ baseUrl, apiKey, modelId: model });
       // Advertised context window (llama.cpp meta.n_ctx) so compaction limits
       // match the real backend instead of the 250K custom fallback.
       const listed = await listEndpointModels({ baseUrl, apiKey });
@@ -1490,6 +1491,7 @@ export function createApp(services = createServices()) {
         label,
         contextWindow: advertisedContext,
         supportsVision: Boolean(asVision),
+        transport: probe.transport,
       });
       writeCustomEndpoints(endpointsFile(), next);
       const endpoints = republishEndpoints();
@@ -1499,7 +1501,8 @@ export function createApp(services = createServices()) {
       return res.json({
         ok: true,
         model,
-        responsesUrl: probe.responsesUrl,
+        transport: probe.transport,
+        probeUrl: probe.probeUrl,
         endpoints: endpoints.map((entry) => ({ modelId: entry.modelId, baseUrl: entry.baseUrl })),
         settings: settingsPayload(services),
       });

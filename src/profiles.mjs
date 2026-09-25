@@ -854,21 +854,26 @@ defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
   }),
 });
 
+function customWireTarget(providerId, config, model) {
+  const endpoint = customEndpointFor(config?.customEndpoints, model);
+  const transport = endpoint?.transport === "chat" ? "chat" : "responses";
+  const baseUrl = trimBase(endpoint?.baseUrl || "");
+  return {
+    provider: providerId,
+    model: bareModelId(model),
+    url: `${baseUrl}/${transport === "chat" ? "chat/completions" : "responses"}`,
+    transport,
+    token: endpoint?.apiKey || "",
+  };
+}
+
 defineRouting(CUSTOM_PROFILE, {
   normalizesPayload: true,
   // One profile, many endpoints: each model can sit on a different host with
   // its own key, so the lookup is per model rather than per provider. Nothing
   // outside this profile needs to know that.
   baseUrlFor: (config, model) => trimBase(customEndpointFor(config?.customEndpoints, model)?.baseUrl || ""),
-  target: (config, model) => {
-    const endpoint = customEndpointFor(config?.customEndpoints, model);
-    return {
-      provider: CUSTOM_PROFILE.id,
-      model: bareModelId(model),
-      url: `${CUSTOM_PROFILE.baseUrlFor(config, model)}/responses`,
-      token: endpoint?.apiKey || "",
-    };
-  },
+  target: (config, model) => customWireTarget(CUSTOM_PROFILE.id, config, model),
 });
 
 defineRouting(OLLAMA_PROFILE, {
@@ -1048,7 +1053,7 @@ export function applyCustomProfile(config) {
       return {
         id: entry.modelId,
         label: entry.modelId,
-        endpoint: "responses",
+        endpoint: entry.transport === "chat" ? "chat" : "responses",
         supportsVision: Boolean(entry.supportsVision),
         ...(advertised ? { contextWindow: advertised } : {}),
         ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
@@ -1098,15 +1103,7 @@ function userEndpointProfile(id) {
     baseUrlFor: (config, model) => trimBase(
       customEndpointFor(config?.customEndpoints, model)?.baseUrl || "",
     ),
-    target: (config, model) => {
-      const endpoint = customEndpointFor(config?.customEndpoints, model);
-      return {
-        provider: id,
-        model: bareModelId(model),
-        url: `${trimBase(endpoint?.baseUrl || "")}/responses`,
-        token: endpoint?.apiKey || "",
-      };
-    },
+    target: (config, model) => customWireTarget(id, config, model),
   });
   return profile;
 }

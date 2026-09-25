@@ -514,16 +514,15 @@ $restart = Join-Path $root "scripts\restart.ps1"
 #
 # What it does:
 #   1. Reads MODELDOCK_PORT from <modeldock>\.env (default 4097).
-#   2. Stops the process listening on that port (if any).
+#   2. Proves the listener PID belongs to this install, then stops only that PID.
 #   3. Rebuilds the bundle when a source checkout has drifted ahead of it.
 #   4. Starts a fresh detached gateway from the built bundle (dist/modeldock.mjs).
-#   5. Prints where the gateway started and exits; runtime logs go to modeldock.log.
+#   5. Confirms the launched Node PID is alive and runs that bundle, then exits.
 
 $ErrorActionPreference = "Stop"
 # PowerShell 7 turns any non-zero native exit into a terminating error when
-# this preference is enabled. The verifier intentionally returns non-zero to
-# let this script print the recovery-safe diagnostic below, so keep its exit
-# code observable through $LASTEXITCODE on hosts that expose this setting.
+# this preference is enabled. Keep build-if-stale's exit code observable
+# through $LASTEXITCODE on hosts that expose this setting.
 if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
   $PSNativeCommandUseErrorActionPreference = $false
 }
@@ -531,7 +530,6 @@ if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction Sile
 $root = Split-Path -Parent $PSScriptRoot
 $envFile = Join-Path $root ".env"
 $stateDir = if ($env:MODELDOCK_STATE_DIR) { [System.IO.Path]::GetFullPath($env:MODELDOCK_STATE_DIR) } else { Join-Path $env:USERPROFILE ".modeldock" }
-$forceTakeover = $args -contains "-Force"
 $oldPid = 0
 
 # Status lines go to both stdout and stderr. Callers (CI, the model shell, the
@@ -542,16 +540,34 @@ function Write-Status($message) {
   [Console]::Error.WriteLine($message)
 }
 
-function Invoke-GatewayVerifier([string[]]$VerifierArgs) {
-  try {
-    & $nodeExe $verifierEntry @VerifierArgs *> $null
-    return $LASTEXITCODE
-  } catch {
-    # See start-hidden.ps1: an overriding PowerShell host can throw for the
-    # verifier's deliberate non-zero result. Preserve the numeric contract.
-    if ($LASTEXITCODE -ne 0) { return $LASTEXITCODE }
-    throw
-  }
+function Test-CommandUsesPath([string]$CommandLine, [string]$ExpectedPath) {
+  if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+  $expected = [System.IO.Path]::GetFullPath($ExpectedPath)
+  $pattern = '(?i)(?:^|[\s"])' + [System.Text.RegularExpressions.Regex]::Escape($expected) + '(?=$|[\s"])'
+  return [System.Text.RegularExpressions.Regex]::IsMatch($CommandLine, $pattern)
+}
+
+function Wait-LaunchedNode([int]$LauncherPid, [string]$ExpectedServer, [int]$TimeoutMs = 10000) {
+  $deadline = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + $TimeoutMs
+  do {
+    $children = @()
+    try {
+      $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $LauncherPid" -ErrorAction Stop)
+    } catch {
+      # A just-created process can be briefly absent from CIM. Retry until the
+      # bounded deadline; no file, owner record, or HTTP request is involved.
+    }
+    foreach ($child in $children) {
+      $command = [string]$child.CommandLine
+      if ([string]$child.Name -ieq "node.exe" -and
+          (Test-CommandUsesPath -CommandLine $command -ExpectedPath $ExpectedServer) -and
+          (Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue)) {
+        return [int]$child.ProcessId
+      }
+    }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -lt $deadline)
+  return 0
 }
 
 # Seed from the environment before consulting .env, matching restart.sh. This script
@@ -581,71 +597,34 @@ $stoppedGateway = $false
 $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
   $oldPid = $listener.OwningProcess
-  # Ownership guard: the gateway records {pid, root} per port in
-  # ~/.modeldock/owner-<port>.json. If the recorded owner is a *different*
-  # checkout, killing it would swap live traffic onto this checkout's code -
-  # exactly the lookalike-instance mixup we have hit before. Refuse unless -Force.
-  # Must match ownerFilePath() in src/instance-owner.mjs, including the
-  # MODELDOCK_STATE_DIR redirect, or the guard reads a file the gateway never wrote.
+  # The gateway owns this record and writes its exact PID, port, and install
+  # root. It remains readable when Windows hides an elevated process command
+  # line from a manual restart. -Force never bypasses this ownership proof.
   $ownerFile = Join-Path $stateDir "owner-$port.json"
-  if (-not $forceTakeover) {
-    # The listener command line is the ground truth: a listener that provably
-    # runs this install's gateway is ours no matter what the owner record says.
-    # The record can go stale (crash, manual start, a second instance dying
-    # with EADDRINUSE), and blocking the restart on that stale file leaves the
-    # old process serving forever. Windows can also return an empty command
-    # line for elevated processes, so when it is unreadable we fall back to the
-    # owner record matching this exact listener.
-    $listenerCommand = ""
+  $owner = $null
+  try {
+    if (Test-Path -LiteralPath $ownerFile) {
+      $owner = Get-Content -LiteralPath $ownerFile -Raw | ConvertFrom-Json
+    }
+  } catch {
+    # The refusal below covers missing or unreadable ownership state.
+  }
+  $ownerMatches = $false
+  if ($owner) {
     try {
-      $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId = $oldPid" -ErrorAction Stop
-      $listenerCommand = [string]$processInfo.CommandLine
+      $ownerMatches = [int]$owner.pid -eq [int]$oldPid -and
+          [int]$owner.port -eq $port -and
+          [System.IO.Path]::GetFullPath([string]$owner.root) -eq [System.IO.Path]::GetFullPath($root)
     } catch {
-      # Treat an unreadable command line as unknown; the owner record decides.
-      $listenerCommand = ""
-    }
-    $sourceEntry = [System.IO.Path]::GetFullPath((Join-Path $root "src\server.mjs"))
-    $bundleEntry = [System.IO.Path]::GetFullPath((Join-Path $root "dist\modeldock.mjs"))
-    $listenerIsOurs = -not [string]::IsNullOrWhiteSpace($listenerCommand) -and
-        ($listenerCommand.IndexOf($sourceEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-         $listenerCommand.IndexOf($bundleEntry, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
-
-    $owner = $null
-    try {
-      if (Test-Path -LiteralPath $ownerFile) { $owner = Get-Content $ownerFile -Raw | ConvertFrom-Json }
-    } catch {
-      # Missing or unreadable record; refusal below explains the state.
-    }
-
-    $recordMatchesListener = $false
-    if ($owner) {
-      $ownerRoot = [System.IO.Path]::GetFullPath([string]$owner.root)
-      $thisRoot = [System.IO.Path]::GetFullPath($root)
-      $recordMatchesListener = [int]$owner.pid -eq [int]$oldPid -and [int]$owner.port -eq $port -and $ownerRoot -eq $thisRoot
-    }
-
-    if (-not $listenerIsOurs -and $recordMatchesListener -and [string]::IsNullOrWhiteSpace($listenerCommand)) {
-      Write-Status "WARNING: listener command line could not be read; trusting owner record PID $oldPid on port $port."
-      $listenerIsOurs = $true
-    }
-
-    if (-not $listenerIsOurs) {
-      if ($owner) {
-        $ownerAlive = $false
-        if (Get-Process -Id ([int]$owner.pid) -ErrorAction SilentlyContinue) { $ownerAlive = $true }
-        if ($ownerAlive -and [int]$owner.pid -ne [int]$oldPid) {
-          Write-Status "ERROR: refusing to stop PID $oldPid on port $port because port $port is recorded as owned by live PID $($owner.pid) (root: $($owner.root))."
-          Write-Status "Re-run with -Force to take the port over deliberately."
-          exit 2
-        }
-      }
-      Write-Status "ERROR: refusing to stop PID $oldPid on port $port because ownership could not be verified: the listener is not a ModelDock gateway from this install and the owner record is missing or stale."
-      Write-Status "Re-run with -Force to take the port over deliberately."
-      exit 2
+      $ownerMatches = $false
     }
   }
+  if (-not $ownerMatches) {
+    Write-Status "ERROR: refusing to stop PID $oldPid on port $port because it is not recorded as this install's gateway."
+    exit 2
+  }
   $currentListener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($currentListener -and $currentListener.OwningProcess -ne $oldPid -and (-not $forceTakeover)) {
+  if ($currentListener -and $currentListener.OwningProcess -ne $oldPid) {
     Write-Status "ERROR: the listener on port $port changed during ownership verification; refusing to stop it."
     exit 2
   }
@@ -766,30 +745,20 @@ try {
 # writes dist/modeldock.mjs and never touches src - preferring src would leave an
 # applied update permanently unused, and the Update button permanently lit.
 $server = Join-Path $root "dist\modeldock.mjs"
-if (-not (Test-Path -LiteralPath $server)) { $server = Join-Path $root "src\server.mjs" }
-$verifyTimeoutMs = 60000
-$verifier = Join-Path $root "scripts\gateway-verifier.mjs"
-if (Test-Path -LiteralPath $verifier) {
-  $verifierEntry = $verifier
-} else {
-  # The 0.3.31 updater did not know this helper asset. Its first upgrade
-  # deploys the new bundle before these scripts, so use the bundled copy for
-  # this one migration only; later releases deploy the standalone helper.
-  Write-Status "WARNING: gateway verifier helper is missing; using the newly deployed bundle verifier for this migration."
-  $verifierEntry = $server
+if (-not (Test-Path -LiteralPath $server)) {
+  Write-Status "ERROR: built gateway bundle is missing: $server"
+  exit 1
 }
-
 try {
   # Quote both paths: an installed layout under a home dir with a space
   # (e.g. "C:\Users\<user>\.modeldock") would otherwise be split by node's
   # CRT into two argv entries and fail with "Cannot find module". cmd.exe does
   # the >> redirection so stdout and stderr share the same log file as the
   # start-hidden launcher (and the "check modeldock.log" guidance).
-  # Record the handoff boundary before the child is launched. The verifier
-  # refuses a stale owner record or the listener from the process we just
-  # stopped, so a previous healthy gateway cannot make this restart look good.
-  $startedAfterMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden
+  # cmd owns the append redirection for the lifetime of Node. Keep its process
+  # object so the exact node.exe child can be identified without consulting a
+  # mutable owner file or waiting for an HTTP health surface.
+  $launcher = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"`"$nodeExe`" `"$server`" >> `"$log`" 2>&1`"" -WorkingDirectory $root -WindowStyle Hidden -PassThru
 } catch {
   Write-Status "ERROR: failed to start gateway: $($_.Exception.Message)"
   if ($stoppedGateway) {
@@ -799,25 +768,16 @@ try {
   }
   exit 1
 }
-Write-Status "restart.ps1: started gateway from $root using $server; verifying readiness (logs: $log)"
-$verifyArgs = @(
-  "--verify-gateway",
-  "--root", $root,
-  "--port", "$port",
-  "--state-dir", $stateDir,
-  "--started-after-ms", "$startedAfterMs",
-  "--timeout-ms", "$verifyTimeoutMs"
-)
-if ($oldPid -gt 0) { $verifyArgs += @("--previous-pid", "$oldPid") }
-$verifyExit = Invoke-GatewayVerifier -VerifierArgs $verifyArgs
-if ($verifyExit -ne 0) {
-  Write-Status "ERROR: Gateway did not verify after restart. The replacement may have exited; check $log."
+Write-Status "restart.ps1: launched gateway from $root using $server (logs: $log)"
+$newPid = Wait-LaunchedNode -LauncherPid $launcher.Id -ExpectedServer $server
+if ($newPid -le 0) {
+  Write-Status "ERROR: the launcher did not create a live node.exe for $server."
   if ($stoppedGateway) {
-    Write-Status "The old gateway was stopped and no verified replacement is serving on port $port."
+    Write-Status "The old gateway was stopped and no replacement process was handed off."
   }
   exit 1
 }
-Write-Status "restart.ps1: verified gateway from $root (logs: $log)"
+Write-Status "restart.ps1: verified gateway handoff to PID $newPid from $server"
 exit 0
 '@ | Out-File -FilePath $restart -Encoding ascii
 

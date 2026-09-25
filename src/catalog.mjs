@@ -70,7 +70,7 @@ export function baseInstructionsFor(config, { supportsVision = false, nativeWebS
     `ModelDock MCP tools ride a session connection that Codex never re-establishes after a gateway restart. If an MCP tool call fails with a connection error (fetch failed, ECONNREFUSED, 'unsupported call', or a stale tool list), do NOT retry it and do NOT treat the capability as gone: run the CLI fallback immediately in a shell - \`node scripts/mcp-call.mjs <tool> ...\` (on macOS/Linux, \`sh scripts/mcp-call.sh <tool> ...\` also works when plain \`node\` is not on PATH). Key tools: ${fallbackTools}`
       + (canGenerateImages ? ", `image <prompt> [size]` (generate an image)" : "")
       + ". Run `node scripts/mcp-call.mjs list_mcp_tools` to list every tool and its arguments.",
-    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It stops the process on the configured port, starts a fresh detached instance, verifies its local status API, then prints 'verified gateway'; wait for that line before continuing.`,
+    `Restarting the gateway: if you need to restart the ModelDock service (e.g. after config or model changes), run: ${restartCommand}. It verifies that the configured-port listener belongs to this install, stops only that PID, starts the current built bundle, and confirms the launched Node PID is alive before printing 'verified gateway handoff'; wait for that line before continuing.`,
   ].join(" ");
 }
 

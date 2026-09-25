@@ -33,7 +33,7 @@ async function waitForHealth(port) {
   return false;
 }
 
-test("restart.ps1 refuses a live foreign listener when the owner record is missing", async (t) => {
+test("restart.ps1 refuses a live foreign listener even when Force is passed", async (t) => {
   if (process.platform !== "win32") {
     t.skip("restart.ps1 is Windows-only");
     return;
@@ -46,7 +46,6 @@ test("restart.ps1 refuses a live foreign listener when the owner record is missi
   const port = await reservePort();
   writeFileSync(path.join(root, ".env"), `MODELDOCK_PORT=${port}\n`, "utf8");
   writeFileSync(path.join(root, "scripts", "restart.ps1"), readFileSync(path.join(repoRoot, "scripts", "restart.ps1")), "utf8");
-  writeFileSync(path.join(root, "scripts", "gateway-verifier.mjs"), readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")), "utf8");
   writeFileSync(path.join(root, "dist", "modeldock.mjs"), "process.exit(0);\n", "utf8");
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -60,7 +59,7 @@ http.createServer((req, res) => {
   t.after(() => foreign.kill("SIGKILL"));
   assert.equal(await waitForHealth(port), true, "foreign listener should start");
 
-  const restart = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "scripts", "restart.ps1")], {
+  const restart = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "scripts", "restart.ps1"), "-Force"], {
     env: {
       ...process.env,
       MODELDOCK_PORT: String(port),
@@ -74,11 +73,11 @@ http.createServer((req, res) => {
   restart.stderr.on("data", (chunk) => (output += chunk));
   const exitCode = await new Promise((resolve) => restart.on("close", resolve));
   assert.equal(exitCode, 2, output);
-  assert.match(output, /ownership could not be verified|owner record is missing/i);
+  assert.match(output, /not recorded as this install's gateway/i);
   assert.equal(await waitForHealth(port), true, "foreign listener must survive the refused restart");
 });
 
-test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting", async (t) => {
+test("restart.ps1 rebuilds a stale bundle and hands off to the exact launched node process", async (t) => {
   if (process.platform !== "win32") {
     t.skip("restart.ps1 is Windows-only");
     return;
@@ -112,11 +111,6 @@ test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting"
     readFileSync(path.join(repoRoot, "scripts", "restart.ps1")),
     "utf8",
   );
-  writeFileSync(
-    path.join(root, "scripts", "gateway-verifier.mjs"),
-    readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")),
-    "utf8",
-  );
   // src is the newest input, so the launcher must run build-if-stale before the
   // bundle is served. The fake helper records that it ran.
   writeFileSync(path.join(root, "src", "server.mjs"), "export const x = 1;\n", "utf8");
@@ -125,36 +119,20 @@ test("restart.ps1 rebuilds a stale bundle (src newer than dist) before starting"
     `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(path.join(root, "rebuilt.txt"))}, "1");\n`,
     "utf8",
   );
-  // This deliberately models a prior released bundle: it has no verifier CLI
-  // at all. The current lifecycle helper must validate its fresh owner and
-  // /api/status without requiring the bundle to understand a new argument.
+  // Deliberately do not publish an owner record or HTTP endpoint. Restart
+  // completion is the process handoff itself: the live node.exe child must be
+  // running the exact bundle path launched above. Slow gateway initialization
+  // must not turn a successful process handoff into a rollback.
   writeFileSync(
     path.join(root, "dist", "modeldock.mjs"),
-    `import http from "node:http";
-import { writeFileSync } from "node:fs";
-import path from "node:path";
-const port = Number(process.env.MODELDOCK_PORT);
-const stateDir = process.env.MODELDOCK_STATE_DIR;
-const ownerFile = path.join(stateDir, \`owner-\${port}.json\`);
+    `import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(path.join(root, "started.txt"))}, String(process.pid));
-writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, root: ${JSON.stringify(root)}, port, startedAt: new Date().toISOString() }));
-http.createServer((req, res) => {
-  if (req.url === "/healthz") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-    return;
-  }
-  if (req.url === "/api/status") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ config: {}, runtime: {} }));
-    return;
-  }
-  res.writeHead(404); res.end();
-}).listen(port, "127.0.0.1");
+setInterval(() => {}, 1000);
 `,
     "utf8",
   );
 
+  const startedAt = Date.now();
   const restart = spawn("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(root, "scripts", "restart.ps1")], {
     env: {
       ...process.env,
@@ -169,19 +147,23 @@ http.createServer((req, res) => {
   restart.stderr.on("data", (chunk) => (output += chunk));
   const exitCode = await new Promise((resolve) => restart.on("close", resolve));
   assert.equal(exitCode, 0, output);
-  assert.match(output, /verified gateway/);
+  assert.match(output, /verified gateway handoff to PID \d+/);
+  assert.ok(Date.now() - startedAt < 5000, `process handoff should not wait for gateway readiness:\n${output}`);
   assert.equal(
     existsSync(path.join(root, "rebuilt.txt")),
     true,
     "restart.ps1 must rebuild a stale bundle (src newer than dist) before launching",
   );
-  // The verifier has already confirmed readiness, but wait for the marker too
-  // so cleanup can kill the exact fake child it launched.
+  // The launched bundle writes this immediately. Match it to the PID reported
+  // by restart.ps1 so the test proves the exact child was identified.
   const started = path.join(root, "started.txt");
   for (let i = 0; i < 40 && !existsSync(started); i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(existsSync(started), "the fake gateway should record its pid after the rebuild");
+  const startedPid = Number(readFileSync(started, "utf8"));
+  assert.ok(startedPid > 0, "the fake gateway should record a valid pid");
+  assert.match(output, new RegExp(`verified gateway handoff to PID ${startedPid}\\b`));
 });
 
 
@@ -216,11 +198,6 @@ test("restart.ps1 reports an unstoppable gateway instead of exiting silently", a
   writeFileSync(
     path.join(root, "scripts", "restart.ps1"),
     readFileSync(path.join(repoRoot, "scripts", "restart.ps1")),
-    "utf8",
-  );
-  writeFileSync(
-    path.join(root, "scripts", "gateway-verifier.mjs"),
-    readFileSync(path.join(repoRoot, "scripts", "gateway-verifier.mjs")),
     "utf8",
   );
   writeFileSync(path.join(root, "dist", "modeldock.mjs"), "// never started\n", "utf8");

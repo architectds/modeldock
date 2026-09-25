@@ -1499,7 +1499,7 @@ function stripLocalInstructionText(text) {
     .replace(VERBOSE_ACTION_RULE, "IMPORTANT: perform any action by emitting a function_call in this turn; never describe an action in text.")
     .replace(VERBOSE_RESTART, (match) => {
       const path = match.match(/"([^"]+\\restart\.ps1)"/)?.[1] || "scripts/restart.ps1";
-      return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for the "verified gateway" line.`;
+      return `Restarting ModelDock: run powershell -ExecutionPolicy Bypass -File "${path}" and wait for the "verified gateway handoff" line.`;
     });
 }
 

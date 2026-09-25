@@ -84,6 +84,7 @@ function cleanEntry(entry) {
     label: String(entry.label || "").trim() || baseUrl,
     contextWindow: Number(entry.contextWindow) > 0 ? Number(entry.contextWindow) : 0,
     supportsVision: Boolean(entry.supportsVision),
+    transport: entry.transport === "chat" ? "chat" : "responses",
     addedAt: entry.addedAt || "",
   };
 }
@@ -126,6 +127,7 @@ export function writeCustomEndpoints(file, endpoints) {
     label: entry.label || "",
     contextWindow: entry.contextWindow || 0,
     supportsVision: Boolean(entry.supportsVision),
+    transport: entry.transport === "chat" ? "chat" : "responses",
     addedAt: entry.addedAt || new Date().toISOString(),
   }));
   // mode on the temp file: rename preserves it, and on macOS/Linux the API

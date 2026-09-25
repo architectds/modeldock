@@ -20,8 +20,10 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
+import { pathToFileURL } from "node:url";
 import { createApp, createServices } from "../src/server.mjs";
 import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
+import { codexSlugFor } from "../src/model-ref.mjs";
 import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
@@ -60,7 +62,10 @@ async function availablePort() {
 // cannot touch the developer's own configuration.
 
 async function startDashboard(t, { nativeVision = false, bundled = false } = {}) {
-  const runtime = bundled ? await import("../dist/modeldock.mjs") : { createServices, createApp };
+  const bundleUrl = process.env.MODELDOCK_TEST_BUNDLE
+    ? pathToFileURL(path.resolve(process.env.MODELDOCK_TEST_BUNDLE)).href
+    : new URL("../dist/modeldock.mjs", import.meta.url).href;
+  const runtime = bundled ? await import(bundleUrl) : { createServices, createApp };
   const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-tabs-"));
   const port = await availablePort();
   const nativeCatalogFile = path.join(dir, "native-catalog.json");
@@ -857,16 +862,49 @@ test("the Cloud page saves a discovered custom endpoint with its single Save con
   }
 
   const upstreamPort = await availablePort();
-  let probeCalls = 0;
-  const upstream = createHttpServer((req, res) => {
+  let responsesProbeCalls = 0;
+  let chatProbeCalls = 0;
+  let chatRelayCalls = 0;
+  const upstream = createHttpServer(async (req, res) => {
     res.setHeader("content-type", "application/json");
     if (req.method === "GET" && req.url === "/v1/models") {
       res.end(JSON.stringify({ data: [{ id: "single-save-model", meta: { n_ctx: 64000 } }] }));
       return;
     }
     if (req.method === "POST" && req.url === "/v1/responses") {
-      probeCalls += 1;
-      res.end(JSON.stringify({ id: "resp_single_save", status: "completed", output: [], usage: {} }));
+      responsesProbeCalls += 1;
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "Responses is not served" }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/chat/completions") {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (body.stream === false && body.messages?.at(-1)?.content === "Reply with exactly CUSTOM_OK.") {
+        chatProbeCalls += 1;
+        res.end(JSON.stringify({
+          id: "chatcmpl_single_save",
+          choices: [{ message: { role: "assistant", content: "CUSTOM_OK" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 1 },
+        }));
+        return;
+      }
+      chatRelayCalls += 1;
+      assert.equal(body.model, "single-save-model");
+      assert.ok(Array.isArray(body.messages) && body.messages.some((message) => message.role === "user"));
+      assert.equal(body.input, undefined, "Responses input must be bridged before reaching Chat");
+      res.setHeader("content-type", "text/event-stream");
+      res.end([
+        `data: ${JSON.stringify({
+          id: "chatcmpl_custom_route",
+          model: "single-save-model",
+          choices: [{ index: 0, delta: { role: "assistant", content: "CHAT_ROUTE_OK" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 3 },
+        })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n"));
       return;
     }
     res.statusCode = 404;
@@ -919,9 +957,12 @@ test("the Cloud page saves a discovered custom endpoint with its single Save con
     found: document.querySelector('#custom-model-select option[value="single-save-model"]') !== null,
     status: document.getElementById('custom-status').textContent,
     error: document.getElementById('custom-error').textContent,
+    hint: document.getElementById('custom-endpoint-hint').textContent,
   })`));
   assert.equal(listedState.found, true,
     `List Models populates the model that the shared Save will persist: ${JSON.stringify(listedState)}`);
+  assert.match(listedState.hint, /responses.*chat\/completions/i,
+    "the page explains that Save detects either supported upstream protocol");
 
   await evaluate(`(() => {
     document.getElementById('custom-model-select').value = 'single-save-model';
@@ -941,14 +982,31 @@ test("the Cloud page saves a discovered custom endpoint with its single Save con
     modelId: saved.modelId,
     contextWindow: saved.contextWindow,
     supportsVision: saved.supportsVision,
+    transport: saved.transport,
     apiKeyConfigured: saved.apiKeyConfigured,
   }, {
     providerId: "together",
     modelId: "single-save-model",
     contextWindow: 64000,
     supportsVision: true,
+    transport: "chat",
     apiKeyConfigured: true,
   }, "the single Save persists the provider-qualified endpoint and its capabilities");
+
+  const routed = await fetch(`${base}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-codex-session-id": "custom-chat-route" },
+    body: JSON.stringify({
+      model: codexSlugFor("together", "single-save-model"),
+      instructions: "Answer the user.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Route this turn." }] }],
+      tools: [],
+      stream: true,
+    }),
+  });
+  const routedText = await routed.text();
+  assert.equal(routed.status, 200, routedText);
+  assert.match(routedText, /CHAT_ROUTE_OK/, "the persisted named provider uses the Chat bridge");
 
   assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify({
     endpoint: document.getElementById('custom-endpoint').value,
@@ -980,7 +1038,9 @@ test("the Cloud page saves a discovered custom endpoint with its single Save con
   const afterKeySave = await (await fetch(`${base}/api/custom/endpoints`)).json();
   assert.equal(afterKeySave.endpoints.filter((endpoint) => endpoint.modelId === "single-save-model").length, 1,
     "saving an existing key does not re-add the cleared custom draft");
-  assert.equal(probeCalls, 1, "the second Save updates the row without probing a duplicate endpoint");
+  assert.equal(responsesProbeCalls, 1, "the first Save tries Responses once");
+  assert.equal(chatProbeCalls, 1, "the first Save detects Chat once and the second Save does not re-probe");
+  assert.equal(chatRelayCalls, 1, "the saved named provider routes later Codex traffic through Chat");
 });
 
 

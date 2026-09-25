@@ -39,7 +39,7 @@ test("recovery restores a complete version snapshot through the canonical restar
   assert.doesNotMatch(windows, /modeldock\.mjs\.prev/);
 });
 
-test("restart scripts prove the newly launched owner serves the status API", () => {
+test("restart scripts enforce their platform-specific handoff contracts", () => {
   const restart = readFileSync(new URL("../scripts/restart.sh", import.meta.url), "utf8");
   const windows = readFileSync(new URL("../scripts/restart.ps1", import.meta.url), "utf8");
   assert.match(restart, /if command -v lsof[\s\S]*if command -v ss[\s\S]*if command -v fuser/);
@@ -48,9 +48,11 @@ test("restart scripts prove the newly launched owner serves the status API", () 
   assert.match(restart, /started gateway from \$ROOT using \$SERVER/);
   assert.match(restart, /--verify-gateway/);
   assert.match(restart, /--started-after-ms/);
-  assert.match(windows, /--verify-gateway/);
-  assert.match(windows, /--started-after-ms/);
-  assert.match(windows, /Gateway did not verify/);
+  assert.doesNotMatch(windows, /--verify-gateway/);
+  assert.doesNotMatch(windows, /--started-after-ms/);
+  assert.doesNotMatch(windows, /\$server\s*=\s*Join-Path\s+\$root\s+"src\\server\.mjs"/);
+  assert.match(windows, /verified gateway handoff to PID/);
+  assert.match(windows, /Test-CommandUsesPath/);
   const hiddenWindows = readFileSync(new URL("../scripts/start-hidden.ps1", import.meta.url), "utf8");
   const hiddenPosix = readFileSync(new URL("../scripts/start-hidden.sh", import.meta.url), "utf8");
   assert.match(hiddenWindows, /--verify-gateway/, "the installer/login launcher must use the same verifier");
