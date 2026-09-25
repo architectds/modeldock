@@ -53,6 +53,7 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-wire-custom-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stateDir = path.join(root, "state");
+  const endpointFile = path.join(stateDir, "custom-endpoints.json");
   await mkdir(stateDir, { recursive: true });
   const received = [];
   let incomplete = false;
@@ -81,7 +82,7 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
   });
   const upstreamPort = await listen(upstream);
   t.after(() => closeServer(upstream));
-  await writeFile(path.join(stateDir, "custom-endpoints.json"), JSON.stringify([{
+  await writeFile(endpointFile, JSON.stringify([{
     providerId: "collab", // Obsolete stored field must not hide the endpoint.
     modelId,
     baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
@@ -101,6 +102,7 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
       MODELDOCK_PROFILE: "opencode-go",
       OPENCODE_GO_TOKEN: "fixture-go-key",
       MODELDOCK_STATE_DIR: stateDir,
+      MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointFile,
       MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
       MODELDOCK_REQUIRE_CALLER_KEY: "0",
       MODELDOCK_MEMORY: "0",
