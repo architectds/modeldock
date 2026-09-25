@@ -854,12 +854,12 @@ defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
   }),
 });
 
-function customWireTarget(providerId, config, model) {
+function customWireTarget(config, model) {
   const endpoint = customEndpointFor(config?.customEndpoints, model);
   const transport = endpoint?.transport === "chat" ? "chat" : "responses";
   const baseUrl = trimBase(endpoint?.baseUrl || "");
   return {
-    provider: providerId,
+    provider: CUSTOM_PROFILE.id,
     model: bareModelId(model),
     url: `${baseUrl}/${transport === "chat" ? "chat/completions" : "responses"}`,
     transport,
@@ -873,7 +873,7 @@ defineRouting(CUSTOM_PROFILE, {
   // its own key, so the lookup is per model rather than per provider. Nothing
   // outside this profile needs to know that.
   baseUrlFor: (config, model) => trimBase(customEndpointFor(config?.customEndpoints, model)?.baseUrl || ""),
-  target: (config, model) => customWireTarget(CUSTOM_PROFILE.id, config, model),
+  target: (config, model) => customWireTarget(config, model),
 });
 
 defineRouting(OLLAMA_PROFILE, {
@@ -1002,7 +1002,11 @@ export function routedModelInventory() {
 // from unrelated metadata such as an empty tokenEnvName.
 export function providerRouteConfigured(config, providerId) {
   const profile = PROFILES[providerId];
-  return Boolean(profile?.availableModels?.length && (profile.keyless || config?.tokens?.[providerId]));
+  if (!profile?.availableModels?.length) return false;
+  if (profile.keyless) return true;
+  return profile.availableModels.some((model) => Boolean(
+    upstreamTargetFor(config, modelAddressFor(providerId, model.id)).token,
+  ));
 }
 
 export function enabledProviderOptions(config) {
@@ -1028,84 +1032,24 @@ export function enabledProviderOptions(config) {
 // do not move, so nothing in a picker breaks.
 export function applyCustomProfile(config) {
   const endpoints = Array.isArray(config?.customEndpoints) ? config.customEndpoints : [];
-  const groups = new Map();
-  for (const entry of endpoints) {
-    const id = String(entry?.providerId || "custom");
-    if (!groups.has(id)) groups.set(id, []);
-    groups.get(id).push(entry);
-  }
-  // The built-in custom profile always exists, empty when nothing is in that
-  // group, because callers ask for it by name.
-  if (!groups.has("custom")) groups.set("custom", []);
-
-  // A provider whose last endpoint was removed stops existing, or its models
-  // would keep resolving to a profile nothing feeds.
-  for (const id of Object.keys(PROFILES)) {
-    if (PROFILES[id]?.userDefined && !groups.has(id)) delete PROFILES[id];
-  }
-
-  for (const [id, group] of groups) {
-    const profile = id === "custom" ? CUSTOM_PROFILE : (PROFILES[id] || userEndpointProfile(id));
-    PROFILES[id] = profile;
-    profile.baseUrl = group[0]?.baseUrl || "";
-    profile.availableModels = group.map((entry) => {
-      const advertised = localContextWindow(entry.contextWindow || undefined);
-      return {
-        id: entry.modelId,
-        label: entry.modelId,
-        endpoint: entry.transport === "chat" ? "chat" : "responses",
-        supportsVision: Boolean(entry.supportsVision),
-        ...(advertised ? { contextWindow: advertised } : {}),
-        ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
-        supportedReasoningLevels: LOCAL_REASONING_LEVELS,
-        defaultReasoningLevel: "xhigh",
-        reasoningSource: "measured",
-        // Always owner-qualified: the slug carries the provider that serves it,
-        // so routing never mistakes it for another provider's model of the
-        // same bare id.
-        ownerQualified: true,
-        status: "available",
-      };
-    });
-  }
-  return CUSTOM_PROFILE;
-}
-
-// A provider the user named. It reaches its endpoints exactly the way the
-// built-in custom profile does - the lookup is by model, and each entry
-// carries its own host and key - so the only thing that differs is the name.
-function userEndpointProfile(id) {
-  const profile = {
-    id,
-    label: id,
-    baseUrl: "",
-    tokenEnvName: "",
-    userDefined: true,
-    blockedToolTypes: new Set([]),
-    hiddenToolNames: new Set([]),
-    availableModels: [],
-    modelCatalog({ mainModel, baseInstructions }) {
-      return modelCatalogDefaults({
-        profileId: id,
-        mainModel,
-        displayName: id,
-        description: `Models served by ${id} through the ModelDock Responses gate.`,
-        compHash: `modeldock-${id}-v1`,
-        inputModalities: ["text", "image"],
-        supportsSearchTool: false,
-        baseInstructions,
-        availableModels: profile.availableModels,
-      });
-    },
-  };
-  defineRouting(profile, {
-    normalizesPayload: true,
-    baseUrlFor: (config, model) => trimBase(
-      customEndpointFor(config?.customEndpoints, model)?.baseUrl || "",
-    ),
-    target: (config, model) => customWireTarget(id, config, model),
+  CUSTOM_PROFILE.baseUrl = endpoints[0]?.baseUrl || "";
+  CUSTOM_PROFILE.availableModels = endpoints.map((entry) => {
+    const advertised = localContextWindow(entry.contextWindow || undefined);
+    return {
+      id: entry.modelId,
+      label: entry.modelId,
+      endpoint: entry.transport === "chat" ? "chat" : "responses",
+      supportsVision: Boolean(entry.supportsVision),
+      ...(advertised ? { contextWindow: advertised } : {}),
+      ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
+      supportedReasoningLevels: LOCAL_REASONING_LEVELS,
+      defaultReasoningLevel: "xhigh",
+      reasoningSource: "measured",
+      ownerQualified: true,
+      status: "available",
+    };
   });
-  return profile;
+  return CUSTOM_PROFILE;
 }
 
 // Populate the ollama profile from the connection snapshot (written by the
@@ -1329,7 +1273,7 @@ export function tokenFor(config, model) {
   // that keeps the healthz and readiness gates honest about a connected
   // engine being usable. Not connected means not ready, same as no token.
   if (profile.keyless) return profile.availableModels?.length ? "local" : "";
-  return config?.tokens?.[provider] || "";
+  return upstreamTargetFor(config, model).token || "";
 }
 
 export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, XAI_PROFILE };

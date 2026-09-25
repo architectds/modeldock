@@ -553,8 +553,7 @@ function settingsPayload(services) {
         baseUrl: entry.baseUrl,
         contextWindow: entry.contextWindow,
         supportsVision: entry.supportsVision,
-      providerId: entry.providerId || "custom",
-        apiKeyConfigured: Boolean(entry.apiKey),
+      apiKeyConfigured: Boolean(entry.apiKey),
       })),
     },
     ollama: {
@@ -1459,7 +1458,6 @@ export function createApp(services = createServices()) {
     // Keys never leave the machine: the list reports whether one is set, not
     // what it is.
     const endpoints = readCustomEndpoints(endpointsFile()).map((entry) => ({
-      providerId: entry.providerId || "custom",
       modelId: entry.modelId,
       baseUrl: entry.baseUrl,
       label: entry.label,
@@ -1473,7 +1471,7 @@ export function createApp(services = createServices()) {
   });
 
   app.post("/api/custom/add", mutateConfig, async (req, res) => {
-    const { baseUrl, apiKey, modelId, asVision, label, providerId } = req.body || {};
+    const { baseUrl, apiKey, modelId, asVision, label } = req.body || {};
     try {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
@@ -1484,7 +1482,6 @@ export function createApp(services = createServices()) {
       const listed = await listEndpointModels({ baseUrl, apiKey });
       const advertisedContext = listed.models.find((m) => m.id === model)?.contextWindow || 0;
       const next = addCustomEndpoint(readCustomEndpoints(endpointsFile()), {
-        providerId,
         modelId: model,
         baseUrl: normalizeBaseUrl(baseUrl),
         apiKey,
@@ -1522,7 +1519,6 @@ export function createApp(services = createServices()) {
   // different endpoint - so only the credential moves.
   app.post("/api/custom/key", mutateConfig, async (req, res) => {
     const model = String(req.body?.modelId || "").trim();
-    const providerId = String(req.body?.providerId || "").trim();
     const apiKey = String(req.body?.apiKey || "");
     if (!model || !apiKey) {
       return res.status(400).json({ error: { type: "model", message: "A model id and an API key are required." } });
@@ -1531,7 +1527,6 @@ export function createApp(services = createServices()) {
     let found = false;
     const next = before.map((entry) => {
       if (entry.modelId !== model) return entry;
-      if (providerId && (entry.providerId || "custom") !== providerId) return entry;
       found = true;
       return { ...entry, apiKey };
     });
@@ -1543,17 +1538,16 @@ export function createApp(services = createServices()) {
     recordConfigAction(metrics, "custom_endpoint_key", { ok: true });
     // The key changes what the endpoint can do, not what Codex sees, so no
     // restart is asked for.
-    return res.json({ modelId: model, providerId: providerId || "custom" });
+    return res.json({ modelId: model });
   });
 
   app.post("/api/custom/remove", mutateConfig, async (req, res) => {
     const model = String(req.body?.modelId || "").trim();
-    const providerId = String(req.body?.providerId || "").trim();
     if (!model) {
       return res.status(400).json({ error: { type: "model", message: "A model id is required." } });
     }
     const before = readCustomEndpoints(endpointsFile());
-    const next = removeCustomEndpoint(before, model, providerId);
+    const next = removeCustomEndpoint(before, model);
     if (next.length === before.length) {
       return res.status(404).json({ error: { type: "model", message: `No endpoint serves ${model}.` } });
     }

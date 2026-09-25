@@ -2540,7 +2540,7 @@ export async function pipeGatewayStream(upstreamBody, res, tee, onFirstResponse,
 export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstResponse, namespaces = null, customToolNames = null, renames = null) {
   if (!upstreamBody) {
     res.end();
-    return { bytes: 0, rewrote: false, terminal: false, failure: "OpenCode Go returned no response body." };
+    return { bytes: 0, rewrote: false, terminal: false, failure: "Response body was empty." };
   }
   let bytes = 0;
   let upstreamBytes = 0;
@@ -2637,14 +2637,14 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
   const finishEvent = (parsed) => {
     if (parsed?.type === "response.failed") {
       sawTerminal = true;
-      responseFailure = parsed.response?.error?.message || parsed.error?.message || "OpenCode Go response failed.";
+      responseFailure = parsed.response?.error?.message || parsed.error?.message || "Response failed.";
       return parsed;
     }
     if (parsed?.type !== "response.completed") return parsed;
     sawTerminal = true;
     if (outputIsDeliverable(parsed.response?.output)) sawDeliverable = true;
     if (!sawDeliverable) {
-      responseFailure = "OpenCode Go completed without an assistant message or tool call.";
+      responseFailure = "Response completed without an assistant message or tool call.";
       return failedCompletion(parsed, responseFailure);
     }
     completedResponse = parsed.response;
@@ -3076,7 +3076,7 @@ export async function pipeNormalizedStream(upstreamBody, res, tee, onFirstRespon
       flushPrelude();
       if (sseBuffer) writeOut(sseBuffer);
       if (!sawTerminal) {
-        responseFailure = "OpenCode Go stream ended before a terminal response event.";
+        responseFailure = "Response stream ended before a terminal event.";
         writeOut(sseEvent(failedCompletion(null, responseFailure)));
         sawTerminal = true;
       }
@@ -4334,7 +4334,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       if (Array.isArray(event.response?.output)) completedResponse = event.response;
     }
     if (event?.type === "response.failed") {
-      responseFailure = event.response?.error?.message || event.error?.message || "OpenCode Go response failed.";
+      responseFailure = event.response?.error?.message || event.error?.message || "Response failed.";
     }
   });
 

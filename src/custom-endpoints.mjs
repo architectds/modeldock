@@ -15,9 +15,6 @@ import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { encryptSecret, decryptSecret } from "./secrets.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
-import { modelAddressFor } from "./model-ref.mjs";
-import { profileById } from "./profiles.mjs";
-import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 export { customEndpointFor } from "./custom-endpoint-routing.mjs";
 
 export class CustomEndpointsError extends Error {
@@ -40,44 +37,11 @@ function normalizeBase(raw) {
   return String(raw || "").trim().replace(/\/+$/, "");
 }
 
-// One record per published model. The model id is the key because that is what
-// routing has to resolve: a request arrives naming a model, and the endpoint
-// that serves it has to be found from the name alone.
-// Lowercase, no separator, no spaces: the id becomes the @suffix of every
-// model this endpoint publishes, and that suffix is parsed by splitting on
-// the separator.
-export function normalizeProviderId(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32);
-}
-
-export function validateProviderId(value) {
-  const id = normalizeProviderId(value);
-  // Absent is allowed and means "custom": every endpoint added before this
-  // existed is in that group, and moving them would change the slug Codex has
-  // in its picker.
-  if (!id) return "custom";
-  // The provider registry is the owner of built-in addresses. A handwritten
-  // reserved-name list drifted as xAI and Command Code were added and allowed
-  // custom endpoints to overwrite those profiles. The native OpenAI address
-  // is not a routed profile, so it is the sole explicit reservation here.
-  const registered = profileById(id);
-  if (id === NATIVE_PROVIDER_ID || (registered && id !== "custom" && !registered.userDefined)) {
-    throw new CustomEndpointsError("provider", `${id} is a built-in provider name. Choose another.`);
-  }
-  return id;
-}
-
 function cleanEntry(entry) {
   const modelId = String(entry?.modelId || "").trim();
   const baseUrl = normalizeBase(entry?.baseUrl);
   if (!modelId || !baseUrl) return null;
   return {
-    providerId: validateProviderId(entry?.providerId),
     modelId,
     baseUrl,
     apiKey: decryptSecret(entry.apiKey || ""),
@@ -98,14 +62,9 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
     const clean = [];
     for (const entry of list) {
       const item = cleanEntry(entry);
-      // The key is the address, not the model id: two providers may each serve
-      // a model of the same name and both are reachable, because the published
-      // slug carries the provider. Keying on the id alone silently dropped the
-      // second one.
       if (!item) continue;
-      const key = modelAddressFor(item.providerId, item.modelId);
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (seen.has(item.modelId)) continue;
+      seen.add(item.modelId);
       clean.push(item);
     }
     return clean;
@@ -120,7 +79,6 @@ export function writeCustomEndpoints(file, endpoints) {
     return file;
   }
   const payload = endpoints.map((entry) => ({
-    providerId: entry.providerId || "custom",
     modelId: entry.modelId,
     baseUrl: normalizeBase(entry.baseUrl),
     apiKey: entry.apiKey ? encryptSecret(entry.apiKey) : "",
@@ -150,27 +108,19 @@ export function writeCustomEndpoints(file, endpoints) {
 export function addCustomEndpoint(endpoints, entry) {
   const item = cleanEntry({ ...entry, apiKey: "" });
   if (!item) throw new CustomEndpointsError("model", "An endpoint needs a base URL and a model id.");
-  // A clash is per provider, not global: naming providers is exactly what
-  // makes the same model id on two hosts addressable, and refusing it would
-  // undo the reason for naming them.
-  const clash = endpoints.find((existing) =>
-    existing.modelId === item.modelId && (existing.providerId || "custom") === item.providerId);
+  const clash = endpoints.find((existing) => existing.modelId === item.modelId);
   if (clash) {
     throw new CustomEndpointsError(
       "duplicate",
-      `${item.modelId} is already served by ${clash.baseUrl} under ${item.providerId}. Remove that endpoint first, or give this one a different provider name.`,
+      `${item.modelId} is already served by ${clash.baseUrl}. Remove that endpoint first.`,
     );
   }
   return [...endpoints, { ...item, apiKey: String(entry.apiKey || ""), addedAt: new Date().toISOString() }];
 }
 
-export function removeCustomEndpoint(endpoints, modelId, providerId = "") {
+export function removeCustomEndpoint(endpoints, modelId) {
   const id = String(modelId || "").trim();
-  const provider = normalizeProviderId(providerId);
-  // Without a provider this removes every endpoint serving that model id,
-  // which is what a caller written before providers existed means by it.
-  return (endpoints || []).filter((entry) =>
-    entry.modelId !== id || (provider && (entry.providerId || "custom") !== provider));
+  return (endpoints || []).filter((entry) => entry.modelId !== id);
 }
 
 

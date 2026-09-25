@@ -2331,7 +2331,6 @@ $("endpoint-save")?.addEventListener("click", async () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             modelId: field.dataset.modelId,
-            providerId: field.dataset.providerId,
             apiKey: value,
           }),
         });
@@ -2356,14 +2355,11 @@ function endpointField(endpoint) {
   const field = document.createElement("label");
   field.className = "field";
   field.dataset.modelId = endpoint.modelId;
-  field.dataset.providerId = endpoint.providerId || "custom";
 
   const head = document.createElement("div");
   head.className = "field-head";
   const name = document.createElement("span");
-  // The address is the provider and the model together: the same model id
-  // can be served by two providers, and the name has to say which one this is.
-  name.textContent = `${endpoint.providerId || "custom"} / ${endpoint.modelId}`;
+  name.textContent = `custom / ${endpoint.modelId}`;
   const where = document.createElement("a");
   where.className = "endpoint-base";
   where.href = endpoint.baseUrl;
@@ -2406,7 +2402,7 @@ function endpointField(endpoint) {
       const reply = await fetch("/api/custom/remove", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ modelId: endpoint.modelId, providerId: endpoint.providerId }),
+        body: JSON.stringify({ modelId: endpoint.modelId }),
       });
       const body = await reply.json();
       if (!reply.ok) throw new Error(body.error?.message || `Remove ${reply.status}`);
@@ -2431,7 +2427,6 @@ const customApiKeyInput = $("custom-api-key");
 const customModelSelect = $("custom-model-select");
 const customAsVision = $("custom-as-vision");
 const customListModelsBtn = $("custom-list-models");
-const customProviderInput = $("custom-provider");
 const customStatus = $("custom-status");
 const customError = $("custom-error");
 const customEndpointHint = $("custom-endpoint-hint");
@@ -2478,7 +2473,6 @@ function clearCustomDraft() {
   if (!customEndpointInput || !customApiKeyInput) return;
   customEndpointInput.value = "";
   customApiKeyInput.value = "";
-  if (customProviderInput) customProviderInput.value = "";
   invalidateCustomModelList();
   if (customAsVision) customAsVision.checked = false;
   customShowHint("");
@@ -2513,8 +2507,7 @@ async function saveCustomEndpointDraft() {
   const baseUrl = customEndpointInput?.value.trim() || "";
   const apiKey = customApiKeyInput?.value.trim() || "";
   const modelId = customModelSelect?.value || "";
-  const providerId = customProviderInput?.value.trim() || "";
-  const engaged = Boolean(baseUrl || apiKey || modelId || providerId || customAsVision?.checked);
+  const engaged = Boolean(baseUrl || apiKey || modelId || customAsVision?.checked);
   if (!engaged) return false;
   if (!baseUrl) {
     throw new Error(t("custom.errEndpointRequired"));
@@ -2534,7 +2527,6 @@ async function saveCustomEndpointDraft() {
       apiKey,
       modelId,
       asVision: Boolean(customAsVision?.checked),
-      providerId,
     }),
   });
   const body = await response.json();
