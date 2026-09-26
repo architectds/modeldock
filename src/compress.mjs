@@ -9,15 +9,184 @@
 // CPU.
 //
 // Priority, in order:
-//   1. user asks           - the task definition, deduped and noise-stripped
+//   1. current user asks   - the task definition, deduped and noise-stripped
 //   2. the tail            - the recent state of the work, kept verbatim
 //   3. assistant findings  - TF-IDF-scored conclusions, truncated to first and
 //                            last sentence
-//   4. recent tool calls   - kept verbatim so the handoff retains the feel of
-//                            the actual recent workflow
+//   4. recent tool calls   - bounded argument excerpts for the recent workflow
 //   5. older tool calls    - aggregated into one inventory line
-// Tool outputs are dropped: a handoff needs to know what was done, not what
-// each command printed.
+// Bulk tool outputs are dropped; recent snippets and decisive failures survive.
+// A handoff must not mistake omitted old output for current authoritative state.
+
+import { createHash } from "node:crypto";
+import { CURRENT_TURN_MARKER } from "./router.mjs";
+
+const HEARTBEAT_RE = /^<heartbeat>\s*<automation_id>([A-Za-z0-9_-]{1,128})<\/automation_id>\s*<current_time_iso>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))<\/current_time_iso>\s*<instructions>([\s\S]+?)<\/instructions>\s*<\/heartbeat>\s*$/;
+
+function parseHeartbeatText(text) {
+  if (typeof text !== "string" || text.length > 128 * 1024) return null;
+  const match = HEARTBEAT_RE.exec(text);
+  if (!match || !Number.isFinite(Date.parse(match[2]))) return null;
+  const [, automationId, time, instructions] = match;
+  const version = createHash("sha256").update(automationId).update("\0").update(instructions).digest("hex");
+  return { automationId, time, instructions, version };
+}
+
+function heartbeatIdentity(item) {
+  if (item?.type !== "message" || item.role !== "user" || item.content?.length !== 1) return null;
+  const part = item.content[0];
+  if (!["input_text", "text"].includes(part?.type)) return null;
+  return parseHeartbeatText(part.text);
+}
+
+function heartbeatMarker(item, identity, { count = 1, first = identity.time, last = identity.time } = {}) {
+  const span = count === 1
+    ? `<current_time_iso>${identity.time}</current_time_iso>`
+    : `<runs>${count}</runs><first_time_iso>${first}</first_time_iso><last_time_iso>${last}</last_time_iso>`;
+  return {
+    ...item,
+    content: [{
+      ...item.content[0],
+      text: `<heartbeat_history><automation_id>${identity.automationId}</automation_id><instruction_version>${identity.version}</instruction_version>${span}<note>Earlier scheduled invocation(s). The unchanged full instructions are retained in the latest heartbeat of this version.</note></heartbeat_history>`,
+    }],
+  };
+}
+
+// Codex keeps user messages when it compacts, so the same scheduled instruction
+// can return dozens of times in the next model request. Factor only a complete,
+// structured heartbeat whose instruction body is byte-identical after removing
+// its timestamp. Keep the latest full instruction and every distinct version;
+// leave ordinary user messages untouched. Before an existing compaction item,
+// the earlier invocations can share one bounded history marker. Elsewhere keep
+// short per-run markers in place so tool-turn chronology remains readable.
+export function foldRecurringHeartbeatHistory(input) {
+  if (!Array.isArray(input)) return input;
+  const groups = new Map();
+  let lastCompaction = -1;
+  for (let index = 0; index < input.length; index += 1) {
+    if (input[index]?.type === "compaction") lastCompaction = index;
+    const identity = heartbeatIdentity(input[index]);
+    if (!identity) continue;
+    const occurrences = groups.get(identity.version) || [];
+    occurrences.push({ index, identity });
+    groups.set(identity.version, occurrences);
+  }
+  if (![...groups.values()].some((occurrences) => occurrences.length > 1)) return input;
+
+  const replacements = new Map();
+  const omitted = new Set();
+  for (const occurrences of groups.values()) {
+    if (occurrences.length < 2) continue;
+    const previous = occurrences.slice(0, -1);
+    const compacted = previous.filter(({ index }) => index < lastCompaction);
+    if (compacted.length) {
+      const anchor = compacted.at(-1);
+      replacements.set(anchor.index, heartbeatMarker(input[anchor.index], anchor.identity, {
+        count: compacted.length,
+        first: compacted[0].identity.time,
+        last: anchor.identity.time,
+      }));
+      for (const { index } of compacted.slice(0, -1)) omitted.add(index);
+    }
+    for (const { index, identity } of previous) {
+      if (index < lastCompaction) continue;
+      replacements.set(index, heartbeatMarker(input[index], identity));
+    }
+  }
+  return input.flatMap((item, index) => omitted.has(index) ? [] : [replacements.get(index) || item]);
+}
+
+const HISTORICAL_USER_DAYS = 14;
+const RECENT_USER_KEEP = 8;
+const HISTORICAL_USER_BUDGET = 6_000;
+const HISTORICAL_USER_RE = /^<historical_user_requests\b/;
+
+function messageTimeMs(item) {
+  const value = item?.internal_chat_message_metadata_passthrough?.create_time;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value < 1e12 ? value * 1000 : value;
+    return ms >= 0 && ms <= 8.64e15 ? ms : null;
+  }
+  if (typeof value === "string" && value) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function historicalPlainUser(item) {
+  if (item?.type !== "message" || item.role !== "user" || item.content?.length !== 1) return null;
+  const part = item.content[0];
+  if (!["input_text", "text"].includes(part?.type) || typeof part.text !== "string") return null;
+  if (heartbeatIdentity(item) || /^<(?:heartbeat|heartbeat_history|historical_user_requests)\b/.test(part.text)) return null;
+  return { text: part.text, timeMs: messageTimeMs(item) };
+}
+
+function hasLocalCompactionSummary(item) {
+  return item?.type === "compaction" && typeof item.encrypted_content === "string" && item.encrypted_content.startsWith("kcr1:");
+}
+
+// A ModelDock CPU handoff already summarizes the history before this boundary.
+// Codex nevertheless replays old user items beside it. Preserve current and
+// post-handoff turns exactly, and replace only dated, plain-text pre-handoff
+// human asks with a bounded, explicitly historical index. Undated or rich
+// content is left alone: an unknown age is not evidence that it is obsolete.
+// This changes only the provider projection, never Codex's recorded history.
+function foldHistoricalUserHistory(input) {
+  const boundary = input.findLastIndex(hasLocalCompactionSummary);
+  if (boundary < 0) return input;
+  const latestHeartbeat = [...input.slice(boundary + 1)].reverse().map(heartbeatIdentity).find(Boolean);
+  let latestTime = latestHeartbeat ? Date.parse(latestHeartbeat.time) : 0;
+  if (!latestTime) {
+    for (const item of input) latestTime = Math.max(latestTime, messageTimeMs(item) || 0);
+  }
+  if (!Number.isFinite(latestTime) || latestTime <= 0) return input;
+
+  const candidates = [];
+  for (let index = 0; index < boundary; index += 1) {
+    const plain = historicalPlainUser(input[index]);
+    if (plain?.timeMs && plain.timeMs <= latestTime) candidates.push({ index, ...plain });
+  }
+  const recent = new Set(candidates.slice(-RECENT_USER_KEEP)
+    .filter(({ timeMs }) => latestTime - timeMs <= HISTORICAL_USER_DAYS * 86_400_000)
+    .map(({ index }) => index));
+  const archived = candidates.filter(({ index }) => !recent.has(index));
+  if (!archived.length) return input;
+
+  const selected = [...archived.slice(0, 2), ...archived.slice(-30)]
+    .filter((entry, index, entries) => entries.findIndex((other) => other.index === entry.index) === index);
+  const lines = [
+    `<historical_user_requests count="${archived.length}" first="${new Date(archived[0].timeMs).toISOString()}" last="${new Date(archived.at(-1).timeMs).toISOString()}">`,
+    "These are earlier user requests, not the current task. The adjacent CPU handoff summarizes prior work. Current human overrides take priority over scheduled heartbeats.",
+  ];
+  let included = 0;
+  for (const entry of selected) {
+    const normalized = entry.text.replace(/\s+/g, " ").trim();
+    const excerpt = firstAndLast(normalized, 150);
+    const line = `${new Date(entry.timeMs).toISOString()} ${JSON.stringify(excerpt)}`;
+    if (lines.join("\n").length + line.length + 30 > HISTORICAL_USER_BUDGET) break;
+    lines.push(line);
+    included += 1;
+  }
+  if (included < archived.length) lines.push(`${archived.length - included} earlier request(s) omitted from this index; see the CPU handoff for the historical context.`);
+  lines.push("</historical_user_requests>");
+  const anchor = archived[0].index;
+  const archivedIndexes = new Set(archived.map(({ index }) => index));
+  return input.flatMap((item, index) => {
+    if (index === anchor) return [{
+      ...item,
+      content: [{ ...item.content[0], text: lines.join("\n") }],
+    }];
+    return archivedIndexes.has(index) ? [] : [item];
+  });
+}
+
+// One owner for the local model's history projection. Both CPU compact and
+// ordinary relay must apply the same derivation before Chat normalization.
+export function projectLocalHistory(input) {
+  const folded = foldRecurringHeartbeatHistory(input);
+  return foldHistoricalUserHistory(folded);
+}
 
 const TOOL_OUTPUT_CAP = 150;
 // The gateway expands a compaction item back into a user message whose text is
@@ -34,7 +203,9 @@ const COMPRESSED_MARK_RE = /^HEAD:\s*(?:task|phase)=/m;
 // plus the edges, bounded, instead of either capping it like a user ask or
 // letting it grow unbounded across hops.
 const BASE_BUDGET = 40_000;
-const BASE_KEEP_RE = /^(?:USER:|LAST_ERROR:|TOOLS_AGGREGATED:)/;
+const BASE_CRITICAL_RE = /^(?:LAST_ERROR:|TOOLS_AGGREGATED:)/;
+const BASE_PLAN_RE = /^PLAN_STATE:/;
+const BASE_LINE_CAP = 2_500;
 
 function itemText(item) {
   if (!item || typeof item !== "object") return "";
@@ -44,6 +215,24 @@ function itemText(item) {
       ? item.content
       : "";
   return text.trim();
+}
+
+function toolOutputText(item) {
+  const output = item?.output;
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    return output
+      .filter((part) => typeof part?.text === "string")
+      .map((part) => part.text)
+      .join("\n");
+  }
+  return output == null ? "" : JSON.stringify(output);
+}
+
+function toolCallArguments(item) {
+  if (typeof item?.input === "string") return item.input;
+  if (typeof item?.arguments === "string") return item.arguments;
+  return JSON.stringify(item?.input ?? item?.arguments ?? "");
 }
 
 // Flatten the Responses input into a list of keep-able lines. Reasoning items
@@ -56,6 +245,14 @@ export function flattenConversation(input) {
       const role = item.role || "user";
       const body = itemText(item);
       if (!body) continue;
+      if (role === "user" && item[CURRENT_TURN_MARKER] === true) {
+        lines.push({ kind: "base", role: "user", text: body });
+        continue;
+      }
+      if (role === "user" && HISTORICAL_USER_RE.test(body)) {
+        lines.push({ kind: "base", role: "user", text: body });
+        continue;
+      }
       if (role === "user" && COMPRESSED_MARK_RE.test(body)) {
         // A restored compaction item. Strip the header line so hops do not
         // pile up "HEAD:" blocks, and keep the whole extract as one unit - it
@@ -66,11 +263,11 @@ export function flattenConversation(input) {
       }
       lines.push({ kind: "msg", role, text: `${role.toUpperCase()}: ${body}` });
     } else if (type === "function_call" || type === "custom_tool_call") {
-      const args = typeof item.input === "string" ? item.input : JSON.stringify(item.input || item.arguments || "");
-      lines.push({ kind: "tool", text: `TOOL_CALL: ${item.name || item.call_id}(${(args || "").slice(0, 120)})` });
+      const args = toolCallArguments(item);
+      lines.push({ kind: "tool", text: `TOOL_CALL: ${item.name || item.call_id}(${firstAndLast(args || "", 120)})` });
     } else if (type === "function_call_output" || type === "custom_tool_call_output") {
-      const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output || "");
-      lines.push({ kind: "tool", text: `TOOL_OUTPUT: ${output.slice(0, TOOL_OUTPUT_CAP)}` });
+      const output = toolOutputText(item);
+      lines.push({ kind: "tool", text: `TOOL_OUTPUT: ${firstAndLast(output, TOOL_OUTPUT_CAP)}` });
     }
   }
   return lines;
@@ -163,12 +360,48 @@ const MAX_ERROR_LINES = 12;
 const ERROR_LINE_CAP = 200;
 const ERROR_SCAN = 80;
 
+function structuredToolFailure(text, name) {
+  const outputSection = /(?:^|\n)Output:\s*\n([\s\S]*)$/.exec(text)?.[1];
+  let result;
+  for (const candidate of [outputSection, text]) {
+    if (!candidate) continue;
+    try {
+      result = JSON.parse(candidate.trim());
+      break;
+    } catch { /* A prose or partial result is handled by the line scan. */ }
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "";
+  const status = String(result.status || "");
+  const failed = result.ok === false || result.success === false || /^(?:failed|error|rejected)$/.test(status.toLowerCase())
+    || (result.error != null && result.ok !== true);
+  if (!failed) return "";
+  const error = result.error;
+  const code = error && typeof error === "object" ? error.code : result.code;
+  const message = typeof error === "string" ? error
+    : error && typeof error === "object" ? error.message
+      : result.message;
+  return `LAST_ERROR: ${name}: ${[code, message || status || "failed"].filter(Boolean).join(" - ")}`.slice(0, ERROR_LINE_CAP);
+}
+
 export function extractErrorLines(input) {
   const seen = new Set();
   const lines = [];
-  for (const item of input || []) {
+  const items = Array.isArray(input) ? input : [];
+  const callNames = new Map(items
+    .filter((item) => ["function_call", "custom_tool_call"].includes(item?.type) && item.call_id)
+    .map((item) => [item.call_id, item.name || "tool"]));
+  // A long-lived task can have more than twelve historical failures. The
+  // current unresolved failure must win the bounded handoff, not the oldest.
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
     if (!item || (item.type !== "function_call_output" && item.type !== "custom_tool_call_output")) continue;
-    const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output || "");
+    const output = toolOutputText(item);
+    const structured = structuredToolFailure(output, callNames.get(item.call_id) || "tool");
+    if (structured && !seen.has(structured.slice(0, 60))) {
+      seen.add(structured.slice(0, 60));
+      lines.push(structured);
+      if (lines.length >= MAX_ERROR_LINES) return lines;
+    }
     const all = output.split(/\r?\n/);
     const scanned = [...all.slice(0, ERROR_SCAN), ...all.slice(-ERROR_SCAN)];
     for (const raw of scanned) {
@@ -176,7 +409,7 @@ export function extractErrorLines(input) {
       if (line.length < 4 || line.length > 400) continue;
       if (/^\s*\d/.test(line)) continue; // coverage/stat rows
       if (ERROR_TABLE_RE.test(line)) continue; // markdown/ASCII tables
-      if (ERROR_CODE_RE.test(line)) continue; // dumped source, not a failure
+      if (ERROR_CODE_RE.test(line) && !/^\s*(?:ERROR|FATAL|SEVERE)[:\uFF1A]/i.test(line)) continue; // dumped source, not a failure
       if (!ERROR_LINE_RE.test(line)) continue;
       if (ERROR_NEG_RE.test(line)) continue;
       const key = line.slice(0, 60);
@@ -255,7 +488,7 @@ function rawInputChars(input) {
     } else if (typeof item.content === "string") {
       n += item.content.length;
     }
-    if (typeof item.output === "string") n += item.output.length;
+    if (item.output !== undefined) n += toolOutputText(item).length;
     if (typeof item.arguments === "string") n += item.arguments.length;
     else if (typeof item.input === "string") n += item.input.length;
     else if (item.input && typeof item.input === "object") n += JSON.stringify(item.input).length;
@@ -270,33 +503,42 @@ function rawInputChars(input) {
 // budget, fall to smaller tiers; a hard head-only cap is the last resort. The
 // restored unit is one multi-line text, so the cap works on its lines.
 const BASE_TIERS = [
-  { head: 8, tail: 20, recent: 10 },
-  { head: 4, tail: 12, recent: 5 },
-  { head: 2, tail: 6, recent: 2 },
+  { head: 8, tail: 20, recent: 10, critical: 8 },
+  { head: 4, tail: 12, recent: 5, critical: 5 },
+  { head: 2, tail: 6, recent: 2, critical: 3 },
 ];
 
 function boundedBaseText(text) {
   if (text.length <= BASE_BUDGET) return text;
   const lines = text.split("\n");
   const n = lines.length;
+  const latestPlan = lines.findLastIndex((line) => BASE_PLAN_RE.test(line));
   for (const tier of BASE_TIERS) {
     const userIdx = [];
+    const criticalIdx = [];
     for (let i = 0; i < n; i++) if (/^USER:/.test(lines[i])) userIdx.push(i);
+    for (let i = 0; i < n; i++) if (BASE_CRITICAL_RE.test(lines[i])) criticalIdx.push(i);
     const recent = new Set(userIdx.slice(-tier.recent));
+    const critical = new Set(criticalIdx.slice(-tier.critical));
     const want = new Set();
     for (let i = 0; i < n; i++) {
       if (i < tier.head || i >= n - tier.tail) want.add(i);
-      else if (BASE_KEEP_RE.test(lines[i]) || recent.has(i)) want.add(i);
+      else if (recent.has(i) || critical.has(i)) want.add(i);
     }
-    const kept = lines.filter((_, i) => want.has(i));
+    if (latestPlan >= 0) want.add(latestPlan);
+    const kept = lines.filter((_, i) => want.has(i)).map((line) =>
+      firstAndLast(line, BASE_PLAN_RE.test(line) ? 6_000 : BASE_LINE_CAP));
     const size = kept.join("\n").length;
     if (size <= BASE_BUDGET) {
-      const dropped = text.length - size;
+      const dropped = Math.max(0, text.length - size);
       return `${kept.join("\n")}\n... ${dropped} characters of earlier compressed history omitted ...`;
     }
   }
-  const head = lines.slice(0, 2).join("\n");
-  return `${head}\n... ${text.length - head.length} characters of earlier compressed history omitted ...`;
+  const edges = [...new Set([0, 1, latestPlan, n - 4, n - 3, n - 2, n - 1].filter((index) => index >= 0 && index < n))]
+    .sort((a, b) => a - b)
+    .map((index) => firstAndLast(lines[index], index === latestPlan ? 6_000 : 1_500));
+  const edgeText = edges.join("\n");
+  return `${edgeText}\n... ${Math.max(0, text.length - edgeText.length)} characters of earlier compressed history omitted ...`;
 }
 
 function truncateHead(text, max) {
@@ -324,12 +566,16 @@ function handoffHeader({ lines, kept, inventory, errorLines }) {
   // The goal is the most recent real user ask: the leading user messages of a
   // session are usually injected system blocks (<recommended_plugins>, skills),
   // so skip those when picking it.
-  const lastUser = [...userLines].reverse().find((l) => !/^USER:\s*</.test(l.text)) || userLines[userLines.length - 1];
-  const goal = lastUser ? truncateHead(lastUser.text.replace(/^USER:\s*/, ""), 100) : "";
+  const latestUser = userLines.at(-1);
+  const currentHeartbeat = latestUser && parseHeartbeatText(latestUser.text.replace(/^USER:\s*/, ""));
+  const lastHumanAsk = [...userLines].reverse().find((l) => !/^USER:\s*</.test(l.text));
+  const firstCycleInstruction = currentHeartbeat?.instructions.trim().split(/\r?\n/).find(Boolean) || "";
+  const task = currentHeartbeat
+    ? truncateHead(`${currentHeartbeat.automationId}: ${firstCycleInstruction}`, 100)
+    : lastHumanAsk ? truncateHead(lastHumanAsk.text.replace(/^USER:\s*/, ""), 100) : "";
   const phase = lastAssistant ? truncateHead(lastAssistant.text.replace(/^ASSISTANT:\s*/, ""), 100) : "";
-  const head = [goal && `task=${goal}`, phase && `phase=${phase}`].filter(Boolean).join(" | ");
-  const parts = [];
-  if (head) parts.push(`HEAD: ${head}`);
+  const head = [task && `task=${task}`, currentHeartbeat && `cycle_at=${currentHeartbeat.time}`, phase && `phase=${phase}`].filter(Boolean).join(" | ");
+  const parts = [`HEAD: ${head || "task=unknown"}`];
   if (errorLines.length) {
     const failures = errorLines
       .slice(0, 3)
@@ -338,8 +584,65 @@ function handoffHeader({ lines, kept, inventory, errorLines }) {
     parts.push(`FAILED: ${failures}`);
   }
   if (inventory) parts.push(`TOOLS: ${inventory.replace(/^TOOLS_AGGREGATED:\s*/, "")}`);
-  if (!parts.length) return "";
   return `${parts.join("\n")}\n---`;
+}
+
+function pairedToolOutput(input, callIndex) {
+  const callId = input[callIndex]?.call_id;
+  if (!callId) return null;
+  for (let index = callIndex + 1; index < input.length; index++) {
+    const item = input[index];
+    if (item?.call_id !== callId) continue;
+    if (["function_call_output", "custom_tool_call_output"].includes(item.type)) return item;
+    if (["function_call", "custom_tool_call"].includes(item.type)) return null;
+  }
+  return null;
+}
+
+// A confirmed update_plan call is the session's explicit task state. Its full
+// bounded steps are more reliable than trying to infer a plan from prose or
+// retaining a generic 120-character TOOL_CALL excerpt.
+function planCheckpoint(input) {
+  const index = input.findLastIndex((item) => item?.type === "compaction" || item?.[CURRENT_TURN_MARKER] === true);
+  return { index, hasPlan: index >= 0 && /^PLAN_STATE:/m.test(itemText(input[index])) };
+}
+
+function latestConfirmedPlan(input, checkpoint) {
+  // A newer checkpoint owns its plan. Codex may replay older tool calls beside
+  // that checkpoint; they must not overwrite the plan already carried there.
+  const firstEligible = checkpoint.hasPlan ? checkpoint.index + 1 : 0;
+  for (let index = input.length - 1; index >= firstEligible; index--) {
+    const call = input[index];
+    if (!["function_call", "custom_tool_call"].includes(call?.type) || call.name !== "update_plan") continue;
+    const output = pairedToolOutput(input, index);
+    if (!output || extractErrorLines([call, output]).length) continue;
+    let args;
+    try { args = JSON.parse(toolCallArguments(call)); } catch { continue; }
+    if (!Array.isArray(args?.plan) || !args.plan.length) continue;
+    const timeMs = messageTimeMs(call) || messageTimeMs(output);
+    const selectedSteps = args.plan.slice(-12);
+    const state = {
+      source: "update_plan",
+      as_of: timeMs ? new Date(timeMs).toISOString() : null,
+      explanation: firstAndLast(String(args.explanation || "").replace(/\s+/g, " ").trim(), 500),
+      omitted_steps: Math.max(0, args.plan.length - 12),
+      truncated_steps: selectedSteps.filter((entry) => String(entry?.step || "").length > 350).length,
+      steps: selectedSteps.map((entry) => ({
+        status: ["pending", "in_progress", "completed"].includes(entry?.status) ? entry.status : "unknown",
+        step: firstAndLast(String(entry?.step || "").replace(/\s+/g, " ").trim(), 350),
+      })).filter((entry) => entry.step),
+      note: "Last confirmed plan; newer user instructions take priority. Recheck volatile facts before acting.",
+    };
+    if (!state.steps.length) continue;
+    let line = `PLAN_STATE: ${JSON.stringify(state)}`;
+    while (line.length > 6_000 && state.steps.length > 1) {
+      state.steps.shift();
+      state.omitted_steps += 1;
+      line = `PLAN_STATE: ${JSON.stringify(state)}`;
+    }
+    return line;
+  }
+  return "";
 }
 
 // Compress a Responses input into handoff-oriented text. Deterministic, CPU
@@ -354,7 +657,11 @@ export function compressConversation(input, options = {}) {
     assistantCap = 180,
     userCap = 300,
   } = options;
-  const lines = flattenConversation(input);
+  const projectedInput = projectLocalHistory(input);
+  const checkpoint = planCheckpoint(projectedInput);
+  const planState = latestConfirmedPlan(projectedInput, checkpoint);
+  const suppressGenericPlan = Boolean(planState || checkpoint.hasPlan);
+  const lines = flattenConversation(projectedInput);
   const scores = tfidfScores(lines);
   const keep = new Array(lines.length).fill(false);
 
@@ -363,9 +670,10 @@ export function compressConversation(input, options = {}) {
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].kind === "base") keep[i] = true;
   }
-  // 1. user asks define the task - always survive, deduped.
+  // 1. Current user asks define the task. A repeated ask keeps its latest
+  //    position, not the stale first occurrence from an earlier cycle.
   const seenUser = new Set();
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = lines.length - 1; i >= 0; i--) {
     if (lines[i].role !== "user") continue;
     const normalized = stripNoise(lines[i].text).replace(/\s+/g, " ");
     if (seenUser.has(normalized)) continue;
@@ -374,6 +682,11 @@ export function compressConversation(input, options = {}) {
   }
   // 2. the tail - recent state, verbatim.
   for (let i = Math.max(0, lines.length - tailLines); i < lines.length; i++) keep[i] = true;
+  // The latest substantive assistant update often carries the actual next
+  // step. Keep one fuller copy even if later tool turns pushed it out of tail.
+  const latestSubstantiveAssistant = lines.findLastIndex((line, i) =>
+    i >= lines.length - 64 && line.kind === "msg" && line.role === "assistant" && line.text.length > 200);
+  if (latestSubstantiveAssistant >= 0) keep[latestSubstantiveAssistant] = true;
   // 3. assistant findings - TF-IDF-scored, signal-boosted, noise-filtered,
   //    truncated. A sentence that states a conclusion or cause is kept before
   //    one that merely scores high on rare tokens.
@@ -383,7 +696,7 @@ export function compressConversation(input, options = {}) {
     .filter((x) => x.line.kind === "msg" && x.line.role === "assistant" && !keep[x.i] && !noisy(x.line.text))
     .sort((a, b) => (b.signal - a.signal) || (b.score - a.score));
   for (const { i } of assistants.slice(0, Math.floor(assistants.length * assistantKeepRatio))) keep[i] = true;
-  // 4. recent tool calls verbatim.
+  // 4. recent tool calls with bounded arguments.
   let keptTools = 0;
   for (let i = lines.length - 1; i >= 0 && keptTools < tailToolKeep; i--) {
     if (lines[i].kind === "tool" && lines[i].text.startsWith("TOOL_CALL:")) {
@@ -393,11 +706,18 @@ export function compressConversation(input, options = {}) {
   }
   // 5. aggregate the older tool calls.
   const inventory = aggregateToolCalls(lines, (i) => keep[i]);
-  const kept = lines.filter((_, i) => keep[i]).map((line) => ({ ...line }));
-  const baseLines = kept.filter((line) => line.kind === "base");
-  const cleaned = kept.filter((line) => line.kind !== "base").map((line) => {
+  const omittedOutputs = lines.reduce((count, line, i) =>
+    count + (line.kind === "tool" && line.text.startsWith("TOOL_OUTPUT:") && !keep[i] ? 1 : 0), 0);
+  const kept = lines.flatMap((line, i) => keep[i] ? [{ ...line, sourceIndex: i }] : []);
+  const baseLines = kept.filter((line) => line.kind === "base").map((line) => suppressGenericPlan ? {
+    ...line,
+    text: line.text.split("\n").filter((part) => !(planState && BASE_PLAN_RE.test(part)) && !/^TOOL_CALL: update_plan\(/.test(part)).join("\n"),
+  } : line);
+  const cleaned = kept.filter((line) => line.kind !== "base" && !(suppressGenericPlan && line.text.startsWith("TOOL_CALL: update_plan("))).map((line) => {
     let text = stripNoise(line.text);
-    if (line.kind === "msg" && line.role === "assistant") text = firstAndLast(text, assistantCap);
+    if (line.kind === "msg" && line.role === "assistant") {
+      text = firstAndLast(text, line.sourceIndex === latestSubstantiveAssistant ? 2_500 : assistantCap);
+    }
     // User asks keep their opening and closing edges: pasted errors and long
     // instructions usually end with the decisive part a blind head-cut would
     // throw away.
@@ -405,14 +725,15 @@ export function compressConversation(input, options = {}) {
     return { ...line, text };
   });
   if (inventory) cleaned.push({ kind: "tool", text: inventory });
+  if (omittedOutputs) cleaned.push({ kind: "tool", text: `TOOL_OUTPUTS_OMITTED: ${omittedOutputs}. Re-read authoritative state before acting on old tool results.` });
   // Decisive error lines from tool outputs ride along explicitly.
-  const errorLines = extractErrorLines(input);
+  const errorLines = extractErrorLines(projectedInput);
   for (const errorLine of errorLines) cleaned.push({ kind: "tool", text: errorLine });
-  const originalChars = rawInputChars(input);
+  const originalChars = rawInputChars(projectedInput);
   const assembled = [...baseLines.map((line) => ({ ...line, text: boundedBaseText(line.text) })), ...cleaned];
   const header = handoffHeader({ lines, kept, inventory, errorLines });
-  const body = assembled.map((line) => line.text).join("\n");
-  const text = header ? `${header}\n${body}` : body;
+  const body = assembled.map((line) => line.text).filter(Boolean).join("\n");
+  const text = [header, body, planState].filter(Boolean).join("\n");
   const compressedChars = text.length;
   return { text, originalChars, compressedChars, keptCount: cleaned.length };
 }
