@@ -1424,7 +1424,7 @@ function rosterSwitch(entry, onChanged, vision = false) {
     input.setAttribute("aria-label", `Vision - ${entry.label}`);
     wrap.title = locked
       ? "Choose a different vision model first to disable this capability."
-      : "Toggle native image input. Saved across restarts and upgrades; restart Codex after changing.";
+      : "Toggle direct image input. Saved across restarts and upgrades; restart Codex after changing.";
   };
   syncVision();
 

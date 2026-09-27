@@ -205,6 +205,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     narrow: 600,
     "vision-persistence": 2400,
     "custom-single-save": 3000,
+    "custom-vision-toggle": 3600,
   }[instance] ?? 1500;
   const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profiles = [];
@@ -954,6 +955,109 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
     await sleep(100);
     const shot = await send("Page.captureScreenshot", { format: "png" });
     writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.local-vision.png`, Buffer.from(shot.result.data, "base64"));
+  }
+});
+
+test("the built dashboard edits a saved custom model's vision capability", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  const modelId = "browser-custom-vision";
+  const upstreamPort = await availablePort();
+  const upstream = createHttpServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.end(JSON.stringify({ data: [{ id: modelId }] }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/responses") {
+      res.end(JSON.stringify({ id: "resp_custom_vision_probe", status: "completed", output: [], usage: {} }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  upstream.listen(upstreamPort, "127.0.0.1");
+  await new Promise((resolve) => upstream.once("listening", resolve));
+  t.after(() => new Promise((resolve) => upstream.close(resolve)));
+
+  const { base, services } = await startDashboard(t, { bundled: true });
+  // startDashboard supplies a source-module profile for its general tab tests.
+  // Here catalog and roster must share the bundled provider registry, as they
+  // do in an installed process, so let the bundle resolve its own profile.
+  services.config.profile = null;
+  const added = await fetch(`${base}/api/custom/add`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+      apiKey: "browser-custom-vision-key",
+      modelId,
+      asVision: false,
+    }),
+  });
+  assert.equal(added.status, 200, await added.text());
+
+  const { send, evaluate } = await openBrowser(t, chromePath, { instance: "custom-vision-toggle" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#models`)}`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(100);
+    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes(${JSON.stringify(modelId)})`)) break;
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`Boolean(document.querySelector('#modeldock-wizard:not([hidden]) .wz-skip button'))`)) break;
+    await sleep(50);
+  }
+  await evaluate(`document.querySelector('#modeldock-wizard:not([hidden]) .wz-skip button')?.click()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`document.getElementById('modeldock-wizard')?.hidden !== false`)) break;
+    await sleep(100);
+  }
+  assert.equal(await evaluate(`document.getElementById('modeldock-wizard')?.hidden`), true,
+    "the first-run overlay is dismissed before visually checking the roster");
+  const rowState = `(() => {
+    const row = [...document.querySelectorAll('#roster-groups tr')]
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === '${modelId}');
+    const inputs = row ? [...row.querySelectorAll('input[type="checkbox"]')] : [];
+    return { inputs: inputs.length, checked: inputs[1]?.checked, disabled: inputs[1]?.disabled };
+  })()`;
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(${rowState})`)),
+    { inputs: 2, checked: false, disabled: false });
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#roster-groups tr')]
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === '${modelId}');
+    row.querySelectorAll('input[type="checkbox"]')[1].click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(50);
+    const endpoints = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+    if (endpoints.find((entry) => entry.modelId === modelId)?.supportsVision === true) break;
+  }
+  const endpoints = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+  assert.equal(endpoints.find((entry) => entry.modelId === modelId)?.supportsVision, true);
+  assert.equal(existsSync(services.visionOverridesFile), false,
+    "custom vision must not create a second capability owner");
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (JSON.parse(await evaluate(`JSON.stringify(${rowState})`)).disabled === false) break;
+    await sleep(100);
+  }
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(${rowState})`)),
+    { inputs: 2, checked: true, disabled: false }, "the switch reflects the saved choice");
+  const catalog = await (await fetch(`${base}/v1/models`)).json();
+  const published = catalog.models.find((entry) => entry.display_name === `Custom - ${modelId}`);
+  assert.ok(published?.input_modalities?.includes("image"), "Codex sees the updated capability");
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    await evaluate(`(() => {
+      const row = [...document.querySelectorAll('#roster-groups tr')]
+        .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === '${modelId}');
+      row?.scrollIntoView({ block: 'center' });
+      return true;
+    })()`);
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.custom-vision.png`, Buffer.from(shot.result.data, "base64"));
   }
 });
 

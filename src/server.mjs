@@ -202,6 +202,11 @@ function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
   };
 }
 
+function modelVisionEditable(entry) {
+  return Boolean(entry && (profileById(entry.provider)?.modelDiscovery
+    || entry.provider === "llamacpp" || entry.provider === "custom"));
+}
+
 function canShowUnavailableSavedModel(config, id) {
   return config.visionModelConfigured || modelRefParts(id).qualified || hasChatGptLogin(config.codexHome);
 }
@@ -1713,9 +1718,8 @@ export function createApp(services = createServices()) {
     const { id, supportsVision } = req.body || {};
     const slug = canonicalModelRefOf(config, String(id || "").trim());
     const model = modelOptions(config).find((entry) => entry.id === slug);
-    const visionEditable = Boolean(model && (profileById(model.provider)?.modelDiscovery || model.provider === "llamacpp"));
-    if (!visionEditable) {
-      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a discovered provider model or the local llama.cpp model." } });
+    if (!modelVisionEditable(model)) {
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a discovered, custom, or local llama.cpp model." } });
     }
     if (typeof supportsVision !== "boolean") {
       return res.status(400).json({ error: { type: "invalid_state", message: "supportsVision must be true or false." } });
@@ -1723,13 +1727,23 @@ export function createApp(services = createServices()) {
     if (!supportsVision && (services.modelSelection?.visionModel || config.visionModel) === slug) {
       return res.status(409).json({ error: { type: "model_in_use", message: "Choose a different vision model first, then disable vision for this model." } });
     }
-    const file = services.visionOverridesFile || visionOverridesPath();
-    const overrides = readVisionOverrides(file);
-    overrides[slug] = supportsVision;
-    writeVisionOverrides(file, overrides);
-    config.visionOverrides = overrides;
-    applyVisionOverrides(allProfiles(), overrides, { modelAddressFor });
-    services.writeCatalogFile?.();
+    if (model.provider === "custom") {
+      const endpoints = readCustomEndpoints(endpointsFile());
+      if (!customEndpointFor(endpoints, slug)) {
+        return res.status(404).json({ error: { type: "invalid_model", message: "The custom endpoint no longer exists." } });
+      }
+      writeCustomEndpoints(endpointsFile(), endpoints.map((entry) =>
+        entry.modelId === bareModelId(slug) ? { ...entry, supportsVision } : entry));
+      republishEndpoints();
+    } else {
+      const file = services.visionOverridesFile || visionOverridesPath();
+      const overrides = readVisionOverrides(file);
+      overrides[slug] = supportsVision;
+      writeVisionOverrides(file, overrides);
+      config.visionOverrides = overrides;
+      applyVisionOverrides(allProfiles(), overrides, { modelAddressFor });
+      services.writeCatalogFile?.();
+    }
     let restartRequired = true;
     try {
       await services.configSwitcher.markRestartRequired();
@@ -1759,7 +1773,7 @@ export function createApp(services = createServices()) {
         providerLabel: providerLabelFor(entry.provider),
         label: entry.label || entry.id,
         supportsVision: Boolean(entry.supportsVision),
-        visionEditable: Boolean(profileById(entry.provider)?.modelDiscovery || entry.provider === "llamacpp"),
+        visionEditable: modelVisionEditable(entry),
         visionLocked: Boolean(entry.supportsVision && (services.modelSelection?.visionModel || config.visionModel) === entry.id),
         visionTier: entry.visionTier || "",
         contextWindow: effectiveContextWindow(entry),

@@ -88,15 +88,13 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
     baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
     apiKey: "fixture-custom-key",
     transport: "responses",
-    supportsVision: true,
+    supportsVision: false,
   }]));
   const probe = http.createServer();
   const gatewayPort = await listen(probe);
   await closeServer(probe);
   const autostartKey = `HKCU\\Software\\ModelDockTests\\wire-custom-${process.pid}`;
-  const child = spawn(process.execPath, [bundle], {
-    cwd: repoRoot,
-    env: {
+  const gatewayEnv = {
       ...process.env,
       MODELDOCK_PORT: String(gatewayPort),
       MODELDOCK_PROFILE: "opencode-go",
@@ -111,10 +109,14 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
       MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
       MODELDOCK_AUTOSTART_KEY: autostartKey,
       MODELDOCK_AUTOSTART_NAME: `ModelDockWireCustom${process.pid}`,
-    },
+  };
+  const launchGateway = () => spawn(process.execPath, [bundle], {
+    cwd: repoRoot,
+    env: gatewayEnv,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  let child = launchGateway();
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(() => stop(child));
@@ -125,12 +127,26 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
   }
   await waitForStatus(gatewayPort);
 
+  const visionUpdate = await fetch(`http://127.0.0.1:${gatewayPort}/api/models/vision`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: `${modelId}@custom`, supportsVision: true }),
+  });
+  assert.equal(visionUpdate.status, 200, `saved custom vision cannot be edited: ${await visionUpdate.text()}`);
+  const savedEndpoints = JSON.parse(readFileSync(endpointFile, "utf8"));
+  assert.equal(savedEndpoints[0].supportsVision, true, "the endpoint record owns its vision capability");
+  const roster = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models/roster`)).json();
+  const customRow = roster.models.find((entry) => entry.id === `${modelId}@custom`);
+  assert.equal(customRow?.visionEditable, true);
+  assert.equal(customRow?.supportsVision, true);
+
   const picker = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models`)).json();
   assert.ok(picker.options.some((option) => option.id === `${modelId}@custom` && option.provider === "custom"),
     "the old named record must be visible under custom in the dashboard picker");
   const catalog = await (await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`)).json();
   const codexModel = catalog.models.find((item) => item.display_name === `Custom - ${modelId}`);
   assert.ok(codexModel, "the same model must be published in the Codex picker");
+  assert.ok(codexModel.input_modalities?.includes("image"), "Codex receives the corrected vision declaration");
   const request = { ...fixture.request, model: codexModel.slug };
   const relay = () => fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
     method: "POST",
@@ -153,4 +169,26 @@ test("built bundle publishes a saved endpoint as custom and relays the full Code
   assert.match(shortText, /"type":"response.failed"/);
   assert.match(shortText, /Response stream ended before a terminal event/);
   assert.doesNotMatch(shortText, /OpenCode Go/);
+
+  for (const next of [false, true]) {
+    const changed = await fetch(`http://127.0.0.1:${gatewayPort}/api/models/vision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: `${modelId}@custom`, supportsVision: next }),
+    });
+    assert.equal(changed.status, 200, `custom vision could not switch to ${next}: ${await changed.text()}`);
+    const current = JSON.parse(readFileSync(endpointFile, "utf8"));
+    assert.equal(current[0].supportsVision, next);
+    const published = await (await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`)).json();
+    assert.equal(published.models.find((entry) => entry.slug === codexModel.slug)?.input_modalities.includes("image"), next);
+  }
+
+  await stop(child);
+  child = launchGateway();
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  await waitForStatus(gatewayPort);
+  const restored = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models/roster`)).json();
+  const restoredRow = restored.models.find((entry) => entry.id === `${modelId}@custom`);
+  assert.equal(restoredRow?.supportsVision, true, "custom vision survives gateway restart");
+  assert.equal(restoredRow?.visionEditable, true);
 });
