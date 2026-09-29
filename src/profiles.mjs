@@ -2,6 +2,7 @@
 import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
 import { localEngineDefinition } from "./local-engine-definitions.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
+import { isLoopbackHost } from "./loopback.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 import { foldLlamaLocalKeys, LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
 import {
@@ -552,6 +553,64 @@ const VLLM_PROFILE = localEngineProfile("vllm", `${VLLM_ENGINE.label} (local)`, 
 export { LLAMACPP_LOCAL_MODEL_ID, LLAMACPP_LOCAL_SLUG } from "./model-identity.mjs";
 export const LLAMACPP_LOCAL_MODEL_LABEL = LLAMACPP_PROFILE.label;
 
+// The generic Local provider. Every keyless OpenAI-compatible origin the user
+// attaches through the Local scan publishes one identity here, spelled
+// "<provider>/<model>@local", so the picker carries a single Local group rather
+// than one group per engine. The engine-specific llama.cpp and vLLM profiles
+// above stay for the older connect flow and for sessions that still carry
+// "Local@llamacpp"; a new attachment never creates them.
+//
+// Routing is per model, like Custom: each custom-endpoints.json entry flagged
+// local:true owns its host, dialect, real upstream id and optional key, and a
+// request is matched to its entry by the published bare id.
+const LOCAL_PROFILE = {
+  id: "local",
+  label: "Local",
+  baseUrl: "",
+  tokenEnvName: "",
+  blockedToolTypes: new Set([]),
+  hiddenToolNames: new Set([]),
+  transport: "chat",
+  availableModels: [],
+  modelCatalog({ mainModel, baseInstructions }) {
+    return modelCatalogDefaults({
+      profileId: LOCAL_PROFILE.id,
+      mainModel,
+      displayName: "Local",
+      description: "Local keyless OpenAI-compatible models through the ModelDock gate.",
+      compHash: "modeldock-local-v1",
+      inputModalities: ["text", "image"],
+      supportsSearchTool: false,
+      baseInstructions,
+      availableModels: LOCAL_PROFILE.availableModels,
+    });
+  },
+};
+
+// The one lookup that owns "which endpoint serves this local model". Local
+// entries share a file with the remote Custom ones, so the flag - not the file -
+// decides the owner, and the profile's routing and its per-model target both
+// read it here instead of filtering the list again.
+function isLocalEndpoint(entry) {
+  if (entry?.local !== true) return false;
+  try { return isLoopbackHost(new URL(entry.baseUrl).hostname); }
+  catch { return false; }
+}
+
+function localEndpointFor(config, model) {
+  const bare = bareModelId(model);
+  if (!bare) return null;
+  return (config?.customEndpoints || [])
+    .find((entry) => isLocalEndpoint(entry) && entry.modelId === bare) || null;
+}
+
+// Remote entries only. A local endpoint belongs to the Local profile, so Custom
+// must not also answer for it - two providers publishing one address is the
+// duplication this split removes.
+export function remoteEndpoints(config) {
+  return (config?.customEndpoints || []).filter((entry) => entry.local !== true);
+}
+
 // Grok through a Grok subscription rather than through metered API credits.
 //
 // It looks like a keyed provider from here - a bearer token on every request -
@@ -740,6 +799,7 @@ const PROFILES = Object.fromEntries([
   XAI_PROFILE,
   COMMAND_CODE_PROFILE,
   OLLAMA_PROFILE,
+  LOCAL_PROFILE,
   LLAMACPP_PROFILE,
   VLLM_PROFILE,
 ].map((profile) => [profile.id, profile]));
@@ -855,12 +915,12 @@ defineRouting(DEEPSEEK_OFFICIAL_PROFILE, {
 });
 
 function customWireTarget(config, model) {
-  const endpoint = customEndpointFor(config?.customEndpoints, model);
+  const endpoint = customEndpointFor(remoteEndpoints(config), model);
   const transport = endpoint?.transport === "chat" ? "chat" : "responses";
   const baseUrl = trimBase(endpoint?.baseUrl || "");
   return {
     provider: CUSTOM_PROFILE.id,
-    model: bareModelId(model),
+    model: endpoint?.upstreamId || bareModelId(model),
     url: `${baseUrl}/${transport === "chat" ? "chat/completions" : "responses"}`,
     transport,
     token: endpoint?.apiKey || "",
@@ -872,7 +932,7 @@ defineRouting(CUSTOM_PROFILE, {
   // One profile, many endpoints: each model can sit on a different host with
   // its own key, so the lookup is per model rather than per provider. Nothing
   // outside this profile needs to know that.
-  baseUrlFor: (config, model) => trimBase(customEndpointFor(config?.customEndpoints, model)?.baseUrl || ""),
+  baseUrlFor: (config, model) => trimBase(customEndpointFor(remoteEndpoints(config), model)?.baseUrl || ""),
   target: (config, model) => customWireTarget(config, model),
 });
 
@@ -940,6 +1000,36 @@ defineRouting(VLLM_PROFILE, {
   target: localWireTarget(VLLM_PROFILE.id),
 });
 
+// The scan-attached Local endpoints. Keyless and loopback like the engine
+// profiles above, but unlike them the host, dialect and real upstream id are
+// per model, exactly as they are for Custom. `cachePrompt` follows the dialect:
+// llama.cpp's chat template keeps a prompt-cache prefix per conversation, and
+// the Responses path has no equivalent field to set.
+defineRouting(LOCAL_PROFILE, {
+  keyless: true,
+  local: true,
+  normalizesPayload: true,
+  baseUrlFor: (config, model) => trimBase(localEndpointFor(config, model)?.baseUrl || ""),
+  target: (config, model) => {
+    const entry = localEndpointFor(config, model);
+    const transport = entry?.transport === "chat" ? "chat" : "responses";
+    return {
+      provider: LOCAL_PROFILE.id,
+      // The published id is "<provider>/<model>"; the endpoint answers to the
+      // id it advertised, which the attach flow persisted separately.
+      model: entry?.upstreamId || bareModelId(model),
+      url: `${trimBase(entry?.baseUrl || "")}/${transport === "chat" ? "chat/completions" : "responses"}`,
+      transport,
+      token: entry?.apiKey || "",
+      tokenRequired: false,
+      cachePrompt: transport === "chat",
+      completeOnFinishReason: entry?.completeOnFinishReason === true,
+      toolArgumentsAsObjects: Boolean(entry?.chatTemplateSupportsObjectArguments),
+      mediaMarker: typeof entry?.mediaMarker === "string" ? entry.mediaMarker : "",
+    };
+  },
+});
+
 export function profileById(id) {
   return PROFILES[id] || null;
 }
@@ -1004,9 +1094,10 @@ export function providerRouteConfigured(config, providerId) {
   const profile = PROFILES[providerId];
   if (!profile?.availableModels?.length) return false;
   if (profile.keyless) return true;
-  return profile.availableModels.some((model) => Boolean(
-    upstreamTargetFor(config, modelAddressFor(providerId, model.id)).token,
-  ));
+  return profile.availableModels.some((model) => {
+    const target = upstreamTargetFor(config, modelAddressFor(providerId, model.id));
+    return Boolean(target.token) || target.tokenRequired === false;
+  });
 }
 
 export function enabledProviderOptions(config) {
@@ -1014,24 +1105,11 @@ export function enabledProviderOptions(config) {
   return profileOptions().filter((entry) => entry.id === active || providerRouteConfigured(config, entry.id));
 }
 
-// Populate the custom profile from config so the catalog and per-model routing
-// treat the configured endpoint/model like any other provider. Called at config
-// load and after the dashboard Add flow writes new values.
-// One profile per named provider, built from the endpoint list.
-//
-// Every user endpoint used to answer to a single "custom" provider, so a
-// machine with three of them published three models all suffixed @custom -
-// one address for three different upstreams. Usage could not be attributed,
-// the same model id could not be served from two hosts, and removing one
-// endpoint left the others sharing an address with a hole in it. The registry
-// was already the only thing routing consults, so a provider per name costs
-// an entry rather than a call site.
-//
-// An endpoint that names no provider is in the "custom" group, which is where
-// every endpoint added before this existed already is: their published slugs
-// do not move, so nothing in a picker breaks.
+// Remote entries in the endpoint file belong to Custom. Local entries in that
+// same file belong to Local. Each profile is a one-way projection of the same
+// persisted list, so the catalog and routing cannot disagree about ownership.
 export function applyCustomProfile(config) {
-  const endpoints = Array.isArray(config?.customEndpoints) ? config.customEndpoints : [];
+  const endpoints = remoteEndpoints(config);
   CUSTOM_PROFILE.baseUrl = endpoints[0]?.baseUrl || "";
   CUSTOM_PROFILE.availableModels = endpoints.map((entry) => {
     const advertised = localContextWindow(entry.contextWindow || undefined);
@@ -1050,6 +1128,34 @@ export function applyCustomProfile(config) {
     };
   });
   return CUSTOM_PROFILE;
+}
+
+// Populate the Local profile from the scan-attached endpoints. Applied at config
+// load and after every attach so the catalog, the picker and per-model routing
+// see one Local group across restarts without re-probing a machine that may be
+// offline now. Empty list clears the profile, which is what makes an install
+// with no scanned endpoint behave exactly as it did before the profile existed.
+export function applyLocalProfile(config) {
+  const endpoints = (config?.customEndpoints || []).filter(isLocalEndpoint);
+  LOCAL_PROFILE.availableModels = endpoints.filter((entry) => entry.modelId).map((entry) => {
+    const advertised = localContextWindow(entry.contextWindow || undefined);
+    return {
+      id: entry.modelId,
+      // The friendly "provider / model" label the attach flow persisted; the
+      // published id stays the machine-safe "<provider>/<model>".
+      label: entry.label || entry.modelId,
+      endpoint: entry.transport === "chat" ? "chat" : "responses",
+      supportsVision: Boolean(entry.supportsVision),
+      ...(advertised ? { contextWindow: advertised } : {}),
+      ...(entry.contextWindow ? { contextSource: "vendor" } : {}),
+      supportedReasoningLevels: LOCAL_REASONING_LEVELS,
+      defaultReasoningLevel: "xhigh",
+      reasoningSource: "measured",
+      ownerQualified: true,
+      status: "available",
+    };
+  });
+  return LOCAL_PROFILE;
 }
 
 // Populate the ollama profile from the connection snapshot (written by the

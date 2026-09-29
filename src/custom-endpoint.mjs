@@ -1,7 +1,9 @@
 // Custom endpoint protocol probe for the dashboard "Custom model" section.
 // The gateway speaks Responses to Codex and can relay either Responses or Chat
 // Completions upstream, so saving detects that boundary once and persists it.
+import { randomUUID } from "node:crypto";
 import { isLoopbackHost } from "./loopback.mjs";
+import { opencodeSessionHeaders } from "./upstream-headers.mjs";
 
 export class CustomEndpointError extends Error {
   constructor(code, message) {
@@ -55,6 +57,14 @@ function connectError(url, error) {
   return new CustomEndpointError("connect", `Cannot connect to ${url} (${reason}).`);
 }
 
+function probeHeaders(url, apiKey, sessionId) {
+  return {
+    "content-type": "application/json",
+    ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+    ...opencodeSessionHeaders({ provider: "custom", url }, { sessionId: sessionId || randomUUID() }),
+  };
+}
+
 // GET {base}/models and return the ids the endpoint advertises. Auth is optional:
 // some endpoints serve /models without a key, and the dashboard re-lists after a
 // key is filled in when it returns 401.
@@ -64,7 +74,10 @@ export async function listEndpointModels({ baseUrl, apiKey }) {
   let response;
   try {
     response = await fetch(url, {
-      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+      headers: {
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        ...opencodeSessionHeaders({ provider: "custom", url }, { sessionId: randomUUID() }),
+      },
       signal: AbortSignal.timeout(15_000),
     });
   } catch (error) {
@@ -107,7 +120,7 @@ export async function listEndpointModels({ baseUrl, apiKey }) {
 // POST {base}/responses with a tiny turn to prove the endpoint speaks the
 // Responses dialect and the key is accepted. Classified failures:
 //   401/403 -> key, 400/404 -> model, anything else non-2xx -> upstream.
-export async function probeCustomResponses({ baseUrl, apiKey, modelId }) {
+export async function probeCustomResponses({ baseUrl, apiKey, modelId, sessionId = "" }) {
   const model = String(modelId || "").trim();
   if (!model) throw new CustomEndpointError("model", "A model id is required.");
   const endpoint = validateBaseUrl(baseUrl);
@@ -116,10 +129,7 @@ export async function probeCustomResponses({ baseUrl, apiKey, modelId }) {
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
+      headers: probeHeaders(url, apiKey, sessionId),
       body: JSON.stringify({
         model,
         input: [{ role: "user", content: [{ type: "input_text", text: "Reply with exactly CUSTOM_OK." }] }],
@@ -146,7 +156,7 @@ export async function probeCustomResponses({ baseUrl, apiKey, modelId }) {
 
 // POST {base}/chat/completions with the same bounded turn. A successful probe
 // selects the existing Responses-to-Chat bridge for every later Codex request.
-export async function probeCustomChat({ baseUrl, apiKey, modelId }) {
+export async function probeCustomChat({ baseUrl, apiKey, modelId, sessionId = "" }) {
   const model = String(modelId || "").trim();
   if (!model) throw new CustomEndpointError("model", "A model id is required.");
   const endpoint = validateBaseUrl(baseUrl);
@@ -155,10 +165,7 @@ export async function probeCustomChat({ baseUrl, apiKey, modelId }) {
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
+      headers: probeHeaders(url, apiKey, sessionId),
       body: JSON.stringify({
         model,
         messages: [{ role: "user", content: "Reply with exactly CUSTOM_OK." }],
@@ -184,23 +191,24 @@ export async function probeCustomChat({ baseUrl, apiKey, modelId }) {
 }
 
 export async function probeCustomEndpoint(options) {
-  let responsesError;
-  try {
-    const result = await probeCustomResponses(options);
-    return { ...result, transport: "responses", probeUrl: result.responsesUrl };
-  } catch (error) {
-    if (error?.code === "key" || error?.code === "connect") throw error;
-    responsesError = error;
+  const probeOptions = { ...options, sessionId: options.sessionId || randomUUID() };
+  const attempts = options.preferChat
+    ? [["chat", probeCustomChat], ["responses", probeCustomResponses]]
+    : [["responses", probeCustomResponses], ["chat", probeCustomChat]];
+  const errors = [];
+  for (const [transport, probe] of attempts) {
+    try {
+      const result = await probe(probeOptions);
+      return { ...result, transport, probeUrl: transport === "chat" ? result.chatUrl : result.responsesUrl };
+    } catch (error) {
+      if (error?.code === "key" || error?.code === "connect") throw error;
+      errors.push(error);
+    }
   }
-  try {
-    const result = await probeCustomChat(options);
-    return { ...result, transport: "chat", probeUrl: result.chatUrl };
-  } catch (error) {
-    if (error?.code === "key" || error?.code === "connect" || error?.code === "upstream") throw error;
-    if (responsesError?.code === "upstream") throw responsesError;
-    throw new CustomEndpointError(
-      "model",
-      "Model not found, or the endpoint supports neither Responses nor Chat Completions.",
-    );
-  }
+  if (errors[1]?.code === "upstream") throw errors[1];
+  if (errors[0]?.code === "upstream") throw errors[0];
+  throw new CustomEndpointError(
+    "model",
+    "Model not found, or the endpoint supports neither Responses nor Chat Completions.",
+  );
 }

@@ -1,4 +1,5 @@
-// Remote endpoints the user has added, as a list.
+// User-added endpoints, as one list. The local flag assigns Local ownership;
+// records without it belong to Custom. Identity is owner plus model id.
 //
 // There used to be one slot: MODELDOCK_CUSTOM_BASE_URL and friends in .env.
 // Adding a second endpoint silently replaced the first, which is a real thing
@@ -37,6 +38,8 @@ function normalizeBase(raw) {
   return String(raw || "").trim().replace(/\/+$/, "");
 }
 
+const endpointKey = (entry) => `${entry.local === true ? "local" : "custom"}\0${entry.modelId}`;
+
 function cleanEntry(entry) {
   const modelId = String(entry?.modelId || "").trim();
   const baseUrl = normalizeBase(entry?.baseUrl);
@@ -46,6 +49,14 @@ function cleanEntry(entry) {
     baseUrl,
     apiKey: decryptSecret(entry.apiKey || ""),
     label: String(entry.label || "").trim() || baseUrl,
+    ...(entry.upstreamId ? { upstreamId: String(entry.upstreamId).trim() } : {}),
+    ...(entry.local === true ? { local: true } : {}),
+    ...(entry.local === true && entry.chatTemplateSupportsObjectArguments === true
+      ? { chatTemplateSupportsObjectArguments: true } : {}),
+    ...(entry.local === true && entry.completeOnFinishReason === true
+      ? { completeOnFinishReason: true } : {}),
+    ...(entry.local === true && typeof entry.mediaMarker === "string" && entry.mediaMarker
+      ? { mediaMarker: entry.mediaMarker } : {}),
     contextWindow: Number(entry.contextWindow) > 0 ? Number(entry.contextWindow) : 0,
     supportsVision: Boolean(entry.supportsVision),
     transport: entry.transport === "chat" ? "chat" : "responses",
@@ -63,8 +74,9 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
     for (const entry of list) {
       const item = cleanEntry(entry);
       if (!item) continue;
-      if (seen.has(item.modelId)) continue;
-      seen.add(item.modelId);
+      const key = endpointKey(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
       clean.push(item);
     }
     return clean;
@@ -83,6 +95,14 @@ export function writeCustomEndpoints(file, endpoints) {
     baseUrl: normalizeBase(entry.baseUrl),
     apiKey: entry.apiKey ? encryptSecret(entry.apiKey) : "",
     label: entry.label || "",
+    ...(entry.upstreamId ? { upstreamId: entry.upstreamId } : {}),
+    ...(entry.local === true ? { local: true } : {}),
+    ...(entry.local === true && entry.chatTemplateSupportsObjectArguments === true
+      ? { chatTemplateSupportsObjectArguments: true } : {}),
+    ...(entry.local === true && entry.completeOnFinishReason === true
+      ? { completeOnFinishReason: true } : {}),
+    ...(entry.local === true && typeof entry.mediaMarker === "string" && entry.mediaMarker
+      ? { mediaMarker: entry.mediaMarker } : {}),
     contextWindow: entry.contextWindow || 0,
     supportsVision: Boolean(entry.supportsVision),
     transport: entry.transport === "chat" ? "chat" : "responses",
@@ -108,7 +128,7 @@ export function writeCustomEndpoints(file, endpoints) {
 export function addCustomEndpoint(endpoints, entry) {
   const item = cleanEntry({ ...entry, apiKey: "" });
   if (!item) throw new CustomEndpointsError("model", "An endpoint needs a base URL and a model id.");
-  const clash = endpoints.find((existing) => existing.modelId === item.modelId);
+  const clash = endpoints.find((existing) => endpointKey(existing) === endpointKey(item));
   if (clash) {
     throw new CustomEndpointsError(
       "duplicate",
@@ -118,9 +138,9 @@ export function addCustomEndpoint(endpoints, entry) {
   return [...endpoints, { ...item, apiKey: String(entry.apiKey || ""), addedAt: new Date().toISOString() }];
 }
 
-export function removeCustomEndpoint(endpoints, modelId) {
+export function removeCustomEndpoint(endpoints, modelId, { local = false } = {}) {
   const id = String(modelId || "").trim();
-  return (endpoints || []).filter((entry) => entry.modelId !== id);
+  return (endpoints || []).filter((entry) => entry.modelId !== id || Boolean(entry.local) !== local);
 }
 
 
@@ -152,7 +172,7 @@ export function migrateLegacyCustomEndpoint(env = process.env, file = customEndp
   const existing = readCustomEndpoints(file);
   // A list that already serves this model is the newer truth; the variables
   // are leftovers and only need clearing.
-  if (existing.some((entry) => entry.modelId === modelId)) return { modelId, added: false };
+  if (existing.some((entry) => !entry.local && entry.modelId === modelId)) return { modelId, added: false };
 
   const entry = {
     modelId,

@@ -475,7 +475,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
       headers: {
         ...(native
           ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }
-          : upstreamHeaders({ provider, token }, { sessionId })),
+          : upstreamHeaders({ provider, token, url }, { sessionId })),
         // The native backend bills the turn to this account; routed providers
         // have no such header and must not receive one.
         ...(nativeAuth?.accountId ? { "chatgpt-account-id": nativeAuth.accountId } : {}),

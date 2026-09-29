@@ -83,7 +83,10 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
   const services = runtime.createServices({
     host: "127.0.0.1",
     port,
-    profile: { ...OPENCODE_GO_PROFILE },
+    // A bundled gateway must use its own provider registry. Passing the
+    // source module's profile closure here makes /api/models see new bundle
+    // entries while /v1/models builds from an older source-only registry.
+    ...(!bundled ? { profile: { ...OPENCODE_GO_PROFILE } } : {}),
     profileId: OPENCODE_GO_PROFILE.id,
     opencodeBaseUrl: "https://go.example.com/v1",
     tokens: { "opencode-go": "tab-render-test" },
@@ -206,6 +209,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     "vision-persistence": 2400,
     "custom-single-save": 3000,
     "custom-vision-toggle": 3600,
+    "unified-local": 4200,
   }[instance] ?? 1500;
   const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profiles = [];
@@ -744,32 +748,29 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   assert.equal(await evaluate(`document.getElementById('settings-commandcode-token').value`), "",
     "the stored key is never echoed back into the field");
 
-  // The drawer is the only local surface that talks to an engine, so it is
-  // rendered for real: opening llama.cpp's settings shows the port it was found
-  // on and offers to connect. There is deliberately no launch form any more -
-  // ModelDock replays the command it watched the engine start with, it does not
-  // let a web page compose one, so an assertion that the fields are gone is the
-  // regression guard for the control that used to sit here and do nothing.
+  // The local surface is one scan list. A connected server remains in that
+  // list and carries its own Disconnect action; there is no separate drawer or
+  // engine-specific configuration section for the user to hunt through.
   await evaluate(`location.hash = '#local'`);
   await sleep(400);
-  await evaluate(`document.getElementById('llamacpp-configure').click()`);
-  await sleep(250);
-  const localDrawer = JSON.parse(await evaluate(`JSON.stringify({
-    open: !document.getElementById('local-drawer').hidden,
-    title: document.getElementById('local-config-title').textContent.trim(),
-    port: document.getElementById('local-config-port').value,
-    launchForm: Boolean(document.getElementById('local-host-control')),
-    modelField: Boolean(document.getElementById('local-host-model-file')),
-    serviceRestart: !document.getElementById('local-service-restart').hidden,
-  })`));
-  assert.deepEqual(localDrawer, {
-    open: true,
-    title: "llama.cpp",
-    port: "11435",
-    launchForm: false,
-    modelField: false,
-    serviceRestart: true,
-  }, "the local drawer configures a port and no longer pretends to own the launch");
+  const localList = JSON.parse(await evaluate(`JSON.stringify((() => {
+    const row = [...document.querySelectorAll('#local-engine-list li')]
+      .find((item) => item.textContent.includes('11435'));
+    if (row) row.click();
+    return {
+      row: Boolean(row),
+      selected: Boolean(row?.classList.contains('is-selected')),
+      action: row?.querySelector('button')?.textContent.trim() || '',
+      sections: ['ollama-section', 'llamacpp-section', 'vllm-section', 'local-drawer']
+        .filter((id) => document.getElementById(id)),
+    };
+  })())`));
+  assert.deepEqual(localList, {
+    row: true,
+    selected: true,
+    action: "Disconnect",
+    sections: [],
+  }, "the saved local host remains discoverable and removable in one scan list");
 
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
@@ -1062,7 +1063,7 @@ test("the built dashboard edits a saved custom model's vision capability", { tim
 });
 
 
-test("the narrow local drawer is an opaque configuration surface", { timeout: 120_000 }, async (t) => {
+test("the narrow local scan keeps its selected action within the viewport", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {
     assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
@@ -1073,32 +1074,33 @@ test("the narrow local drawer is an opaque configuration surface", { timeout: 12
   await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
   for (let i = 0; i < 40; i += 1) {
     await sleep(250);
-    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#llamacpp-configure')`)) break;
+    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#local-engine-list li')`)) break;
   }
   await evaluate(`(() => {
     const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
     if (skip) skip.click();
-    document.getElementById('llamacpp-configure').click();
+    document.querySelector('#local-engine-list li')?.click();
     return true;
   })()`);
   await sleep(400);
   const surface = JSON.parse(await evaluate(`JSON.stringify((() => {
-    const drawer = document.getElementById('local-drawer');
-    const card = drawer.querySelector('.local-drawer-card');
-    const style = getComputedStyle(card);
+    const row = document.querySelector('#local-engine-list li');
+    const action = row?.querySelector('.local-engine-actions button');
+    const rowBox = row?.getBoundingClientRect();
+    const actionBox = action?.getBoundingClientRect();
     return {
-      drawerPosition: getComputedStyle(drawer).position,
-      cardBackground: style.backgroundColor,
-      cardBorder: style.borderTopColor,
-      cardVisible: card.offsetParent !== null,
+      rowVisible: Boolean(rowBox?.width && rowBox?.height),
+      actionVisible: Boolean(actionBox?.width && actionBox?.height),
+      actionInsideRow: Boolean(rowBox && actionBox && actionBox.left >= rowBox.left && actionBox.right <= rowBox.right),
+      horizontalOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
     };
   })())`));
   assert.deepEqual(surface, {
-    drawerPosition: "absolute",
-    cardBackground: "rgb(16, 27, 38)",
-    cardBorder: "rgb(35, 55, 71)",
-    cardVisible: true,
-  }, "the narrow drawer must cover the engine list with an opaque card");
+    rowVisible: true,
+    actionVisible: true,
+    actionInsideRow: true,
+    horizontalOverflow: false,
+  }, "the narrow scan keeps the selected action visible without horizontal overflow");
 });
 
 
@@ -1132,4 +1134,272 @@ test("a canvas is sized from its CSS box, never from its own bitmap", () => {
   assert.equal(measured, 1, "all dashboard waves share one measured renderer");
   assert.equal((app.match(/drawCacheWave/g) || []).length, 0, "no call site may retain the removed parallel cache renderer");
   assert.ok((app.match(/drawWave\(/g) || []).length >= 8, "every wave delegates to the shared renderer");
+});
+
+// One Local view. Everything listening is one list, and a row ModelDock can
+// adopt carries its own inline Connect - including a bare OpenAI-compatible
+// server, which used to be a dead end: the scan listed it under "An
+// OpenAI-compatible server. Add it on the API page", and the only way in was a
+// different tab asking for a key this endpoint does not have.
+//
+// A keyless endpoint still needs a name for Codex to route by, so a successful
+// probe asks for one before it publishes. That dialog is the contract this test
+// pins: the probe runs first, the naming form opens only when it answered, and a
+// probe that failed opens nothing - a form that cannot save is worse than no
+// form at all. Both outcomes are driven against real endpoints, and the proof is
+// read from what was persisted and what the gateway publishes, not from the
+// pixels around them.
+//
+// Contract the view must satisfy (the harness drives the UI, it does not reach
+// into it): the detected row lives in `#local-engine-list li` and contains a
+// `button` whose text matches /connect/i; the naming form is a visible
+// `dialog`/`[role="dialog"]`/`.modal`/`.local-connect-dialog` holding exactly
+// two non-hidden inputs and a button whose text matches /save|connect|add/i.
+test("the unified Local view adopts a detected OpenAI-compatible endpoint through a naming dialog", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+
+  // OpenAI-compatible and nothing more: /v1/models lists a model and
+  // /v1/responses completes, while /props, /version and /api/tags all 404, so
+  // discovery can only name it "openai". The row has to work for exactly this
+  // shape, because it is the shape the API page was invented for.
+  const livePort = await availablePort();
+  const liveUpstream = createHttpServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.end(JSON.stringify({ data: [{ id: "unified-local-model" }] }));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/responses") {
+      res.end(JSON.stringify({ id: "resp_unified_probe", status: "completed", output: [], usage: {} }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  liveUpstream.listen(livePort, "127.0.0.1");
+  await new Promise((resolve) => liveUpstream.once("listening", resolve));
+  t.after(() => new Promise((resolve) => liveUpstream.close(resolve)));
+
+  // A loopback port held by an HTTP server that refuses every probe. Keeping
+  // the port occupied prevents the test gateway from accidentally reusing a
+  // just-freed "dead" port and turning the negative case into a success.
+  const deadUpstream = createHttpServer((_req, res) => {
+    res.statusCode = 503;
+    res.end("unavailable");
+  });
+  deadUpstream.listen(0, "127.0.0.1");
+  await new Promise((resolve) => deadUpstream.once("listening", resolve));
+  const deadPort = deadUpstream.address().port;
+  t.after(() => new Promise((resolve) => deadUpstream.close(resolve)));
+
+  const liveUrl = `http://127.0.0.1:${livePort}`;
+  const deadUrl = `http://127.0.0.1:${deadPort}`;
+  const providerName = "UnifiedProvider";
+  const modelName = "unified-local-model";
+
+  const { base, services } = await startDashboard(t, { bundled: true });
+  // Discovery is the only input the Local view reads, so the two endpoints are
+  // injected rather than required to be listening on this machine.
+  services.discoverEngines = async () => [
+    { engine: "openai", label: "OpenAI-compatible", baseUrl: liveUrl, port: livePort, models: [modelName], connectable: true },
+    { engine: "openai", label: "OpenAI-compatible", baseUrl: deadUrl, port: deadPort, models: [], connectable: true },
+  ];
+
+  const { send, evaluate } = await openBrowser(t, chromePath, { instance: "unified-local" });
+  await evaluate(`location.href = ${JSON.stringify(`${base}#local`)}`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(250);
+    if (await evaluate(`document.readyState === 'complete' && !!document.querySelector('#local-engine-list li')`)) break;
+  }
+  // A temp-dir install is a first run. Wait until the guide actually opens
+  // before clicking Skip; clicking too early leaves it free to open later over
+  // the Local dialog and makes the negative probe look like it opened a form.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`Boolean(document.getElementById('modeldock-wizard')?.open)`)) break;
+    await sleep(100);
+  }
+  await evaluate(`(() => {
+    const skip = [...(document.getElementById('modeldock-wizard')?.querySelectorAll('button') || [])]
+      .find((node) => /skip for now/i.test(node.textContent));
+    skip?.click();
+    return true;
+  })()`);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate(`!document.getElementById('modeldock-wizard')?.open`)) break;
+    await sleep(100);
+  }
+  assert.equal(await evaluate(`Boolean(document.getElementById('modeldock-wizard')?.open)`), false,
+    "the first-run guide is closed before testing Local dialogs");
+
+  const visibleDialog = `[...document.querySelectorAll('dialog, [role="dialog"], .modal, .local-connect-dialog')]
+    .find((node) => { const box = node.getBoundingClientRect(); return box.width > 0 && box.height > 0; }) || null`;
+
+  // The row is found by the address the scan reported, and its Connect is found
+  // inside it: "click/select the row, then Connect" is still one control, not a
+  // second surface the user has to know about.
+  const clickConnect = (url) => `(() => {
+    const row = [...document.querySelectorAll('#local-engine-list li')].find((item) => item.textContent.includes(${JSON.stringify(url)}));
+    if (!row) return "no-row";
+    const find = () => [...row.querySelectorAll('button')].find((button) => /connect/i.test(button.textContent || ''));
+    let control = find();
+    if (!control) {
+      row.click();
+      control = find();
+    }
+    if (!control) return "no-connect";
+    control.click();
+    return "clicked";
+  })()`;
+
+  assert.equal(await evaluate(clickConnect(liveUrl)), "clicked",
+    "the detected endpoint's row carries its own Connect control");
+
+  let dialog = { open: false, inputs: 0 };
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(100);
+    dialog = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const node = ${visibleDialog};
+      if (!node) return { open: false, inputs: 0 };
+      return { open: true, inputs: [...node.querySelectorAll('input:not([type="hidden"])')].length };
+    })())`));
+    if (dialog.open) break;
+  }
+  assert.equal(dialog.open, true, "a probe that answered opens the naming form");
+  assert.equal(dialog.inputs, 2,
+    "the form asks for the two names Codex routes by - provider and model - and nothing else");
+
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.unified-local.png`, Buffer.from(shot.result.data, "base64"));
+  }
+
+  await evaluate(`(() => {
+    const node = ${visibleDialog};
+    const inputs = [...node.querySelectorAll('input:not([type="hidden"])')];
+    inputs[0].value = ${JSON.stringify(providerName)};
+    inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+    inputs[1].value = ${JSON.stringify(modelName)};
+    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+    const save = [...node.querySelectorAll('button')].find((button) => /save|connect|add/i.test(button.textContent || ''));
+    save.click();
+    return true;
+  })()`);
+
+  let saved = null;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(100);
+    const endpoints = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+    saved = endpoints.find((entry) => String(entry.baseUrl || "").includes(`:${livePort}`));
+    if (saved) break;
+  }
+  assert.ok(saved, "Save publishes the detected endpoint as a configured model");
+  assert.match(String(saved.modelId), new RegExp(providerName),
+    "the provider name the user typed survives into the saved model id");
+  assert.match(String(saved.modelId), new RegExp(modelName),
+    "the model name the user typed survives into the saved model id");
+  assert.ok(JSON.parse(readFileSync(services.customEndpointsFile, "utf8")).some((entry) => entry.modelId === "some-model"),
+    "adopting a new endpoint leaves the endpoints the user already had alone");
+
+  let published = null;
+  let catalog = { models: [] };
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    catalog = await (await fetch(`${base}/v1/models`)).json();
+    published = (catalog.models || []).find((entry) => String(entry.display_name || "").includes(modelName));
+    if (published) break;
+    await sleep(100);
+  }
+  assert.ok(published,
+    `the saved endpoint is published to the Codex catalog under the name the user gave it: ${JSON.stringify({
+      catalogLocal: (catalog.models || []).filter((entry) => String(entry.slug || "").startsWith("mdr.bG9jYWw.")),
+      savedLocal: services.config.customEndpoints?.filter((entry) => entry.local).map((entry) => entry.modelId),
+    })}`);
+  assert.equal(Buffer.from(String(published.slug || "").split(".")[1] || "", "base64url").toString("utf8"), "local",
+    "the Local page publishes one generic Local provider, not Custom or an engine-specific branch");
+
+  let connectedRow = { found: false };
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    connectedRow = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const row = [...document.querySelectorAll('#local-engine-list li')]
+        .find((item) => item.textContent.includes(${JSON.stringify(liveUrl)}));
+      if (!row) return { found: false };
+      if (!row.classList.contains('is-selected')) row.click();
+      return { found: true, connected: row.classList.contains('is-connected'),
+        border: getComputedStyle(row).borderTopColor,
+        action: row.querySelector('.local-engine-actions button')?.textContent.trim() || '' };
+    })())`));
+    if (connectedRow.connected && /disconnect/i.test(connectedRow.action)) break;
+    await sleep(100);
+  }
+  assert.deepEqual(connectedRow, {
+    found: true, connected: true, border: "rgb(80, 183, 255)", action: "Disconnect",
+  }, "a saved Local route stays in the scan with a highlighted border and Disconnect control");
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.unified-local-connected.png`, Buffer.from(shot.result.data, "base64"));
+  }
+
+  // The negative case. The port answers 503, so the row must report a generic
+  // connection failure and open no form.
+  const before = readFileSync(services.customEndpointsFile, "utf8");
+  assert.equal(await evaluate(clickConnect(deadUrl)), "clicked",
+    "the unavailable row offers the same single control");
+
+  let failureText = "";
+  let sawDialog = false;
+  const visibleDialogIds = new Set();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await sleep(100);
+    const state = JSON.parse(await evaluate(`JSON.stringify((() => {
+      const row = [...document.querySelectorAll('#local-engine-list li')].find((item) => item.textContent.includes(${JSON.stringify(deadUrl)}));
+      const dialog = ${visibleDialog};
+      return { text: (row ? row.textContent : document.body.textContent) || "", dialog: Boolean(dialog), dialogId: dialog?.id || "" };
+    })())`));
+    failureText = state.text;
+    sawDialog = sawDialog || state.dialog;
+    if (state.dialog) visibleDialogIds.add(state.dialogId);
+    if (/connection failed/i.test(failureText)) break;
+  }
+  assert.match(failureText, /connection failed/i,
+    "a probe that did not answer reports one generic line, not a provider-specific one");
+  assert.equal(sawDialog, false, `a failed probe opens no naming form: ${[...visibleDialogIds].join(", ")}`);
+  assert.equal(JSON.parse(readFileSync(services.customEndpointsFile, "utf8")).some((entry) => String(entry.baseUrl || "").includes(`:${deadPort}`)), false,
+    "a failed probe persists nothing");
+  assert.equal(readFileSync(services.customEndpointsFile, "utf8"), before,
+    "a failed probe leaves the configured endpoints byte-for-byte alone");
+
+  const disconnect = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#local-engine-list li')]
+      .find((item) => item.textContent.includes(${JSON.stringify(liveUrl)}) && item.classList.contains('is-connected'));
+    if (!row) return 'no-connected-row';
+    row.click();
+    const action = [...row.querySelectorAll('button')].find((button) => /disconnect/i.test(button.textContent));
+    if (!action) return 'no-disconnect';
+    action.click();
+    return 'clicked';
+  })()`);
+  assert.equal(disconnect, "clicked", "the highlighted saved row exposes Disconnect");
+  let disconnected = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await sleep(100);
+    const endpoints = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+    disconnected = !endpoints.some((entry) => entry.modelId === saved.modelId);
+    if (disconnected) break;
+  }
+  assert.equal(disconnected, true, "Disconnect removes only ModelDock's saved route");
+  assert.equal((await fetch(`${liveUrl}/v1/models`)).status, 200,
+    "Disconnect leaves the user's model service running");
+  const remaining = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+  assert.deepEqual(remaining.map((entry) => entry.modelId), ["some-model"],
+    "Disconnect does not remove an unrelated Custom endpoint");
+
+  // The three per-engine sections are gone: the whole point of one view is that
+  // there is no second place an engine can be configured.
+  for (const id of ["ollama-section", "llamacpp-section", "vllm-section"]) {
+    assert.equal(await evaluate(`document.getElementById(${JSON.stringify(id)}) === null`), true,
+      `${id} must not survive the unified view`);
+  }
 });

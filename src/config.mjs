@@ -2,7 +2,7 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, modelAddressFor, modelRefParts, profileById, routedModelRefFor, llamaLocalStableEntry } from "./profiles.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, modelAddressFor, modelRefParts, profileById, routedModelRefFor, llamaLocalStableEntry } from "./profiles.mjs";
 import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
 import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
@@ -483,7 +483,11 @@ export function loadConfig() {
   // a config - the catalog writer, the roster, a test fixture - sees the same
   // set without each of them reaching for the file.
   const modelToggles = readModelToggles();
-  const primaryCustomEndpoint = customEndpoints[0] || null;
+  // The single MODELDOCK_CUSTOM_* slot this stands in for was always a remote
+  // endpoint: it carries a key. A scan-attached Local endpoint shares the file
+  // but belongs to the Local profile, so it must not become the credential
+  // source or the display default for Custom.
+  const primaryCustomEndpoint = customEndpoints.find((entry) => !entry.local) || null;
   // Ollama connection snapshot: the model list captured at connect time, restored
   // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
   const ollamaSnapshotFile = ollamaSnapshotPath();
@@ -661,6 +665,10 @@ export function loadConfig() {
   // Populate the custom provider profile so catalog building and per-model
   // routing see the configured endpoint/model (see profiles.mjs).
   applyCustomProfile(config);
+  // Populate the Local profile from the scan-attached endpoints. Same reason as
+  // Custom: the catalog, the picker and per-model routing all read the registry,
+  // so the entries have to be there before anything derives a slug from them.
+  applyLocalProfile(config);
   // Populate the ollama profile from the connection snapshot so local models stay
   // published across restarts without re-contacting Ollama.
   applyOllamaProfile(config, ollamaSnapshot);

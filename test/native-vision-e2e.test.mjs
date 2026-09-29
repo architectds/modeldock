@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import os from "node:os";
 import nodePath from "node:path";
+import { pathToFileURL } from "node:url";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
@@ -15,7 +16,7 @@ import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 // silently break (the set is built once; a catalog written after boot is not in
 // it), so this test drives the real createServices/createUpstreams path and
 // asserts what actually arrived at the backend.
-test("the built bundle refreshes the live native catalog and routes native vision", async (t) => {
+test("the built bundle refreshes native models, routes vision, and prices Sol in Stats", async (t) => {
   const dir = mkdtempSync(nodePath.join(os.tmpdir(), "modeldock-native-e2e-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -40,6 +41,20 @@ test("the built bundle refreshes the live native catalog and routes native visio
   }] }), "utf8");
   writeFileSync(nodePath.join(dir, "config.toml"),
     `model_catalog_json = ${JSON.stringify(selfCatalog.replace(/\\/g, "/"))}\n`, "utf8");
+  const usageRollupFile = nodePath.join(dir, "usage-rollup.json");
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  const hour = `${now.toISOString().slice(0, 13)}:00:00.000Z`;
+  const solUsage = {
+    "gpt-6-sol@openai": {
+      requests: 1, ok: 1, in: 10_000, out: 1_000, cached: 8_000,
+      ms: 1_000, okOut: 1_000, okMs: 1_000,
+    },
+  };
+  writeFileSync(usageRollupFile, JSON.stringify({
+    version: 2, lastFoldedAt: now.toISOString(),
+    days: { [day]: solUsage }, hours: { [hour]: solUsage },
+  }), "utf8");
   const pngPath = nodePath.join(dir, "shot.png");
   writeFileSync(pngPath, Buffer.from("89504e470d0a1a0a", "hex"));
 
@@ -108,7 +123,10 @@ test("the built bundle refreshes the live native catalog and routes native visio
   // NATIVE_BASE is read at module load, so the redirect must be in place before
   // src/server.mjs (and through it src/upstreams.mjs) is first evaluated.
   process.env.CODEX_NATIVE_BASE_URL = stubBase;
-  const { createServices } = await import("../dist/modeldock.mjs");
+  const bundleUrl = process.env.MODELDOCK_TEST_BUNDLE
+    ? pathToFileURL(nodePath.resolve(process.env.MODELDOCK_TEST_BUNDLE)).href
+    : new URL("../dist/modeldock.mjs", import.meta.url).href;
+  const { createServices, createApp } = await import(bundleUrl);
 
   const services = createServices({
     host: "127.0.0.1",
@@ -138,6 +156,7 @@ test("the built bundle refreshes the live native catalog and routes native visio
     codexHome: dir,
     nativeCatalogFile: nodePath.join(dir, "native-catalog.json"),
     codexCatalogFile: nodePath.join(dir, "codex-model-catalog.json"),
+    usageRollupFile,
     summariesFile: nodePath.join(dir, "summaries.json"),
   });
   t.after(() => services.mediaStore.cleanup());
@@ -174,4 +193,26 @@ test("the built bundle refreshes the live native catalog and routes native visio
   assert.equal(call.body.input[0].content[1].type, "input_image", "the image rides the Responses wire");
   assert.ok(String(call.body.input[0].content[1].image_url).startsWith("data:image/png;base64,"));
   assert.equal(result.answer, "a red bar chart", "the backend's answer comes back through inspectVision");
+
+  const { app } = createApp(services);
+  const gateway = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => gateway.once("listening", resolve));
+  t.after(() => new Promise((resolve) => {
+    gateway.closeAllConnections?.();
+    gateway.close(resolve);
+  }));
+  const statsResponse = await fetch(`http://127.0.0.1:${gateway.address().port}/api/stats`);
+  assert.equal(statsResponse.status, 200);
+  const stats = await statsResponse.json();
+  const sol = stats.modelPeriods.days30.models.find((entry) => entry.id === "gpt-6-sol");
+  assert.ok(sol, "the native model has one normalized Stats identity");
+  assert.ok(Math.abs(sol.estimatedApiCostUsd - 0.0156) < 1e-12,
+    "Sol's published input, cached, and output rates price the full token mix");
+  assert.equal(sol.costCoverage, 1);
+  assert.ok(Math.abs(stats.periods.days30.estimatedApiCostUsd - sol.estimatedApiCostUsd) < 1e-12,
+    "the aggregate card and model breakdown use the same price");
+  const plottedCost = stats.series.days30.reduce((sum, bucket) =>
+    sum + (bucket.byModel?.["gpt-6-sol"]?.cost || 0), 0);
+  assert.ok(Math.abs(plottedCost - sol.estimatedApiCostUsd) < 1e-12,
+    "the spend chart uses the same Sol price as the card and model breakdown");
 });

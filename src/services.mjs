@@ -6,6 +6,7 @@
 // module owns building it. Moved as-is from server.mjs.
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { fileURLToPath } from "node:url";
@@ -37,6 +38,7 @@ import { modelRefParts } from "./model-ref.mjs";
 import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
 import { DEFAULT_ZSTD_MEMORY_BUDGET_BYTES, WeightedByteBudget } from "./zstd-ingress-budget.mjs";
+import { opencodeSessionHeaders } from "./upstream-headers.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +52,10 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
   try {
     const base = profile.baseUrlFor(config).replace(/\/$/, "");
     const response = await fetchImpl(`${base}/models`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...opencodeSessionHeaders({ provider: profile.id, url: base }, { sessionId: randomUUID() }),
+      },
       signal: AbortSignal.timeout(10_000),
     });
     // The directory entry is kept beside the id rather than thrown away, because a

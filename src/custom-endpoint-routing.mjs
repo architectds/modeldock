@@ -1,7 +1,7 @@
 import { modelRefParts } from "./model-ref.mjs";
 
-// Every user endpoint belongs to the one custom provider. The model id is its
-// address inside that provider, so one lookup serves catalog and routing.
+// The caller passes one provider's subset of the endpoint list. The model id
+// is an address within that owner, so Local and Custom may use the same name.
 export function customEndpointFor(endpoints, model) {
   if (!model) return null;
   const bare = modelRefParts(model).model;

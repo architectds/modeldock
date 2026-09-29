@@ -23,17 +23,31 @@ export function conversationIdFrom(headers, meta) {
     || headerValue(headers, "x-opencode-session");
 }
 
+function isOfficialOpenCodeGoUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === "https://opencode.ai"
+      && (url.pathname === "/zen/go/v1" || url.pathname.startsWith("/zen/go/v1/"));
+  } catch {
+    return false;
+  }
+}
+
+export function opencodeSessionHeaders(target, { incomingHeaders, sessionId = "" } = {}) {
+  const isGo = target.provider === "opencode-go"
+    || (target.provider === "custom" && isOfficialOpenCodeGoUrl(target.url));
+  if (!isGo) return {};
+  const id = sessionId || conversationIdFrom(incomingHeaders);
+  // Do not invent a shared identity or a new id on each retry when the
+  // caller omitted its conversation. Go can report its required-header error.
+  return id ? { "x-opencode-session": id } : {};
+}
+
 export function upstreamHeaders(target, { incomingHeaders, sessionId = "" } = {}) {
-  const headers = {
-    Authorization: `Bearer ${target.token}`,
+  return {
+    ...(target.token ? { Authorization: `Bearer ${target.token}` } : {}),
     "Content-Type": "application/json",
     "User-Agent": "modeldock-gateway/0.1",
+    ...opencodeSessionHeaders(target, { incomingHeaders, sessionId }),
   };
-  if (target.provider === "opencode-go") {
-    const id = sessionId || conversationIdFrom(incomingHeaders);
-    // Do not invent a shared identity or a new id on each retry when the
-    // caller omitted its conversation. Go can report its required-header error.
-    if (id) headers["x-opencode-session"] = id;
-  }
-  return headers;
 }

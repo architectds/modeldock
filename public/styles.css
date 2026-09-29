@@ -197,7 +197,7 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
 .runtime-migration { margin: 12px 0 0; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--amber) 45%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--amber) 9%, transparent); color: var(--amber); font-size: 10px; line-height: 1.45; }
 .security-note { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 12px; border: 1px solid rgba(72,214,160,.18); border-radius: 9px; background: rgba(72,214,160,.05); }.security-note span { color: var(--green); font: 700 9px ui-monospace, monospace; }.security-note p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
 
-@media (max-width: 1200px) { .shell { width: calc(100% - 36px); }.control-meta { gap: 12px; } }
+@media (max-width: 1200px) { body { min-width: 0; } .shell { width: calc(100% - 36px); }.control-meta { gap: 12px; } }
 
 /* --- Settings dialog + open button --- */
 .settings-open {
@@ -267,6 +267,9 @@ td.empty { text-align: center; color: var(--muted); padding: 42px; }
 .settings-close:active { transform: scale(.96); }
 .settings-close:focus-visible { outline: 2px solid var(--blue, #4f8cff); outline-offset: 2px; }
 .field { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--text, #ecf4f8); }
+/* A field sets display, which beats the user agent's [hidden] rule - the same
+   trap the rail links and the section bodies carry an override for. */
+.field[hidden] { display: none; }
 .field span { color: #c3d2dc; font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.25; letter-spacing: 0; }
 .field-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .field-head a {
@@ -717,42 +720,28 @@ body { padding-left: 88px; }
   .cloud-credentials .cloud-wide { grid-column: auto; }
 }
 
-/* Discovered local engines. */
+/* Local Hosts: one scan list. The row is the control - selecting it reveals the
+   one action it carries, which is why the cursor and the selected outline are
+   part of the row rather than something that appears on hover. */
 .local-engine-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.local-engine { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
-.local-engine-head { display: flex; align-items: baseline; gap: 10px; }
-.local-engine-base { color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.local-engine-models { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
-/* The engine button is always clickable; only its colour changes. Muted means
-   "not found yet, open me and type the port", primary means the engine answered
-   a probe. Never disabled: a disabled button is the state that left a user with
-   an engine on a non-default port and no way to say so. */
-/* The primary state paints with a gradient, which background-color cannot
-   transition; border and text are what actually animate. */
-.engine-button { transition: border-color 120ms ease, color 120ms ease; }
-/* Connect becomes the longer Disconnect after a successful probe. Reserve that
-   width from the beginning so a state change never shifts the adjacent Manage
-   action or the local-engine row. */
-.engine-button[id$="-connect"] { min-width: 92px; text-align: center; }
-.local-config-card { max-width: 460px; }
-.local-config-card .local-engine-runtime { margin: 8px 0 0; }
-.local-config-actions { margin-top: 14px; }
-
-/* Runtime facts read from the process table. Monospace because it is mostly
-   file paths, and a long binary path wraps rather than widening the card. */
-.local-engine-runtime {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  font-family: var(--mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
-  overflow-wrap: anywhere;
-}
+.local-engine { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.local-engine:hover { border-color: #365064; }
+.local-engine:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.local-engine.is-selected { background: rgba(80,183,255,.07); }
+.local-engine-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+.local-engine-base { min-width: 0; overflow-wrap: anywhere; color: var(--muted); font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.local-engine-models { margin: 6px 0 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
 .local-engine-actions { margin-top: 9px; align-items: center; }
 .local-engine-state { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
 /* Connected is the state worth seeing at a glance in a list of several. The
    border carries it so the row still reads as a row. */
 .local-engine.is-connected { border-color: var(--blue); }
 .local-engine.is-offline { border-color: var(--amber); }
+
+/* The naming dialog. The two names Codex routes by are the inputs; the upstream
+   id is a picker that only appears when the origin serves more than one model,
+   so the common single-model case is exactly two fields and a Save. */
+.local-connect-actions { justify-content: flex-end; }
 
 /* Model roster: one ranked table, provider as a column. */
 .roster-panel { max-width: none; }
@@ -867,54 +856,6 @@ body { padding-left: 88px; }
 .roster-table th.is-sorted::after { content: ""; display: inline-block; width: 0; height: 0; margin-left: 6px; vertical-align: middle; border-left: 3.5px solid transparent; border-right: 3.5px solid transparent; }
 .roster-table th.is-sorted[data-direction="desc"]::after { border-top: 4px solid var(--blue); }
 .roster-table th.is-sorted[data-direction="asc"]::after { border-bottom: 4px solid var(--blue); }
-
-/* Each engine section can be folded away. Three of them open at once is a
-   long page for someone who came to look at one. */
-.engine-head-tail { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
-.section-toggle { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font: 15px/1 inherit; cursor: pointer; flex: none; transition: transform .15s ease, color .15s ease, border-color .15s ease; }
-.section-toggle:hover { color: var(--text); border-color: #365064; }
-.section-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-/* Points down while the section is open and right while it is closed, so the
-   glyph says which way pressing it will go. */
-.section-toggle[aria-expanded="true"] { transform: rotate(90deg); }
-.engine-body[hidden] { display: none; }
-
-/* --- Local Hosts: engine row + right-hand detail drawer --- */
-/* The drawer is a flex sibling of the 760px panel rather than a fixed overlay,
-   so its right edge lands on the shell edge - the same edge the top-right
-   Settings button sits on - without computing any offsets. */
-.view[data-view="local"].is-active { display: flex; align-items: flex-start; gap: 20px; }
-.view[data-view="local"] > .page-panel { flex: 0 0 760px; }
-.local-drawer { flex: 1 1 0; min-width: 0; position: sticky; top: 48px; }
-.local-drawer[hidden] { display: none; }
-.local-drawer-card { max-width: none; }
-
-/* The three engine sections are labelled actions inside a field, not rows in a
-   list - the discovered engines are the list, and they carry .local-engine.
-   They briefly wore a row component built for a click-the-whole-row
-   interaction: the row took cursor: pointer without ever getting a handler,
-   the chevron only appeared on hover, and the button gave up .custom-action,
-   so at rest there was no button, no affordance, and a pointer cursor over
-   something that did nothing. The component is gone; these are buttons. */
-
-/* Under the existing breakpoint there is no room beside the panel, so the
-   drawer covers it instead of squeezing both. */
-@media (max-width: 1200px) {
-  .view[data-view="local"].is-active { display: block; }
-  .view[data-view="local"] { position: relative; }
-  .view[data-view="local"] > .page-panel { flex: none; }
-  .local-drawer { position: absolute; inset: 0 0 auto 0; z-index: 5; }
-  .local-drawer-card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    box-shadow: 0 20px 60px rgba(0,0,0,.32);
-  }
-}
-
-/* Blue = a probe answered. Carried by the row now that the trigger is the row
-   rather than a button, so the state reads without a second control. */
-.custom-action.is-open { border-color: var(--blue); background: rgba(80,183,255,.12); }
 
 /* Settings that are on and doing nothing. Amber rather than red: nothing is
    broken right now, but the configuration says something untrue. */

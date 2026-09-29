@@ -1204,9 +1204,7 @@ async function loadSettings() {
   if (status) status.textContent = "";
   renderAutostart(data);
   renderCustomSection();
-  renderOllamaSection(data.ollama);
   renderXaiSection(data.xai);
-  for (const [engine, render] of Object.entries(renderLocalSections)) render(data.local?.[engine]);
   lastSettings = data;
   return data;
 }
@@ -1308,6 +1306,8 @@ const PROVIDER_MARKS = {
     path: "M8 3v5a4 4 0 0 0 8 0V3h-2v5a2 2 0 0 1-4 0V3zM3 11h18v2H3zm5 5h8v2H8z",
   },
 };
+// The Local group reuses the existing neutral server mark, not a llama brand.
+PROVIDER_MARKS.local = PROVIDER_MARKS.llamacpp;
 
 function providerMark(provider) {
   const key = String(provider || "").toLowerCase();
@@ -2157,115 +2157,336 @@ function warningText(code) {
   return t(`warn.${code}`);
 }
 
-function renderEngineWarnings(warnings) {
-  const box = $("local-warnings");
-  if (!box) return;
+// Warnings travel with the live row that produced them. They used to live in a
+// drawer the unified view no longer has, and a warning nobody can see is the
+// same as no warning: an on-and-ineffective setting would be silently accepted.
+function appendWarnings(item, warnings) {
   const list = Array.isArray(warnings) ? warnings : [];
-  box.replaceChildren();
-  box.hidden = list.length === 0;
+  if (!list.length) return;
+  const box = document.createElement("ul");
+  box.className = "engine-warnings";
   for (const warning of list) {
-    const item = document.createElement("li");
-    item.textContent = warningText(warning.code);
-    box.append(item);
+    const line = document.createElement("li");
+    line.textContent = warningText(warning.code);
+    box.append(line);
+  }
+  item.append(box);
+}
+
+// Two origins are the same endpoint even when one carries the /v1 tree and the
+// other does not, so a live row suppresses a saved registration for the address
+// it already shows. Identity here is the protocol, host and port - never the
+// path, which discovery does not promise and the user never typed.
+function localOrigin(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return `${url.protocol}//${url.host}`.toLowerCase();
+  } catch {
+    return String(value || "").trim().replace(/\/+$/, "").toLowerCase();
   }
 }
 
-// 81920 reads as 80K to anyone who set it; the exact figure is noise here.
-// Thousands, the same base the Models page reads windows in. Binary K is the
-// computing convention and would suit a llama.cpp -c 81920 (80K exactly), but
-// most published windows are decimal - 272000, 200000, 1000000 - and showing
-// DeepSeek 1M as 976.6K to keep Kimi 256K round is the worse trade. One base
-// across the product beats either base used in half of it.
-function formatContextSize(tokens) {
-  return tokens >= 1000 ? `${Math.round(tokens / 1000)}K` : String(tokens);
+// --- Local Hosts: one scan list, one attach dialog ---
+//
+// Everything listening on this machine is one list. Selecting a row reveals its
+// one inline action: Connect for a discovered origin, Disconnect for one
+// ModelDock already holds. There is no second place an engine is configured.
+//
+// A keyless origin still needs a name for Codex to route by, so Connect probes
+// first and opens a naming dialog only when the probe answered. A probe that
+// failed leaves one generic line on the row and opens nothing - a form that
+// cannot save is worse than no form at all. The scan itself never writes.
+//
+// The last outcome for an address is kept by origin, because a scan that lands
+// after the user clicked must not erase what the click said. It is re-applied to
+// the row the list shows now, and to whatever a later scan rebuilds.
+const localRowMessages = new Map();
+
+function localRowMessage(baseUrl) {
+  return localRowMessages.get(localOrigin(baseUrl)) || "";
 }
+
+function setLocalRowState(baseUrl, text) {
+  const origin = localOrigin(baseUrl);
+  if (text) localRowMessages.set(origin, text);
+  else localRowMessages.delete(origin);
+  const list = $("local-engine-list");
+  const row = list ? [...list.children].find((item) => item.dataset.origin === origin) : null;
+  const stateLine = row?.querySelector(".local-engine-state");
+  // Clearing restores the state the row was built with, so a cancelled dialog
+  // never leaves "Connecting..." behind.
+  if (stateLine) stateLine.textContent = text || row.localTarget?.state || "";
+}
+
+function localRow({ label, baseUrl, models, state, mode, engine, modelId }) {
+  const item = document.createElement("li");
+  item.className = "local-engine";
+  item.tabIndex = 0;
+  item.dataset.origin = localOrigin(baseUrl);
+  const origin = item.dataset.origin;
+  const head = document.createElement("div");
+  head.className = "local-engine-head";
+  const name = document.createElement("strong");
+  name.textContent = label;
+  const where = document.createElement("span");
+  where.className = "local-engine-base";
+  where.textContent = baseUrl || "";
+  head.append(name, where);
+  item.append(head);
+  const modelsLine = document.createElement("p");
+  modelsLine.className = "local-engine-models";
+  modelsLine.textContent = models?.length ? models.join(", ") : t("local.noModels");
+  item.append(modelsLine);
+  const stateLine = document.createElement("p");
+  stateLine.className = "local-engine-state";
+  stateLine.textContent = localRowMessages.get(origin) || state || "";
+  item.append(stateLine);
+  // The row's identity for the action it reveals. It is kept beside the element
+  // rather than read back out of the DOM: the address on screen is a label, and
+  // the value a request needs must not be reconstructed from one.
+  item.localTarget = { mode, label, baseUrl: baseUrl || "", engine, modelId, state: state || "" };
+  item.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    selectLocalRow(item);
+  });
+  item.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (event.target.closest("button")) return;
+    event.preventDefault();
+    selectLocalRow(item);
+  });
+  return item;
+}
+
+function selectLocalRow(item) {
+  const list = $("local-engine-list");
+  const reselected = item.classList.contains("is-selected");
+  for (const other of list ? [...list.children] : []) {
+    other.classList.remove("is-selected");
+    other.querySelector(".local-engine-actions")?.remove();
+  }
+  if (reselected) return;
+  item.classList.add("is-selected");
+  item.append(localRowAction(item));
+}
+
+function localRowAction(item) {
+  const target = item.localTarget || {};
+  const actions = document.createElement("div");
+  actions.className = "custom-row local-engine-actions";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "custom-action";
+  if (target.mode === "connect") {
+    button.classList.add("primary");
+    button.textContent = t("local.connectBtn");
+    button.addEventListener("click", () => { connectLocalEndpoint(target, item, button).catch(() => {}); });
+  } else {
+    button.textContent = t("local.disconnect");
+    button.addEventListener("click", () => { disconnectLocalEndpoint(target, item, button).catch(() => {}); });
+  }
+  actions.append(button);
+  return actions;
+}
+
+async function connectLocalEndpoint(target, item, button) {
+  button.disabled = true;
+  setLocalRowState(target.baseUrl, t("local.connecting"));
+  let opened = false;
+  try {
+    const reply = await fetch("/api/local/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl: target.baseUrl }),
+    });
+    const payload = await reply.json().catch(() => ({}));
+    if (!reply.ok) throw new Error("probe");
+    openLocalConnectDialog(target, payload);
+    opened = true;
+  } catch {
+    // One generic line, and never a reason: a probe can fail for a hundred
+    // provider-specific causes and naming them was never the useful part.
+    setLocalRowState(target.baseUrl, t("local.connectFailed"));
+  } finally {
+    button.disabled = false;
+    if (opened) setLocalRowState(target.baseUrl, "");
+  }
+}
+
+async function disconnectLocalEndpoint(target, item, button) {
+  button.disabled = true;
+  const stateLine = item.querySelector(".local-engine-state");
+  try {
+    const registration = target.mode === "registration";
+    const route = registration ? "/api/custom/remove"
+      : target.engine === "ollama" ? "/api/ollama/disconnect" : "/api/local/disconnect";
+    const reply = await fetch(route, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(registration ? { modelId: target.modelId, local: true } : { engine: target.engine }),
+    });
+    const payload = await reply.json().catch(() => ({}));
+    if (!reply.ok) throw new Error(payload.error?.message || `Disconnect ${reply.status}`);
+    poll().catch(() => {});
+    pollConfig().catch(() => {});
+    renderCustomSection();
+    renderModelRoster().catch(() => {});
+    await renderLocalEngines();
+  } catch (error) {
+    if (stateLine) stateLine.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+let localConnectOrigin = "";
+let localConnectModels = [];
+
+// A routing name has to survive into a model id, so the suggestion is the engine
+// label reduced to slug characters - never a translated string. It is a starting
+// point the user edits, not a value anything reads back.
+function localNameSuggestion(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "local";
+}
+
+function openLocalConnectDialog(target, probe) {
+  const dialog = $("local-connect-dialog");
+  if (!dialog) return;
+  localConnectOrigin = target.baseUrl;
+  localConnectModels = (probe?.models || [])
+    .map((entry) => (typeof entry === "string" ? entry : entry?.id))
+    .filter((id) => Boolean(id));
+  const source = $("local-connect-source");
+  if (source) source.textContent = target.baseUrl || "";
+  const field = $("local-connect-upstream-field");
+  const select = $("local-connect-upstream");
+  if (select) {
+    select.replaceChildren();
+    for (const id of localConnectModels) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = id;
+      select.append(option);
+    }
+  }
+  // The picker appears only when there is a choice to make. One model is the
+  // model, and a select with a single option is a field that only looks like one.
+  if (field) field.hidden = localConnectModels.length <= 1;
+  const provider = $("local-connect-provider");
+  const model = $("local-connect-model");
+  if (provider) provider.value = localNameSuggestion(target.label);
+  if (model) model.value = localNameSuggestion(localConnectModels[0]);
+  if (select) select.onchange = () => { if (model) model.value = localNameSuggestion(select.value); };
+  const errorLine = $("local-connect-error");
+  if (errorLine) {
+    errorLine.hidden = true;
+    errorLine.textContent = "";
+  }
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  provider?.focus();
+  provider?.select();
+}
+
+function closeLocalConnectDialog() {
+  const dialog = $("local-connect-dialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+  localConnectOrigin = "";
+  localConnectModels = [];
+}
+
+async function saveLocalConnect() {
+  const provider = $("local-connect-provider");
+  const model = $("local-connect-model");
+  const select = $("local-connect-upstream");
+  const errorLine = $("local-connect-error");
+  const save = $("local-connect-save");
+  const showError = (text) => {
+    if (errorLine) {
+      errorLine.hidden = !text;
+      errorLine.textContent = text || "";
+    }
+  };
+  showError("");
+  const providerName = String(provider?.value || "").trim();
+  const modelName = String(model?.value || "").trim();
+  if (!providerName || !modelName) {
+    showError(t("local.errNames"));
+    return;
+  }
+  // The wire id and the published names are two facts. The picker owns the
+  // upstream id; the two inputs above own what Codex routes by.
+  const upstreamId = (select?.value || "") || localConnectModels[0] || "";
+  if (save) save.disabled = true;
+  try {
+    const reply = await fetch("/api/local/attach", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ baseUrl: localConnectOrigin, upstreamId, providerName, modelName }),
+    });
+    const payload = await reply.json().catch(() => ({}));
+    if (!reply.ok) throw new Error(payload.error?.message || t("local.attachFailed"));
+    closeLocalConnectDialog();
+    poll().catch(() => {});
+    pollConfig().catch(() => {});
+    renderCustomSection();
+    renderModelRoster().catch(() => {});
+    renderLocalEngines().catch(() => {});
+  } catch (error) {
+    showError(error.message);
+  } finally {
+    if (save) save.disabled = false;
+  }
+}
+
+$("local-connect-close")?.addEventListener("click", closeLocalConnectDialog);
+$("local-connect-cancel")?.addEventListener("click", closeLocalConnectDialog);
+$("local-connect-save")?.addEventListener("click", () => { saveLocalConnect().catch(() => {}); });
 
 async function renderLocalEngines() {
   const list = $("local-engine-list");
   const note = $("local-discovery-note");
-  if (!list) return;
-  list.innerHTML = "";
+  if (!list) return [];
   if (note) note.textContent = t("local.scanning");
   try {
     const response = await fetch("/api/local/discover", { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error?.message || `Discover ${response.status}`);
     const engines = data.engines || [];
-    localEngineDefinitions.clear();
-    for (const definition of data.engineDefinitions || []) {
-      if (definition?.id) localEngineDefinitions.set(definition.id, definition);
+    const registrations = data.registrations || [];
+    // Each saved model keeps its own Disconnect control. Several models may
+    // share one origin, so a map to one registration would hide all but the
+    // last and leave the hidden routes impossible to disconnect here.
+    const savedByOrigin = new Map();
+    for (const registration of registrations) {
+      const origin = localOrigin(registration.baseUrl);
+      if (!savedByOrigin.has(origin)) savedByOrigin.set(origin, []);
+      savedByOrigin.get(origin).push(registration);
     }
-    // Feed the dialog: a discovered engine opens pre-filled and its button goes
-    // blue. An engine that has stopped answering is dropped from the map so the
-    // colour follows reality rather than the last good scan.
-    localDiscovery.clear();
-    localKnownEngines.clear();
+    const rendered = new Set();
+    // Built off-document and swapped in at the end: a refresh must never leave a
+    // window where the list is empty, because the row is the control.
+    const rows = document.createDocumentFragment();
     for (const engine of engines) {
-      // Reachability and identity are different facts. A stopped engine must
-      // remain available to the drawer even though it must not paint the engine
-      // as online: its saved record is what carries the model, projector, port
-      // and launch arguments the Start action replays.
-      if (preferKnownEngine(engine, localKnownEngines.get(engine.engine))) {
-        localKnownEngines.set(engine.engine, engine);
-      }
-      // One entry per engine, and which one matters: discovery lists the ports
-      // it read from the process table before the fixed candidates, precisely so
-      // the attributed one wins. Overwriting on a repeated engine id inverted
-      // that - a llama-server on 11435 was replaced by a fixed-list hit on 8080,
-      // taking the pid, binary and launch arguments with it, and the dialog then
-      // offered the default port while the real server ran elsewhere.
-      if (!engine.offline && Number.isInteger(engine.port) && preferEngine(engine, localDiscovery.get(engine.engine))) {
-        localDiscovery.set(engine.engine, engine);
-      }
-    }
-    for (const engineId of localEngineIds) paintEngineButton(engineId);
-    if (localConfigEngine) {
-      renderLocalDrawerActions(localConfigEngine);
-      renderLocalStartAction(localConfigEngine);
-    }
-    for (const engine of engines) {
-      const item = document.createElement("li");
-      item.className = "local-engine";
-      const head = document.createElement("div");
-      head.className = "local-engine-head";
-      const name = document.createElement("strong");
-      name.textContent = engine.label;
-      const where = document.createElement("span");
-      where.className = "local-engine-base";
-      where.textContent = engine.baseUrl;
-      head.append(name, where);
-      const models = document.createElement("p");
-      models.className = "local-engine-models";
-      models.textContent = engine.models?.length
-        ? engine.models.join(", ")
-        : t("local.noModels");
-      item.append(head, models);
-      // The scan names a server and the model it is serving, and stops there.
-      // It used to carry the model file, the context, the slot count, the binary
-      // path, the memory ledger and the warnings as well - six lines per engine,
-      // stacked before anyone had asked a question. All of it is in
-      // Configurations, which is where you go when you have one.
-      // A scan result, not a control. Every engine connects from its own
-      // section below, so this list stays one shape for all three.
-      const state = document.createElement("p");
-      state.className = "local-engine-state";
-      if (!engine.connectable && engine.engine !== "ollama") {
-        // Discovered, but there is no profile to attach it to. The API page
-        // takes an arbitrary endpoint with a key, which is what this needs.
-        state.textContent = t("local.useApiPage");
-      } else if (engine.connected && engine.offline) {
-        item.classList.add("is-connected", "is-offline");
-        state.textContent = t("local.gatewayOffline", { count: engine.connectedModels });
-      } else if (engine.connected) {
-        item.classList.add("is-connected");
-        state.textContent = t("local.gatewayConnected", { count: engine.connectedModels });
+      const saved = engine.offline ? null : savedByOrigin.get(localOrigin(engine.baseUrl));
+      if (saved?.length) {
+        for (const registration of saved) {
+          rendered.add(registration.modelId);
+          rows.append(localRegistrationRow(registration));
+        }
       } else {
-        state.textContent = t("local.gatewayNotConnected");
+        rows.append(localEngineRow(engine));
       }
-      item.append(state);
-      list.append(item);
     }
-    if (note) note.textContent = engines.length ? "" : t("local.none");
+    // A saved origin that is not answering any more stays in the same list, so
+    // there is exactly one place a local endpoint lives.
+    for (const registration of registrations) {
+      if (rendered.has(registration.modelId)) continue;
+      rows.append(localRegistrationRow(registration));
+    }
+    list.replaceChildren(rows);
+    if (note) note.textContent = list.children.length ? "" : t("local.none");
     return engines;
   } catch (error) {
     if (note) note.textContent = error.message;
@@ -2273,10 +2494,53 @@ async function renderLocalEngines() {
   }
 }
 
+function localEngineRow(engine) {
+  const offline = Boolean(engine.offline);
+  const connected = Boolean(engine.connected);
+  const count = Number(engine.connectedModels) || 0;
+  const state = connected && offline
+    ? t("local.gatewayOffline", { count })
+    : connected
+      ? t("local.gatewayConnected", { count })
+      : t("local.gatewayNotConnected");
+  const item = localRow({
+    label: engine.label || engine.engine,
+    baseUrl: engine.baseUrl,
+    models: engine.models,
+    state,
+    mode: connected ? "local" : "connect",
+    engine: engine.engine,
+  });
+  if (connected) item.classList.add("is-connected");
+  if (offline) item.classList.add("is-offline");
+  appendWarnings(item, engine.warnings);
+  return item;
+}
+
+// A saved local endpoint ModelDock already holds. It is the same list, offline,
+// with the one control that removes it.
+function localRegistrationRow(registration) {
+  const item = localRow({
+    label: registration.label || registration.modelId || registration.baseUrl,
+    baseUrl: registration.baseUrl,
+    models: registration.upstreamId ? [registration.upstreamId] : [],
+    state: registration.offline ? t("local.registrationOffline") : t("local.registrationSaved"),
+    mode: "registration",
+    modelId: registration.modelId,
+  });
+  item.classList.add("is-connected");
+  if (registration.offline) item.classList.add("is-offline");
+  return item;
+}
+
 // Rescan discovers and nothing else. Connecting is the dialog's job, which is
-// what gives an undiscovered engine a way in at all: there is no state where
-// the user is left with a button that can only report failure.
-$("local-rescan")?.addEventListener("click", () => { renderLocalEngines().catch(() => {}); });
+// what gives an undiscovered origin a way in at all: there is no state where the
+// user is left with a button that can only report failure. It also forgets the
+// previous attempts, which is what a rescan is for.
+$("local-rescan")?.addEventListener("click", () => {
+  localRowMessages.clear();
+  renderLocalEngines().catch(() => {});
+});
 // --- Configured endpoints (API page) ---
 //
 // One record per model rather than one slot: a self-hosted vLLM alongside a
@@ -2692,484 +2956,6 @@ if (customListModelsBtn) {
   });
 }
 
-// --- Ollama (local) connect section ---
-const ollamaStatus = $("ollama-status");
-const ollamaError = $("ollama-error");
-
-let ollamaState = { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
-
-function ollamaShow(text, error) {
-  if (ollamaStatus) ollamaStatus.hidden = !text || Boolean(error);
-  if (ollamaError) ollamaError.hidden = !(text && error);
-  if (ollamaStatus) ollamaStatus.textContent = error ? "" : text || "";
-  if (ollamaError) ollamaError.textContent = error ? text : "";
-}
-
-function ollamaErrorText(code, fallback) {
-  const key = {
-    connect: "ollama.errConnect",
-    protocol: "ollama.errProtocol",
-    models: "ollama.errModels",
-    model: "ollama.errModel",
-    upstream: "ollama.errUpstream",
-  }[code];
-  return key ? t(key) : fallback;
-}
-
-function renderOllamaSection(state) {
-  ollamaState = state || { connected: false, baseUrl: "", models: [], mainModel: "", visionModel: "" };
-  const connected = Boolean(ollamaState.connected && ollamaState.models?.length);
-  ollamaShow(connected ? t("ollama.connected", { n: ollamaState.models?.length || 0 }) : "", false);
-  // Same rule the other two get: something to replay, and nothing answering.
-  localCanRestart.set("ollama", Boolean(ollamaState.canRestart));
-  if (localConfigEngine === "ollama") {
-    renderLocalStartAction("ollama");
-  }
-}
-
-// --- Local engines: one port dialog for all three ---
-//
-// Scanning discovers, the dialog decides. The two were briefly one action,
-// which left no way in at all when discovery came up empty; now a button
-// always opens the same dialog and an engine that was not found is typed in.
-//
-// Blue means reachable, not merely configured. Both routes to blue are a probe
-// that succeeded: discovery answers /props and /v1/models before it reports an
-// engine, and a hand-typed port turns blue only after connect accepts it. A
-// blue button that meant "a number is present" would be a colour saying nothing.
-//
-// There is no API key field. A local engine is reachable on loopback only, and
-// that is the entire reason it needs no credential - one decision, not two,
-// enforced by assertLocalBase on the server.
-const localEngineIds = ["ollama", "llamacpp", "vllm"];
-const localDiscovery = new Map();
-// Includes stopped engines ModelDock still remembers. Never use this map to
-// paint an engine as reachable; it exists so the drawer always describes the
-// saved host.
-const localKnownEngines = new Map();
-const localCanRestart = new Map();
-
-// Start belongs in the engine drawer, beside the configuration it will launch.
-// The server independently refuses a second copy if the process came back
-// between this render and the click.
-function renderLocalStartAction(engine) {
-  const button = $("local-config-start");
-  const hint = $("local-config-start-hint");
-  if (!button) return;
-  const offer = localConfigEngine === engine
-    && Boolean(localCanRestart.get(engine))
-    && !localDiscovery.has(engine);
-  button.hidden = !offer;
-  button.dataset.engine = offer ? engine : "";
-  // Replay starts from what was written down while the engine served, so the
-  // hint has to say that environment-only arguments were not captured.
-  if (hint) hint.hidden = !offer;
-  if (offer) {
-    const save = $("local-config-save");
-    if (save) save.hidden = true;
-  } else if (localConfigEngine === engine) {
-    // A service can come online from another route while its drawer is open.
-    // Restore the ordinary action instead of leaving the previous Start state
-    // frozen in the UI until the drawer is closed and reopened.
-    const save = $("local-config-save");
-    if (save) save.hidden = false;
-  }
-}
-
-// A connected engine beats an idle one; an engine we could attribute to a
-// process beats one we only found by knocking on a default port. Otherwise the
-// first stays, which is discovery order.
-function preferEngine(next, current) {
-  if (!current) return true;
-  if (Boolean(next.connected) !== Boolean(current.connected)) return Boolean(next.connected);
-  if (Boolean(next.pid) !== Boolean(current.pid)) return Boolean(next.pid);
-  return false;
-}
-// A stopped engine must not be forgotten: the saved record is what the drawer
-// shows and what Start replays. Reachability itself is preferEngine's job.
-function preferKnownEngine(next, current) {
-  if (!current) return true;
-  if (Boolean(next.offline) !== Boolean(current.offline)) return !next.offline;
-  return preferEngine(next, current);
-}
-const localConnectedState = new Map();
-const localEngineDefinitions = new Map();
-let localConfigEngine = "";
-
-function localEngineLabel(engine) {
-  return localEngineDefinitions.get(engine)?.label || localKnownEngines.get(engine)?.label || engine;
-}
-
-function paintEngineButton(engine) {
-  // Two controls that mirror the two authorities: Connect is the light,
-  // reversible decision (route requests through the gateway), Open brings up
-  // the drawer holding that engine's own settings. One "Configurations" button
-  // used to carry both, and users could not tell the weight of what they were
-  // about to click.
-  const connected = Boolean(localConnectedState.get(engine));
-  // Reachable means a probe answered - discovery answers /props and /v1/models
-  // before reporting an engine, and a hand-typed port only counts once connect
-  // accepted it. The colour therefore always means "this really responds".
-  const reachable = Boolean(localDiscovery.has(engine) || connected);
-  const connect = $(`${engine}-connect`);
-  if (connect) {
-    connect.classList.toggle("primary", reachable && !connected);
-    connect.textContent = t(connected ? "local.disconnect" : "local.connectBtn");
-  }
-  const manage = $(`${engine}-configure`);
-  if (manage) {
-    manage.classList.toggle("primary", connected);
-    manage.classList.toggle("is-open", localConfigEngine === engine);
-    manage.textContent = t("local.manageBtn");
-  }
-}
-
-function localShow(engine, text, isError) {
-  const status = $(`${engine}-status`);
-  const errorLine = $(`${engine}-error`);
-  if (status) {
-    status.hidden = !text || Boolean(isError);
-    status.textContent = isError ? "" : text || "";
-  }
-  if (errorLine) {
-    errorLine.hidden = !(text && isError);
-    errorLine.textContent = isError ? text : "";
-  }
-}
-
-// Called with the settings payload for one engine, so the button and its status
-// line agree with what the server actually published.
-function renderLocalEngineState(engine, state) {
-  const connected = Boolean(state?.connected && state.models?.length);
-  localConnectedState.set(engine, connected);
-  localShow(engine, connected ? t("local.connected", { count: state.models.length }) : "", false);
-  paintEngineButton(engine);
-  // Shown only when there is a launch to replay, and only while the engine is
-  // not answering: starting a second copy on a port the first one holds fails,
-  // and offering it would read as a control that does not work.
-  localCanRestart.set(engine, Boolean(state?.canRestart));
-  if (localConfigEngine === engine) {
-    renderLocalStartAction(engine);
-  }
-}
-
-const renderLocalSections = {
-  llamacpp: (state) => renderLocalEngineState("llamacpp", state),
-  vllm: (state) => renderLocalEngineState("vllm", state),
-};
-
-// The drawer's contextual actions. There is deliberately no launch form:
-// this product connects to a port and replays the command it watched that
-// engine start with, it never composes a command line for somebody else's
-// process, so what is left to decide is which controls apply right now.
-function renderLocalDrawerActions(engine) {
-  const routed = Boolean(localConnectedState.get(engine));
-  // While the route exists the port is a fact to read, not a value to type.
-  const port = $("local-config-port");
-  if (port) port.readOnly = routed;
-  const save = $("local-config-save");
-  if (save && localConfigEngine === engine) save.hidden = false;
-  // The restart escape hatch never depends on the engine being reachable: it
-  // restarts ModelDock, not the engine.
-  const serviceRestart = $("local-service-restart");
-  if (serviceRestart) serviceRestart.hidden = false;
-  const disconnect = $("local-config-disconnect");
-  if (disconnect) disconnect.hidden = !routed;
-}
-
-function localEnginePort(found, engine) {
-  const direct = Number(found?.port);
-  if (Number.isInteger(direct) && direct > 0 && direct <= 65535) return direct;
-  for (const value of [found?.baseUrl]) {
-    try {
-      const parsed = new URL(String(value || ""));
-      const port = Number(parsed.port);
-      if (Number.isInteger(port) && port > 0 && port <= 65535) return port;
-    } catch {
-      // An empty or malformed observation falls through to the normal hint.
-    }
-  }
-  return Number(localEngineDefinitions.get(engine)?.defaultPort) || 0;
-}
-
-async function openLocalConfig(engine) {
-  localConfigEngine = engine;
-  const drawer = $("local-drawer");
-  if (!drawer) return;
-  // Configuration buttons render before the asynchronous first discovery
-  // completes. A remembered engine must not open as a blank form merely because
-  // that scan is still in flight: finish the one read, then show what it holds.
-  if (!localKnownEngines.has(engine) && !localEngineDefinitions.has(engine)) await renderLocalEngines();
-  const found = localKnownEngines.get(engine) || localDiscovery.get(engine);
-  const title = $("local-config-title");
-  if (title) title.textContent = localEngineLabel(engine);
-
-  // Pre-filled when discovery found it, empty with a hint when it did not.
-  const port = $("local-config-port");
-  if (port) {
-    port.readOnly = false;
-    port.value = found ? String(localEnginePort(found, engine)) : "";
-    port.placeholder = String(localEngineDefinitions.get(engine)?.defaultPort || "");
-  }
-
-  // Read-only proof that the pre-filled port is the right one: the model file
-  // actually loaded and the context it was started with, taken from the process
-  // behind that port rather than from anything the user typed.
-  const runtime = $("local-config-runtime");
-  if (runtime) {
-    const parts = [];
-    if (found?.launch?.model) parts.push(found.launch.model.split(/[\\/]/).pop());
-    if (found?.launch?.ctxSize) parts.push(t("local.ctxTokens", { tokens: formatContextSize(found.launch.ctxSize) }));
-    if (found?.binary) parts.push(found.binary);
-    runtime.textContent = parts.join(" · ");
-    runtime.hidden = parts.length === 0;
-  }
-  renderEngineWarnings(found?.warnings);
-  const disconnect = $("local-config-disconnect");
-  if (disconnect) disconnect.hidden = !localConnectedState.get(engine);
-  const errorLine = $("local-config-error");
-  if (errorLine) errorLine.hidden = true;
-  const save = $("local-config-save");
-  if (save) {
-    save.hidden = false;
-    save.textContent = t("local.connect");
-  }
-  // After the defaults above: for a connected llama.cpp this switches the
-  // bottom primary into its "Save and Manage" (launch spec) mode.
-  renderLocalDrawerActions(engine);
-  renderLocalStartAction(engine);
-
-  // Not modal: the row this drawer describes stays readable beside it, which
-  // is the whole reason it is not the dialog it replaced.
-  drawer.hidden = false;
-  for (const engineId of localEngineIds) paintEngineButton(engineId);
-  $("local-config-port")?.focus();
-}
-
-function closeLocalConfig() {
-  const drawer = $("local-drawer");
-  if (drawer) drawer.hidden = true;
-  localConfigEngine = "";
-  for (const engineId of localEngineIds) paintEngineButton(engineId);
-}
-
-async function submitLocalConfig(action) {
-  const engine = localConfigEngine;
-  if (!engine) return;
-  const save = $("local-config-save");
-  const disconnect = $("local-config-disconnect");
-  const errorLine = $("local-config-error");
-  const showError = (text) => {
-    if (!errorLine) return;
-    errorLine.hidden = !text;
-    errorLine.textContent = text || "";
-  };
-  showError("");
-
-  const ollama = engine === "ollama";
-  let body = ollama ? {} : { engine };
-  if (action === "connect") {
-    const field = $("local-config-port");
-    const port = Number(String(field?.value || "").trim() || field?.placeholder || 0);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      showError(t("local.errPort"));
-      return;
-    }
-    // Host is fixed: assertLocalBase refuses anything but loopback anyway, so a
-    // host field could only ever be a way to be told no.
-    const baseUrl = `http://127.0.0.1:${port}`;
-    const observed = localDiscovery.get(engine);
-    // Reusing the discovered endpoint lets Connect carry llama.cpp's live
-    // /props modalities into the saved observation. A manually changed port
-    // remains explicit and keeps the lightweight no-scan connect behaviour.
-    const discoveredPort = Number(observed?.port) || 0;
-    body = ollama
-      ? { baseUrl }
-      : (discoveredPort === port ? { engine } : { engine, baseUrl });
-  }
-
-  if (save) save.disabled = true;
-  if (disconnect) disconnect.disabled = true;
-  const previous = save?.textContent;
-  if (save && action === "connect") save.textContent = t("local.connecting");
-  try {
-    const path = ollama ? `/api/ollama/${action}` : `/api/local/${action}`;
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error?.message || `${action} ${response.status}`);
-    if (ollama) renderOllamaSection(payload.settings?.ollama);
-    else renderLocalEngineState(engine, payload.settings?.local?.[engine]);
-    closeLocalConfig();
-    poll().catch(() => {});
-    pollConfig().catch(() => {});
-    renderModelRoster().catch(() => {});
-    renderLocalEngines().catch(() => {});
-  } catch (error) {
-    showError(error.message);
-  } finally {
-    if (save) {
-      save.disabled = false;
-      if (previous) save.textContent = previous;
-    }
-    if (disconnect) disconnect.disabled = false;
-  }
-}
-
-for (const engineId of localEngineIds) {
-  // The row is a mouse convenience; the button inside it is the real control,
-  // so the keyboard and assistive tech get one named, focusable target instead
-  // of a div pretending to be a button around another button.
-  $(`${engineId}-configure`)?.addEventListener("click", () => openLocalConfig(engineId));
-  // One-click routing toggle. Connect posts with no baseUrl so the server
-  // discovers the address the same way the drawer prefill does; when nothing
-  // was discovered the drawer opens instead, which already carries the manual
-  // port hint. Disconnect is the escape hatch and never asks the engine first.
-  $(`${engineId}-connect`)?.addEventListener("click", async () => {
-    const button = $(`${engineId}-connect`);
-    const ollama = engineId === "ollama";
-    const connected = Boolean(localConnectedState.get(engineId));
-    if (!connected && !ollama && !localDiscovery.get(engineId)) {
-      openLocalConfig(engineId);
-      return;
-    }
-    if (button) button.disabled = true;
-    if (!connected) localShow(engineId, t("local.connecting"), false);
-    try {
-      const action = connected ? "disconnect" : "connect";
-      const response = await fetch(ollama ? `/api/ollama/${action}` : `/api/local/${action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(ollama ? {} : { engine: engineId }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error?.message || `${action} ${response.status}`);
-      if (ollama) renderOllamaSection(payload.settings?.ollama);
-      else renderLocalEngineState(engineId, payload.settings?.local?.[engineId]);
-      localShow(engineId, "", false);
-      await renderLocalEngines();
-    } catch (error) {
-      localShow(engineId, error.message, true);
-    } finally {
-      if (button) button.disabled = false;
-      paintEngineButton(engineId);
-    }
-  });
-  $(`${engineId}-row`)?.addEventListener("click", (event) => {
-    if (event.target.closest("button")) return;
-    openLocalConfig(engineId);
-  });
-  paintEngineButton(engineId);
-}
-
-// The request carries an engine id and nothing else: what runs is what the
-// gateway wrote down while that engine was serving. It lives in the drawer so
-// the user sees the exact saved configuration before starting a heavy service.
-$("local-config-start")?.addEventListener("click", async () => {
-  const button = $("local-config-start");
-  const engine = button?.dataset.engine || localConfigEngine;
-  if (!button || !engine) return;
-  const errorLine = $("local-config-error");
-  button.disabled = true;
-  button.textContent = t("local.restarting");
-  if (errorLine) {
-    errorLine.hidden = true;
-    errorLine.textContent = "";
-  }
-  try {
-    const reply = await fetch("/api/local/restart", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ engine }),
-    });
-    const body = await reply.json();
-    if (!reply.ok) throw new Error(body.error?.message || `Start ${reply.status}`);
-    // A model can take a while to load - a large one much longer than any
-    // fixed wait would be honest about - so this polls until the engine
-    // answers or the ceiling is reached, and says which happened.
-    let up = false;
-    for (let waited = 0; waited < 60_000 && !up; waited += 2_000) {
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-      await renderLocalEngines();
-      up = localDiscovery.has(engine);
-    }
-    if (!up && errorLine) {
-      errorLine.hidden = false;
-      errorLine.textContent = t("local.restartSlow");
-    }
-    poll().catch(() => {});
-    pollConfig().catch(() => {});
-    if (up && localConfigEngine === engine) await openLocalConfig(engine);
-  } catch (error) {
-    if (errorLine) {
-      errorLine.hidden = false;
-      errorLine.textContent = error.message;
-    }
-  } finally {
-    button.disabled = false;
-    button.textContent = t("local.restart");
-  }
-});
-$("local-config-close")?.addEventListener("click", closeLocalConfig);
-
-// Restart the ModelDock service itself and stop for nothing. The route is
-// deliberately outside the config mutation queue: the state it exists for is a
-// gateway that has wedged a config mutation, so an action queued behind that
-// mutation could never run. Losing the warm prefix costs the next turn one
-// prefill; refusing to restart would cost the session.
-$("local-service-restart")?.addEventListener("click", async () => {
-  const button = $("local-service-restart");
-  if (!button || button.disabled) return;
-  if (!window.confirm(t("host.restartServiceConfirm"))) return;
-  const errorLine = $("local-config-error");
-  button.disabled = true;
-  button.textContent = t("host.restartServiceBusy");
-  if (errorLine) {
-    errorLine.hidden = true;
-    errorLine.textContent = "";
-  }
-  try {
-    const response = await fetch("/api/local/service/restart", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error?.message || `Restart service ${response.status}`);
-    // The page is about to lose its server. The shared probe reloads it as soon
-    // as a gateway answers again, so the button intentionally stays disabled.
-    awaitRestartThenReload();
-  } catch (error) {
-    if (errorLine) {
-      errorLine.hidden = false;
-      errorLine.textContent = error.message;
-    }
-    button.disabled = false;
-    button.textContent = t("host.restartService");
-  }
-});
-$("local-config-save")?.addEventListener("click", () => { submitLocalConfig("connect").catch(() => {}); });
-// Folding a section away. The button carries the state on aria-expanded, so
-// the stylesheet turns the glyph and assistive technology reads the same fact
-// from the same place rather than from a class that has to be kept in step.
-for (const engineId of localEngineIds) {
-  const toggle = $(`${engineId}-toggle`);
-  const body = $(`${engineId}-body`);
-  if (!toggle || !body) continue;
-  toggle.addEventListener("click", () => {
-    const open = toggle.getAttribute("aria-expanded") !== "false";
-    toggle.setAttribute("aria-expanded", open ? "false" : "true");
-    toggle.title = t(open ? "local.expand" : "local.collapse");
-    body.hidden = open;
-  });
-}
-
-
-$("local-config-disconnect")?.addEventListener("click", () => { submitLocalConfig("disconnect").catch(() => {}); });
-
 // --- xAI (Grok) subscription sign-in ---
 //
 // A device grant is a person walking to a browser, so the page owns the
@@ -3359,11 +3145,7 @@ function refreshDynamicText() {
     () => {
       if (!lastSettings) return;
       renderCustomSection();
-      renderOllamaSection(lastSettings.ollama);
       renderXaiSection(lastSettings.xai);
-      for (const [engine, render] of Object.entries(renderLocalSections)) {
-        render(lastSettings.local?.[engine]);
-      }
     },
   ];
   for (const step of steps) {

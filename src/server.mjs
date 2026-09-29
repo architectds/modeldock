@@ -29,7 +29,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, remoteEndpoints, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { canonicalLlamaLocalKey, foldLlamaLocalKeys } from "./model-identity.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
@@ -57,7 +57,7 @@ import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifec
 import { canonicalUsageModelId, foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
 import { launchSpecFrom, spawnEngineDetached } from "./engine-processes.mjs";
-import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
+import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, probeLocalEngine, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
 import { localEngineDefinitions } from "./local-engine-definitions.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
@@ -204,7 +204,7 @@ function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
 
 function modelVisionEditable(entry) {
   return Boolean(entry && (profileById(entry.provider)?.modelDiscovery
-    || entry.provider === "llamacpp" || entry.provider === "custom"));
+    || entry.provider === "local" || entry.provider === "llamacpp" || entry.provider === "custom"));
 }
 
 function canShowUnavailableSavedModel(config, id) {
@@ -528,7 +528,8 @@ function statusPayload(services) {
 
 function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
-  const primaryCustomEndpoint = config.customEndpoints?.[0] || null;
+  const customEndpoints = remoteEndpoints(config);
+  const primaryCustomEndpoint = customEndpoints[0] || null;
   const ollamaProfile = profileById("ollama");
   const ollamaConnected = Boolean(ollamaProfile.availableModels?.length);
   const ollamaMain = modelSelection.mainModel && providerForModel(config, modelSelection.mainModel) === "ollama"
@@ -553,12 +554,12 @@ function settingsPayload(services) {
       asVision: Boolean(primaryCustomEndpoint?.supportsVision),
       // The whole list, so the API page renders every endpoint rather than
       // the first one. Keys never leave the machine: only whether one is set.
-      endpoints: (config.customEndpoints || []).map((entry) => ({
+      endpoints: customEndpoints.map((entry) => ({
         modelId: entry.modelId,
         baseUrl: entry.baseUrl,
         contextWindow: entry.contextWindow,
         supportsVision: entry.supportsVision,
-      apiKeyConfigured: Boolean(entry.apiKey),
+        apiKeyConfigured: Boolean(entry.apiKey),
       })),
     },
     ollama: {
@@ -1437,10 +1438,8 @@ export function createApp(services = createServices()) {
     }
   });
 
-  // The endpoint list. One record per model, because routing resolves an
-  // endpoint from the model name a request arrives with - two endpoints
-  // offering the same model id would leave the second unreachable, so the
-  // second is refused rather than published as a lie.
+  // One persisted list, with identity scoped to Custom or Local. The two
+  // providers can serve the same chosen model name without sharing a route.
   const endpointsFile = () => services.customEndpointsFile || customEndpointsPath();
 
   // Republish from disk after any change, so the catalog, the pickers and the
@@ -1449,11 +1448,12 @@ export function createApp(services = createServices()) {
     config.customEndpoints = readCustomEndpoints(endpointsFile());
     // The first key still drives the provider-level readiness bit. Endpoint
     // identity, address, capability, and routing remain owned by the list.
-    const first = config.customEndpoints[0] || null;
+    const first = config.customEndpoints.find((entry) => !entry.local && entry.apiKey) || null;
     config.tokens = { ...(config.tokens || {}) };
     if (first?.apiKey) config.tokens.custom = first.apiKey;
     else delete config.tokens.custom;
     applyCustomProfile(config);
+    applyLocalProfile(config);
     reconcileModelSelection(services);
     services.writeCatalogFile?.();
     return config.customEndpoints;
@@ -1462,7 +1462,7 @@ export function createApp(services = createServices()) {
   app.get("/api/custom/endpoints", (req, res) => {
     // Keys never leave the machine: the list reports whether one is set, not
     // what it is.
-    const endpoints = readCustomEndpoints(endpointsFile()).map((entry) => ({
+    const endpoints = readCustomEndpoints(endpointsFile()).filter((entry) => !entry.local).map((entry) => ({
       modelId: entry.modelId,
       baseUrl: entry.baseUrl,
       label: entry.label,
@@ -1531,7 +1531,7 @@ export function createApp(services = createServices()) {
     const before = readCustomEndpoints(endpointsFile());
     let found = false;
     const next = before.map((entry) => {
-      if (entry.modelId !== model) return entry;
+      if (entry.local || entry.modelId !== model) return entry;
       found = true;
       return { ...entry, apiKey };
     });
@@ -1548,11 +1548,12 @@ export function createApp(services = createServices()) {
 
   app.post("/api/custom/remove", mutateConfig, async (req, res) => {
     const model = String(req.body?.modelId || "").trim();
+    const local = req.body?.local === true;
     if (!model) {
       return res.status(400).json({ error: { type: "model", message: "A model id is required." } });
     }
     const before = readCustomEndpoints(endpointsFile());
-    const next = removeCustomEndpoint(before, model);
+    const next = removeCustomEndpoint(before, model, { local });
     if (next.length === before.length) {
       return res.status(404).json({ error: { type: "model", message: `No endpoint serves ${model}.` } });
     }
@@ -1562,6 +1563,82 @@ export function createApp(services = createServices()) {
     await services.configSwitcher.markRestartRequired();
     recordConfigAction(metrics, "custom_endpoint_remove", { ok: true });
     return res.json({ removed: model, endpoints: next.map((entry) => ({ modelId: entry.modelId, baseUrl: entry.baseUrl })) });
+  });
+
+  // The scan's Connect button checks the API before asking for a published
+  // name. A failed probe must not create a model that Codex cannot use.
+  app.post("/api/local/probe", localPostGuard, async (req, res) => {
+    try {
+      const baseUrl = normalizeBaseUrl(assertLocalBase(req.body?.baseUrl));
+      const apiKey = String(req.body?.apiKey || "");
+      const listed = await listEndpointModels({ baseUrl, apiKey });
+      if (!listed.models.length) throw new Error("No model is loaded.");
+      const probe = await probeCustomEndpoint({ baseUrl, apiKey, modelId: listed.models[0].id, preferChat: true });
+      return res.json({ ok: true, baseUrl, models: listed.models, transport: probe.transport });
+    } catch {
+      return res.status(400).json({ error: { type: "connect_failed", message: "Connection failed." } });
+    }
+  });
+
+  const localNamePart = (value) => {
+    const part = String(value || "").trim().replace(/\s+/g, "-");
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(part) ? part : "";
+  };
+
+  // One persisted endpoint owns the published name, real upstream id, dialect,
+  // and address. The Codex slug derives from provider/model@local; no second
+  // local catalog or engine-specific connection record is created.
+  app.post("/api/local/attach", mutateConfig, async (req, res) => {
+    try {
+      const baseUrl = normalizeBaseUrl(assertLocalBase(req.body?.baseUrl));
+      const apiKey = String(req.body?.apiKey || "");
+      const upstreamId = String(req.body?.upstreamId || "").trim();
+      const providerName = String(req.body?.providerName || "").trim();
+      const modelName = String(req.body?.modelName || "").trim();
+      const provider = localNamePart(providerName);
+      const model = localNamePart(modelName);
+      if (!provider || !model || !upstreamId) throw new Error("Invalid local model identity.");
+      const listed = await listEndpointModels({ baseUrl, apiKey });
+      const upstream = listed.models.find((entry) => entry.id === upstreamId);
+      if (!upstream) throw new Error("The selected model is not available.");
+      const probe = await probeCustomEndpoint({ baseUrl, apiKey, modelId: upstreamId, preferChat: true });
+      // Reuse the scanner's capability probe for the selected port. Its llama
+      // template facts affect tool-call serialization and media escaping, even
+      // though engine identity no longer decides which provider owns the model.
+      const port = Number(new URL(baseUrl).port);
+      const detected = Number.isInteger(port) && port > 0
+        ? await probeLocalEngine(port)
+        : null;
+      const modelId = `${provider}/${model}`;
+      const next = addCustomEndpoint(readCustomEndpoints(endpointsFile()), {
+        modelId,
+        upstreamId,
+        baseUrl,
+        apiKey,
+        label: `${providerName} / ${modelName}`,
+        local: true,
+        contextWindow: upstream.contextWindow || 0,
+        supportsVision: typeof req.body?.asVision === "boolean"
+          ? req.body.asVision
+          : typeof detected?.supportsVision === "boolean"
+            ? detected.supportsVision
+            : false,
+        ...(detected?.engine === "llamacpp" ? {
+          chatTemplateSupportsObjectArguments: Boolean(detected.chatTemplateSupportsObjectArguments),
+          mediaMarker: detected.mediaMarker || "",
+          completeOnFinishReason: true,
+        } : {}),
+        transport: probe.transport,
+      });
+      writeCustomEndpoints(endpointsFile(), next);
+      republishEndpoints();
+      await services.configSwitcher.markRestartRequired();
+      recordConfigAction(metrics, "local_attach", { ok: true });
+      return res.json({ ok: true, modelId, id: modelAddressFor("local", modelId), transport: probe.transport });
+    } catch {
+      recordConfigAction(metrics, "local_attach", { ok: false, error: "connect_failed" });
+      return res.status(400).json({ error: { type: "connect_failed", message: "Connection failed." } });
+    }
   });
 
   // Dashboard "Ollama (local)" flow: one click lists every chat-capable local
@@ -1621,6 +1698,7 @@ export function createApp(services = createServices()) {
     // Clearing has to start from the shipped catalog, so rebuild the profiles
     // from their sources before stamping what is left of the overrides on.
     applyCustomProfile(config);
+    applyLocalProfile(config);
     const localSnapshot = readLocalEnginesSnapshot() || {};
     for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
     // Native models are appended to the published set rather than living in a
@@ -1719,7 +1797,7 @@ export function createApp(services = createServices()) {
     const slug = canonicalModelRefOf(config, String(id || "").trim());
     const model = modelOptions(config).find((entry) => entry.id === slug);
     if (!modelVisionEditable(model)) {
-      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a discovered, custom, or local llama.cpp model." } });
+      return res.status(400).json({ error: { type: "invalid_model", message: "Choose a discovered, custom, or local model." } });
     }
     if (typeof supportsVision !== "boolean") {
       return res.status(400).json({ error: { type: "invalid_state", message: "supportsVision must be true or false." } });
@@ -1727,13 +1805,16 @@ export function createApp(services = createServices()) {
     if (!supportsVision && (services.modelSelection?.visionModel || config.visionModel) === slug) {
       return res.status(409).json({ error: { type: "model_in_use", message: "Choose a different vision model first, then disable vision for this model." } });
     }
-    if (model.provider === "custom") {
+    if (model.provider === "custom" || model.provider === "local") {
       const endpoints = readCustomEndpoints(endpointsFile());
-      if (!customEndpointFor(endpoints, slug)) {
-        return res.status(404).json({ error: { type: "invalid_model", message: "The custom endpoint no longer exists." } });
+      const local = model.provider === "local";
+      const endpoint = customEndpointFor(endpoints.filter((entry) => Boolean(entry.local) === local), slug);
+      if (!endpoint) {
+        return res.status(404).json({ error: { type: "invalid_model", message: "The endpoint no longer exists." } });
       }
       writeCustomEndpoints(endpointsFile(), endpoints.map((entry) =>
-        entry.modelId === bareModelId(slug) ? { ...entry, supportsVision } : entry));
+        entry.modelId === bareModelId(slug) && Boolean(entry.local) === local
+          ? { ...entry, supportsVision } : entry));
       republishEndpoints();
     } else {
       const file = services.visionOverridesFile || visionOverridesPath();
@@ -1889,6 +1970,18 @@ export function createApp(services = createServices()) {
           ...engine,
           observation: attached(engine) ? saved[engine.engine]?.observation || null : null,
         })),
+        registrations: readCustomEndpoints(endpointsFile())
+          .filter((entry) => entry.local)
+          .map((entry) => ({
+            id: modelAddressFor("local", entry.modelId),
+            modelId: entry.modelId,
+            upstreamId: entry.upstreamId || entry.modelId,
+            baseUrl: entry.baseUrl,
+            label: entry.label,
+            connected: true,
+            offline: !live.some((engine) => sameLocalHost(engine.baseUrl, entry.baseUrl)
+              && engine.models?.includes(entry.upstreamId || entry.modelId)),
+          })),
       });
     } catch (error) {
       return res.status(500).json({ error: { type: "discover_failed", message: error.message } });

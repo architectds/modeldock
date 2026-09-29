@@ -4486,7 +4486,12 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           onFirstResponse: markFirstResponse,
           restoreCall: restoreChatCall,
           signal: requestSignal,
-          completeOnFinishReason: target.provider === "llamacpp",
+          // Every local engine (llama.cpp, vLLM, and a scan-attached Local
+          // endpoint) reports a semantic finish_reason once it has released the
+          // request; accepting it as the end of the turn keeps the gateway lease
+          // from outliving the answer. Hosted Chat upstreams keep the [DONE]
+          // contract they were tested against.
+          completeOnFinishReason: target.provider === "llamacpp" || target.completeOnFinishReason === true,
           onTerminal: () => upstreamController.abort(),
         });
         tee.end();
