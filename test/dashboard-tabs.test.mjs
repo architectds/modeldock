@@ -22,8 +22,7 @@ import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { pathToFileURL } from "node:url";
 import { createApp, createServices } from "../src/server.mjs";
-import { OPENCODE_GO_PROFILE, applyLocalEngineProfile } from "../src/profiles.mjs";
-import { writeLocalEngineSnapshot } from "../src/local-engines.mjs";
+import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
 process.env.MODELDOCK_REQUIRE_CALLER_KEY = "0";
 
@@ -142,7 +141,6 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
       },
     },
   }), "utf8");
-  services.localEnginesFile = path.join(dir, "local-engines.json");
   // One configured endpoint, so the Cloud tab renders a row with a Remove
   // button. Without it that section has nothing to check and the escaped-element
   // assertion below walks an empty page - which is exactly how the button came
@@ -158,28 +156,12 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
     addedAt: "2026-01-01T00:00:00.000Z",
   }], null, 2));
   services.engineLogDir = path.join(dir, "engine-logs");
-  writeLocalEngineSnapshot(services.localEnginesFile, "llamacpp", {
-    baseUrl: "http://127.0.0.1:11435/v1",
-    observation: {
-      modelPath: "D:/models/previous-connected-model.gguf",
-      visionProjectorPath: "D:/models/previous-connected-projector.gguf",
-      supportsVision: true,
-      observedAt: "2026-08-24T20:00:00.000Z",
-    },
-    models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
-  });
-  applyLocalEngineProfile("llamacpp", {
-    baseUrl: "http://127.0.0.1:11435/v1",
-    models: [{ id: "qwen3.8:27b", contextWindow: 262144 }],
-  });
-  t.after(() => applyLocalEngineProfile("llamacpp", null));
   const observedEngine = {
     engine: "llamacpp",
     label: "llama.cpp",
     baseUrl: "http://127.0.0.1:11435",
     port: 11435,
     models: ["qwen3.8:27b"],
-    connectable: true,
     binary: "D:/llama-cpp/llama-server.exe",
     cmdline: "D:/llama-cpp/llama-server.exe -m D:/models/qwen.gguf -c 262144 --parallel 1 --port 11435",
     launch: { model: "D:/models/qwen.gguf", ctxSize: 262144, parallel: 1 },
@@ -748,9 +730,9 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   assert.equal(await evaluate(`document.getElementById('settings-commandcode-token').value`), "",
     "the stored key is never echoed back into the field");
 
-  // The local surface is one scan list. A connected server remains in that
-  // list and carries its own Disconnect action; there is no separate drawer or
-  // engine-specific configuration section for the user to hunt through.
+  // The local surface is one scan list. Detection alone is not a route: the
+  // user connects it through the naming dialog, and only that explicit Local
+  // registration gets a Disconnect action.
   await evaluate(`location.hash = '#local'`);
   await sleep(400);
   const localList = JSON.parse(await evaluate(`JSON.stringify((() => {
@@ -761,6 +743,7 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
       row: Boolean(row),
       selected: Boolean(row?.classList.contains('is-selected')),
       action: row?.querySelector('button')?.textContent.trim() || '',
+      state: row?.querySelector('.local-engine-state')?.textContent.trim() || '',
       sections: ['ollama-section', 'llamacpp-section', 'vllm-section', 'local-drawer']
         .filter((id) => document.getElementById(id)),
     };
@@ -768,9 +751,10 @@ test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }
   assert.deepEqual(localList, {
     row: true,
     selected: true,
-    action: "Disconnect",
+    action: "Connect",
+    state: "Detected - not connected",
     sections: [],
-  }, "the saved local host remains discoverable and removable in one scan list");
+  }, "a legacy host snapshot is discoverable but no longer masquerades as a connected route");
 
   // 5. And none of that produced an error the page swallowed.
   const errors = JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors || [])`));
@@ -854,7 +838,7 @@ test("changing only the vision provider persists its selected model across refre
   }
 });
 
-test("the built dashboard keeps local llama.cpp vision user-editable", { timeout: 120_000 }, async (t) => {
+test("the built dashboard keeps an attached Local model's vision capability user-editable", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {
     assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
     t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
@@ -879,20 +863,19 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
   t.after(() => new Promise((resolve) => engine.close(resolve)));
 
   const { base, services } = await startDashboard(t, { bundled: true });
-  services.discoverEngines = async () => [{
-    engine: "llamacpp",
-    label: "llama.cpp",
-    baseUrl: `http://127.0.0.1:${enginePort}/v1`,
-    port: enginePort,
-    models: ["local-test-model"],
-    connectable: true,
-    supportsVision: false,
-    launch: { model: "", ctxSize: 32768, parallel: 1 },
-  }];
-  const connected = await fetch(`${base}/api/local/connect`, {
+  const providerName = "BrowserLocal";
+  const modelName = "local-test-model";
+  const modelId = `${providerName}/${modelName}`;
+  const connected = await fetch(`${base}/api/local/attach`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ engine: "llamacpp" }),
+    body: JSON.stringify({
+      baseUrl: `http://127.0.0.1:${enginePort}`,
+      upstreamId: modelName,
+      providerName,
+      modelName,
+      asVision: false,
+    }),
   });
   assert.equal(connected.status, 200, await connected.text());
 
@@ -900,7 +883,7 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
   await evaluate(`location.href = ${JSON.stringify(`${base}#models`)}`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await sleep(250);
-    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes('llama.cpp (local)')`)) break;
+    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes(${JSON.stringify(`${providerName} / ${modelName}`)})`)) break;
   }
   await evaluate(`(() => {
     const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
@@ -910,27 +893,31 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
   await sleep(100);
   const before = JSON.parse(await evaluate(`JSON.stringify((() => {
     const row = [...document.querySelectorAll('#roster-groups tr')]
-      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === ${JSON.stringify(`${providerName} / ${modelName}`)});
     const inputs = row ? [...row.querySelectorAll('input[type="checkbox"]')] : [];
     return { inputs: inputs.length, checked: inputs[1]?.checked, disabled: inputs[1]?.disabled };
   })())`));
   assert.deepEqual(before, { inputs: 2, checked: false, disabled: false });
   await evaluate(`(() => {
     const row = [...document.querySelectorAll('#roster-groups tr')]
-      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === ${JSON.stringify(`${providerName} / ${modelName}`)});
     row.querySelectorAll('input[type="checkbox"]')[1].click();
     return true;
   })()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await sleep(50);
-    if (!existsSync(services.visionOverridesFile)) continue;
-    if (JSON.parse(readFileSync(services.visionOverridesFile, "utf8"))["Local@llamacpp"] === true) break;
+    const endpoints = JSON.parse(readFileSync(services.customEndpointsFile, "utf8"));
+    if (endpoints.find((entry) => entry.local === true && entry.modelId === modelId)?.supportsVision === true) break;
   }
-  assert.equal(JSON.parse(readFileSync(services.visionOverridesFile, "utf8"))["Local@llamacpp"], true);
+  assert.equal(
+    JSON.parse(readFileSync(services.customEndpointsFile, "utf8"))
+      .find((entry) => entry.local === true && entry.modelId === modelId)?.supportsVision,
+    true,
+  );
   await evaluate(`location.reload()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     await sleep(250);
-    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes('llama.cpp (local)')`)) break;
+    if (await evaluate(`document.getElementById('roster-groups')?.textContent.includes(${JSON.stringify(`${providerName} / ${modelName}`)})`)) break;
   }
   await evaluate(`(() => {
     const skip = [...document.querySelectorAll('a,button')].find((node) => /skip for now/i.test(node.textContent));
@@ -940,7 +927,7 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
   await sleep(100);
   const afterReload = JSON.parse(await evaluate(`JSON.stringify((() => {
     const row = [...document.querySelectorAll('#roster-groups tr')]
-      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+      .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === ${JSON.stringify(`${providerName} / ${modelName}`)});
     const inputs = row ? [...row.querySelectorAll('input[type="checkbox"]')] : [];
     return { checked: inputs[1]?.checked, disabled: inputs[1]?.disabled };
   })())`));
@@ -949,7 +936,7 @@ test("the built dashboard keeps local llama.cpp vision user-editable", { timeout
   if (process.env.MODELDOCK_TEST_SCREENSHOT) {
     await evaluate(`(() => {
       const row = [...document.querySelectorAll('#roster-groups tr')]
-        .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === 'llama.cpp (local)');
+        .find((candidate) => candidate.querySelector('strong')?.textContent.trim() === ${JSON.stringify(`${providerName} / ${modelName}`)});
       row?.scrollIntoView({ block: 'center' });
       return true;
     })()`);
@@ -1205,8 +1192,8 @@ test("the unified Local view adopts a detected OpenAI-compatible endpoint throug
   // Discovery is the only input the Local view reads, so the two endpoints are
   // injected rather than required to be listening on this machine.
   services.discoverEngines = async () => [
-    { engine: "openai", label: "OpenAI-compatible", baseUrl: liveUrl, port: livePort, models: [modelName], connectable: true },
-    { engine: "openai", label: "OpenAI-compatible", baseUrl: deadUrl, port: deadPort, models: [], connectable: true },
+    { engine: "openai", label: "OpenAI-compatible", baseUrl: liveUrl, port: livePort, models: [modelName] },
+    { engine: "openai", label: "OpenAI-compatible", baseUrl: deadUrl, port: deadPort, models: [] },
   ];
 
   const { send, evaluate } = await openBrowser(t, chromePath, { instance: "unified-local" });
@@ -1329,13 +1316,14 @@ test("the unified Local view adopts a detected OpenAI-compatible endpoint throug
       if (!row.classList.contains('is-selected')) row.click();
       return { found: true, connected: row.classList.contains('is-connected'),
         border: getComputedStyle(row).borderTopColor,
-        action: row.querySelector('.local-engine-actions button')?.textContent.trim() || '' };
+        action: row.querySelector('.local-engine-actions button')?.textContent.trim() || '',
+        state: row.querySelector('.local-engine-state')?.textContent.trim() || '' };
     })())`));
     if (connectedRow.connected && /disconnect/i.test(connectedRow.action)) break;
     await sleep(100);
   }
   assert.deepEqual(connectedRow, {
-    found: true, connected: true, border: "rgb(80, 183, 255)", action: "Disconnect",
+    found: true, connected: true, border: "rgb(80, 183, 255)", action: "Disconnect", state: "Connected",
   }, "a saved Local route stays in the scan with a highlighted border and Disconnect control");
   if (process.env.MODELDOCK_TEST_SCREENSHOT) {
     const shot = await send("Page.captureScreenshot", { format: "png" });

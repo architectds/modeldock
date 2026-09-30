@@ -24,8 +24,7 @@ import { createDerivedFallback } from "./derived-fallback.mjs";
 import { callerBasePath, callerRootPath, loadOrCreateCallerKey } from "./caller-key.mjs";
 import { SessionNames } from "./session-names.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { allProfiles, applyOllamaProfile, modelAddressFor } from "./profiles.mjs";
-import { ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
+import { allProfiles, modelAddressFor } from "./profiles.mjs";
 import { modelTogglesPath, readModelToggles, selectedModelSlugs, writeModelToggles } from "./model-toggles.mjs";
 import { applyVisionOverrides, readVisionOverrides, visionOverridesPath } from "./vision-overrides.mjs";
 import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
@@ -199,15 +198,6 @@ export function createServices(config = loadConfig()) {
   // endpoint that edits the same file can never disagree about which file it is.
   const togglesFile = mutableConfig.modelTogglesFile || modelTogglesPath();
   const lifecycleFile = mutableConfig.modelLifecycleFile || modelLifecyclePath();
-  // The Ollama connection snapshot follows the same state-dir redirect. Real
-  // configs restore it during loadConfig; this re-apply covers hand-built test
-  // configs (which opt in by setting ollamaSnapshotFile) and keeps the running
-  // profile in sync with whatever the connect/disconnect routes write.
-  const ollamaSnapshotFile = mutableConfig.ollamaSnapshotFile || ollamaSnapshotPath();
-  if (mutableConfig.ollamaSnapshotFile) {
-    const snapshot = readOllamaSnapshot(mutableConfig.ollamaSnapshotFile);
-    if (snapshot) applyOllamaProfile(mutableConfig, snapshot);
-  }
   // The capability key rides in the base URL Codex reads from config.toml, so a
   // hostile local web page cannot reach the relay endpoints (see caller-key.mjs).
   const callerKey = mutableConfig.callerKey || loadOrCreateCallerKey();
@@ -428,7 +418,7 @@ export function createServices(config = loadConfig()) {
     visionOverridesFile,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,
-    refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer, ollamaSnapshotFile,
+    refreshModelCatalog, writeCatalogFile, runModelTidy, runScheduledMaintenance, modelRefreshTimer,
     usageRollupFile: rollupFile,
     usageEventsFile,
     modelTogglesFile: togglesFile, modelLifecycleFile: lifecycleFile,

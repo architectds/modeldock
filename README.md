@@ -8,10 +8,10 @@ manually moving prompts, files, or results between apps.
 
 **Work in one place. Get things done everywhere.**
 
-A thin local Responses bridge for OpenCode Go, DeepSeek, and local
-engines - Ollama, llama.cpp, and vLLM are detected on loopback, and any other
-OpenAI-compatible endpoint can be added by URL - with native GPT passthrough
-and live token, latency, and trace observability.
+A thin local Responses bridge for OpenCode Go, DeepSeek, and local models.
+Ollama, llama.cpp, vLLM, and other OpenAI-compatible servers are detected on
+loopback and attached through one Local route, with native GPT passthrough and
+live token, latency, and trace observability.
 
 ModelDock currently connects models and capabilities inside a Codex task. The
 next step is Connectors: user-authorized local tools that run through their own
@@ -61,8 +61,8 @@ without rewriting the conversation history:
   with ffmpeg, and QA every frame. Audio assets are not bundled; download from
   the [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) repo
   when a project needs sound.
-- **Run local** — Ollama and custom Responses endpoints connect your own models
-  to Codex. Codex usage is automatically optimized to fit your local model's
+- **Run local** — scan a compatible server, name its provider and model, and
+  connect it through the single Local group. Codex usage is automatically optimized to fit your local model's
   specifications — CPU compression mode activates as soon as a local model is
   detected.
 
@@ -89,8 +89,8 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 The installer checks Node.js >= 24, downloads Model Dock For Codex to
 `~/.modeldock`, starts it in the background, and opens the dashboard. Add at
 least one provider in Settings: [OpenCode Go](https://opencode.ai/auth),
-DeepSeek, a custom Responses endpoint, or connect Ollama for local
-models. The `content-to-video` skill is not downloaded by the installer; copy
+DeepSeek, or a custom Responses endpoint. Use Local Hosts to scan and connect
+models running on this machine. The `content-to-video` skill is not downloaded by the installer; copy
 `skills/content-to-video` into Codex's skills directory manually when you want
 the video capability.
 
@@ -116,14 +116,14 @@ main model with a MiMo vision model, for example. Switching the main provider
 preserves your current vision pick if it remains reachable. Providers with no
 vision-capable model show `None`.
 
-**Add models** - open Settings and add the service or local engine you use.
-ModelDock supports OpenCode Go, DeepSeek, Grok, custom Responses endpoints, and
-local Ollama, llama.cpp, or vLLM. Pick the model in Codex; the dashboard shows
-what is connected.
+**Add models** - open Settings for cloud APIs and custom endpoints. Open Local
+Hosts for any server running on this machine. Local engines share one Local
+provider instead of publishing engine-specific providers. Pick the model in
+Codex; the dashboard shows what is connected.
 
-**Local models** - press **Rescan** to find an engine already running on your
-machine. The drawer shows whether the model fits, recommends practical settings,
-and can restart llama.cpp with the settings you choose.
+**Local models** - press **Rescan** to find a compatible server already running
+on your machine. Connect opens one naming form; the provider/model name you save
+becomes the readable Local picker entry. Protocol selection is automatic.
 
 **Tools** - web search, image understanding, image generation, memory, speech,
 and video are available to the model when configured. For voice, turn TTS or
@@ -230,9 +230,9 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 **在一个地方工作，把事情办完。**
 
-一个轻量本地 Responses 桥：连接 OpenCode Go、DeepSeek 官方 API 和本地引擎（自动探测
-环回地址上的 Ollama、llama.cpp、vLLM，其它 OpenAI 兼容端点也可按 URL 添加），支持原生
-GPT 透传，并带实时的 token、延迟与调用链路观测。
+一个轻量本地 Responses 桥：连接 OpenCode Go、DeepSeek 官方 API 和本地模型。自动探测
+环回地址上的 Ollama、llama.cpp、vLLM 及其它 OpenAI 兼容服务器，并统一通过一个 Local
+路由接入，支持原生 GPT 透传，并带实时的 token、延迟与调用链路观测。
 
 目前 ModelDock 在 Codex 任务内部连接模型与能力。下一步是 Connectors：用户授权的本地
 工具，通过各自的官方 CLI 运行、在隔离的作业中执行，并把结果和可审查的 diff 返回任务。
@@ -258,8 +258,9 @@ Go Responses 端点没有托管搜索（DeepSeek 官方端点有）。你自己�
   HTML 或 HyperFrames 搭建场景、ffmpeg 合成、逐帧质检。音频素材不随包提供；项目需要
   声音时，从 [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) 仓库
   下载。
-- **本地运行** — Ollama 和自定义 Responses 端点把本地模型接入 Codex。检测到本地模型后，
-  Codex 的用量会自动优化以适配其规格——CPU 压缩模式在检测到本地模型时立即启用。
+- **本地运行** — 扫描兼容服务器，命名它的 provider 和模型，再通过统一的 Local 分组接入
+  Codex。Codex 的用量会自动优化以适配本地模型的规格——CPU 压缩模式在检测到本地模型时
+  立即启用。
 
 桥是轻量本地网关：Responses 流原样透传，多轮工具循环、流式输出和长会话压缩都与原生
 通道一致。
@@ -281,9 +282,10 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 ```
 
 安装程序会检查 Node.js >= 24，下载到 `~/.modeldock`，在后台启动并打开仪表盘。在设置中
-至少添加一个 provider：[OpenCode Go](https://opencode.ai/auth)、DeepSeek 官方、自定义
-Responses 端点，或连接 Ollama 使用本地模型。`content-to-video` 技能不会随安装器下载；
-需要视频能力时，把 `skills/content-to-video` 手动复制到 Codex 的 skills 目录。
+至少添加一个 provider：[OpenCode Go](https://opencode.ai/auth)、DeepSeek 官方或自定义
+Responses 端点；本机运行的模型请到本地主机页扫描并连接。`content-to-video` 技能不会随
+安装器下载；需要视频能力时，把 `skills/content-to-video` 手动复制到 Codex 的 skills
+目录。
 
 ### 接入 Codex
 
@@ -302,12 +304,12 @@ Responses 端点，或连接 Ollama 使用本地模型。`content-to-video` 技�
 所有已启用 provider 中支持视觉的模型，例如 DeepSeek 主模型搭配 MiMo 视觉模型。切换主
 provider 时，只要当前视觉选择仍可达就会保留。没有视觉模型的 provider 显示 `None`。
 
-**添加模型** - 打开设置添加你要用的服务或本地引擎。ModelDock 支持 OpenCode Go、DeepSeek、
-Grok、自定义 Responses 端点，以及本地的 Ollama、llama.cpp 或 vLLM。在 Codex 里选模型；
-仪表盘显示连接状态。
+**添加模型** - 云 API 和自定义端点打开设置，本机运行的服务器打开本地主机页。本地引擎共用
+一个 Local provider，不再发布各引擎独立的 provider。在 Codex 里选模型；仪表盘显示连接
+状态。
 
-**本地模型** - 按 **Rescan** 查找本机已在运行的引擎。抽屉会显示模型是否装得下、推荐实用
-参数，并可用你选的参数重启 llama.cpp。
+**本地模型** - 按 **Rescan** 查找本机已在运行的兼容服务器。点连接会打开一个命名表单；
+保存的 provider/模型名会成为 Local 选择器中可读的条目。协议选择自动完成。
 
 **工具** - 配置后，模型即可使用网络搜索、图像理解、图像生成、记忆、语音和视频。语音需
 在仪表盘打开 TTS 或 STT；需要时可在那里为子代理选一个专用模型。
@@ -378,9 +380,9 @@ Codex で作業を続けながら、DeepSeek・Qwen・選んだモデルを、�
 
 **一つの場所で作業し、どこでも完了させる。**
 
-OpenCode Go・DeepSeek 公式 API・ローカルエンジン（ループバック上の Ollama・llama.cpp・
-vLLM を自動検出。その他の OpenAI 互換エンドポイントも URL で追加可能）をつなぐ薄い
-ローカル Responses ブリッジ。ネイティブ GPT パススルーと、リアルタイムのトークン・
+OpenCode Go・DeepSeek 公式 API・ローカルモデルをつなぐ薄いローカル Responses ブリッジ。
+ループバック上の Ollama・llama.cpp・vLLM およびその他の OpenAI 互換サーバーを自動検出し、
+単一の Local ルートで接続します。ネイティブ GPT パススルーと、リアルタイムのトークン・
 レイテンシー・トレース可観測性を備えています。
 
 現在 ModelDock は Codex タスク内でモデルと機能を接続します。次のステップは Connectors
@@ -411,10 +413,9 @@ DeepSeek V4 Flash は速くて安い一方、画像を見られず、話せず�
   全フレームの QA。音声アセットは同梱されません。サウンドが必要なプロジェクトでは
   [video-shotcraft](https://github.com/Vincentwei1021/video-shotcraft) リポジトリから
   ダウンロードしてください。
-- **ローカル実行** — Ollama とカスタム Responses エンドポイントで自分のモデルを Codex に
-  接続できます。ローカルモデルが検出されると、Codex の使用量はローカルモデルの仕様に
-  合わせて自動的に最適化されます — CPU 圧縮モードはローカルモデル検出と同時に有効に
-  なります。
+- **ローカル実行** — 互換サーバーをスキャンし、プロバイダーとモデルを命名して、単一の
+  Local グループ経由で接続します。Codex の使用量はローカルモデルの仕様に合わせて自動的に
+  最適化されます — CPU 圧縮モードはローカルモデル検出と同時に有効になります。
 
 ブリッジは薄いローカルゲートウェイです。Responses ストリームはそのまま透過し、マルチ
 ターンのツールループ・ストリーミング・長いセッションの圧縮はネイティブチャネルと同様に
@@ -438,10 +439,11 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 
 インストーラーは Node.js >= 24 を確認し、`~/.modeldock` にダウンロードしてバックグラウンド
 で起動し、ダッシュボードを開きます。設定で少なくとも 1 つのプロバイダーを追加して
-ください：[OpenCode Go](https://opencode.ai/auth)、DeepSeek 公式、カスタム Responses
-エンドポイント、または Ollama（ローカルモデル）。`content-to-video` スキルはインストーラー
-ではダウンロードされません。動画機能が必要な場合は、`skills/content-to-video` を Codex の
-スキルディレクトリに手動でコピーしてください。
+ください：[OpenCode Go](https://opencode.ai/auth)、DeepSeek 公式、またはカスタム
+Responses エンドポイント。このマシンで動いているモデルはローカルホストのページから
+スキャンして接続します。`content-to-video` スキルはインストーラーではダウンロードされ
+ません。動画機能が必要な場合は、`skills/content-to-video` を Codex のスキルディレクトリに
+手動でコピーしてください。
 
 ### Codex への接続
 
@@ -463,14 +465,14 @@ curl -fsSL https://raw.githubusercontent.com/architectds/modeldock/main/scripts/
 メインプロバイダーを切り替えても、現在のビジョン選択がまだ到達可能なら保持されます。
 ビジョン対応モデルのないプロバイダーは `None` と表示されます。
 
-**モデルを追加** - 設定を開き、使うサービスやローカルエンジンを追加します。ModelDock は
-OpenCode Go・DeepSeek・Grok・カスタム Responses エンドポイント、およびローカルの Ollama・
-llama.cpp・vLLM に対応しています。Codex でモデルを選択し、ダッシュボードで接続状況を
-確認します。
+**モデルを追加** - クラウド API とカスタムエンドポイントは設定を開きます。このマシンで
+動いているサーバーはローカルホストのページを開きます。ローカルエンジンはエンジン固有の
+プロバイダーを公開せず、単一の Local プロバイダーを共有します。Codex でモデルを選択し、
+ダッシュボードで接続状況を確認します。
 
-**ローカルモデル** - **Rescan** を押すと、マシン上で既に動いているエンジンが見つかります。
-ドロワーはモデルが収まるかどうかを示し、実用的な設定を推奨し、選んだ設定で llama.cpp を
-再起動できます。
+**ローカルモデル** - **Rescan** を押すと、マシン上で既に動いている互換サーバーが見つかり
+ます。接続を押すと命名フォームが開き、保存したプロバイダー／モデル名が Local ピッカーの
+読みやすいエントリーになります。プロトコル選択は自動です。
 
 **ツール** - 設定済みの場合、ウェブ検索・画像理解・画像生成・記憶・音声・動画がモデルから
 利用できます。音声はダッシュボードで TTS または STT をオンにします。必要に応じて、そこから

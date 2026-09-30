@@ -29,8 +29,7 @@ import { CALLER_PATH_PREFIX, callerBasePath, callerKeyEqual, callerRootPath, loa
 import { SessionNames } from "./session-names.mjs";
 import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
-import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, effectiveContextWindow, applyLocalEngineProfile, publishedCatalogFingerprint, applyOllamaProfile, bareModelId, LLAMACPP_LOCAL_MODEL_LABEL, LLAMACPP_LOCAL_SLUG, llamaLocalStableEntry, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, remoteEndpoints, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
-import { canonicalLlamaLocalKey, foldLlamaLocalKeys } from "./model-identity.mjs";
+import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, effectiveContextWindow, bareModelId, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, remoteEndpoints, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
@@ -43,10 +42,9 @@ import { NATIVE_PROVIDER } from "./native-provider.mjs";
 // Re-exported: tests and the config switcher import the catalog through
 // server.mjs, and that path stays stable across the model-options split.
 export { codexModelCatalog };
-import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomEndpoint, probeCustomResponses } from "./custom-endpoint.mjs";
+import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomEndpoint } from "./custom-endpoint.mjs";
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
-import { OLLAMA_DEFAULT_BASE, OllamaError, clearOllamaSnapshot, listOllamaModels, normalizeOllamaBase, ollamaSnapshotPath, probeOllamaResponses, readOllamaSnapshot, writeOllamaSnapshot } from "./ollama.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
 import { attachSseKeepAlive } from "./sse.mjs";
 import { applyContextOverrides, contextOverridesPath, readContextOverrides, validateContextWindow, writeContextOverrides } from "./context-overrides.mjs";
@@ -56,12 +54,11 @@ import { modelsToPark, shouldTidy, stampFirstSeen } from "./model-tidy.mjs";
 import { modelLifecyclePath, readLifecycle, writeLifecycle } from "./model-lifecycle-state.mjs";
 import { canonicalUsageModelId, foldUsageFile, readRollup, rollupKey, rollupTotals, usageRollupPath, usageStats, writeRollup } from "./usage-rollup.mjs";
 import { probeGpus } from "./gpu.mjs";
-import { launchSpecFrom, spawnEngineDetached } from "./engine-processes.mjs";
-import { launchSpecForPort, rememberedLaunch, ENGINE_LABELS as LOCAL_ENGINE_LABELS, CONNECTABLE_ENGINES, readLocalEnginesSnapshot, LocalEngineError, assertLocalBase, clearLocalEngineSnapshot, discoverLocalEngines, probeLocalEngine, localEnginesSnapshotPath, writeLocalEngineSnapshot, modelFactsFor } from "./local-engines.mjs";
+import { assertLocalBase, discoverLocalEngines, probeLocalEngine } from "./local-engines.mjs";
 import { localEngineDefinitions } from "./local-engine-definitions.mjs";
 import { XAI_API_BASE, XaiAuthError, accessTokenExpired, clearXaiAuth, isDefinitiveAuthRejection, listXaiModels, pollDeviceToken, readXaiAuth, refreshAccessToken, startDeviceAuthorization, writeXaiAuth, xaiAuthPath } from "./xai-auth.mjs";
 import { recordSettingsEvent } from "./settings-events.mjs";
-import { stateDir as resolveStateDir, stateFile } from "./state-dir.mjs";
+import { stateDir as resolveStateDir } from "./state-dir.mjs";
 import staticFiles from "./static-inline.mjs";
 import {
   DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
@@ -120,40 +117,6 @@ function serveInlineStatic(app) {
   });
 }
 
-function llamaLaunchArgument(launch, spellings) {
-  const args = Array.isArray(launch?.args) ? launch.args : [];
-  const index = args.findIndex((value) => spellings.includes(value));
-  return index >= 0 ? String(args[index + 1] || "").trim() : "";
-}
-
-// One projection owns the catalog-facing model facts learned from a local
-// engine. Connect, live refresh, and managed restart may observe those facts at
-// different times, but none of them may maintain a private field mapping.
-function projectLocalModel(current, {
-  modelFacts = null,
-  upstreamId = "",
-  supportsVision,
-  chatTemplateSupportsObjectArguments,
-  mediaMarker,
-  contextWindow = 0,
-} = {}) {
-  // Old managed snapshots carried a 70-percent cap. Local compaction now
-  // derives from the effective catalog window through the shared rule.
-  const { autoCompactTokenLimit: retiredCompactLimit, ...model } = current;
-  return {
-    ...model,
-    ...(modelFacts?.modelSlug ? { id: modelFacts.modelSlug } : {}),
-    ...(modelFacts?.modelName ? { label: modelFacts.modelName } : {}),
-    ...(upstreamId ? { upstreamId } : {}),
-    ...(typeof supportsVision === "boolean" ? { supportsVision } : {}),
-    ...(typeof chatTemplateSupportsObjectArguments === "boolean"
-      ? { chatTemplateSupportsObjectArguments }
-      : {}),
-    ...(typeof mediaMarker === "string" ? { mediaMarker } : {}),
-    ...(contextWindow > 0 ? { contextWindow } : {}),
-  };
-}
-
 // Pick one complete route for ON mode. The current provider wins when it is
 // usable; otherwise the first configured provider becomes active. Vision is
 // an independent saved preference, not a derivative of the main provider.
@@ -204,7 +167,7 @@ function unavailableSavedModel(config, id, { supportsVision = false } = {}) {
 
 function modelVisionEditable(entry) {
   return Boolean(entry && (profileById(entry.provider)?.modelDiscovery
-    || entry.provider === "local" || entry.provider === "llamacpp" || entry.provider === "custom"));
+    || entry.provider === "local" || entry.provider === "custom"));
 }
 
 function canShowUnavailableSavedModel(config, id) {
@@ -237,7 +200,7 @@ function modelsPayload(services) {
     providers: providerOptions(services.config),
     // Derive the provider from the model actually selected, the same way the
     // vision and subagent pickers do. Reporting config.profileId here let the two
-    // drift apart: selecting a custom/ollama model as main updates mainModel but
+    // drift apart: selecting a Custom or Local model as main updates mainModel but
     // never touches profileId, so the dashboard rendered impossible pairs of
     // a provider and a model. profileId remains the fallback for a model the
     // catalog cannot place.
@@ -327,10 +290,6 @@ function statsModelDirectory(services) {
     const id = entry.native ? modelAddressFor(NATIVE_PROVIDER.id, entry.id) : entry.id;
     remember(id, entry.label || entry.id);
   }
-  // The stable local entry keeps its "llama.cpp (local)" label even while no
-  // engine is connected: folded history still needs the human name, and the
-  // inventory above is empty for a provider with nothing published.
-  remember(LLAMACPP_LOCAL_SLUG, LLAMACPP_LOCAL_MODEL_LABEL);
   return {
     labelFor: (id) => labels.get(id) || "",
   };
@@ -403,54 +362,6 @@ function engineWarnings(engine, gpus = []) {
     warnings.push({ code: "mtp_ignored" });
   }
   return warnings;
-}
-
-// Connection snapshots predate GGUF header names, so a previously connected
-// llama.cpp server still publishes its disk path after an upgrade until the
-// user presses Connect again. Discovery already observes both sides without
-// touching the engine: its one advertised endpoint id and the launch GGUF's
-// cached header facts. Refresh that one unambiguous case automatically. A
-// multi-model endpoint remains untouched because one GGUF cannot name all of
-// its models safely.
-function refreshedSingleModelSnapshot(snapshot, engine) {
-  const saved = snapshot?.models;
-  const advertised = Array.isArray(engine?.models) && engine.models.length === 1
-    ? String(engine.models[0] || "")
-    : "";
-  const name = String(engine?.modelFacts?.modelName || "").trim();
-  const slug = String(engine?.modelFacts?.modelSlug || "").trim();
-  if (!Array.isArray(saved) || saved.length !== 1 || !advertised) return null;
-  const current = saved[0];
-  const next = projectLocalModel(current, {
-    modelFacts: name && slug ? { modelName: name, modelSlug: slug } : null,
-    upstreamId: advertised,
-    // llama.cpp exposes these on /props. They must overwrite an earlier
-    // observation in either direction, especially vision after --mmproj is
-    // removed. Other engines do not publish this contract.
-    supportsVision: engine?.engine === "llamacpp" ? engine.supportsVision : undefined,
-    chatTemplateSupportsObjectArguments: engine?.engine === "llamacpp"
-      ? engine.chatTemplateSupportsObjectArguments
-      : undefined,
-    mediaMarker: engine?.engine === "llamacpp" ? engine.mediaMarker : undefined,
-  });
-  if (JSON.stringify(current) === JSON.stringify(next)) return null;
-  // A swapped file is a real event even when the published identity hides it:
-  // the drawer facts reset against the new fingerprint. Silent in the log
-  // meant "the engine changed and nothing said why."
-  if ((current.upstreamId || "") !== (next.upstreamId || "")) {
-    const base = (value) => String(value || "").replace(/\\/g, "/").split("/").pop() || "unknown";
-    console.log(`[gate] local engine model changed: ${base(current.upstreamId)} -> ${base(next.upstreamId)}; the published entry stays stable.`);
-  }
-  return {
-    ...snapshot,
-    models: [next],
-  };
-}
-
-async function discoveredLocalEngine(services, engine, baseUrl = "") {
-  const found = await (services.discoverEngines || discoverLocalEngines)({});
-  return found.find((candidate) => candidate.engine === engine
-    && (!baseUrl || sameLocalHost(candidate.baseUrl, baseUrl))) || null;
 }
 
 function statusPayload(services) {
@@ -530,14 +441,6 @@ function settingsPayload(services) {
   const { config, autostart, modelSelection } = services;
   const customEndpoints = remoteEndpoints(config);
   const primaryCustomEndpoint = customEndpoints[0] || null;
-  const ollamaProfile = profileById("ollama");
-  const ollamaConnected = Boolean(ollamaProfile.availableModels?.length);
-  const ollamaMain = modelSelection.mainModel && providerForModel(config, modelSelection.mainModel) === "ollama"
-    ? bareModelId(modelSelection.mainModel)
-    : "";
-  const ollamaVision = modelSelection.visionModel && providerForModel(config, modelSelection.visionModel) === "ollama"
-    ? bareModelId(modelSelection.visionModel)
-    : "";
   return {
     tokenConfigured: anyProviderRouteConfigured(config),
     providers: credentialProfiles()
@@ -562,20 +465,6 @@ function settingsPayload(services) {
         apiKeyConfigured: Boolean(entry.apiKey),
       })),
     },
-    ollama: {
-      baseUrl: config.ollamaBaseUrl || OLLAMA_DEFAULT_BASE,
-      connected: ollamaConnected,
-      canRestart: Boolean(readOllamaSnapshot(services.ollamaSnapshotFile)?.launch?.binary),
-      models: (ollamaProfile.availableModels || []).map((model) => ({
-        id: model.id,
-        upstreamId: model.upstreamId,
-        label: model.label || model.id,
-        supportsVision: Boolean(model.supportsVision),
-        contextWindow: model.contextWindow || null,
-      })),
-      mainModel: ollamaMain,
-      visionModel: ollamaVision,
-    },
     // The signed-in subscription, reported like any other provider so the page
     // does not have to ask a second endpoint what state it is in.
     xai: (() => {
@@ -587,21 +476,6 @@ function settingsPayload(services) {
         expiresAt: auth?.expiresAt || 0,
       };
     })(),
-    local: Object.fromEntries(CONNECTABLE_ENGINES.map((id) => {
-      const profile = profileById(id);
-      return [id, {
-        baseUrl: profile.baseUrl,
-        connected: Boolean(profile.availableModels?.length),
-        // Drives a control that is hidden when there is nothing to replay.
-        canRestart: Boolean(rememberedLaunch(id, services.localEnginesFile || localEnginesSnapshotPath())),
-        models: (profile.availableModels || []).map((model) => ({
-          id: model.id,
-          label: model.label || model.id,
-          supportsVision: Boolean(model.supportsVision),
-          contextWindow: model.contextWindow || null,
-        })),
-      }];
-    })),
     models: {
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
@@ -693,7 +567,7 @@ function recordConfigAction(metrics, operation, result) {
 }
 
 // The dashboard's view of the same question the relay asks. It had its own
-// if-chain and disagreed with the relay about Ollama, so the address shown
+// if-chain and disagreed with the relay about Local endpoints, so the address shown
 // was not the address used.
 function serveModels(req, res, { config, modelSelection }) {
   // Advertise the dashboard-selected main model (with its modalities/plugins) so Codex
@@ -1422,7 +1296,7 @@ export function createApp(services = createServices()) {
   });
 
   function customErrorPayload(error) {
-    const code = error instanceof CustomEndpointError || error instanceof OllamaError ? error.code : "upstream";
+    const code = error instanceof CustomEndpointError ? error.code : "upstream";
     return { error: { type: code, message: error.message } };
   }
 
@@ -1641,16 +1515,6 @@ export function createApp(services = createServices()) {
     }
   });
 
-  // Dashboard "Ollama (local)" flow: one click lists every chat-capable local
-  // model (/api/tags), probes the Responses protocol, snapshots the list to disk
-  // and publishes the models as one more provider option. Reconnect refreshes;
-  // restart restores the snapshot. Connecting never rewrites the main or vision
-  // model: Ollama stays a candidate provider and the user picks it explicitly.
-  // Read-only: report which engines are already listening on this machine so
-  // Local Hosts can offer them instead of asking the user to type a port. It
-  // persists nothing - connecting still goes through the flow that owns the
-  // engine (Ollama has its own; the OpenAI-compatible ones share the custom
-  // endpoint slot).
   // The model roster: every published model with the two things a catalog
   // entry cannot tell you - how much it was used, and how it performed. Usage
   // is read from the folded rollup, never from the event log, so the page load
@@ -1668,23 +1532,12 @@ export function createApp(services = createServices()) {
     if (!requested) {
       return res.status(400).json({ error: { type: "invalid_model", message: "A model id is required." } });
     }
-    // The local endpoint publishes one stable entry whatever file it loads, so an
-    // id still carrying the file's own name addresses that entry. Canonicalizing the
-    // write key keeps the stored override on the slug the catalog actually publishes:
-    // filing it under a name no entry matches answered 200 with the new value while
-    // the published window never moved. Only while that entry is published - a
-    // multi-model llama.cpp server keeps per-model ids, and each keeps its own edit.
-    const canonical = canonicalModelRefOf(config, requested);
-    const slug = llamaLocalStableEntry() ? canonicalLlamaLocalKey(canonical) : canonical;
+    const slug = canonicalModelRefOf(config, requested);
     if (!modelOptions(config).some((entry) => entry.id === slug)) {
       return res.status(400).json({ error: { type: "invalid_model", message: "Choose a model from the published roster." } });
     }
     const file = services.contextOverridesFile || contextOverridesPath();
-    // Folded on read as well as on write: a value stored before the stable identity
-    // is still the user's measurement, and clearing it has to reach the entry it
-    // applies to rather than leave the old key behind to be folded in again.
-    const stored = readContextOverrides(file);
-    const overrides = llamaLocalStableEntry() ? foldLlamaLocalKeys(stored) : stored;
+    const overrides = readContextOverrides(file);
     if (contextWindow === null) {
       delete overrides[slug];
     } else {
@@ -1699,8 +1552,6 @@ export function createApp(services = createServices()) {
     // from their sources before stamping what is left of the overrides on.
     applyCustomProfile(config);
     applyLocalProfile(config);
-    const localSnapshot = readLocalEnginesSnapshot() || {};
-    for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
     // Native models are appended to the published set rather than living in a
     // profile, so the pass below cannot reach them; they read this instead.
     // Without it the edit returned 200 and changed nothing for them.
@@ -1889,88 +1740,68 @@ export function createApp(services = createServices()) {
   });
   app.get("/api/local/discover", async (req, res) => {
     try {
-      const live = await (services.discoverEngines || discoverLocalEngines)({});
-      const saved = readLocalEnginesSnapshot(services.localEnginesFile || localEnginesSnapshotPath()) || {};
-      // Attached-ness is a property of an address, not of an engine name. Now
-      // that discovery reads the process table it can find two llama-servers at
-      // once (a tuned 27B on 11435 and a scratch one on 8080 is the ordinary
-      // case), and keying this on the engine name alone marked both of them
-      // connected while only one was.
-      const attached = (engine) => sameLocalHost(saved[engine.engine]?.baseUrl, engine.baseUrl);
-      // Probed once per scan, not per engine: two llama-servers on one machine
-      // are still one set of cards.
+      let endpointRows = readCustomEndpoints(endpointsFile());
+      // Re-probe every saved Local port as well as the conventional engine
+      // ports. A server launched by Node, Python, WSL, a container relay, or a
+      // renamed binary may not look like an inference engine in the process
+      // table; its explicit Local registration is still authoritative evidence
+      // that this exact loopback port belongs in the scan.
+      const candidatePorts = new Map();
+      for (const definition of localEngineDefinitions()) {
+        if (Number(definition.defaultPort) > 0) {
+          candidatePorts.set(Number(definition.defaultPort), { port: Number(definition.defaultPort), hint: definition.label });
+        }
+      }
+      for (const entry of endpointRows) {
+        if (!entry.local) continue;
+        try {
+          const endpoint = new URL(entry.baseUrl);
+          const port = Number(endpoint.port || (endpoint.protocol === "https:" ? 443 : 80));
+          if (port > 0) candidatePorts.set(port, { port, hint: entry.label || entry.modelId });
+        } catch {
+          // A malformed persisted endpoint remains visible as offline. It must
+          // not make the rest of the Local scan fail.
+        }
+      }
+      const live = await (services.discoverEngines || discoverLocalEngines)({
+        candidates: [...candidatePorts.values()],
+      });
+      const registrationsFor = (engine) => endpointRows.filter((entry) => entry.local
+        && sameLocalHost(entry.baseUrl, engine.baseUrl));
       const gpus = await (services.probeGpus || probeGpus)({});
-      const engines = live.map((engine) => ({
-        ...engine,
-        connected: attached(engine),
-        connectedModels: attached(engine) ? saved[engine.engine]?.models?.length || 0 : 0,
-      })).map((engine) => ({ ...engine, warnings: engineWarnings(engine, gpus) }));
-      // A gateway update can come up before a managed local engine has started
-      // answering again. Keep its durable row in this scan so the drawer can
-      // still show the user's selected model and projector instead of
-      // replacing them with empty defaults while the host returns.
-      for (const [engine, snapshot] of Object.entries(saved)) {
-        if (engines.some((found) => found.engine === engine && found.connected)) continue;
-        engines.push({
-          engine,
-          label: LOCAL_ENGINE_LABELS[engine] || engine,
-          baseUrl: snapshot.baseUrl || "",
-          models: (snapshot.models || []).map((model) => model.id),
-          connectable: CONNECTABLE_ENGINES.includes(engine),
-          connected: true,
-          connectedModels: snapshot.models?.length || 0,
-          offline: true,
-        });
-      }
-      // The window Codex is told about has to follow the window the engine is
-      // actually serving. A connected engine publishes its context from meta.n_ctx, read once at
-      // connect time. Restart it on a smaller -c - through the drawer, or by
-      // hand - and the published figure stays where it was, so Codex keeps
-      // packing against the old number and auto-compacts near 80% of it. An
-      // engine moved from 80K to 32K is told to fill 64,000 tokens into a window
-      // that holds 32,000, and the failure lands mid-conversation.
-      //
-      // The scan already knows the running ctxSize, so this is the place that
-      // can notice. Republishing changes the catalog Codex reads at startup,
-      // which is what the restart banner is for.
-      for (const engine of engines) {
-        const snapshot = saved[engine.engine];
-        const declared = Number(engine.launch?.ctxSize) || 0;
-        if (!engine.connected || !declared || !snapshot?.models?.length) continue;
-        if (snapshot.models.every((model) => Number(model.contextWindow) === declared)) continue;
-        const models = snapshot.models.map((model) => ({ ...model, contextWindow: declared }));
-        writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine.engine, { ...snapshot, models });
-        applyLocalEngineProfile(engine.engine, { ...snapshot, models });
-        services.writeCatalogFile?.();
+
+      // Context follows the explicit Local registration, never the old engine
+      // snapshot. A scan can therefore refresh a changed -c without reviving an
+      // engine-specific provider.
+      let contextChanged = false;
+      endpointRows = endpointRows.map((entry) => {
+        if (!entry.local) return entry;
+        const engine = live.find((candidate) => sameLocalHost(candidate.baseUrl, entry.baseUrl));
+        const declared = Number(engine?.launch?.ctxSize) || 0;
+        if (!declared || Number(entry.contextWindow) === declared) return entry;
+        contextChanged = true;
+        return { ...entry, contextWindow: declared };
+      });
+      if (contextChanged) {
+        writeCustomEndpoints(endpointsFile(), endpointRows);
+        republishEndpoints();
         await services.configSwitcher.markRestartRequired();
-        recordConfigAction(metrics, `local_context_republished_${engine.engine}`, { ok: true, contextWindow: declared });
+        recordConfigAction(metrics, "local_context_republished", { ok: true });
       }
-      // Refresh legacy local snapshots from the GGUF header without restarting
-      // or modifying the engine. This makes a naming-only ModelDock update
-      // visible the next time the dashboard scans, rather than requiring a
-      // person to reconnect an already working local server by hand.
-      for (const engine of engines) {
-        if (!engine.connected) continue;
-        const file = services.localEnginesFile || localEnginesSnapshotPath();
-        const snapshot = readLocalEnginesSnapshot(file)?.[engine.engine];
-        const refreshed = refreshedSingleModelSnapshot(snapshot, engine);
-        if (!refreshed) continue;
-        const publishedBefore = publishedCatalogFingerprint(engine.engine);
-        writeLocalEngineSnapshot(file, engine.engine, refreshed);
-        applyLocalEngineProfile(engine.engine, refreshed);
-        const publishedAfter = publishedCatalogFingerprint(engine.engine);
-        if (publishedAfter === publishedBefore) continue;
-        services.writeCatalogFile?.();
-        await services.configSwitcher.markRestartRequired();
-        recordConfigAction(metrics, `local_model_name_refreshed_${engine.engine}`, { ok: true });
-      }
+
+      const engines = live.map((engine) => {
+        const registrations = registrationsFor(engine);
+        return {
+          ...engine,
+          connected: registrations.length > 0,
+          connectedModels: registrations.length,
+          warnings: engineWarnings(engine, gpus),
+        };
+      });
       return res.json({
         engineDefinitions: localEngineDefinitions(),
-        engines: engines.map((engine) => ({
-          ...engine,
-          observation: attached(engine) ? saved[engine.engine]?.observation || null : null,
-        })),
-        registrations: readCustomEndpoints(endpointsFile())
+        engines,
+        registrations: endpointRows
           .filter((entry) => entry.local)
           .map((entry) => ({
             id: modelAddressFor("local", entry.modelId),
@@ -1987,126 +1818,6 @@ export function createApp(services = createServices()) {
       return res.status(500).json({ error: { type: "discover_failed", message: error.message } });
     }
   });
-  // Connect a keyless local engine. assertLocalBase is the whole security
-  // story: skipping the API key is only safe because the address cannot leave
-  // this machine, so the two are one check rather than two.
-  app.post("/api/local/connect", mutateConfig, async (req, res) => {
-    const { engine, baseUrl, asVision } = req.body || {};
-    try {
-      if (!CONNECTABLE_ENGINES.includes(engine)) {
-        throw new LocalEngineError("engine", `Unknown local engine: ${engine}`);
-      }
-      // Scanning and connecting are one action. Discovering the address here
-      // rather than trusting the caller to send one is what makes them one:
-      // the button in the list and the button in the engine's own section both
-      // arrive with no address and both get the port the engine is really on.
-      // Without this the fallback was the profile's default port, so an engine
-      // started with `--port 11435` was found by the scan and then not
-      // connectable, which is the worst of both.
-      const discovered = baseUrl
-        ? null
-        : (await (services.discoverEngines || discoverLocalEngines)({})).find((found) => found.engine === engine);
-      if (!baseUrl && !discovered) {
-        throw new LocalEngineError(
-          "not_found",
-          `No ${LOCAL_ENGINE_LABELS[engine] || engine} server is answering on this machine. Start it, then connect.`,
-        );
-      }
-      const base = normalizeBaseUrl(assertLocalBase(baseUrl || discovered.baseUrl));
-      const listed = await listEndpointModels({ baseUrl: base, apiKey: "" });
-      if (!listed.models.length) {
-        throw new LocalEngineError("models", "The engine reported no models. Load one, then reconnect.");
-      }
-      // Prove the Responses dialect before persisting, so a server that only
-      // speaks /v1/chat/completions fails the connect instead of every later turn.
-      await probeCustomResponses({ baseUrl: base, apiKey: "", modelId: listed.models[0].id });
-      const launch = launchSpecFrom(discovered) || await launchSpecForPort(new URL(base).port);
-      const supportsVision = engine === "llamacpp"
-        ? Boolean(discovered?.supportsVision ?? asVision)
-        : Boolean(asVision);
-      const observation = {
-        modelPath: discovered?.launch?.model || llamaLaunchArgument(launch, ["-m", "--model"]),
-        visionProjectorPath: discovered?.launch?.visionProjectorPath || llamaLaunchArgument(launch, ["--mmproj"]),
-        supportsVision,
-        ...(engine === "llamacpp" && typeof discovered?.chatTemplateSupportsObjectArguments === "boolean"
-          ? { chatTemplateSupportsObjectArguments: discovered.chatTemplateSupportsObjectArguments }
-          : {}),
-        ...(engine === "llamacpp" && typeof discovered?.mediaMarker === "string"
-          ? { mediaMarker: discovered.mediaMarker }
-          : {}),
-        observedAt: new Date().toISOString(),
-      };
-      const snapshot = {
-        // What started this engine, read from the process behind the port we
-        // just connected to. Kept so a stopped engine can be started again as
-        // it was, rather than from a command line we would have to invent.
-        launch,
-        baseUrl: base,
-        connectedAt: new Date().toISOString(),
-        // A Connect observation is useful input when the person next opens
-        // managed setup, but is deliberately separate from the catalog's live
-        // capability declaration. A subsequent /props scan can therefore turn
-        // off image routing without erasing the last chosen model/projector.
-        observation,
-        // The endpoint advertises a raw id that is often the model file path
-        // (llama.cpp serves "D:\models\Qwen3.8-...gguf"). Publishing that as the
-        // picker name leaks a path and makes the catalog unreadable. When a
-        // single-model llama.cpp process names a GGUF we read its header and
-        // publish the model's own name instead; the endpoint id stays in
-        // upstreamId so the wire never sees a name the server does not serve.
-        // A multi-model endpoint is deliberately left alone: one launch GGUF
-        // cannot name every advertised endpoint model, and assigning it to all
-        // of them would manufacture duplicate picker entries. An id we cannot
-        // map to one unambiguous file (including vLLM) is published as-is.
-        models: listed.models.map((model) => {
-          const facts = listed.models.length === 1
-            ? (services.modelFactsFor || modelFactsFor)(observation.modelPath)
-            : null;
-          const friendly = facts?.modelName || "";
-          const slug = facts?.modelSlug || "";
-          return projectLocalModel({
-            id: model.id,
-            label: model.label || model.id,
-          }, {
-            modelFacts: friendly && slug ? { modelName: friendly, modelSlug: slug } : null,
-            upstreamId: model.id,
-            supportsVision,
-            chatTemplateSupportsObjectArguments: engine === "llamacpp"
-              ? discovered?.chatTemplateSupportsObjectArguments
-              : undefined,
-            mediaMarker: engine === "llamacpp" ? discovered?.mediaMarker : undefined,
-            contextWindow: model.contextWindow,
-          });
-        }),
-      };
-      const publishedBefore = publishedCatalogFingerprint(engine);
-      writeLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine, snapshot);
-      applyLocalEngineProfile(engine, snapshot);
-      services.writeCatalogFile?.();
-      // Same rule as the managed publish: connect only means a new world to
-      // Codex when the published catalog projection actually moved. Re-
-      // connecting llama.cpp after swapping the GGUF updates the wire id and
-      // nothing the picker was told, and that swap is precisely the flow the
-      // stable identity exists to keep restart-free.
-      if (publishedCatalogFingerprint(engine) !== publishedBefore) await services.configSwitcher.markRestartRequired();
-      recordConfigAction(metrics, `local_connect_${engine}`, { ok: true });
-      return res.json({
-        engine,
-        baseUrl: base,
-        // Report what Codex will be told, not the snapshot's internal row: the
-        // two are the same object for every engine except a single-model
-        // llama.cpp, whose published id is deliberately stable.
-        models: profileById(engine)?.availableModels || snapshot.models,
-        observation,
-        settings: settingsPayload(services),
-      });
-    } catch (error) {
-      recordConfigAction(metrics, `local_connect_${engine || "unknown"}`, { ok: false, error: error.message });
-      const status = error instanceof LocalEngineError ? 400 : 502;
-      return res.status(status).json({ error: { type: error.code || "local_connect_failed", message: error.message } });
-    }
-  });
-
   // Restart the gateway service itself, immediately.
   //
   // Two refusals make this route what it is, and both are the point:
@@ -2130,87 +1841,6 @@ export function createApp(services = createServices()) {
     return res.json({ scheduled: true });
   });
 
-  // Start an engine again exactly as it was running when it was connected.
-  //
-  // The request names an engine and nothing more. The binary and its arguments
-  // come from the snapshot this install wrote while that engine was serving, so
-  // there is no path from an HTTP body to a process argument, and argv is a list
-  // rather than a string so no shell parses a model path.
-  //
-  // Only offered for an engine we have actually met. Composing a launch for one
-  // we have not - guessing a model path, a context size, how many layers belong
-  // on the GPU - would be a guess wearing the clothes of a memory.
-  app.post("/api/local/restart", mutateConfig, async (req, res) => {
-    const { engine } = req.body || {};
-    const remembered = engine === "ollama"
-      ? readOllamaSnapshot(services.ollamaSnapshotFile)?.launch
-      : (CONNECTABLE_ENGINES.includes(engine)
-        ? rememberedLaunch(engine, services.localEnginesFile || localEnginesSnapshotPath())
-        : null);
-    if (!remembered?.binary || !Array.isArray(remembered.args)) {
-      return res.status(404).json({
-        error: { type: "no_launch", message: `No remembered way to start ${engine || "that engine"}.` },
-      });
-    }
-    // The button hides itself while the engine answers, but that is a rendered
-    // snapshot: an engine that came back between the render and the click would
-    // get a second copy started on a port the first one holds. The second copy
-    // fails to bind, and the only place that failure appears is the log below.
-    // Checking here costs one probe and turns a confusing "start" into a plain
-    // "it is already running".
-    const alreadyUp = Boolean(await discoveredLocalEngine(services, engine));
-    if (alreadyUp) {
-      recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: "already running" });
-      return res.status(409).json({
-        error: { type: "already_running", message: `${LOCAL_ENGINE_LABELS[engine] || engine} is already answering.` },
-      });
-    }
-    try {
-      const { logFile } = spawnEngineDetached({
-        binary: remembered.binary,
-        args: remembered.args,
-        engine,
-        // Under the state dir, not os.tmpdir(): /tmp is sticky-bit shared on
-        // POSIX, so another user can pre-own /tmp/modeldock and point
-        // engine-<name>.log at a symlink - an append-as-this-user primitive.
-        // ~/.modeldock is already ours alone.
-        logDir: services.engineLogDir || stateFile("engine-logs"),
-      });
-      recordConfigAction(metrics, `local_restart_${engine}`, { ok: true });
-      return res.json({ engine, started: true, binary: remembered.binary, logFile });
-    } catch (error) {
-      recordConfigAction(metrics, `local_restart_${engine}`, { ok: false, error: error.message });
-      return res.status(502).json({ error: { type: "launch_failed", message: error.message } });
-    }
-  });
-
-  // Disconnect is the last resort, so it may not depend on anything the host it
-  // is leaving can still hold: no queue behind a wedged mutation, no engine
-  // round-trip, and no prerequisite that management be released first.
-  //
-  // It used to answer 409 while a llama.cpp host was managed ("Leave host control
-  // before disconnecting"), but releasing management restores the pre-takeover
-  // command and *verifies* it, which cannot succeed against a server that is dead
-  // - and a record already stuck in "draining" can never be verified again. Two
-  // refusals referencing each other formed a lock with no exit: the host could not
-  // be used, could not be unmanaged, and could not be disconnected.
-  //
-  // Management is therefore *released* here rather than demanded as a precondition.
-  // Authority is never orphaned - the records go away with the route - but nothing
-  // is verified, drained or restarted on the way out, because the whole point is
-  // that the process being walked away from may be beyond answering.
-  app.post("/api/local/disconnect", localPostGuard, async (req, res) => {
-    const { engine } = req.body || {};
-    if (!CONNECTABLE_ENGINES.includes(engine)) {
-      return res.status(400).json({ error: { type: "engine", message: `Unknown local engine: ${engine}` } });
-    }
-    clearLocalEngineSnapshot(services.localEnginesFile || localEnginesSnapshotPath(), engine);
-    applyLocalEngineProfile(engine, null);
-    reconcileModelSelection(services);
-    services.writeCatalogFile?.();
-    recordConfigAction(metrics, `local_disconnect_${engine}`, { ok: true });
-    return res.json({ engine, models: [], settings: settingsPayload(services) });
-  });
   // Signing in to xAI. Three routes because a device grant is three moments:
   // ask for a code, wait for a person, then use what they approved.
   //
@@ -2340,65 +1970,6 @@ export function createApp(services = createServices()) {
   const xaiTimer = setInterval(() => { refreshXaiToken().catch(() => {}); }, 10 * 60 * 1000);
   xaiTimer.unref?.();
   refreshXaiToken().catch(() => {});
-
-  app.post("/api/ollama/connect", mutateConfig, async (req, res) => {
-    const { baseUrl } = req.body || {};
-    try {
-      // Same rule as the other engines: discover the address instead of
-      // falling back to a default port. Ollama's 11434 is stable enough that
-      // this rarely changes the outcome, but OLLAMA_HOST can move it, and a
-      // moved Ollama was previously found by the scan and then not connectable.
-      const discovered = baseUrl
-        ? null
-        : (await (services.discoverEngines || discoverLocalEngines)({})).find((found) => found.engine === "ollama");
-      const result = await listOllamaModels({ baseUrl: baseUrl || discovered?.baseUrl });
-      if (!result.models.length) {
-        throw new OllamaError("models", "Ollama returned no chat-capable models. Pull one first (ollama pull <model>).");
-      }
-      // Prove the Responses dialect before persisting so an old Ollama (< 0.13.3)
-      // fails the connect with readable guidance instead of a silent 404 later.
-      await probeOllamaResponses({ baseUrl: result.endpoint, modelId: result.models[0].upstreamId });
-      const snapshot = {
-        baseUrl: result.endpoint,
-        connectedAt: new Date().toISOString(),
-        models: result.models,
-        launch: await launchSpecForPort(new URL(result.endpoint).port || 11434),
-      };
-      writeOllamaSnapshot(services.ollamaSnapshotFile, snapshot);
-      applyOllamaProfile(config, snapshot);
-      config.ollamaBaseUrl = result.endpoint;
-      services.writeCatalogFile?.();
-      // Ollama publishes models Codex cannot see until it restarts.
-      await services.configSwitcher.markRestartRequired();
-      recordConfigAction(metrics, "ollama_connect", { ok: true, models: result.models.length });
-      return res.json({
-        ok: true,
-        connected: true,
-        baseUrl: result.endpoint,
-        models: result.models,
-        responsesUrl: result.responsesUrl,
-        settings: settingsPayload(services),
-      });
-    } catch (error) {
-      recordConfigAction(metrics, "ollama_connect", { ok: false, error: error.message });
-      return res.status(400).json(customErrorPayload(error));
-    }
-  });
-
-  app.post("/api/ollama/disconnect", mutateConfig, async (req, res) => {
-    try {
-      clearOllamaSnapshot(services.ollamaSnapshotFile);
-      applyOllamaProfile(config, null);
-      config.ollamaBaseUrl = OLLAMA_DEFAULT_BASE;
-      reconcileModelSelection(services);
-      services.writeCatalogFile?.();
-      recordConfigAction(metrics, "ollama_disconnect", { ok: true });
-      return res.json({ ok: true, connected: false, settings: settingsPayload(services) });
-    } catch (error) {
-      recordConfigAction(metrics, "ollama_disconnect", { ok: false, error: error.message });
-      return res.status(400).json(customErrorPayload(error));
-    }
-  });
 
   const eventClients = new Set();
   const broadcast = () => {

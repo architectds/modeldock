@@ -1,10 +1,7 @@
 
-import { OLLAMA_DEFAULT_BASE, normalizeOllamaBase } from "./ollama.mjs";
-import { localEngineDefinition } from "./local-engine-definitions.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
-import { foldLlamaLocalKeys, LLAMACPP_LOCAL_MODEL_ID } from "./model-identity.mjs";
 import {
   codexSlugFor,
   modelAddressFor,
@@ -41,7 +38,7 @@ const DEEPSEEK_REASONING_LEVELS = [
 
 // llama.cpp chat template accepts exactly these reasoning efforts
 // (verified in the GGUF template: 'xhigh', 'medium', 'low'; "high" raises).
-// Advertised for custom/Ollama local backends so the Codex picker only offers
+// Advertised for Custom and Local backends so the Codex picker only offers
 // values the template accepts.
 // The ladder a model gets when nothing better is known. Not a measurement -
 // no upstream publishes its accepted efforts (OpenCode Go's /v1/models returns
@@ -185,16 +182,14 @@ function modelCatalogDefaults({ profileId, mainModel, displayName, description, 
     const profile = profileById(reference.provider);
     if (!profile?.label) return null;
     const modelLabel = modelEntryFor(null, id)?.label || reference.model;
-    // An entry labeled with its provider's own name (the stable llama.cpp
-    // entry) is already fully described by the provider label; joining them
-    // would double it into "llama.cpp (local) - llama.cpp (local)".
+    // An entry labeled with its provider's own name is already fully described;
+    // joining both would duplicate the same label.
     return modelLabel === profile.label ? profile.label : `${profile.label} - ${modelLabel}`;
   };
   // The main model may be the published slug (gpt-5.6-luna@opencode-go); the profile
   // catalog stores bare ids, so resolve through bareModelId. A main model owned by
-  // another provider (custom endpoint or a connected Ollama) reads its window and
-  // vision capability from that provider's catalog entry instead of the active
-  // profile's list, so a text-only Ollama model never advertises image input.
+  // another provider (Custom or Local) reads its window and vision capability
+  // from that provider's catalog entry instead of the active profile's list.
   const mainEntry = modelEntryFor(null, qualifiedMain)
     || availableModels.find((model) => model.id === bareModelId(qualifiedMain));
   const mainModalities = mainEntry?.supportsVision ? ["text", "image"] : ["text"];
@@ -480,85 +475,10 @@ const CUSTOM_PROFILE = {
   },
 };
 
-// The local Ollama profile (dashboard "Ollama (local)" section). Needs no API
-// key; models are filled from the connection snapshot by applyOllamaProfile() at
-// config load, so catalog building and per-model routing see local models
-// without ever re-contacting Ollama between connects.
-const OLLAMA_PROFILE = {
-  id: "ollama",
-  label: "Ollama (local)",
-  baseUrl: OLLAMA_DEFAULT_BASE,
-  tokenEnvName: "",
-  blockedToolTypes: new Set([]),
-  hiddenToolNames: new Set([]),
-  availableModels: [],
-  modelCatalog({ mainModel, baseInstructions }) {
-    return modelCatalogDefaults({
-      profileId: OLLAMA_PROFILE.id,
-      mainModel,
-      displayName: "Ollama (local)",
-      description: "Local Ollama models through the ModelDock Responses gate.",
-      compHash: "modeldock-ollama-v1",
-      inputModalities: ["text", "image"],
-      supportsSearchTool: false,
-      baseInstructions,
-      availableModels: OLLAMA_PROFILE.availableModels,
-    });
-  },
-};
-
-// llama.cpp and vLLM are the same profile with different names: both speak the
-// OpenAI dialect over loopback and neither takes a key. Ollama is separate
-// because its dialect is not - it lists models at /api/tags, not /v1/models.
-//
-// They are distinct providers rather than one "local" slot so a machine can run
-// more than one at a time: a small model under Ollama and a tuned 27B under
-// llama-server is the case this exists for, and one slot would force a choice.
-function localEngineProfile(id, label, defaultBaseUrl, compHash, transport = "responses") {
-  const profile = {
-    id,
-    label,
-    baseUrl: defaultBaseUrl,
-    tokenEnvName: "",
-    blockedToolTypes: new Set([]),
-    hiddenToolNames: new Set([]),
-    transport,
-    availableModels: [],
-    modelCatalog({ mainModel, baseInstructions }) {
-      return modelCatalogDefaults({
-        profileId: id,
-        mainModel,
-        displayName: label,
-        description: `Local ${label} models through the ModelDock gate.`,
-        compHash,
-        inputModalities: ["text", "image"],
-        supportsSearchTool: false,
-        baseInstructions,
-        availableModels: profile.availableModels,
-      });
-    },
-  };
-  return profile;
-}
-
-const LLAMACPP_ENGINE = localEngineDefinition("llamacpp");
-const VLLM_ENGINE = localEngineDefinition("vllm");
-const LLAMACPP_PROFILE = localEngineProfile("llamacpp", `${LLAMACPP_ENGINE.label} (local)`, `http://127.0.0.1:${LLAMACPP_ENGINE.defaultPort}`, "modeldock-llamacpp-v1", "chat");
-const VLLM_PROFILE = localEngineProfile("vllm", `${VLLM_ENGINE.label} (local)`, `http://127.0.0.1:${VLLM_ENGINE.defaultPort}`, "modeldock-vllm-v1");
-
-// The stable llama.cpp entry itself (the id, the slug, and the alias rule)
-// lives in model-identity.mjs, because routing, stats, and boot selection all
-// have to fold on the exact same string. What lives here is the label: the
-// picker identity names the endpoint, never the loaded model.
-export { LLAMACPP_LOCAL_MODEL_ID, LLAMACPP_LOCAL_SLUG } from "./model-identity.mjs";
-export const LLAMACPP_LOCAL_MODEL_LABEL = LLAMACPP_PROFILE.label;
-
 // The generic Local provider. Every keyless OpenAI-compatible origin the user
 // attaches through the Local scan publishes one identity here, spelled
 // "<provider>/<model>@local", so the picker carries a single Local group rather
-// than one group per engine. The engine-specific llama.cpp and vLLM profiles
-// above stay for the older connect flow and for sessions that still carry
-// "Local@llamacpp"; a new attachment never creates them.
+// than one group per engine. Engine-specific profiles never enter the catalog.
 //
 // Routing is per model, like Custom: each custom-endpoints.json entry flagged
 // local:true owns its host, dialect, real upstream id and optional key, and a
@@ -798,10 +718,7 @@ const PROFILES = Object.fromEntries([
   CUSTOM_PROFILE,
   XAI_PROFILE,
   COMMAND_CODE_PROFILE,
-  OLLAMA_PROFILE,
   LOCAL_PROFILE,
-  LLAMACPP_PROFILE,
-  VLLM_PROFILE,
 ].map((profile) => [profile.id, profile]));
 
 // Everything a provider needs to answer about itself lives on the provider.
@@ -809,8 +726,8 @@ const PROFILES = Object.fromEntries([
 // This used to be five separate if-chains - in upstreamTargetFor, in
 // upstreamBaseForModel, in visionEndpointFor, and in two probe helpers - each
 // naming providers by hand. They disagreed: three of them had no case for a
-// local engine, so a llama.cpp model resolved to opencode.ai, and a local
-// vision model still sends its image there today. The table below is the only
+// local endpoint, so a Local model resolved to opencode.ai, and a local vision
+// model sent its image there. The table below is the only
 // registry; a provider that is in it is reachable by construction, and adding
 // one is adding an entry rather than remembering five call sites.
 const trimBase = (value) => String(value || "").replace(/\/+$/, "");
@@ -936,73 +853,8 @@ defineRouting(CUSTOM_PROFILE, {
   target: (config, model) => customWireTarget(config, model),
 });
 
-defineRouting(OLLAMA_PROFILE, {
-  normalizesPayload: true,
-  keyless: true,
-  local: true,
-  // Ollama serves the OpenAI dialect under /v1 while its own API sits at the
-  // root, so the routed base is not the address the user configured.
-  baseUrlFor: (config) => `${normalizeOllamaBase(config?.ollamaBaseUrl || OLLAMA_DEFAULT_BASE)}/v1`,
-  target: (config, model) => ({
-    provider: OLLAMA_PROFILE.id,
-    // The published id is colon-free but Ollama only serves the original tag
-    // (a tag may contain a colon the slug cannot carry), so the wire id comes
-    // from the profile entry.
-    model: modelEntryFor(config, model)?.upstreamId || bareModelId(model),
-    url: `${OLLAMA_PROFILE.baseUrlFor(config)}/responses`,
-    token: "",
-    tokenRequired: false,
-  }),
-});
-
-// llama.cpp and vLLM are keyless and their base is whatever the connect snapshot
-// wrote onto the profile. They DO need one override the default does not give:
-// the published id is now the model's own name ("Qwen3.8 27B") read from the
-// GGUF header, not the endpoint id (which is often the model path). The server
-// only answers to the id it advertises, so the wire must carry the endpoint id.
-// Same rule Ollama uses - its slug is colon-free but the server serves the
-// original tag - and the comment there applies verbatim.
-function localWireTarget(providerId) {
-  return (config, model) => {
-    const transport = profileById(providerId).transport || "responses";
-    const entry = modelEntryFor(config, model);
-    return {
-      provider: providerId,
-      model: entry?.upstreamId || bareModelId(model),
-      url: `${trimBase(profileById(providerId).baseUrl)}/${transport === "chat" ? "chat/completions" : "responses"}`,
-      transport,
-      token: "",
-      tokenRequired: false,
-      // llama.cpp exposes this per-template capability on /props. Qwen's
-      // template rejects a non-empty JSON string here and requires the decoded
-      // mapping, while older templates keep the ordinary OpenAI string shape.
-      toolArgumentsAsObjects: Boolean(entry?.chatTemplateSupportsObjectArguments),
-      cachePrompt: transport === "chat",
-      // llama.cpp can expose an internal multimodal sentinel. Literal copies
-      // in tool output must be escaped before its Chat template sees text.
-      mediaMarker: typeof entry?.mediaMarker === "string" ? entry.mediaMarker : "",
-    };
-  };
-}
-
-defineRouting(LLAMACPP_PROFILE, {
-  keyless: true,
-  local: true,
-  normalizesPayload: true,
-  baseUrlFor: (config) => trimBase(LLAMACPP_PROFILE.baseUrl),
-  target: localWireTarget(LLAMACPP_PROFILE.id),
-});
-defineRouting(VLLM_PROFILE, {
-  keyless: true,
-  local: true,
-  normalizesPayload: true,
-  baseUrlFor: (config) => trimBase(VLLM_PROFILE.baseUrl),
-  target: localWireTarget(VLLM_PROFILE.id),
-});
-
-// The scan-attached Local endpoints. Keyless and loopback like the engine
-// profiles above, but unlike them the host, dialect and real upstream id are
-// per model, exactly as they are for Custom. `cachePrompt` follows the dialect:
+// Scan-attached Local endpoints keep the host, dialect and real upstream id per
+// model, exactly as Custom does. `cachePrompt` follows the dialect:
 // llama.cpp's chat template keeps a prompt-cache prefix per conversation, and
 // the Responses path has no equivalent field to set.
 defineRouting(LOCAL_PROFILE, {
@@ -1158,11 +1010,6 @@ export function applyLocalProfile(config) {
   return LOCAL_PROFILE;
 }
 
-// Populate the ollama profile from the connection snapshot (written by the
-// dashboard connect flow, read back at config load). Every entry keeps its
-// upstreamId (the original tag with the colon) for the wire: the published id is
-// colon-free so the slug is safe for config.toml, but Ollama only serves the
-// original name. Empty snapshot clears the profile (disconnect).
 // Publish what the signed-in subscription can reach. The list is captured at
 // sign-in and replayed from the snapshot on every boot, so a restart never has
 // to contact xAI before the pickers are correct.
@@ -1207,78 +1054,6 @@ export function applyXaiProfile(models) {
   return XAI_PROFILE;
 }
 
-export function applyOllamaProfile(config, snapshot) {
-  const baseUrl = normalizeOllamaBase(snapshot?.baseUrl || config?.ollamaBaseUrl);
-  OLLAMA_PROFILE.baseUrl = baseUrl;
-  OLLAMA_PROFILE.availableModels = Array.isArray(snapshot?.models)
-    ? snapshot.models
-        .filter((model) => model?.id && model?.upstreamId)
-        .map((model) => ({
-          id: model.id,
-          upstreamId: model.upstreamId,
-          label: model.label || model.id,
-          endpoint: "responses",
-          supportsVision: Boolean(model.supportsVision),
-          contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
-          ownerQualified: true,
-          status: model.status || "available",
-        }))
-    : [];
-  return OLLAMA_PROFILE;
-}
-
-// Fill a local engine profile from its connection snapshot, so the catalog and
-// per-model routing publish local models across restarts without re-contacting
-// the engine. Do not import the retired managed compaction override: the
-// catalog computes the shared ratio from the final effective context window.
-export function applyLocalEngineProfile(engineId, snapshot) {
-  const profile = PROFILES[engineId];
-  if (!profile) return null;
-  if (snapshot?.baseUrl) profile.baseUrl = snapshot.baseUrl;
-  // A connected llama.cpp publishes exactly one stable local entry whatever
-  // model it is loading (see LLAMACPP_LOCAL_MODEL_ID). Snapshots written by
-  // older builds carry the file's own name as the id, so the pin happens at
-  // this single projection point instead of migrating the file: catalog,
-  // routing, and warm-base priming agree the moment the snapshot is applied
-  // at startup, without waiting for a rescan. A multi-model llama.cpp server
-  // keeps per-model ids; one launch spec cannot name every advertised model.
-  const stableIdentity = engineId === "llamacpp"
-    && Array.isArray(snapshot?.models) && snapshot.models.length === 1;
-  profile.availableModels = Array.isArray(snapshot?.models)
-    ? snapshot.models
-        .filter((model) => model?.id)
-        .map((model) => ({
-          id: stableIdentity ? LLAMACPP_LOCAL_MODEL_ID : model.id,
-          upstreamId: model.upstreamId || model.id,
-          label: stableIdentity ? LLAMACPP_LOCAL_MODEL_LABEL : (model.label || model.id),
-          endpoint: "responses",
-          supportsVision: Boolean(model.supportsVision),
-          chatTemplateSupportsObjectArguments: Boolean(model.chatTemplateSupportsObjectArguments),
-          mediaMarker: typeof model.mediaMarker === "string" ? model.mediaMarker : "",
-          contextWindow: localContextWindow(Number(model.contextWindow) || undefined),
-          ownerQualified: true,
-          status: model.status || "available",
-        }))
-    : [];
-  return profile;
-}
-
-// The JSON of everything the Codex catalog derives from a profile's published
-// models. A change here means the picker Codex already loaded describes a
-// different world and the user must restart; no change means whatever else
-// moved (a hot-swapped GGUF behind a stable id, launch diagnostics) is
-// invisible to every open session. Restart banners must diff this, not the
-// snapshot file and not the full profile entry (which carries wire ids).
-export function publishedCatalogFingerprint(profileIdOrObject) {
-  const profile = typeof profileIdOrObject === "string" ? PROFILES[profileIdOrObject] : profileIdOrObject;
-  return JSON.stringify((profile?.availableModels || []).map((model) => ({
-    id: model.id,
-    label: model.label,
-    contextWindow: model.contextWindow,
-    supportsVision: Boolean(model.supportsVision),
-    status: model.status || "available",
-  })));
-}
 // The internal routed address remains readable and stable in preferences,
 // usage rollups and diagnostics. It is not the Codex-facing slug; catalog
 // construction encodes that address with codexSlugFor above.
@@ -1317,24 +1092,6 @@ export function providerForModel(config, model) {
 
 // Resolve the curated model entry (label, endpoint, zen flag, vision metadata) for a
 // bare model id. Used by the gateway to pick the upstream base URL per model.
-// Is the stable local entry published right now? That single question is the gate
-// on every llama.cpp alias: with an engine connected, a stale name still means
-// "this machine's local endpoint"; with none, the same name must keep failing with
-// the honest configuration error instead of being invented into existence.
-export function llamaLocalStableEntry() {
-  return PROFILES.llamacpp?.availableModels?.find((entry) => entry.id === LLAMACPP_LOCAL_MODEL_ID) || null;
-}
-
-// A map keyed by published slug, as the catalog publishes it now: keys written
-// before the stable local identity fold onto the entry that endpoint publishes
-// today, so the catalog, the picker and the override stamping pass all read one
-// map. Gated on the stable entry, the same gate every other llama.cpp alias uses:
-// a multi-model llama.cpp server keeps per-model ids, and those keys name
-// different entries rather than each other's old name.
-export function foldContextOverrideKeys(overrides) {
-  return llamaLocalStableEntry() ? foldLlamaLocalKeys(overrides) : overrides;
-}
-
 export function modelEntryFor(config, model) {
   const provider = providerForModel(config, model);
   const bare = bareModelId(model);
@@ -1344,19 +1101,6 @@ export function modelEntryFor(config, model) {
   // made metadata and routing disagree: a bare or misspelled id could borrow an
   // entry from the active profile while providerForModel still sent it to the
   // default provider. Dynamic profiles must register before this lookup.
-  if (provider === "llamacpp" && bare !== LLAMACPP_LOCAL_MODEL_ID) {
-    // llama.cpp publishes one stable entry whatever file it loads, so every name
-    // that endpoint has ever answered to is an alias of it. Resolving the alias at
-    // the entry owner is what keeps a stored reference (a vision model saved before
-    // the rename, a host connected after config load) from being sent upstream as if
-    // it were a wire id: without this the caller gets no entry and falls back to the
-    // stale name, which the server has never heard of. The routed path still
-    // normalizes the slug earlier (normalizeLegacySlug) so the picker, the stats and
-    // the honest 503 all name one identity; with no engine connected there is no
-    // stable entry to resolve to and this returns null, as before.
-    const stable = llamaLocalStableEntry();
-    if (stable) return stable;
-  }
   return null;
 }
 
@@ -1382,4 +1126,4 @@ export function tokenFor(config, model) {
   return upstreamTargetFor(config, model).token || "";
 }
 
-export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, XAI_PROFILE };
+export { OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, XAI_PROFILE };

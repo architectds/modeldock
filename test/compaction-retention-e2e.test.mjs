@@ -61,7 +61,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
 
-const MODEL = "Qwen3.8-27B@llamacpp";
+const MODEL = "fixture/Qwen3.8-27B@local";
 const BASE_BUDGET_CHARS = 40_000;
 const TOOL_OUTPUT_CAP_CHARS = 150;
 
@@ -346,12 +346,18 @@ async function bootLocalHarness(t) {
   });
   const upstreamPort = await listen(upstream);
   t.after(() => closeServer(upstream));
-  await writeFile(path.join(stateDir, "local-engines.json"), JSON.stringify({
-    llamacpp: {
-      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
-      models: [{ id: "Qwen3.8-27B", upstreamId: "Qwen3.8-27B", label: "Qwen3.8-27B", supportsVision: false, contextWindow: 32_768 }],
-    },
-  }), "utf8");
+  const endpointsFile = path.join(stateDir, "custom-endpoints.json");
+  await writeFile(endpointsFile, JSON.stringify([{
+    modelId: "fixture/Qwen3.8-27B",
+    upstreamId: "Qwen3.8-27B",
+    baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+    apiKey: "",
+    label: "fixture / Qwen3.8-27B",
+    local: true,
+    supportsVision: false,
+    contextWindow: 32_768,
+    transport: "chat",
+  }]), "utf8");
 
   const probe = http.createServer();
   const gatewayPort = await listen(probe);
@@ -362,8 +368,9 @@ async function bootLocalHarness(t) {
     env: {
       ...process.env,
       MODELDOCK_PORT: String(gatewayPort),
-      MODELDOCK_PROFILE: "llamacpp",
+      MODELDOCK_PROFILE: "local",
       MODELDOCK_STATE_DIR: stateDir,
+      MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointsFile,
       MODELDOCK_CODEX_HOME: codexHome,
       MODELDOCK_REQUIRE_CALLER_KEY: "0",
       MODELDOCK_MEMORY: "0",

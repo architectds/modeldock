@@ -1,9 +1,9 @@
 // Which hosts count as this machine.
 //
 // Two rules lean on that answer, in opposite directions: plaintext http is allowed
-// only to loopback (the gateway's own bind address, an Ollama base URL, a custom
-// endpoint), and remote image fetches are allowed only *away* from loopback. The
-// membership test behind both was written out five times - config.mjs, ollama.mjs,
+// only to loopback (the gateway's own bind address or a local endpoint), and
+// remote image fetches are allowed only *away* from loopback. The
+// membership test behind both was written out across configuration, discovery,
 // custom-endpoint.mjs twice, media-store.mjs - and the copies had already drifted:
 // media-store stripped the brackets URL.hostname puts around an IPv6 literal, the
 // others did not, so `http://[::1]:11434` failed the check and was refused as a
@@ -30,7 +30,15 @@ export function isLoopbackHost(value) {
 export function sameEndpointHost(left, right) {
   if (!left || !right) return false;
   try {
-    return new URL(left).host === new URL(right).host;
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    const hostKey = (url) => {
+      const hostname = isLoopbackHost(url.hostname)
+        ? "loopback"
+        : url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+      return `${hostname}:${url.port}`;
+    };
+    return hostKey(leftUrl) === hostKey(rightUrl);
   } catch {
     return false;
   }

@@ -63,12 +63,18 @@ test("the built bundle never turns quoted collaboration prose into a live user t
   });
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
-  await writeFile(path.join(stateDir, "local-engines.json"), JSON.stringify({
-    llamacpp: {
-      baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
-      models: [{ id: "Qwen3.8-27B", upstreamId: "Qwen3.8-27B", label: "Qwen3.8-27B", supportsVision: false, contextWindow: 32_768 }],
-    },
-  }), "utf8");
+  const endpointsFile = path.join(stateDir, "custom-endpoints.json");
+  await writeFile(endpointsFile, JSON.stringify([{
+    modelId: "fixture/Qwen3.8-27B",
+    upstreamId: "Qwen3.8-27B",
+    baseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
+    apiKey: "",
+    label: "fixture / Qwen3.8-27B",
+    local: true,
+    supportsVision: false,
+    contextWindow: 32_768,
+    transport: "chat",
+  }]), "utf8");
 
   const probe = http.createServer();
   const gatewayPort = await listen(probe);
@@ -78,8 +84,9 @@ test("the built bundle never turns quoted collaboration prose into a live user t
     env: {
       ...process.env,
       MODELDOCK_PORT: String(gatewayPort),
-      MODELDOCK_PROFILE: "llamacpp",
+      MODELDOCK_PROFILE: "local",
       MODELDOCK_STATE_DIR: stateDir,
+      MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointsFile,
       MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
       MODELDOCK_REQUIRE_CALLER_KEY: "0",
       MODELDOCK_MEMORY: "0",
@@ -101,7 +108,7 @@ test("the built bundle never turns quoted collaboration prose into a live user t
     method: "POST",
     headers: { "content-type": "application/json", "x-codex-session-id": "replay-e2e" },
     body: JSON.stringify({
-      model: "Qwen3.8-27B@llamacpp",
+      model: "fixture/Qwen3.8-27B@local",
       stream: false,
       input: [
         // The model's own rows quoting a collaboration header: history, never a delivery.

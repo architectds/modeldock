@@ -124,7 +124,7 @@ test("event fields with nonfinite or negative values are ignored without moving 
   assert.equal(rollup.lastFoldedAt, "2026-08-18T01:00:00.000Z");
 });
 
-test("local engine definitions have one source for labels, ports, and connectability", () => {
+test("local engine definitions have one source for labels and probe ports", () => {
   const definitions = localEngineDefinitions();
   const ids = definitions.map((definition) => definition.id);
   assert.deepEqual(ids, ["ollama", "llamacpp", "vllm", "openai"]);

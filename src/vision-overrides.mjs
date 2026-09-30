@@ -11,11 +11,7 @@ const defaults = new WeakMap();
 
 export function applyVisionOverrides(profiles, overrides, { modelAddressFor }) {
   for (const profile of profiles) {
-    // Remote directory discovery and the stable llama.cpp row both expose a
-    // user correction surface. /props remains the observed default for local,
-    // but an older server or a projector attached after that observation must
-    // not make the correction disappear on the next catalog refresh.
-    if (!profile.modelDiscovery && profile.id !== "llamacpp") continue;
+    if (!profile.modelDiscovery) continue;
     for (const model of profile.availableModels || []) {
       const value = overrides?.[modelAddressFor(profile.id, model)];
       if (typeof value === "boolean") {

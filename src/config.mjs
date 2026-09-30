@@ -2,11 +2,8 @@ import process from "node:process";
 import os from "node:os";
 import path from "node:path";
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, renameSync, copyFileSync, rmSync } from "node:fs";
-import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, applyLocalEngineProfile, applyOllamaProfile, foldContextOverrideKeys, modelAddressFor, modelRefParts, profileById, routedModelRefFor, llamaLocalStableEntry } from "./profiles.mjs";
-import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
+import { allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, modelAddressFor, modelRefParts, profileById, routedModelRefFor } from "./profiles.mjs";
 import { normalizeBaseUrl } from "./custom-endpoint.mjs";
-import { OLLAMA_DEFAULT_BASE, ollamaSnapshotPath, readOllamaSnapshot } from "./ollama.mjs";
-import { CONNECTABLE_ENGINES, readLocalEnginesSnapshot } from "./local-engines.mjs";
 import { applyContextOverrides, readContextOverrides } from "./context-overrides.mjs";
 import { applyVisionOverrides, readVisionOverrides } from "./vision-overrides.mjs";
 import { readModelToggles } from "./model-toggles.mjs";
@@ -413,11 +410,13 @@ export function loadConfig() {
   // CODEX_HOME may point at a CLI runtime parent rather than the Desktop store;
   // only ModelDock's explicit test/admin override may replace this path.
   const codexHome = path.resolve(process.env.MODELDOCK_CODEX_HOME || path.join(os.homedir(), ".codex"));
-  const profileId = (process.env.MODELDOCK_PROFILE || DEFAULT_PROFILE_ID).trim().toLowerCase();
-  const profile = profileById(profileId);
+  const requestedProfileId = (process.env.MODELDOCK_PROFILE || DEFAULT_PROFILE_ID).trim().toLowerCase();
+  const retiredLocalProfile = ["llamacpp", "vllm", "ollama"].includes(requestedProfileId);
+  const profile = profileById(retiredLocalProfile ? DEFAULT_PROFILE_ID : requestedProfileId);
   if (!profile) {
-    throw new Error(`Unknown MODELDOCK_PROFILE: ${profileId}`);
+    throw new Error(`Unknown MODELDOCK_PROFILE: ${requestedProfileId}`);
   }
+  const profileId = profile.id;
   const nativeCatalogFile = process.env.MODELDOCK_NATIVE_CATALOG_FILE
     ? path.resolve(process.env.MODELDOCK_NATIVE_CATALOG_FILE)
     : "";
@@ -461,23 +460,11 @@ export function loadConfig() {
   // a loader that writes .env writes whichever .env it resolves, which under
   // `node --test` is the user's real one.
   const customEndpoints = readCustomEndpoints();
-  // The keyless OpenAI-dialect engines republish what their last connect saw,
-  // without probing a machine that may be offline now. Applied this early because
-  // the llama.cpp pin decides the slug its one entry is published under, and every
-  // value below that is keyed by a published slug is read after it - the context
-  // overrides are keyed by it, so they are folded onto it, not before it. Ollama
-  // is the one that cannot move here: its profile is derived from the frozen
-  // config (see the applyOllamaProfile call below).
-  const localSnapshot = readLocalEnginesSnapshot() || {};
-  for (const engineId of CONNECTABLE_ENGINES) applyLocalEngineProfile(engineId, localSnapshot[engineId]);
   // Native models are appended to the published set rather than living in a
   // profile, so the stamping pass at the end cannot reach them; the catalog and
   // the pickers read this map instead. Without it, editing a native model's
   // window returned 200 and changed neither the page nor the file Codex reads.
-  // Folded on read: a window measured before the stable local identity is filed
-  // under the file's own name, and filing it there left the published window
-  // untouched while the edit answered 200.
-  const contextOverrides = foldContextOverrideKeys(readContextOverrides());
+  const contextOverrides = readContextOverrides();
   const visionOverrides = readVisionOverrides();
   // Which published models reach Codex's picker. Read here so every consumer of
   // a config - the catalog writer, the roster, a test fixture - sees the same
@@ -488,10 +475,6 @@ export function loadConfig() {
   // but belongs to the Local profile, so it must not become the credential
   // source or the display default for Custom.
   const primaryCustomEndpoint = customEndpoints.find((entry) => !entry.local) || null;
-  // Ollama connection snapshot: the model list captured at connect time, restored
-  // on every boot so a restart never has to re-contact Ollama. Reconnect refreshes.
-  const ollamaSnapshotFile = ollamaSnapshotPath();
-  const ollamaSnapshot = readOllamaSnapshot(ollamaSnapshotFile);
   const tokens = {
     ...directTokens,
     [DEFAULT_PROFILE_ID]: opencodeGoToken,
@@ -606,8 +589,6 @@ export function loadConfig() {
     contextOverrides,
     visionOverrides,
     modelToggles,
-    ollamaBaseUrl: String(ollamaSnapshot?.baseUrl || OLLAMA_DEFAULT_BASE),
-    ollamaSnapshotFile,
     mainModel,
     visionModel,
     // Distinguish an explicit user choice (including "none") from the empty
@@ -669,22 +650,6 @@ export function loadConfig() {
   // Custom: the catalog, the picker and per-model routing all read the registry,
   // so the entries have to be there before anything derives a slug from them.
   applyLocalProfile(config);
-  // Populate the ollama profile from the connection snapshot so local models stay
-  // published across restarts without re-contacting Ollama.
-  applyOllamaProfile(config, ollamaSnapshot);
-  // A saved vision reference outlives a rename: before the stable entry it
-  // could name a llama.cpp file that has since been replaced, and vision
-  // escalation consults this value directly. With no stable entry published
-  // (no engine connected) the reference stays untouched - it may name a host
-  // that is coming back. The main-model history folds at its own reader
-  // (readLatestMainRoute replays events; mainModelFor folds them again here).
-  // One rule owns the name test (isLlamaLocalName) and one owns the publication
-  // gate (llamaLocalStableEntry); this layer only decides when it applies: a saved
-  // reference is rewritten while the stable entry is published, and left alone
-  // otherwise because it may name a host that is coming back.
-  if (llamaLocalStableEntry() && isLlamaLocalName(config.visionModel)) {
-    config.visionModel = canonicalLlamaLocalKey(config.visionModel);
-  }
   // Last, so a user correction wins over the shipped catalog and over
   // whatever a local engine just reported about itself.
   applyContextOverrides(allProfiles(), config.contextOverrides, { modelAddressFor });

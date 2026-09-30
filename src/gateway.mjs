@@ -7,9 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { allProfiles, bareModelId, modelAddressFor, modelEntryFor, modelRefParts, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
 import { codexModelRef } from "./model-ref.mjs";
-import { canonicalLlamaLocalKey, isLlamaLocalName } from "./model-identity.mjs";
 import { compressConversation, projectLocalHistory } from "./compress.mjs";
-import { normalizeOllamaBase } from "./ollama.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError, isLocalConnectionFailure, localEngineDownMessage } from "./error-translation.mjs";
 import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "./router.mjs";
@@ -75,7 +73,7 @@ const NATIVE_REDUNDANT_NAMESPACE_CHILDREN = new Set(["web_search_exa", "vision_i
 // the selected wire cannot encode: unsupported hosted types, model-specific
 // modality conflicts, and provider-declared blocked types.
 
-// A custom/Ollama backend that runs on this machine (loopback base URL).
+// A Custom or Local backend that runs on this machine (loopback base URL).
 //
 // This is the real signal behind the local instruction compaction and compact
 // pre-compression, because both exist for slow local models. Tool availability
@@ -398,11 +396,7 @@ const NATIVE_COMPACTION_FALLBACK_CLASSES = new Set([
 function mainModelFor(services, sessionId) {
   const sessionModel = services.derivedFallback?.resolve?.(sessionId, "");
   if (sessionModel) return sessionModel;
-  const selected = canonicalLlamaLocalKey(String(services.mainModel || services.config?.mainModel || ""));
-  // A boot selection can be replayed from a usage event recorded before the
-  // stable entry existed (the latest-main-route read replays history, not
-  // config). Fold it onto the stable identity here so the fallback route and
-  // the catalog row it seeds cannot disagree with what the picker publishes.
+  const selected = String(services.mainModel || services.config?.mainModel || "");
   // A routed selection is provider-qualified or a known legacy bare id; native
   // slugs are bare and are published from Codex's captured catalog.
   if (selected && (modelRefParts(selected).qualified || services.knownModels?.has?.(selected))) return selected;
@@ -427,18 +421,6 @@ export function normalizeLegacySlug(model, knownModels) {
       ? reference.model
       : modelAddressFor(reference.provider, reference.model)
     : model;
-  // llama.cpp publishes one stable local entry that replaces whatever name the
-  // loaded file has published over time ("Qwen3.8-27B@llamacpp", a GGUF codename
-  // like "Src@llamacpp", a raw shard path). A session pinned to an older name
-  // means "the llama.cpp server on this machine", and that server is answering;
-  // answering it is the wire contract of the stable entry. The alias only fires
-  // for a name that is not currently published while the stable one is, so with
-  // no local engine connected the request still falls through to the honest
-  // 503 configuration error. Bare ids and every other provider pass untouched.
-  if (knownModels && isLlamaLocalName(normalized) && !knownModels.has(normalized)) {
-    const stable = canonicalLlamaLocalKey(normalized);
-    if (knownModels.has(stable)) return stable;
-  }
   if (reference.qualified) return normalized;
   const match = normalized.match(/^([a-z0-9][a-z0-9-]*)\/(.+)$/);
   if (!match || !knownModels) return normalized;
@@ -1267,7 +1249,7 @@ export function normalizeGatewayInput(input) {
 
 // Codex emits its built-in tools as custom_tool_call / local_shell_call items
 // (with matching _output siblings). Upstreams that only speak the standard
-// Responses wire - Ollama's /v1/responses dialect in particular - reject those
+// Standard Responses backends reject those
 // as unknown input item types, so they are rewritten to the standard
 // function_call / function_call_output shape before forwarding. Codex carries
 // the call payload in `input`; the standard wire expects it in `arguments`.
@@ -1370,12 +1352,12 @@ function standardToolArguments(value) {
   return JSON.stringify(value);
 }
 
-// Local Responses backends (Ollama, llama.cpp behind a custom endpoint) implement
+// Local Responses backends implement
 // the standard Responses subset and reject Codex's own item types. Run the generic
 // gateway normalization first (pairing, compaction, orphan removal on the
 // Codex-native shapes) and then rewrite the remaining Codex tool types to the
 // standard wire.
-export function normalizeOllamaInput(input) {
+export function normalizeStandardLocalInput(input) {
   if (!Array.isArray(input)) return input;
   return normalizeGatewayInput(input).map(normalizeStandardToolItem);
 }
@@ -1384,7 +1366,7 @@ export function normalizeOllamaInput(input) {
 // ("System message must be at the beginning") and rejects a mid-history system
 // item - Codex can emit one after compaction or a tool turn. Merge every
 // system item's text into a single leading system message and drop the
-// originals, so local backends (llama.cpp / Ollama) always see system first.
+// originals, so local backends always see system first.
 function splitLocalSystem(input) {
   const texts = [];
   const rest = [];
@@ -1413,13 +1395,13 @@ export function hoistLocalSystem(input) {
 // Local backend input, used by the custom route (typically llama.cpp). It needs
 // both local adaptations, not just one: system hoisting so Codex's mid-history
 // system items never trip llama.cpp's template validator, AND the standard-item
-// rewrite, because llama.cpp implements the same Responses subset as Ollama and
+// rewrite, because local servers implement the standard Responses subset and
 // rejects Codex's custom_tool_call / local_shell_call types. Missing the rewrite
 // meant a custom llama.cpp endpoint failed on the first tool call - which is
 // nearly every turn in an agentic session.
 export function normalizeLocalInput(input) {
   if (!Array.isArray(input)) return input;
-  return hoistLocalSystem(normalizeOllamaInput(input));
+  return hoistLocalSystem(normalizeStandardLocalInput(input));
 }
 
 // llama.cpp's /v1/responses renders `instructions` as the system message, so a
@@ -1438,7 +1420,7 @@ export function normalizeLocalPayload(payload) {
       : "";
   if (instructions) {
     const { texts, rest } = splitLocalSystem(payload.input);
-    const input = normalizeOllamaInput(rest);
+    const input = normalizeStandardLocalInput(rest);
     return {
       ...payload,
       instructions: texts.length ? [instructions, ...texts].filter(Boolean).join("\n") : instructions,
@@ -1553,7 +1535,7 @@ function appendLocalGuidance(instructions) {
 
 // llama.cpp's jinja template accepts only xhigh/medium/low and raises
 // on "high" (Codex's default effort). Map "high" to the closest accepted value
-// and drop anything else so local custom/Ollama routes never trip the template
+// and drop anything else so local Chat routes never trip the template
 // validator. Valid efforts pass through so the picker's selection is honored.
 export function normalizeLocalReasoning(payload) {
   if (!payload || typeof payload !== "object") return payload;
@@ -2469,9 +2451,8 @@ export function restoreCustomToolOutput(output, customToolNames) {
 // the id reaches the upstream.
 // Where a request goes and what credential it carries. The answer belongs to
 // the provider, so this asks it. The chain of if (provider === ...) that used
-// to live here was a second registry maintained by hand, and llamacpp and
-// vllm were missing from it while having perfectly good profiles - so they
-// fell through to OpenCode Go carrying the OpenCode token.
+// to live here was a second registry maintained by hand, so new providers
+// could fall through to OpenCode Go carrying the wrong token.
 export { upstreamTargetFor };
 
 export { RouteAffinity };
@@ -3778,7 +3759,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     directVision: false,
   };
   recordDerivedFallback(services, sessionId, route);
-  // Custom/ollama backends must see the same adapted shape on the compact path
+  // Custom and Local backends must see the same adapted shape on the compact path
   // as on the main relay path: Codex's mid-history system/developer items
   // hoisted into a single leading system (or merged into instructions), the
   // standard tool-item rewrite, and a reasoning effort the jinja template
@@ -4486,12 +4467,11 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
           onFirstResponse: markFirstResponse,
           restoreCall: restoreChatCall,
           signal: requestSignal,
-          // Every local engine (llama.cpp, vLLM, and a scan-attached Local
-          // endpoint) reports a semantic finish_reason once it has released the
+          // A local Chat endpoint can report a semantic finish_reason once it has released the
           // request; accepting it as the end of the turn keeps the gateway lease
           // from outliving the answer. Hosted Chat upstreams keep the [DONE]
           // contract they were tested against.
-          completeOnFinishReason: target.provider === "llamacpp" || target.completeOnFinishReason === true,
+          completeOnFinishReason: target.completeOnFinishReason === true,
           onTerminal: () => upstreamController.abort(),
         });
         tee.end();

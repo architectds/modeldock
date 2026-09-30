@@ -1295,7 +1295,7 @@ const PROVIDER_MARKS = {
     color: "#f4f4f4",
     image: "/assets/commandcode-favicon.svg",
   },
-  llamacpp: {
+  local: {
     color: "#b9c8d4",
     viewBox: "0 0 24 24",
     path: "M3 4h18v16H3zM7 8h2v2H7zm4 0h6v2h-6zM7 12h2v2H7zm4 0h4v2h-4zM7 16h10v2H7z",
@@ -1306,9 +1306,6 @@ const PROVIDER_MARKS = {
     path: "M8 3v5a4 4 0 0 0 8 0V3h-2v5a2 2 0 0 1-4 0V3zM3 11h18v2H3zm5 5h8v2H8z",
   },
 };
-// The Local group reuses the existing neutral server mark, not a llama brand.
-PROVIDER_MARKS.local = PROVIDER_MARKS.llamacpp;
-
 function providerMark(provider) {
   const key = String(provider || "").toLowerCase();
   const mark = PROVIDER_MARKS[key] || PROVIDER_MARKS.custom;
@@ -2317,13 +2314,10 @@ async function disconnectLocalEndpoint(target, item, button) {
   button.disabled = true;
   const stateLine = item.querySelector(".local-engine-state");
   try {
-    const registration = target.mode === "registration";
-    const route = registration ? "/api/custom/remove"
-      : target.engine === "ollama" ? "/api/ollama/disconnect" : "/api/local/disconnect";
-    const reply = await fetch(route, {
+    const reply = await fetch("/api/custom/remove", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(registration ? { modelId: target.modelId, local: true } : { engine: target.engine }),
+      body: JSON.stringify({ modelId: target.modelId, local: true }),
     });
     const payload = await reply.json().catch(() => ({}));
     if (!reply.ok) throw new Error(payload.error?.message || `Disconnect ${reply.status}`);
@@ -2495,24 +2489,14 @@ async function renderLocalEngines() {
 }
 
 function localEngineRow(engine) {
-  const offline = Boolean(engine.offline);
-  const connected = Boolean(engine.connected);
-  const count = Number(engine.connectedModels) || 0;
-  const state = connected && offline
-    ? t("local.gatewayOffline", { count })
-    : connected
-      ? t("local.gatewayConnected", { count })
-      : t("local.gatewayNotConnected");
   const item = localRow({
     label: engine.label || engine.engine,
     baseUrl: engine.baseUrl,
     models: engine.models,
-    state,
-    mode: connected ? "local" : "connect",
+    state: t("local.routeAvailable"),
+    mode: "connect",
     engine: engine.engine,
   });
-  if (connected) item.classList.add("is-connected");
-  if (offline) item.classList.add("is-offline");
   appendWarnings(item, engine.warnings);
   return item;
 }
@@ -2524,7 +2508,7 @@ function localRegistrationRow(registration) {
     label: registration.label || registration.modelId || registration.baseUrl,
     baseUrl: registration.baseUrl,
     models: registration.upstreamId ? [registration.upstreamId] : [],
-    state: registration.offline ? t("local.registrationOffline") : t("local.registrationSaved"),
+    state: registration.offline ? t("local.routeOffline") : t("local.routeConnected"),
     mode: "registration",
     modelId: registration.modelId,
   });
@@ -2543,7 +2527,7 @@ $("local-rescan")?.addEventListener("click", () => {
 });
 // --- Configured endpoints (API page) ---
 //
-// One record per model rather than one slot: a self-hosted vLLM alongside a
+// One record per model rather than one slot: a self-hosted API alongside a
 // third-party API is an ordinary setup, and the slot this replaced silently
 // overwrote the first endpoint when a second was added.
 // One field per configured endpoint, shaped like the preset above it: the

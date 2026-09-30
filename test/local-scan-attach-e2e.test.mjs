@@ -197,13 +197,26 @@ test("built bundle probes a keyless local origin without saving, then attaches o
     addedAt: "2026-01-03T00:00:00.000Z",
   };
   await writeFile(endpointFile, JSON.stringify([seeded, previousLocal, remoteSameName]));
+  // An older install may still carry an engine-specific snapshot. It remains
+  // useful to the Local Hosts management page, but it must never resurrect the
+  // retired llama.cpp provider in either picker. Local publication is owned by
+  // the explicit Local registration created below.
+  await writeFile(path.join(stateDir, "local-engines.json"), JSON.stringify({
+    llamacpp: {
+      baseUrl: `${origin}/v1`,
+      models: [{ id: "LegacyLlamaModel", upstreamId: UPSTREAM_ID, label: "Legacy llama.cpp model", contextWindow: 262144 }],
+    },
+  }));
 
   const gatewayPort = await freePort();
   const autostartKey = `HKCU\\Software\\ModelDockTests\\local-scan-${process.pid}`;
   const gatewayEnv = {
     ...process.env,
     MODELDOCK_PORT: String(gatewayPort),
-    MODELDOCK_PROFILE: "opencode-go",
+    // An upgrade may still have the retired engine-specific provider selected.
+    // That stale default cannot republish it; the explicit attachment below is
+    // the only action that creates a new Local picker entry.
+    MODELDOCK_PROFILE: "llamacpp",
     OPENCODE_GO_TOKEN: "fixture-go-key",
     MODELDOCK_STATE_DIR: stateDir,
     MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointFile,
@@ -326,10 +339,16 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const attachedRow = await catalogSlug(MODEL_ID);
   assert.ok(attachedRow, `the catalog must publish a Codex-safe slug for ${MODEL_ID}`);
   assert.equal(decodeSlug(attachedRow.slug), EXPECTED_INTERNAL_ID, "the slug must decode to the published identity");
-  assert.ok(
-    attachedRow.display_name?.includes(PROVIDER_NAME) && attachedRow.display_name?.includes(MODEL_NAME),
-    `the picker label must name the provider and model, got ${attachedRow.display_name}`,
-  );
+  assert.equal(attachedRow.display_name, `Local - ${PROVIDER_NAME} / ${MODEL_NAME}`,
+    "the picker label must be Local plus the user-provided provider/model name");
+  const modelState = await (await fetch(`${api}/api/models`)).json();
+  const providerIds = modelState.providers.map((entry) => entry.id);
+  assert.ok(providerIds.includes("local"), "the unified Local provider is published");
+  assert.ok(!providerIds.includes("llamacpp"), "the retired llama.cpp provider cannot reappear from a saved snapshot");
+  assert.ok(!providerIds.includes("vllm"), "the retired vLLM provider cannot appear in the picker");
+  assert.ok(!providerIds.includes("ollama"), "the retired Ollama provider cannot appear in the picker");
+  assert.ok(!modelState.options.some((entry) => ["llamacpp", "vllm", "ollama"].includes(entry.provider)),
+    "no engine-specific local model may bypass the Local provider");
 
   // 5. A full Codex-shaped tool turn reaches the real upstream id over Chat.
   const relay = (slug) => fetch(`${api}/v1/responses`, {
@@ -375,6 +394,21 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const restoredTurns = received.filter((entry) => entry.method === "POST" && entry.path === "/v1/chat/completions" && entry.body?.stream === true);
   assert.equal(restoredTurns.length, attachedTurns.length + 1, "the restarted gateway must relay again");
   assert.equal(restoredTurns.at(-1).body.model, UPSTREAM_ID, "the restarted routing still sends the real upstream id");
+
+  // A saved registration is itself a scan candidate. This covers services on
+  // non-default ports whose owning process is Node, Python, WSL, or a container
+  // relay and therefore is not classified as an engine process. Loopback
+  // spellings are one network identity: a route saved as localhost must match
+  // the scanner's 127.0.0.1 probe instead of being reported offline.
+  const aliased = savedEndpoints().map((entry) => entry.local && entry.modelId === MODEL_ID
+    ? { ...entry, baseUrl: entry.baseUrl.replace("127.0.0.1", "localhost") }
+    : entry);
+  await writeFile(endpointFile, JSON.stringify(aliased));
+  const liveDiscovery = await (await fetch(`${api}/api/local/discover`)).json();
+  const liveRegistration = liveDiscovery.registrations?.find((entry) => entry.modelId === MODEL_ID);
+  assert.ok(liveRegistration, "the saved non-default Local port must be scanned");
+  assert.equal(liveRegistration.offline, false,
+    "localhost and 127.0.0.1 must describe the same live Local endpoint");
 
   // An offline endpoint stays registered and selectable; only its health changes.
   await closeServer(upstream);

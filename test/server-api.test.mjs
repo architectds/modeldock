@@ -8,7 +8,7 @@ import zlib from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { createApp, createServices, startServer, initAutostartDefault, codexModelCatalog, decodeZstdBody } from "../src/server.mjs";
-import { codexSlugFor, OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, OLLAMA_PROFILE, applyOllamaProfile, applyXaiProfile, profileById } from "../src/profiles.mjs";
+import { codexSlugFor, OPENCODE_GO_PROFILE, DEEPSEEK_OFFICIAL_PROFILE, applyXaiProfile, profileById } from "../src/profiles.mjs";
 import { decryptSecret } from "../src/secrets.mjs";
 import {
   ZSTD_COMPRESSED_HARD_LIMIT_BYTES,
@@ -265,68 +265,6 @@ test("native vision selection persists its provider without changing the Codex w
   assert.equal(afterEnable.selected.visionModel, "gpt-5.6-luna",
     "re-enabling must not reinterpret native Luna as OpenCode Go Luna");
   assert.match(await readFile(envFile, "utf8"), /^MODELDOCK_VISION_MODEL=gpt-5\.6-luna@openai$/m);
-});
-
-test("connecting Ollama publishes local models without changing the selected main model", async (t) => {
-  const stateDir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-ollama-"));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
-  const ollamaSnapshotFile = path.join(stateDir, "ollama-models.json");
-  const instance = await startApp({ ollamaSnapshotFile });
-  t.after(instance.stop);
-  t.after(() => { OLLAMA_PROFILE.availableModels = []; });
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    const href = String(url);
-    if (!href.includes("127.0.0.1:11434")) return originalFetch(url, options);
-    if (href.endsWith("/api/tags")) {
-      return new Response(JSON.stringify({
-        models: [
-          { name: "qwen3.8:27b", capabilities: ["completion"], details: { context_length: 262144 } },
-        ],
-      }), { status: 200, headers: { "content-type": "application/json" } });
-    }
-    if (href.endsWith("/v1/responses")) {
-      return new Response(JSON.stringify({ id: "probe-ok", object: "response" }), { status: 200 });
-    }
-    return new Response("not found", { status: 404 });
-  };
-  t.after(() => { globalThis.fetch = originalFetch; });
-
-  const before = await (await fetch(`${instance.base}/api/models`)).json();
-  assert.equal(before.selected.mainModel, "deepseek-v4-flash");
-
-  const connected = await fetch(`${instance.base}/api/ollama/connect`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  assert.equal(connected.status, 200);
-  const body = await connected.json();
-  assert.equal(body.connected, true);
-  assert.equal(body.settings.ollama.models.length, 1);
-
-  const after = await (await fetch(`${instance.base}/api/models`)).json();
-  assert.equal(after.selected.mainModel, "deepseek-v4-flash", "connect never rewrites the selected main model");
-  const ollamaEntry = after.options.find((model) => model.provider === "ollama");
-  assert.equal(ollamaEntry.id, "qwen3.8-27b@ollama", "Ollama models publish as owner-qualified candidates");
-
-  const selected = await fetch(`${instance.base}/api/models`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mainModel: ollamaEntry.id }),
-  });
-  assert.equal(selected.status, 200);
-  assert.equal((await selected.json()).selected.mainModel, ollamaEntry.id);
-
-  const disconnected = await fetch(`${instance.base}/api/ollama/disconnect`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  assert.equal(disconnected.status, 200);
-  const afterDisconnect = await (await fetch(`${instance.base}/api/models`)).json();
-  assert.equal(afterDisconnect.selected.mainModel, "deepseek-v4-flash@opencode-go",
-    "disconnect derives a serviceable fallback instead of retaining Ollama or hardcoding another provider");
 });
 
 test("switching the main provider keeps a vision model owned by another enabled provider", async (t) => {
@@ -999,49 +937,6 @@ test("Grok-only onboarding selects a working xAI main and vision route", async (
   assert.deepEqual(models.selected, {
     mainModel: "grok-4.5@xai",
     visionModel: "grok-4.5@xai",
-  });
-  assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
-});
-
-test("local-only onboarding selects a connected Ollama route without a token", async (t) => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "modeldock-server-onboard-ollama-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  t.after(() => applyOllamaProfile({}, null));
-  applyOllamaProfile({}, {
-    baseUrl: "http://127.0.0.1:11434",
-    models: [{
-      id: "qwen3.8-27b",
-      upstreamId: "qwen3.8:27b",
-      label: "qwen3.8:27b",
-      supportsVision: false,
-      contextWindow: 262144,
-    }],
-  });
-  await writeFile(path.join(dir, "config.toml"), 'model = "gpt-5.6-sol"\n', "utf8");
-
-  const instance = await startApp({
-    tokens: {},
-    codexHome: dir,
-    envFile: path.join(dir, "modeldock.env"),
-    ollamaSnapshotFile: path.join(dir, "ollama-models.json"),
-  });
-  t.after(instance.stop);
-
-  const onboard = await (await fetch(`${instance.base}/api/onboarding`)).json();
-  assert.equal(onboard.anyTokenConfigured, true, "a connected keyless engine unlocks the wizard apply gate");
-
-  const applied = await fetch(`${instance.base}/api/config/mode`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ mode: "on", nativeMerge: false }),
-  });
-  assert.equal(applied.status, 200);
-
-  const models = await (await fetch(`${instance.base}/api/models`)).json();
-  assert.equal(models.selectedProvider, "ollama");
-  assert.deepEqual(models.selected, {
-    mainModel: "qwen3.8-27b@ollama",
-    visionModel: "",
   });
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 200);
 });

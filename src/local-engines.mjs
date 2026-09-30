@@ -10,11 +10,11 @@
 // both speak the OpenAI dialect and either can be moved to the other's port,
 // so a port alone would mislabel them.
 import path from "node:path";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { isLoopbackHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
-import { launchSpecFrom, listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
+import { listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
 import { modelFactsAreStale, readModelFacts } from "./gguf.mjs";
 import { LOCAL_ENGINE_DEFINITIONS, localEngineDefinitions } from "./local-engine-definitions.mjs";
 
@@ -26,30 +26,17 @@ export class LocalEngineError extends Error {
   }
 }
 
-// Ollama is listed first because it is the only one with a dedicated connect
-// path; the rest share the keyless OpenAI-compatible route.
 const LOCAL_CANDIDATES = localEngineDefinitions()
   .filter((entry) => entry.defaultPort > 0 && entry.id !== "openai")
   .map((entry) => ({ port: entry.defaultPort, hint: entry.label }));
-
-// The engines this gateway can attach a profile to. Ollama is absent because
-// it connects through its own older route and snapshot. Kept in one place so
-// the discovery, the route, and the page cannot drift into disagreeing about
-// which engines are offerable - which is exactly how this feature shipped
-// unreachable the first time.
-export const CONNECTABLE_ENGINES = localEngineDefinitions()
-  .filter((entry) => entry.connectable)
-  .map((entry) => entry.id);
 
 export const ENGINE_LABELS = Object.fromEntries(
   Object.values(LOCAL_ENGINE_DEFINITIONS).map((entry) => [entry.id, entry.label]),
 );
 
 // Pure: given what each probe returned, name the engine. The names are the
-// ids used everywhere else - the provider suffix, the snapshot key, the
-// connect route - because a second vocabulary here is a bug waiting to be
-// written, and once was: discovery said "llama.cpp" while the route only
-// accepted "llamacpp", so nothing could ever be connected.
+// ids used by discovery and management. Publication does not use these ids;
+// every scanned endpoint is attached under the single Local provider.
 //
 // Order is by how specific the evidence is. /props is llama.cpp's own and no
 // one else serves it. /version is vLLM's; without it vLLM is just another
@@ -128,10 +115,6 @@ export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 80
       chatTemplateSupportsObjectArguments: Boolean(props?.chat_template_caps?.supports_object_arguments),
       mediaMarker: typeof props?.media_marker === "string" ? props.media_marker : "",
     } : {}),
-    // A bare OpenAI-compatible server is discovered but not connectable here:
-    // it has no profile to attach to, and the API page already takes an
-    // arbitrary endpoint with a key.
-    connectable: CONNECTABLE_ENGINES.includes(engine),
   };
 }
 
@@ -197,30 +180,6 @@ function describeFromProcess(engine, listener, factsOptions) {
   return described;
 }
 
-// One file keyed by engine rather than a file per engine: a fourth engine then
-// costs a key, not a new path to remember, back up, and clean up. Ollama keeps
-// its own snapshot - it predates this and renaming it would strand anyone
-// mid-upgrade for no gain.
-export function localEnginesSnapshotPath() {
-  return stateFile("local-engines.json");
-}
-
-export function readLocalEnginesSnapshot(file = localEnginesSnapshotPath()) {
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-export function writeLocalEngineSnapshot(file, engine, snapshot) {
-  const all = readLocalEnginesSnapshot(file) || {};
-  all[engine] = snapshot;
-  atomicWriteJsonSync(file, all);
-  return file;
-}
-
 // What a model file costs, remembered so the ledger does not re-read a 12 GiB
 // file on every scan. Keyed by the model PATH rather than by the engine: the
 // facts belong to the file, and two engines can serve the same one.
@@ -266,39 +225,4 @@ export function modelFactsFor(modelPath, { file = modelFactsCachePath(), read = 
   } catch {
     return cached || null;
   }
-}
-
-export function clearLocalEngineSnapshot(file, engine) {
-  const all = readLocalEnginesSnapshot(file);
-  if (!all || !(engine in all)) return file;
-  delete all[engine];
-  try {
-    if (Object.keys(all).length === 0) {
-      rmSync(file, { force: true });
-      return file;
-    }
-    atomicWriteJsonSync(file, all);
-  } catch {
-    // Best effort: a stale entry is only honoured while it still parses.
-  }
-  return file;
-}
-
-
-// The remembered launch for an engine, or null. Reading it through one
-// function keeps the shape of the snapshot an implementation detail of this
-// module rather than something the restart route has to know.
-export function rememberedLaunch(engine, file = localEnginesSnapshotPath()) {
-  const spec = readLocalEnginesSnapshot(file)?.[engine]?.launch;
-  if (!spec?.binary || !Array.isArray(spec.args)) return null;
-  return { binary: spec.binary, args: spec.args };
-}
-
-// Attach the launch of whatever process is serving this port, when we could
-// attribute one. A port we could not attribute simply carries no launch, and
-// the Restart control stays hidden rather than offering a guess.
-export async function launchSpecForPort(port, { listeners = null } = {}) {
-  const observed = listeners || await listEngineListeners();
-  const match = observed.find((listener) => Number(listener?.port) === Number(port));
-  return launchSpecFrom(match);
 }

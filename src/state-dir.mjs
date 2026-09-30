@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 
 // Where ModelDock keeps its per-install state: owner records, the caller key, the
-// published catalog, the Ollama snapshot, compaction reports. MODELDOCK_STATE_DIR
+// published catalog, local management observations, compaction reports. MODELDOCK_STATE_DIR
 // redirects the whole directory so a spawned test gateway (the mock-install test
 // runs the real installer, which starts a real gateway) keeps its bookkeeping in
 // its own throwaway root instead of littering the user's ~/.modeldock.
