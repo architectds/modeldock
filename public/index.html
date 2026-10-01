@@ -218,27 +218,36 @@
                 </div>
                 <p id="xai-error" class="custom-error" aria-live="polite" hidden></p>
               </div>
-              <label class="field">
+              <div class="field provider-credential-field">
                 <div class="field-head">
-                  <span data-i18n="settings.goLabel">OpenCode Go token</span>
+                  <label for="settings-go-token" data-i18n="settings.goLabel">OpenCode Go token</label>
                   <a href="https://opencode.ai/go?ref=P2133HRY5J" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-go-token" data-provider-token="opencode-go" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-              </label>
-              <label class="field" id="commandcode-field">
+                <div class="provider-credential-row">
+                  <input id="settings-go-token" data-provider-token="opencode-go" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                  <button type="button" class="custom-action provider-disconnect" data-provider-disconnect="opencode-go" data-i18n="xai.disconnect" hidden>Disconnect</button>
+                </div>
+              </div>
+              <div class="field provider-credential-field" id="commandcode-field">
                 <div class="field-head">
-                  <span data-i18n="settings.ccLabel">Command Code API key</span>
+                  <label for="settings-commandcode-token" data-i18n="settings.ccLabel">Command Code API key</label>
                   <a href="https://commandcode.ai/provider" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-commandcode-token" data-provider-token="commandcode" type="password" placeholder="user_..." autocomplete="off" spellcheck="false" />
-              </label>
-              <label class="field" id="deepseek-field">
+                <div class="provider-credential-row">
+                  <input id="settings-commandcode-token" data-provider-token="commandcode" type="password" placeholder="user_..." autocomplete="off" spellcheck="false" />
+                  <button type="button" class="custom-action provider-disconnect" data-provider-disconnect="commandcode" data-i18n="xai.disconnect" hidden>Disconnect</button>
+                </div>
+              </div>
+              <div class="field provider-credential-field" id="deepseek-field">
                 <div class="field-head">
-                  <span data-i18n="settings.dsLabel">DeepSeek API key</span>
+                  <label for="settings-deepseek-token" data-i18n="settings.dsLabel">DeepSeek API key</label>
                   <a href="https://platform.deepseek.com/" target="_blank" rel="noopener noreferrer" data-i18n="settings.apply">No key? Apply here.</a>
                 </div>
-                <input id="settings-deepseek-token" data-provider-token="deepseek-official" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
-              </label>
+                <div class="provider-credential-row">
+                  <input id="settings-deepseek-token" data-provider-token="deepseek-official" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                  <button type="button" class="custom-action provider-disconnect" data-provider-disconnect="deepseek-official" data-i18n="xai.disconnect" hidden>Disconnect</button>
+                </div>
+              </div>
             </div>
             <div class="settings-actions">
               <span id="settings-status" class="save-status" aria-live="polite"></span>

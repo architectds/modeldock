@@ -953,8 +953,11 @@ export function providerRouteConfigured(config, providerId) {
 }
 
 export function enabledProviderOptions(config) {
-  const active = config?.profileId || DEFAULT_PROFILE_ID;
-  return profileOptions().filter((entry) => entry.id === active || providerRouteConfigured(config, entry.id));
+  // The active profile is not itself proof of availability. OpenCode Go's
+  // Codex-config fallback is already resolved into config.tokens during load;
+  // publishing an unconfigured active profile kept disconnected static models
+  // routable after its credential had been removed.
+  return profileOptions().filter((entry) => providerRouteConfigured(config, entry.id));
 }
 
 // Remote entries in the endpoint file belong to Custom. Local entries in that

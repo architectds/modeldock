@@ -713,6 +713,9 @@ body { padding-left: 88px; }
 .cloud-section > * + * { margin-top: 16px; }
 .cloud-credentials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
 .cloud-credentials .cloud-wide { grid-column: 1 / -1; }
+.provider-credential-row { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.provider-credential-row input { flex: 1 1 auto; min-width: 0; }
+.provider-disconnect { flex: 0 0 auto; white-space: nowrap; }
 .cloud-section .settings-actions { margin-top: 18px; }
 
 @media (max-width: 1180px) {

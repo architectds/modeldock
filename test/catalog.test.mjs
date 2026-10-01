@@ -565,10 +565,22 @@ test("catalogFor orders the picker by use, with sequential priorities", () => {
     const natives = ordered.filter((slug) => !modelRefParts(slug).qualified);
     const routed = ordered.filter((slug) => modelRefParts(slug).qualified);
     assert.deepEqual(ordered.slice(0, natives.length), natives, "every native entry sits above the divider");
-    assert.equal(routed[0], codexSlugFor("opencode-go", "deepseek-v4-pro"), "the most-used routed model opens the lower half");
+    // The stub selects deepseek-v4-flash (main) and gpt-5.6-luna (vision), and
+    // selection now outranks traffic so the picker's first page cannot lose
+    // the models the user actually routed.
+    const selectedRouted = new Set([
+      codexSlugFor("opencode-go", "deepseek-v4-flash"),
+      codexSlugFor("opencode-go", "gpt-5.6-luna"),
+    ]);
+    assert.ok(routed.slice(0, selectedRouted.size).every((slug) => selectedRouted.has(slug)),
+      "the selected models pin the top of the lower half");
+    const unselected = routed.filter((slug) => !selectedRouted.has(slug));
+    assert.equal(unselected[0], codexSlugFor("opencode-go", "deepseek-v4-pro"), "the most-used routed model follows the selection");
     assert.deepEqual(
-      routed.slice(1),
-      unused.filter((slug) => modelRefParts(slug).qualified && slug !== codexSlugFor("opencode-go", "deepseek-v4-pro")),
+      unselected.slice(1),
+      unused.filter((slug) => modelRefParts(slug).qualified
+        && !selectedRouted.has(slug)
+        && slug !== codexSlugFor("opencode-go", "deepseek-v4-pro")),
       "and the untouched tail keeps its previous order",
     );
   } finally {
@@ -601,7 +613,14 @@ test("catalogFor falls back to popularity when heat is absent", () => {
     },
   });
   const routed = catalog.models.map((entry) => entry.slug).filter((slug) => modelRefParts(slug).qualified);
-  assert.equal(routed[0], codexSlugFor("opencode-go", "deepseek-v4-pro"), "without heat the 30-day popularity decides");
+  const selectedRouted = new Set([
+    codexSlugFor("opencode-go", "deepseek-v4-flash"),
+    codexSlugFor("opencode-go", "gpt-5.6-luna"),
+  ]);
+  assert.ok(routed.slice(0, selectedRouted.size).every((slug) => selectedRouted.has(slug)),
+    "the selected models stay pinned above popularity");
+  assert.equal(routed.filter((slug) => !selectedRouted.has(slug))[0], codexSlugFor("opencode-go", "deepseek-v4-pro"),
+    "without heat the 30-day popularity decides among the rest");
 });
 
 test("a published native slug routes to the native leg despite being in the catalog", () => {
@@ -665,6 +684,13 @@ test("the native section keeps Codex's own order, not ours", async (t) => {
   }).models.map((entry) => entry.slug);
 
   assert.deepEqual(order.slice(0, 2), ["gpt-5.6-sol", "gpt-5.6-terra"], "captured order survives our traffic counts");
-  assert.equal(order[2], codexSlugFor("opencode-go", "deepseek-v4-pro"), "the busiest routed model opens the lower half");
+  const selectedRouted = new Set([
+    codexSlugFor("opencode-go", "deepseek-v4-flash"),
+    codexSlugFor("opencode-go", "gpt-5.6-luna"),
+  ]);
+  assert.ok(order.slice(2, 2 + selectedRouted.size).every((slug) => selectedRouted.has(slug)),
+    "the selected models open the lower half");
+  assert.equal(order.slice(2).filter((slug) => !selectedRouted.has(slug))[0],
+    codexSlugFor("opencode-go", "deepseek-v4-pro"), "the busiest unselected routed model follows");
   assert.ok(!order.slice(2).some((slug) => !modelRefParts(slug).qualified), "no native entry falls below the divider");
 });

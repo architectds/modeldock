@@ -1259,6 +1259,7 @@ export function createApp(services = createServices()) {
           );
         }
         updates[profile.tokenEnvName] = checked.value;
+        if (profile.id === DEFAULT_PROFILE_ID) updates.MODELDOCK_DISABLE_OPENCODE_GO_BACKUP = "0";
       }
       if (body.exaApiKey) {
         const checked = validateProviderToken("exa", body.exaApiKey);
@@ -1292,6 +1293,69 @@ export function createApp(services = createServices()) {
       recordConfigAction(metrics, "settings_update", { ok: false, error: error.message });
       const status = error.code?.startsWith("invalid_") ? 400 : 500;
       return res.status(status).json({ error: { type: error.code || "settings_failed", message: error.message } });
+    }
+  });
+
+  app.post("/api/providers/disconnect", mutateConfig, async (req, res) => {
+    const providerId = String(req.body?.provider || "");
+    const provider = credentialProfiles().find((entry) => entry.id === providerId);
+    if (!provider) {
+      return res.status(400).json({ error: { type: "invalid_provider", message: "Choose a disconnectable credential provider." } });
+    }
+
+    const updates = { [provider.tokenEnvName]: "" };
+    if (providerId === DEFAULT_PROFILE_ID) updates.MODELDOCK_DISABLE_OPENCODE_GO_BACKUP = "1";
+
+    const wasActive = config.profileId === providerId;
+    let nextProfileId = config.profileId;
+    if (wasActive) {
+      nextProfileId = profileOptions().map((entry) => entry.id)
+        .find((id) => id !== providerId && providerRouteConfigured(config, id))
+        || "";
+      if (nextProfileId) updates.MODELDOCK_PROFILE = nextProfileId;
+    }
+
+    try {
+      writeEnvFile(updates, config.envFile);
+      config.tokens = { ...(config.tokens || {}) };
+      delete config.tokens[providerId];
+      // Command Code's directory is entirely discovered at runtime. Empty its
+      // canonical profile only after persistence succeeds so a write failure
+      // leaves both the credential and model availability untouched.
+      if (providerId === "commandcode") provider.availableModels = [];
+      if (providerId === DEFAULT_PROFILE_ID) config.goTokenSource = "disconnected";
+      if (wasActive && nextProfileId) {
+        config.profileId = nextProfileId;
+        config.profile = profileById(nextProfileId);
+      }
+
+      reconcileModelSelection(services);
+
+      const selectedSubagent = readSubagentModel(config);
+      const selectedSubagentProvider = selectedSubagent ? providerForModel(config, selectedSubagent) : "";
+      if (selectedSubagentProvider === providerId) {
+        const fallbackSubagent = subagentModelOptions(config)[0];
+        if (fallbackSubagent) {
+          writeSubagentAgentFile(config, fallbackSubagent.id);
+          // Credential/model availability has already changed successfully;
+          // a restart-ack write failure must not report the disconnect itself
+          // as failed after its irreversible .env update.
+          await services.configSwitcher.markRestartRequired().catch(() => {});
+        }
+      }
+
+      services.writeCatalogFile?.();
+      recordConfigAction(metrics, "provider_disconnect", { ok: true, provider: providerId });
+      return res.json({
+        status: "disconnected",
+        provider: providerId,
+        settings: settingsPayload(services),
+        models: modelsPayload(services),
+        subagent: subagentPayload(services),
+      });
+    } catch (error) {
+      recordConfigAction(metrics, "provider_disconnect", { ok: false, provider: providerId, error: error.message });
+      return res.status(500).json({ error: { type: "provider_disconnect_failed", message: error.message } });
     }
   });
 

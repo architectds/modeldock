@@ -227,10 +227,10 @@ export function catalogFor(config) {
   // "see it, can't use it" noise (every request 401s), so subscribers keep the
   // merge and everyone else gets the curated catalog only.
   if (config.nativeMerge === false) {
-    return { ...catalog, models: orderCatalogByUse(applyPerModelInstructions(config, models), config.usageByModel) };
+    return { ...catalog, models: orderCatalogByUse(applyPerModelInstructions(config, models), config.usageByModel, config, nativeSlugs) };
   }
   const merged = mergeNativeCatalog({ ...catalog, models }, config, native);
-  return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models, nativeSlugs), config.usageByModel) };
+  return { ...merged, models: orderCatalogByUse(applyPerModelInstructions(config, merged.models, nativeSlugs), config.usageByModel, config, nativeSlugs) };
 }
 
 // The Codex App picker list is the model_catalog_json file when configured, not
@@ -329,7 +329,7 @@ function sanitizeNativeReasoningLevels(model, codexVersion) {
 // to do - sorts by a fact about billing that nobody is looking for at the
 // moment they open a model picker.
 //
-function orderCatalogByUse(models, usage = {}) {
+function orderCatalogByUse(models, usage = {}, config = {}, nativeSlugs = new Set()) {
   if (!Array.isArray(models)) return models;
   // Only the routed half is ever ranked. The Codex-facing slug carries its
   // owner in the safe encoding; decode it once to the internal address that
@@ -349,11 +349,29 @@ function orderCatalogByUse(models, usage = {}) {
   // A native entry is the one without an owner suffix: it comes from Codex's
   // own catalog rather than a provider of ours.
   const isNative = (entry) => !modelRefParts(entry?.slug).qualified;
+  const selected = selectedModelSlugs(config, config.subagentModel);
+  const selectedRefs = new Set([...selected].map((id) => {
+    if (nativeSlugs.has(id)) return id;
+    const parts = modelRefParts(id);
+    return parts.qualified ? modelAddressFor(parts.provider, parts.model) : modelAddressFor(providerForModel(config, id), id);
+  }));
   const decorated = models.map((entry, index) => ({ entry, used: score(entry), index }));
   const native = decorated.filter(({ entry }) => isNative(entry)).sort((a, b) => a.index - b.index);
   const routed = decorated
     .filter(({ entry }) => !isNative(entry))
-    .sort((left, right) => right.used - left.used || left.index - right.index);
+    .sort((left, right) => {
+      const ref = (item) => {
+        const parts = modelRefParts(item.entry?.slug);
+        return parts.qualified ? modelAddressFor(parts.provider, parts.model) : parts.raw;
+      };
+      const leftSelected = selectedRefs.has(ref(left));
+      const rightSelected = selectedRefs.has(ref(right));
+      if (leftSelected !== rightSelected) return leftSelected ? -1 : 1;
+      const leftLocal = modelRefParts(left.entry?.slug).provider === "local";
+      const rightLocal = modelRefParts(right.entry?.slug).provider === "local";
+      if (leftLocal !== rightLocal) return leftLocal ? -1 : 1;
+      return right.used - left.used || left.index - right.index;
+    });
   return [...native, ...routed].map(({ entry }, index) => ({ ...entry, priority: index + 1 }));
 }
 

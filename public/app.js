@@ -1192,6 +1192,8 @@ function renderProviderTokenFields(data) {
     input.placeholder = provider?.tokenConfigured
       ? t("settings.configured")
       : (data.tokenConfigured ? t("settings.optional") : t("settings.required"));
+    const disconnect = document.querySelector(`[data-provider-disconnect="${input.dataset.providerToken}"]`);
+    if (disconnect) disconnect.hidden = !provider?.tokenConfigured;
   }
 }
 
@@ -3093,6 +3095,33 @@ async function saveSettings() {
 $("settings-open")?.addEventListener("click", openSettings);
 $("settings-close")?.addEventListener("click", closeSettings);
 $("settings-save")?.addEventListener("click", saveSettings);
+for (const button of document.querySelectorAll("[data-provider-disconnect]")) {
+  button.addEventListener("click", async () => {
+    const provider = button.dataset.providerDisconnect;
+    button.disabled = true;
+    const status = $("settings-status");
+    if (status) status.textContent = t("settings.saving");
+    try {
+      const response = await fetch("/api/providers/disconnect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message || `Disconnect ${response.status}`);
+      renderProviderTokenFields(data.settings);
+      lastSettings = data.settings;
+      if (status) status.textContent = t("settings.saved");
+      poll().catch(() => {});
+      pollConfig().catch(() => {});
+      renderModelRoster().catch(() => {});
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
 $("update-button")?.addEventListener("click", applyUpdate);
 
 // Session filter: the dropdown and the chips below it set the same filter;

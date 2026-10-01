@@ -406,8 +406,10 @@ export function createServices(config = loadConfig()) {
   }
   // Write once at boot so the file exists even when the refresh is disabled or fails.
   writeCatalogFile();
-  runModelTidy();
-  refreshModelCatalog();
+  // Refresh first, then stamp/tidy the resulting inventory. A provider-discovered
+  // model is absent from the in-memory registry until refresh completes; tidying
+  // before it would erase its old first-seen stamp on every restart.
+  runScheduledMaintenance();
   const refreshIntervalHours = Number(mutableConfig.modelRefreshHours || 24);
   const modelRefreshTimer = refreshIntervalHours > 0
     ? setInterval(runScheduledMaintenance, refreshIntervalHours * 3_600_000)

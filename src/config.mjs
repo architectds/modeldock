@@ -445,8 +445,9 @@ export function loadConfig() {
   const rawOpencodeToken = credentialInputs.get(DEFAULT_PROFILE_ID) || "";
   const opencodeEnvValid = Boolean(rawOpencodeToken) && !isPlaceholderToken(rawOpencodeToken);
   const backupOpenCode = discoverCodexGoToken(codexHome);
-  const opencodeGoToken = opencodeEnvValid ? rawOpencodeToken : backupOpenCode.token;
-  const opencodeGoSource = opencodeEnvValid ? "environment" : backupOpenCode.source;
+  const opencodeBackupDisabled = envOn("MODELDOCK_DISABLE_OPENCODE_GO_BACKUP");
+  const opencodeGoToken = opencodeEnvValid ? rawOpencodeToken : opencodeBackupDisabled ? "" : backupOpenCode.token;
+  const opencodeGoSource = opencodeEnvValid ? "environment" : opencodeBackupDisabled ? "disconnected" : backupOpenCode.source;
   const directTokens = Object.fromEntries([...credentialInputs]
     .filter(([, token]) => token && !isPlaceholderToken(token)));
   // Custom endpoint (dashboard "Custom model" section): a user-configured

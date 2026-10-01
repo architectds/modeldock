@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { stateFile } from "./state-dir.mjs";
 
 // Append-only usage metering that survives gateway restarts. The in-memory
 // Metrics snapshot resets every restart (and this gateway restarts often during
@@ -10,12 +10,13 @@ import path from "node:path";
 // One JSON object per line. Telemetry must never interrupt or fail a model
 // request: every write is wrapped and errors are swallowed.
 
-const USAGE_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "usage-events.jsonl");
-
-// Tests and packaging can redirect the metering file without touching the real
-// ~/.modeldock state (mirrors MODELDOCK_SETTINGS_EVENTS_FILE in settings-events.mjs).
+// Tests and packaging can redirect the metering file on its own, but the
+// default must follow the state directory: a hardcoded ~/.modeldock here let
+// every MODELDOCK_STATE_DIR-isolated gateway (each e2e boot of the bundle)
+// append its fixture traffic into the real user's metering stream, and served
+// the real stream's stats back from isolated instances.
 export function usageEventsPath() {
-  return process.env.MODELDOCK_USAGE_EVENTS_FILE || USAGE_EVENTS_PATH;
+  return process.env.MODELDOCK_USAGE_EVENTS_FILE || stateFile("usage-events.jsonl");
 }
 
 // A single rotation keeps the active file bounded without a log-management

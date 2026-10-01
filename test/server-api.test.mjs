@@ -135,7 +135,10 @@ test("without token: healthz and responses return 503, local models catalog stil
   assert.equal((await fetch(`${instance.base}/healthz`)).status, 503);
   const models = await fetch(`${instance.base}/v1/models`);
   assert.equal(models.status, 200, "models catalog is local and does not need the token");
-  assert.equal((await models.json()).models[0].slug, codexSlugFor("opencode-go", "deepseek-v4-flash"));
+  // Provider availability is ownership, not the active profile: with no
+  // credential configured, no routed model may be published or routable.
+  assert.deepEqual((await models.json()).models.filter((entry) => entry.slug.startsWith("mdr.")), [],
+    "an unconfigured provider publishes no routed models");
   const responses = await fetch(`${instance.base}/v1/responses`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -420,6 +423,9 @@ test("models endpoint serves the local Codex catalog", async (t) => {
 test("codexModelCatalog matches Codex schema requirements", () => {
   const catalog = codexModelCatalog({
     mainModel: "deepseek-v4-flash",
+    // An unconfigured provider publishes nothing now, so the schema check
+    // needs a configured credential to have a row to inspect.
+    tokens: { "opencode-go": "go-token" },
     // Keep the schema check hermetic: without a configured native catalog file
     // the merge would read the real ~/.modeldock capture on a dev machine and
     // the provider-grouped order would put a native GPT model first.

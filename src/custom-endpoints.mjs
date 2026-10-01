@@ -14,7 +14,7 @@
 import { readFileSync, rmSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
 import { stateFile } from "./state-dir.mjs";
-import { encryptSecret, decryptSecret } from "./secrets.mjs";
+import { encryptSecrets, decryptSecrets } from "./secrets.mjs";
 import { protectPrivateFile } from "./caller-key.mjs";
 export { customEndpointFor } from "./custom-endpoint-routing.mjs";
 
@@ -40,14 +40,14 @@ function normalizeBase(raw) {
 
 const endpointKey = (entry) => `${entry.local === true ? "local" : "custom"}\0${entry.modelId}`;
 
-function cleanEntry(entry) {
+function cleanEntry(entry, apiKeys) {
   const modelId = String(entry?.modelId || "").trim();
   const baseUrl = normalizeBase(entry?.baseUrl);
   if (!modelId || !baseUrl) return null;
   return {
     modelId,
     baseUrl,
-    apiKey: decryptSecret(entry.apiKey || ""),
+    apiKey: apiKeys.get(entry.apiKey || "") || "",
     label: String(entry.label || "").trim() || baseUrl,
     ...(entry.upstreamId ? { upstreamId: String(entry.upstreamId).trim() } : {}),
     ...(entry.local === true ? { local: true } : {}),
@@ -69,10 +69,12 @@ export function readCustomEndpoints(file = customEndpointsPath()) {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     const list = Array.isArray(parsed) ? parsed : parsed?.endpoints;
     if (!Array.isArray(list)) return [];
+    // One DPAPI batch for the whole file, not one PowerShell per key.
+    const apiKeys = decryptSecrets(list.map((entry) => entry?.apiKey || ""));
     const seen = new Set();
     const clean = [];
     for (const entry of list) {
-      const item = cleanEntry(entry);
+      const item = cleanEntry(entry, apiKeys);
       if (!item) continue;
       const key = endpointKey(item);
       if (seen.has(key)) continue;
@@ -90,10 +92,11 @@ export function writeCustomEndpoints(file, endpoints) {
     try { rmSync(file, { force: true }); } catch { /* best effort */ }
     return file;
   }
+  const storedKeys = encryptSecrets(endpoints.map((entry) => entry.apiKey || ""));
   const payload = endpoints.map((entry) => ({
     modelId: entry.modelId,
     baseUrl: normalizeBase(entry.baseUrl),
-    apiKey: entry.apiKey ? encryptSecret(entry.apiKey) : "",
+    apiKey: entry.apiKey ? storedKeys.get(entry.apiKey) : "",
     label: entry.label || "",
     ...(entry.upstreamId ? { upstreamId: entry.upstreamId } : {}),
     ...(entry.local === true ? { local: true } : {}),
@@ -126,7 +129,7 @@ export function writeCustomEndpoints(file, endpoints) {
 }
 
 export function addCustomEndpoint(endpoints, entry) {
-  const item = cleanEntry({ ...entry, apiKey: "" });
+  const item = cleanEntry({ ...entry, apiKey: "" }, new Map());
   if (!item) throw new CustomEndpointsError("model", "An endpoint needs a base URL and a model id.");
   const clash = endpoints.find((existing) => endpointKey(existing) === endpointKey(item));
   if (clash) {

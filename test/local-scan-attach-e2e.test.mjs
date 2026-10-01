@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -77,7 +77,7 @@ async function stop(child) {
 async function waitForStatus(port) {
   for (let attempt = 0; attempt < 150; attempt += 1) {
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/api/status`)).ok) return;
+      if ((await fetch(`http://127.0.0.1:${port}/api/status`, { signal: AbortSignal.timeout(500) })).ok) return;
     } catch { /* bundle is still starting */ }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
@@ -196,7 +196,45 @@ test("built bundle probes a keyless local origin without saving, then attaches o
     transport: "chat",
     addedAt: "2026-01-03T00:00:00.000Z",
   };
-  await writeFile(endpointFile, JSON.stringify([seeded, previousLocal, remoteSameName]));
+  const bulkRecent = Array.from({ length: 105 }, (_, index) => ({
+    modelId: `e2e-catalog-${String(index).padStart(3, "0")}`,
+    baseUrl: `${origin}/legacy/v1`,
+    apiKey: "fixture-bulk-key",
+    label: `Catalog fixture ${index}`,
+    contextWindow: 0,
+    supportsVision: false,
+    transport: "chat",
+    addedAt: "2026-01-04T00:00:00.000Z",
+  }));
+  const staleModels = ["e2e-stale-a", "e2e-stale-b"];
+  const staleEndpoints = staleModels.map((modelId) => ({
+    modelId,
+    baseUrl: `${origin}/legacy/v1`,
+    apiKey: "fixture-bulk-key",
+    label: modelId,
+    contextWindow: 0,
+    supportsVision: false,
+    transport: "chat",
+    addedAt: "2026-01-05T00:00:00.000Z",
+  }));
+  const now = Date.now();
+  const old = new Date(now - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const rollupDay = new Date(now - 29 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  await writeFile(endpointFile, JSON.stringify([seeded, previousLocal, remoteSameName, ...bulkRecent, ...staleEndpoints]));
+  // The inclusive thirty-date rollup starts twenty-nine days before today.
+  // An unrelated event there proves that the complete retained window exists;
+  // the two stale fixtures have no requests in that window.
+  await writeFile(path.join(stateDir, "usage-rollup.json"), JSON.stringify({
+    version: 2,
+    lastFoldedAt: new Date(now).toISOString(),
+    days: { [rollupDay]: { "unrelated@custom": { requests: 1 } } },
+    hours: {},
+  }));
+  const firstSeen = Object.fromEntries([
+    ...bulkRecent.map((entry) => [`${entry.modelId}@custom`, new Date(now).toISOString()]),
+    ...staleModels.map((modelId) => [`${modelId}@custom`, old]),
+  ]);
+  await writeFile(path.join(stateDir, "model-lifecycle.json"), JSON.stringify({ version: 1, lastTidyAt: "", firstSeen }));
   // An older install may still carry an engine-specific snapshot. It remains
   // useful to the Local Hosts management page, but it must never resurrect the
   // retired llama.cpp provider in either picker. Local publication is owned by
@@ -210,8 +248,13 @@ test("built bundle probes a keyless local origin without saving, then attaches o
 
   const gatewayPort = await freePort();
   const autostartKey = `HKCU\\Software\\ModelDockTests\\local-scan-${process.pid}`;
+  // The lane preload redirects the metering file in THIS process; the spawned
+  // gateway must not inherit it, because this test proves the bundle's own
+  // default keeps metering inside MODELDOCK_STATE_DIR.
+  const inheritedEnv = { ...process.env };
+  delete inheritedEnv.MODELDOCK_USAGE_EVENTS_FILE;
   const gatewayEnv = {
-    ...process.env,
+    ...inheritedEnv,
     MODELDOCK_PORT: String(gatewayPort),
     // An upgrade may still have the retired engine-specific provider selected.
     // That stale default cannot republish it; the explicit attachment below is
@@ -220,10 +263,10 @@ test("built bundle probes a keyless local origin without saving, then attaches o
     OPENCODE_GO_TOKEN: "fixture-go-key",
     MODELDOCK_STATE_DIR: stateDir,
     MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointFile,
+    MODELDOCK_UPSTREAM_BASE_URL: `${origin}/v1`,
     MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
     MODELDOCK_REQUIRE_CALLER_KEY: "0",
     MODELDOCK_MEMORY: "0",
-    MODELDOCK_MODEL_DISCOVERY: "0",
     MODELDOCK_NATIVE_MERGE: "0",
     MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
     MODELDOCK_AUTOSTART_KEY: autostartKey,
@@ -237,6 +280,8 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   });
   let child = launchGateway();
   let stderr = "";
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(() => stop(child));
   if (process.platform === "win32") {
@@ -251,6 +296,27 @@ test("built bundle probes a keyless local origin without saving, then attaches o
     const catalog = await (await fetch(`${api}/v1/models`)).json();
     return catalog.models.find((item) => item.slug === codexSlugFor("local", modelId));
   };
+
+  const dynamicAddress = `${UPSTREAM_ID}@opencode-go`;
+  const dynamicSlug = codexSlugFor("opencode-go", UPSTREAM_ID);
+  const lifecycleFile = path.join(stateDir, "model-lifecycle.json");
+  let discoveredRow;
+  let initialCatalog;
+  let firstDynamicStamp;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    initialCatalog = await (await fetch(`${api}/v1/models`)).json();
+    discoveredRow = initialCatalog.models.find((item) => item.slug === dynamicSlug);
+    firstDynamicStamp = JSON.parse(readFileSync(lifecycleFile, "utf8")).firstSeen[dynamicAddress];
+    const staleVisible = staleModels.some((modelId) => initialCatalog.models.some((entry) => decodeSlug(entry.slug) === `${modelId}@custom`));
+    if (discoveredRow && firstDynamicStamp && !staleVisible) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(discoveredRow, `initial provider discovery must publish ${dynamicSlug}`);
+  for (const modelId of staleModels) {
+    assert.ok(!initialCatalog.models.some((entry) => decodeSlug(entry.slug) === `${modelId}@custom`),
+      `the 30-day tidy must park unused ${modelId} within the inclusive rollup window`);
+  }
+  assert.ok(firstDynamicStamp, "the initial provider refresh must stamp its newly discovered model");
 
   // 1. The probe reads the models and the protocol, and touches no state.
   const before = savedEndpoints();
@@ -329,8 +395,9 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   assert.ok(afterAttach.some((entry) => !entry.local && entry.modelId === MODEL_ID),
     "the same chosen model name can coexist under the independent Custom provider");
   const customPage = await (await fetch(`${api}/api/custom/endpoints`)).json();
-  assert.deepEqual(customPage.endpoints.map((entry) => entry.modelId), [LEGACY_MODEL, UPSTREAM_ID, MODEL_ID],
-    "the API page lists only remote Custom entries, not Local registrations");
+  assert.deepEqual(customPage.endpoints.map((entry) => entry.modelId),
+    savedEndpoints().filter((entry) => !entry.local).map((entry) => entry.modelId),
+    "the API page lists every remote Custom entry and no Local registrations");
   const settings = await (await fetch(`${api}/api/settings`)).json();
   assert.deepEqual(settings.custom.endpoints.map((entry) => entry.modelId), customPage.endpoints.map((entry) => entry.modelId),
     "Settings and the Custom page must project the same remote endpoint list");
@@ -349,6 +416,11 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   assert.ok(!providerIds.includes("ollama"), "the retired Ollama provider cannot appear in the picker");
   assert.ok(!modelState.options.some((entry) => ["llamacpp", "vllm", "ollama"].includes(entry.provider)),
     "no engine-specific local model may bypass the Local provider");
+  const firstHundred = (await (await fetch(`${api}/v1/models`)).json()).models.slice(0, 100);
+  assert.ok(firstHundred.some((entry) => entry.slug === attachedRow.slug),
+    "every registered Local model must stay in Codex desktop's first-100 model list");
+  assert.ok(firstHundred.some((entry) => entry.slug === codexSlugFor("opencode-go", "deepseek-v4-flash")),
+    "the current main model must stay in Codex desktop's first-100 model list");
 
   // 5. A full Codex-shaped tool turn reaches the real upstream id over Chat.
   const relay = (slug) => fetch(`${api}/v1/responses`, {
@@ -363,6 +435,13 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const attachedTurns = received.filter((entry) => entry.method === "POST" && entry.path === "/v1/chat/completions" && entry.body?.stream === true);
   assert.equal(attachedTurns.length, 1, "the Codex turn must reach the attached Chat endpoint exactly once");
   assert.equal(attachedTurns[0].body.model, UPSTREAM_ID, "the REAL upstream id must travel on the wire, not the slug");
+  // The metering append happens as the server side of the stream closes,
+  // which can land a beat after the client finishes reading it.
+  for (let attempt = 0; attempt < 40 && !existsSync(path.join(stateDir, "usage-events.jsonl")); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(existsSync(path.join(stateDir, "usage-events.jsonl")),
+    "relay metering must land inside MODELDOCK_STATE_DIR, not in the real ~/.modeldock stream");
   assert.ok(Array.isArray(attachedTurns[0].body.tools) && attachedTurns[0].body.tools.length > 150,
     "the full Codex tool catalog must reach the attached endpoint");
 
@@ -384,8 +463,9 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   // 6. A restart from the same state keeps the slug and the routing.
   await stop(child);
   child = launchGateway();
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  await waitForStatus(gatewayPort);
+  await waitForStatus(gatewayPort).catch((error) => { throw new Error(`${error.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`); });
   const restoredRow = await catalogSlug(MODEL_ID);
   assert.ok(restoredRow, "the published slug must survive a restart");
   const restoredRelay = await relay(restoredRow.slug);
@@ -394,6 +474,12 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const restoredTurns = received.filter((entry) => entry.method === "POST" && entry.path === "/v1/chat/completions" && entry.body?.stream === true);
   assert.equal(restoredTurns.length, attachedTurns.length + 1, "the restarted gateway must relay again");
   assert.equal(restoredTurns.at(-1).body.model, UPSTREAM_ID, "the restarted routing still sends the real upstream id");
+  const restartedLifecycle = JSON.parse(readFileSync(lifecycleFile, "utf8"));
+  assert.equal(restartedLifecycle.firstSeen[dynamicAddress], firstDynamicStamp,
+    "refresh-before-tidy preserves a discovered model's age across frequent gateway restarts");
+  const restartedFirstHundred = (await (await fetch(`${api}/v1/models`)).json()).models.slice(0, 100);
+  assert.ok(restartedFirstHundred.some((entry) => entry.slug === restoredRow.slug),
+    "the Local registration remains within the first 100 after restart and tidy");
 
   // A saved registration is itself a scan candidate. This covers services on
   // non-default ports whose owning process is Node, Python, WSL, or a container

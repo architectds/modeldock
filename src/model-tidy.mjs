@@ -18,8 +18,6 @@
 //                    authoritative for them - they are not ours to withhold
 //   known long enough a model added last week has no thirty-day history to be
 //                    judged on, only a short one that reads the same as disuse
-//   window is full   a fresh install accumulates forward, so before the rollup
-//                    spans thirty days every zero means "not yet", not "never"
 import { isRuleEligible } from "./model-toggles.mjs";
 import { rollupTotals } from "./usage-rollup.mjs";
 
@@ -47,7 +45,9 @@ export function rollupSpanDays(rollup, now = Date.now()) {
 
 export function shouldTidy({ lastTidyAt, rollup, now = Date.now() }) {
   const span = rollupSpanDays(rollup, now);
-  if (span < TIDY_WINDOW_DAYS) {
+  // pruneRollup retains thirty inclusive UTC date buckets: the oldest bucket
+  // can therefore be at most twenty-nine calendar days behind today.
+  if (span < TIDY_WINDOW_DAYS - 1) {
     return { run: false, reason: "window_incomplete", spanDays: span };
   }
   const last = asTime(lastTidyAt);
@@ -75,7 +75,10 @@ export function modelsToPark({
     if (!slug) continue;
     if (!isRuleEligible(toggles, slug)) continue;
     if (selected.has(slug)) continue;
-    if (model.native || model.provider === "openai") continue;
+    // A Local row exists because the user explicitly registered that route.
+    // Keep it available and let the catalog's Local-first ordering protect it
+    // from Codex desktop's first-page limit.
+    if (model.native || model.provider === "openai" || model.provider === "local") continue;
     const seen = asTime(firstSeen[slug]);
     // An unstamped model is treated as new. Stamping happens on the same pass
     // that reads this, so the only way to be unstamped is to have just arrived.

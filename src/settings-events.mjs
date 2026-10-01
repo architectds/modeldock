@@ -1,19 +1,19 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { stateFile } from "./state-dir.mjs";
 
 // Durable, append-only audit events for dashboard settings changes. Values and
 // request bodies must never be written here: this file is for change diagnosis,
 // not secret storage.
-const SETTINGS_EVENTS_PATH = path.join(os.homedir(), ".modeldock", "settings-events.jsonl");
 
 const ROTATE_BYTES = 5 * 1024 * 1024;
 
-// Tests and packaging can redirect the audit file without touching the real
-// ~/.modeldock state.
+// Tests and packaging can redirect the audit file on its own; the default
+// follows the state directory so an isolated gateway never writes the real
+// ~/.modeldock audit stream.
 function settingsEventsPath() {
-  return process.env.MODELDOCK_SETTINGS_EVENTS_FILE || SETTINGS_EVENTS_PATH;
+  return process.env.MODELDOCK_SETTINGS_EVENTS_FILE || stateFile("settings-events.jsonl");
 }
 
 function safeText(value, fallback = "unknown") {
