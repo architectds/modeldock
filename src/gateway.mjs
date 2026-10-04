@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { allProfiles, bareModelId, isLocalBackend, modelAddressFor, modelEntryFor, modelRefParts, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
 import { codexModelRef } from "./model-ref.mjs";
-import { compressConversation, projectLocalHistory } from "./compress.mjs";
+import { compressConversation, projectLocalHistory, SOURCE_INSTRUCTION_ROLE } from "./compress.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
 import { translateUpstreamError, freeEmptyOutputError, isLocalConnectionFailure, localEngineDownMessage } from "./error-translation.mjs";
 import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnStartIndex, routeResponsesRequest } from "./router.mjs";
@@ -1016,17 +1016,10 @@ const PRO_EXECUTION_GUIDANCE = [
   "A final answer must report completed evidence or the blocker; statements such as 'I will do it' or 'doing it now' are not a completed result.",
 ].join(" ");
 
-function attachProExecutionGuidance(input) {
-  if (!Array.isArray(input)) return input;
-  const index = input.findLastIndex((item) => item?.type === "message" && item?.role === "user");
-  if (index < 0) return input;
-  const message = input[index];
-  const content = Array.isArray(message.content)
-    ? [...message.content, { type: "input_text", text: PRO_EXECUTION_GUIDANCE }]
-    : `${String(message.content || "")}\n\n${PRO_EXECUTION_GUIDANCE}`;
-  const out = [...input];
-  out[index] = { ...message, content };
-  return out;
+function attachProExecutionGuidance(payload) {
+  // A fixed execution rule belongs in the fixed instruction prefix. Attaching
+  // it to the newest human message rewrote that old message on the next turn.
+  return { ...payload, instructions: appendInstructionGuidance(payload.instructions, [PRO_EXECUTION_GUIDANCE]) };
 }
 
 // --- opaque collaboration payload relay ----------------------------------
@@ -1327,53 +1320,35 @@ export function normalizeStandardLocalInput(input) {
   return normalizeGatewayInput(input).map(normalizeStandardToolItem);
 }
 
-// llama.cpp's jinja template requires the system message to be first
-// ("System message must be at the beginning") and rejects a mid-history system
-// item - Codex can emit one after compaction or a tool turn. Merge every
-// system item's text into a single leading system message and drop the
-// originals, so local backends always see system first.
+// Strict local templates accept system only at the beginning. Only the
+// contiguous opening instruction block belongs there: hoisting later Codex
+// time/permission updates rewrites the entire cached history prefix. Encode
+// later updates as user messages at their original position instead.
 function splitLocalSystem(input) {
   const texts = [];
   const rest = [];
+  let leading = true;
   for (const item of input) {
-    if (item?.role === "system" || item?.role === "developer") {
-      const text = Array.isArray(item.content)
-        ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
-        : "";
+    const instruction = (item?.type === "message" || item?.type === undefined)
+      && (item?.role === "system" || item?.role === "developer");
+    if (leading && instruction) {
+      const text = typeof item.content === "string" ? item.content.trim()
+        : Array.isArray(item.content)
+          ? item.content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
+          : "";
       if (text) texts.push(text);
       continue;
     }
-    rest.push(item);
+    leading = false;
+    rest.push(instruction ? { ...item, type: "message", role: "user", [SOURCE_INSTRUCTION_ROLE]: item.role } : item);
   }
   return { texts, rest };
 }
 
-export function hoistLocalSystem(input) {
-  if (!Array.isArray(input)) return input;
-  // Codex sends its system guidance as role "developer"; llama.cpp's
-  // template treats both developer and system as leading system messages.
-  const { texts, rest } = splitLocalSystem(input);
-  if (!texts.length) return input;
-  return [{ role: "system", content: [{ type: "input_text", text: texts.join("\n") }] }, ...rest];
-}
-
-// Local backend input, used by the custom route (typically llama.cpp). It needs
-// both local adaptations, not just one: system hoisting so Codex's mid-history
-// system items never trip llama.cpp's template validator, AND the standard-item
-// rewrite, because local servers implement the standard Responses subset and
-// rejects Codex's custom_tool_call / local_shell_call types. Missing the rewrite
-// meant a custom llama.cpp endpoint failed on the first tool call - which is
-// nearly every turn in an agentic session.
-export function normalizeLocalInput(input) {
-  if (!Array.isArray(input)) return input;
-  return hoistLocalSystem(normalizeStandardLocalInput(input));
-}
-
-// llama.cpp's /v1/responses renders `instructions` as the system message, so a
-// role=system item anywhere in input then sits mid-history and trips the
-// template ("System message must be at the beginning"). When instructions exist,
-// merge every system item's text into them and drop the items; when they do not,
-// hoist system to the front as before. Both paths keep the standard-tool rewrite.
+// Both Chat and local Responses render `instructions` as the initial system
+// message. Use this one projection even when the incoming instructions are
+// absent, and classify opening messages before tool/history repair can drop
+// items. The standard tool rewrite still owns custom_tool_call/local_shell_call.
 export function normalizeLocalPayload(payload) {
   if (!payload || !Array.isArray(payload.input)) return payload;
   // Codex sends `instructions` as an array of input_text parts, not a string.
@@ -1383,16 +1358,12 @@ export function normalizeLocalPayload(payload) {
     : Array.isArray(payload.instructions)
       ? payload.instructions.map((part) => (typeof part?.text === "string" ? part.text : "")).join("\n").trim()
       : "";
-  if (instructions) {
-    const { texts, rest } = splitLocalSystem(payload.input);
-    const input = normalizeStandardLocalInput(rest);
-    return {
-      ...payload,
-      instructions: texts.length ? [instructions, ...texts].filter(Boolean).join("\n") : instructions,
-      input,
-    };
-  }
-  return { ...payload, input: normalizeLocalInput(payload.input) };
+  const { texts, rest } = splitLocalSystem(payload.input);
+  return {
+    ...payload,
+    instructions: [instructions, ...texts].filter(Boolean).join("\n"),
+    input: normalizeStandardLocalInput(rest),
+  };
 }
 
 const SKILLS_BLOCK_RE = /<skills_instructions>[\s\S]*?<\/skills_instructions>/;
@@ -1487,6 +1458,10 @@ export function stripLocalInstructions(instructions) {
 function appendLocalGuidance(instructions, localBackend) {
   instructions = mapInstructionText(instructions, (text) => text.replaceAll(`Subagents: ${SUBAGENT_SPAWN_RULE}`, LOCAL_SUBAGENT_RULE));
   const guidance = localBackend ? [LOCAL_HOST_SAFETY, LOCAL_PLAN_GUIDANCE, LOCAL_SUBAGENT_RULE] : [LOCAL_SUBAGENT_RULE];
+  return appendInstructionGuidance(instructions, guidance);
+}
+
+function appendInstructionGuidance(instructions, guidance) {
   if (Array.isArray(instructions)) {
     const existing = instructions.map((part) => String(part?.text || "")).join("\n");
     const missing = guidance.filter((line) => !existing.includes(line));
@@ -1540,8 +1515,7 @@ export function normalizeOpenCodeProInput(input) {
   const withReasoningContent = normalizeOpenCodeReasoningContent(withToolCallIds);
   const withReasoningIds = fillReasoningIds(withReasoningContent);
   const flattened = flattenAssistantContent(withReasoningIds);
-  const continued = appendProToolContinuation(flattened);
-  return attachProExecutionGuidance(continued);
+  return appendProToolContinuation(flattened);
 }
 
 // Which adaptation a route runs is the profile's to declare, not this file's
@@ -1559,6 +1533,7 @@ export const INPUT_NORMALIZERS = {
 
 export const PAYLOAD_NORMALIZERS = {
   xai: normalizeXaiPayload,
+  "opencode-pro": attachProExecutionGuidance,
 };
 
 function inputNormalizerFor(config, model) {
@@ -1572,7 +1547,8 @@ function inputNormalizerFor(config, model) {
 // summarize call alike. Identity when the profile declares nothing.
 function normalizePayloadForRoute(config, model, payload) {
   const profile = profileById(providerForModel(config, model));
-  const normalize = PAYLOAD_NORMALIZERS[profile?.payloadNormalizer];
+  const entry = modelEntryFor(config, model);
+  const normalize = PAYLOAD_NORMALIZERS[entry?.payloadNormalizer || profile?.payloadNormalizer];
   return normalize ? normalize(payload) : payload;
 }
 
@@ -3729,8 +3705,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   };
   recordDerivedFallback(services, sessionId, route);
   // Custom and Local backends must see the same adapted shape on the compact path
-  // as on the main relay path: Codex's mid-history system/developer items
-  // hoisted into a single leading system (or merged into instructions), the
+  // as on the main relay path: opening system/developer items merged into
+  // instructions, later updates encoded in place, the
   // standard tool-item rewrite, and a reasoning effort the jinja template
   // accepts. Context size is not the right gate here - a local server can
   // advertise a large window and still reject a mid-history system item, so

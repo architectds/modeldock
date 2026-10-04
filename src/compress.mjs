@@ -21,6 +21,11 @@
 import { createHash } from "node:crypto";
 import { CURRENT_TURN_MARKER } from "./router.mjs";
 
+// Local templates encode later platform instructions as user messages. Keep
+// their source role for CPU handoffs without adding a provider-visible field
+// or mistaking a time/permission update for the human's active task.
+export const SOURCE_INSTRUCTION_ROLE = Symbol("modeldock.sourceInstructionRole");
+
 const HEARTBEAT_RE = /^<heartbeat>\s*<automation_id>([A-Za-z0-9_-]{1,128})<\/automation_id>\s*<current_time_iso>(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))<\/current_time_iso>\s*<instructions>([\s\S]+?)<\/instructions>\s*<\/heartbeat>\s*$/;
 
 function parseHeartbeatText(text) {
@@ -242,7 +247,7 @@ export function flattenConversation(input) {
   for (const item of input) {
     const type = item?.type;
     if (type === "message") {
-      const role = item.role || "user";
+      const role = item[SOURCE_INSTRUCTION_ROLE] || item.role || "user";
       const body = itemText(item);
       if (!body) continue;
       if (role === "user" && item[CURRENT_TURN_MARKER] === true) {
