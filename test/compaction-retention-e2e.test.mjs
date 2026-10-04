@@ -284,10 +284,13 @@ async function waitForStatus(port) {
 }
 
 async function stop(child) {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
   await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 3_000))]);
-  if (child.exitCode === null) child.kill("SIGKILL");
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await once(child, "exit");
+  }
 }
 
 function messageText(message) {
@@ -315,7 +318,6 @@ function activePlanField(summary) {
 // into the handoff, and what the local model was actually asked to read.
 async function bootLocalHarness(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-retention-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const stateDir = path.join(root, "state");
   const codexHome = path.join(root, "codex-home");
   await mkdir(stateDir, { recursive: true });
@@ -345,7 +347,6 @@ async function bootLocalHarness(t) {
     ].join("\n\n"));
   });
   const upstreamPort = await listen(upstream);
-  t.after(() => closeServer(upstream));
   const endpointsFile = path.join(stateDir, "custom-endpoints.json");
   await writeFile(endpointsFile, JSON.stringify([{
     modelId: "fixture/Qwen3.8-27B",
@@ -387,9 +388,11 @@ async function bootLocalHarness(t) {
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   t.after(async () => {
     await stop(child);
+    await closeServer(upstream);
     if (process.platform === "win32") {
       try { execFileSync("reg.exe", ["delete", autostartKey, "/f"], { stdio: "ignore" }); } catch { /* key may not exist */ }
     }
+    await rm(root, { recursive: true, force: true });
   });
   await waitForStatus(gatewayPort);
   return { gatewayPort, chatRequests, stderrText: () => stderr };

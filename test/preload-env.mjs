@@ -31,3 +31,7 @@ process.env.MODELDOCK_CUSTOM_ENDPOINTS_FILE ||= path.join(dir, "custom-endpoints
 // (vendor-alpha@custom, shared-model@alpha) into the live gateway's usage
 // history, which the weekly model tidy now reads to decide what to park.
 process.env.MODELDOCK_STATE_DIR ||= path.join(dir, "state");
+// Ordinary tests retain bundled prices, not a moving public price directory.
+// Feed e2es override these URLs with their own loopback servers.
+process.env.MODELDOCK_MODELS_DEV_PRICES_URL ||= "http://127.0.0.1:1/prices/models-dev";
+process.env.MODELDOCK_OPENROUTER_PRICES_URL ||= "http://127.0.0.1:1/prices/openrouter";

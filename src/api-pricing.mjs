@@ -1,14 +1,15 @@
 import { canonicalModelId } from "./model-identity.mjs";
+import { modelRefParts } from "./model-ref.mjs";
+import { readFileSync, statSync } from "node:fs";
+import { atomicWriteTextSync } from "./atomic-file.mjs";
+import { stateFile } from "./state-dir.mjs";
 
 // Public API prices in USD per one million tokens.
 //
-// This is deliberately a small, explicit snapshot rather than a live pricing
-// dependency. Stats must remain available offline and a provider catalog fetch
-// must never change a historical chart behind the user's back. Update this
-// table when a provider changes its published rates. Each row is one complete
-// provider offer. Equivalent cost normalizes the model identity and chooses the
-// cheapest real offer for the observed token mix; it never combines individual
-// columns from different providers into a price no provider actually offers.
+// Bundled fallback for offline first start. A per-gateway price owner overlays
+// validated public feeds and their last-good disk snapshot. Stats always uses
+// current Standard base rates, not historical invoices or long-context tiers.
+// Each row is one provider offer; never combine columns across providers.
 const PRICE_OFFERS = [
   // OpenCode Go base rates, checked against its current models.dev directory
   // on 2026-08-29. Free Zen models come from the sibling OpenCode directory.
@@ -105,6 +106,10 @@ const PRICE_OFFERS = [
   // OpenAI Docs Sep 22 release, prompts up to 272K input tokens:
   // https://developers.openai.com/api/docs/changelog
   ["gpt-6-sol@openai", { input: 2, cached: 0.2, output: 10 }],
+  // OpenAI Standard short-context rates, checked 2026-10-03:
+  // https://developers.openai.com/api/docs/pricing
+  ["gpt-6.1-sol@openai", { input: 2, cached: 0.1, output: 10 }],
+  ["gpt-6-luna@openai", { input: 0.1, cached: 0.01, output: 0.5 }],
   ["gpt-5.6-sol@openai", { input: 4, cached: 0.4, output: 20 }],
   ["gpt-5.6-terra@openai", { input: 2, cached: 0.2, output: 12 }],
   ["gpt-5.6-luna@openai", { input: 0.2, cached: 0.02, output: 1.2 }],
@@ -113,31 +118,52 @@ const PRICE_OFFERS = [
   ["gpt-5.2@openai", { input: 1.75, cached: 0.175, output: 14 }],
 ];
 
-const OFFERS_BY_MODEL = new Map();
-for (const [sourceKey, rate] of PRICE_OFFERS) {
-  const modelId = canonicalModelId(sourceKey);
-  const offers = OFFERS_BY_MODEL.get(modelId) || [];
-  offers.push({ sourceKey, ...rate });
-  OFFERS_BY_MODEL.set(modelId, offers);
+function indexOffers(sources = {}) {
+  const index = new Map();
+  const add = (offer) => {
+    const modelId = canonicalModelId(offer.model);
+    const offers = index.get(modelId) || [];
+    offers.push(offer);
+    index.set(modelId, offers);
+  };
+  for (const [sourceKey, rate] of PRICE_OFFERS) add({ model: sourceKey, sourceKey, source: "bundled", ...rate });
+  for (const [source, batch] of Object.entries(sources)) {
+    for (const offer of batch.offers) add({ ...offer, source });
+  }
+  return index;
 }
+const BUNDLED_OFFERS = indexOffers();
 
 const perMillion = (tokens, rate) => (Math.max(0, Number(tokens) || 0) * rate) / 1_000_000;
 
-function cheapestOffer(model, { input = 0, cached = 0, output = 0 } = {}) {
-  const offers = OFFERS_BY_MODEL.get(canonicalModelId(model)) || [];
-  if (!offers.length) return null;
+function cheapestOffer(model, provider, { input = 0, cached = 0, output = 0 } = {}, index = BUNDLED_OFFERS) {
+  const modelId = canonicalModelId(model);
+  const owner = modelRefParts(model).provider || provider;
+  // Local routes can carry arbitrary user-chosen names. If no public offer
+  // matches, retain the hosted Qwen Flash equivalent-value convention without
+  // changing the usage identity or duplicating its rates. The retired stable
+  // llama.cpp key is retained only for historical rollup valuation.
+  const localComparator = owner === "local" || (owner === "llamacpp" && modelId === "local");
+  const offers = (index.get(modelId)
+    || (localComparator ? index.get("qwen3.8-flash") : null) || [])
+    .filter((offer) => cached === 0 || offer.cached !== null);
+  const refreshed = offers.filter((offer) => offer.source !== "bundled");
+  // Dynamic offers supersede old bundled rates, including price increases.
+  // Missing cache rates cannot win by pretending that cache reads are free.
+  const candidates = refreshed.length ? refreshed : offers;
+  if (!candidates.length) return null;
   const costFor = (rate) => perMillion(input - cached, rate.input)
     + perMillion(cached, rate.cached)
     + perMillion(output, rate.output);
-  return offers.reduce((best, offer) => (costFor(offer) < costFor(best) ? offer : best));
+  return candidates.reduce((best, offer) => (costFor(offer) < costFor(best) ? offer : best));
 }
 
-export function estimateApiCost({ model, provider, inputTokens, cachedTokens, outputTokens } = {}) {
+export function estimateApiCost({ model, provider, inputTokens, cachedTokens, outputTokens } = {}, index = BUNDLED_OFFERS) {
   const input = Math.max(0, Number(inputTokens) || 0);
   const cached = Math.max(0, Math.min(input, Number(cachedTokens) || 0));
   const output = Math.max(0, Number(outputTokens) || 0);
   const totalTokens = input + output;
-  const rate = cheapestOffer(model, { input, cached, output });
+  const rate = cheapestOffer(model, provider, { input, cached, output }, index);
   if (!rate) return { usd: 0, pricedTokens: 0, unpricedTokens: totalTokens };
   return {
     usd: perMillion(input - cached, rate.input)
@@ -148,15 +174,142 @@ export function estimateApiCost({ model, provider, inputTokens, cachedTokens, ou
   };
 }
 
-export function apiRate(model, provider) {
-  // apiRate has no workload. Use an equal one-million-token mix only to expose
-  // a deterministic representative offer; estimateApiCost performs the actual
-  // workload-aware comparison used by Stats.
-  const selected = cheapestOffer(model, {
-    input: 2_000_000,
-    cached: 1_000_000,
-    output: 1_000_000,
+const MAX_FEED_BYTES = 16 * 1024 * 1024;
+const SOURCE_URLS = {
+  "models.dev": "https://models.dev/api.json",
+  openrouter: "https://openrouter.ai/api/v1/models",
+};
+
+function priceNumber(value) {
+  if (typeof value === "string" && !/^(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(value)) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function validOffer(offer) {
+  if (typeof offer?.model !== "string" || !offer.model.trim() || offer.model.length > 240) return null;
+  if (typeof offer.sourceKey !== "string" || !offer.sourceKey || offer.sourceKey.length > 480) return null;
+  if (/:(?:free|batch)$/i.test(offer.model)) return null;
+  const input = priceNumber(offer.input);
+  const output = priceNumber(offer.output);
+  const cached = offer.cached == null ? null : priceNumber(offer.cached);
+  if (input === null || output === null || input + output === 0 || (offer.cached != null && cached === null)) return null;
+  return { model: offer.model, sourceKey: offer.sourceKey, input, cached, output };
+}
+
+function feedOffers(source, body) {
+  const offers = [];
+  const add = (model, provider, input, output, cached, scale = 1) => {
+    const offer = validOffer({ model, sourceKey: `${model}@${provider}`, input, output, cached });
+    if (!offer) return;
+    const scaled = validOffer({ ...offer, input: offer.input * scale, output: offer.output * scale,
+      cached: offer.cached === null ? null : offer.cached * scale });
+    if (scaled) offers.push(scaled);
+  };
+  if (source === "models.dev" && body && typeof body === "object" && !Array.isArray(body)) {
+    for (const [provider, directory] of Object.entries(body)) {
+      for (const model of Object.values(directory?.models || {})) {
+        if (model?.modalities?.output && (!Array.isArray(model.modalities.output) || !model.modalities.output.includes("text"))) continue;
+        add(model?.id, provider, model?.cost?.input, model?.cost?.output, model?.cost?.cache_read);
+      }
+    }
+  } else if (source === "openrouter" && Array.isArray(body?.data)) {
+    for (const model of body.data) {
+      if (model?.architecture?.output_modalities && (!Array.isArray(model.architecture.output_modalities) || !model.architecture.output_modalities.includes("text"))) continue;
+      add(model?.id, "openrouter", model?.pricing?.prompt, model?.pricing?.completion, model?.pricing?.input_cache_read, 1_000_000);
+    }
+  }
+  if (!offers.length) throw new Error("No valid Standard token prices in feed");
+  return offers;
+}
+
+async function fetchOffers(source, url, signal) {
+  const response = await fetch(url, { headers: { Accept: "application/json" }, signal });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of response.body) {
+    bytes += chunk.length;
+    if (bytes > MAX_FEED_BYTES) throw new Error("Price feed exceeds 16 MiB");
+    chunks.push(chunk);
+  }
+  return feedOffers(source, JSON.parse(Buffer.concat(chunks).toString("utf8")));
+}
+
+export function createApiPricing({
+  file = stateFile("api-prices.json"),
+  modelsDevUrl = process.env.MODELDOCK_MODELS_DEV_PRICES_URL || SOURCE_URLS["models.dev"],
+  openRouterUrl = process.env.MODELDOCK_OPENROUTER_PRICES_URL || SOURCE_URLS.openrouter,
+  timeoutMs = 10_000,
+  onChange = () => {},
+} = {}) {
+  const urls = { "models.dev": modelsDevUrl, openrouter: openRouterUrl };
+  let sources = {};
+  try {
+    if (statSync(file).size > MAX_FEED_BYTES) throw new Error("Price snapshot exceeds 16 MiB");
+    const snapshot = JSON.parse(readFileSync(file, "utf8"));
+    if (snapshot.version !== 1 || snapshot.unit !== "USD_per_million_tokens") throw new Error("Unknown price snapshot format");
+    for (const source of Object.keys(SOURCE_URLS)) {
+      const batch = snapshot.sources?.[source];
+      if (!Array.isArray(batch?.offers) || !Number.isFinite(Date.parse(batch.fetchedAt)) || typeof batch.url !== "string") continue;
+      const offers = batch.offers.map(validOffer).filter(Boolean);
+      if (offers.length) sources[source] = { url: batch.url, fetchedAt: batch.fetchedAt, offers };
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") console.log(`[gate] price snapshot ignored: ${error.message}`);
+  }
+  let index = indexOffers(sources);
+  let revision = 0;
+  let refreshJob = null;
+  let controller = null;
+  let closed = false;
+  const status = () => ({
+    revision, currency: "USD", unit: "per_million_tokens", basis: "current_standard_base_rates",
+    sources: Object.fromEntries(Object.keys(SOURCE_URLS).map((source) => [source, {
+      url: sources[source]?.url || urls[source], fetchedAt: sources[source]?.fetchedAt || null,
+      offers: sources[source]?.offers.length || 0,
+    }])),
   });
-  if (!selected) return null;
-  return { input: selected.input, cached: selected.cached, output: selected.output };
+  const refresh = () => {
+    if (closed) return Promise.resolve(status());
+    if (refreshJob) return refreshJob;
+    controller = new AbortController();
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);
+    refreshJob = Promise.all(Object.entries(urls).map(async ([source, url]) => {
+      try {
+        const offers = await fetchOffers(source, url, signal);
+        return [source, { url, fetchedAt: new Date().toISOString(), offers }];
+      } catch (error) {
+        if (!closed) console.log(`[gate] ${source} price refresh failed: ${error.message}; keeping last-good prices`);
+        return null;
+      }
+    })).then((results) => {
+      const valid = results.filter(Boolean);
+      if (closed || !valid.length) return status();
+      const next = { ...sources, ...Object.fromEntries(valid) };
+      try {
+        const snapshot = JSON.stringify({ version: 1, unit: "USD_per_million_tokens", sources: next });
+        if (Buffer.byteLength(snapshot) > MAX_FEED_BYTES) throw new Error("Price snapshot exceeds 16 MiB");
+        atomicWriteTextSync(file, snapshot);
+      } catch (error) {
+        console.log(`[gate] price snapshot save failed: ${error.message}; keeping last-good prices`);
+        return status();
+      }
+      sources = next;
+      index = indexOffers(sources);
+      revision += 1;
+      onChange();
+      return status();
+    }).finally(() => { refreshJob = null; controller = null; });
+    return refreshJob;
+  };
+  return {
+    file, status, refresh,
+    estimateApiCost: (usage) => estimateApiCost(usage, index),
+    close() { closed = true; controller?.abort(); },
+  };
 }

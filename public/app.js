@@ -670,14 +670,15 @@ function fillSelect(select, items, { value = "", label, data, placeholder = true
 
 let lastModelSignature = "";
 let lastCatalogRevision = null;
+let lastPricingRevision = null;
 
-function refreshCatalogConsumers() {
-  // Stats deliberately keeps a bounded snapshot for ten minutes, but a model
-  // directory change invalidates its labels immediately. Models is also a
-  // server projection, so an already-open page must not wait for navigation.
+function refreshCatalogConsumers({ roster = true } = {}) {
+  // Stats keeps a bounded snapshot for ten minutes, but model labels and public
+  // price changes invalidate it immediately. Only a catalog change also needs
+  // the Models roster: pricing does not change that projection.
   statsLoadedAt = 0;
   const active = document.querySelector(".view.is-active")?.dataset.view || "";
-  if (active === "models") renderModelRoster().catch(() => {});
+  if (active === "models" && roster) renderModelRoster().catch(() => {});
   if (active === "stats") loadStats({ force: true }).catch(() => {});
 }
 
@@ -763,10 +764,14 @@ function renderModelOptions(data, currentRoute = currentRouteView(data)) {
   if (!models?.options) return;
   lastModelData = data;
   const catalogRevision = Number(models.catalogRevision) || 0;
-  if (lastCatalogRevision !== null && catalogRevision !== lastCatalogRevision) {
-    refreshCatalogConsumers();
+  const catalogChanged = lastCatalogRevision !== null && catalogRevision !== lastCatalogRevision;
+  const pricingRevision = data.pricing?.revision;
+  const pricingChanged = pricingRevision !== undefined && lastPricingRevision !== null && pricingRevision !== lastPricingRevision;
+  if (catalogChanged || pricingChanged) {
+    refreshCatalogConsumers({ roster: catalogChanged });
   }
   lastCatalogRevision = catalogRevision;
+  if (pricingRevision !== undefined) lastPricingRevision = pricingRevision;
   // This must run on every status event. The selectable model set changes
   // rarely, but the latest real route can change from one request to the next.
   renderCurrentModel(data, currentRoute);

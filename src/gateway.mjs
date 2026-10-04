@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { allProfiles, bareModelId, modelAddressFor, modelEntryFor, modelRefParts, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
+import { allProfiles, bareModelId, isLocalBackend, modelAddressFor, modelEntryFor, modelRefParts, profileById, providerForModel, upstreamTargetFor } from "./profiles.mjs";
 import { codexModelRef } from "./model-ref.mjs";
 import { compressConversation, projectLocalHistory } from "./compress.mjs";
 import { recordUsageEvent } from "./usage-events.mjs";
@@ -14,7 +14,7 @@ import { CURRENT_TURN_MARKER, RouteAffinity, currentTurnHasImage, currentTurnSta
 import { extractResponseUsage } from "./metrics.mjs";
 import { stateDir } from "./state-dir.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
-import { collaborationEnvelopeTurn, historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent } from "./subagent-guidance.mjs";
+import { collaborationEnvelopeTurn, historicalImageSpawnHint, hasOpaqueCollaboration, isOpaqueEncryptedContent, LOCAL_SUBAGENT_RULE, stripSubagentWorkTools, SUBAGENT_SPAWN_RULE } from "./subagent-guidance.mjs";
 import { attachSseKeepAlive, createUsageTee, forEachSseEvent, parseSseData } from "./sse.mjs";
 import { chatCompletionToResponse, chatReasoningText, normalizeLlamaServerTimings, pipeChatCompletionStream, responsesToChat } from "./local-chat-bridge.mjs";
 import { MIN_IMAGE_TRANSPORT_WIRE_BYTES } from "./image-transport.mjs";
@@ -67,45 +67,10 @@ const NATIVE_REDUNDANT_TOOL_NAMES = new Set([
 ]);
 const NATIVE_REDUNDANT_NAMESPACE_CHILDREN = new Set(["web_search_exa", "vision_inspect"]);
 
-// Local backends receive every callable tool Codex supplies. Tool names are not
-// a compatibility boundary, and a static allowlist silently disabled project
-// MCP servers such as trading_support. applyToolPolicy still removes only what
-// the selected wire cannot encode: unsupported hosted types, model-specific
-// modality conflicts, and provider-declared blocked types.
-
-// A Custom or Local backend that runs on this machine (loopback base URL).
-//
-// This is the real signal behind the local instruction compaction and compact
-// pre-compression, because both exist for slow local models. Tool availability
-// is intentionally independent of this budget decision. The earlier
-// context-window proxy (ctx <= 100K) existed only to avoid compacting remote
-// endpoints like OpenAI/OpenRouter; the loopback check excludes those directly
-// instead of guessing from a token count. A local backend with a large window
-// still gets the budget treatment (it is still a local model), and a remote one
-// never does, whatever it advertises.
-//
-// Like its predecessor it does NOT gate the *protocol* adaptation (system
-// hoisting, standard tool rewrite, reasoning mapping): that keys off the
-// provider alone, because a local server can reject a mid-history system
-// item at any advertised window. Conflating the two is what made compact_v2
-// fail with "System message must be at the beginning"; see the comment in
-// relayCompaction before widening this function's role again.
-export function isLocalBackend(config, model) {
-  const provider = providerForModel(config, model);
-  const profile = profileById(provider);
-  // A local engine says so about itself. A custom endpoint cannot: the same
-  // provider serves both a laptop and a datacentre, so its address decides.
-  if (profile?.local) return true;
-  if (provider !== "custom") return false;
-  const baseUrl = profile?.baseUrlFor?.(config, model);
-  if (!baseUrl) return false;
-  try {
-    const host = new URL(baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, "");
-    return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "0.0.0.0";
-  } catch {
-    return false;
-  }
-}
+// Local compute keeps ordinary callable/project MCP tools, but not Codex
+// child-work starters. The existing wire/modality denylist remains unchanged.
+// The provider-owned predicate keeps catalog instructions and the live
+// request policy on the same local-compute boundary.
 
 function redactBearer(value) {
   return String(value || "")
@@ -1519,8 +1484,9 @@ export function stripLocalInstructions(instructions) {
   return mapInstructionText(instructions, stripLocalInstructionText);
 }
 
-function appendLocalGuidance(instructions) {
-  const guidance = [LOCAL_HOST_SAFETY, LOCAL_PLAN_GUIDANCE];
+function appendLocalGuidance(instructions, localBackend) {
+  instructions = mapInstructionText(instructions, (text) => text.replaceAll(`Subagents: ${SUBAGENT_SPAWN_RULE}`, LOCAL_SUBAGENT_RULE));
+  const guidance = localBackend ? [LOCAL_HOST_SAFETY, LOCAL_PLAN_GUIDANCE, LOCAL_SUBAGENT_RULE] : [LOCAL_SUBAGENT_RULE];
   if (Array.isArray(instructions)) {
     const existing = instructions.map((part) => String(part?.text || "")).join("\n");
     const missing = guidance.filter((line) => !existing.includes(line));
@@ -2148,13 +2114,16 @@ export function applyToolPolicy(tools, {
   customToolsAsFunctions,
   flattenAllNamespaces = false,
   safeNamespaceFunctionNames = false,
+  disableSubagentWork = false,
 } = {}) {
+  const subagentPolicy = disableSubagentWork ? stripSubagentWorkTools(tools) : { tools, removed: 0 };
+  tools = subagentPolicy.tools;
   if (!Array.isArray(tools)) return { tools, stripped: { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 }, namespaces: new Map(), customToolNames: new Set(), toolNames: toolNameLedger() };
   const hidden = new Set(hiddenToolNames || []);
   const blocked = new Set(blockedToolTypes || []);
   const hostedOk = new Set(hostedToolTypes || []);
   const customFunctions = new Set(customToolsAsFunctions || []);
-  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: 0, namespaceChildren: 0, blockedType: 0 };
+  const stripped = { toolSearch: 0, webSearch: 0, otherHosted: 0, hidden: subagentPolicy.removed, namespaceChildren: 0, blockedType: 0 };
   // Reverse map for the flattening below: flat wire name -> { name, namespace }.
   // Codex resolves an incoming function_call by (namespace, name), so the
   // response path has to undo the flattening with the exact pair it was built
@@ -4211,15 +4180,17 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     forwarded: describeImageTransfer(normalizedPayload.input),
   };
 
-  // Local backends keep the complete callable tool surface. They still receive
-  // a compacted instruction envelope and the protocol/modality denylist below.
+  // Local compute keeps ordinary tools. A temporary vision escalation from a
+  // local selection must not re-enable child-work starters for that turn.
   const localBackend = isLocalBackend(config, route.model);
+  const disableSubagentWork = localBackend || isLocalBackend(config, requestedModel || mainModel);
   const routedProfile = profileById(routedProvider) || {};
   // A mixed provider can expose models backed by different downstream APIs.
   // Let a measured model narrow its tool dialect without weakening the other
   // models on the same provider. Undefined fields inherit the provider policy.
   const modelToolPolicy = routedModelEntry || {};
   const { tools, stripped, namespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
+    disableSubagentWork,
     // What this upstream refuses, and what it runs itself. Both are the
     // profile's to declare: the gate cannot know from the model id that xAI
     // rejects `custom` and serves its own web_search.
@@ -4238,6 +4209,15 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     safeNamespaceFunctionNames: modelToolPolicy.safeNamespaceFunctionNames ?? routedProfile.safeNamespaceFunctionNames,
   });
   if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
+  if (disableSubagentWork && Array.isArray(normalizedPayload.input)) {
+    normalizedPayload.input = normalizedPayload.input.flatMap((item) => {
+      if (item?.type !== "additional_tools" || !Array.isArray(item.tools)) return [item];
+      const deferred = stripSubagentWorkTools(item.tools);
+      stripped.hidden += deferred.removed;
+      if (deferred.tools === item.tools) return [item];
+      return deferred.tools.length ? [{ ...item, tools: deferred.tools }] : [];
+    });
+  }
   // The declarations above were flattened; the replayed history has to use the
   // same flat names or the upstream sees calls for tools it was never given.
   // Same for the 64-character cap: a replayed call for a tool whose declaration
@@ -4246,8 +4226,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces, toolNames);
   // Compress repeated prose without removing the instructions that govern the
   // tools now visible to the local model.
-  if (localBackend) {
-    normalizedPayload.instructions = appendLocalGuidance(stripLocalInstructions(normalizedPayload.instructions));
+  if (disableSubagentWork) {
+    normalizedPayload.instructions = appendLocalGuidance(localBackend
+      ? stripLocalInstructions(normalizedPayload.instructions)
+      : normalizedPayload.instructions, localBackend);
   }
   if (route.reason === "current_turn_image" && route.directVision) {
     normalizedPayload.instructions = stripTextOnlyVisionGuidance(normalizedPayload.instructions);

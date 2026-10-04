@@ -59,7 +59,7 @@ async function availablePort() {
 // A dashboard on a scratch port with its state in a temp dir, so looking at it
 // cannot touch the developer's own configuration.
 
-async function startDashboard(t, { nativeVision = false, bundled = false } = {}) {
+async function startDashboard(t, { nativeVision = false, bundled = false, config = {} } = {}) {
   const bundleUrl = process.env.MODELDOCK_TEST_BUNDLE
     ? pathToFileURL(path.resolve(process.env.MODELDOCK_TEST_BUNDLE)).href
     : new URL("../dist/modeldock.mjs", import.meta.url).href;
@@ -108,6 +108,8 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
     usageRollupFile: path.join(dir, "usage-rollup.json"),
     usageEventsFile: path.join(dir, "usage-events.jsonl"),
     visionOverridesFile: path.join(dir, "vision-overrides.json"),
+    apiPricesFile: path.join(dir, "api-prices.json"),
+    ...config,
   });
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -169,10 +171,11 @@ async function startDashboard(t, { nativeVision = false, bundled = false } = {})
   services.discoverEngines = async () => [observedEngine];
   services.probeGpus = async () => [];
 
-  const { app } = runtime.createApp(services);
+  const { app, close } = runtime.createApp(services);
   const server = app.listen(port, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   t.after(async () => {
+    await close();
     await services.mediaStore.cleanup();
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
@@ -192,6 +195,7 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
     "custom-single-save": 3000,
     "custom-vision-toggle": 3600,
     "unified-local": 4200,
+    "price-refresh": 4800,
   }[instance] ?? 1500;
   const basePort = 9350 + Math.floor(process.pid % 200) + instanceOffset;
   const profiles = [];
@@ -303,6 +307,90 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
 }
 
 const chromePath = findChrome();
+
+test("public price refresh invalidates an open built-bundle Stats page without extra polling", { timeout: 120_000 }, async (t) => {
+  if (!chromePath) {
+    assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");
+    t.skip("no Chrome on this machine; install one or set CHROME_PATH to run the render check");
+    return;
+  }
+  let rates = { input: 0.22, cache_read: 0.007, output: 0.66 };
+  const calls = [];
+  const priceFeed = createHttpServer((req, res) => {
+    calls.push(req.url);
+    res.writeHead(req.url === "/dev" ? 200 : 503, { "content-type": "application/json" });
+    res.end(req.url === "/dev" ? JSON.stringify({ opencode: { models: {
+      flash: { id: "deepseek-v4-flash", cost: rates },
+    } } }) : "{}");
+  });
+  await new Promise((resolve) => priceFeed.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    priceFeed.closeAllConnections?.();
+    await new Promise((resolve) => priceFeed.close(resolve));
+  });
+  const feedUrl = `http://127.0.0.1:${priceFeed.address().port}`;
+  const { base, services } = await startDashboard(t, { bundled: true, config: {
+    modelsDevPricesUrl: `${feedUrl}/dev`, openRouterPricesUrl: `${feedUrl}/router`, modelDiscoveryEnabled: false,
+  } });
+  await services.runScheduledMaintenance();
+  assert.equal(calls.length, 2, "startup and an overlapping pass join one pricing refresh");
+  await fetch(`${base}/api/onboarding/complete`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  });
+  const { send, evaluate } = await openBrowser(t, chromePath, { instance: "price-refresh" });
+  await send("Page.addScriptToEvaluateOnNewDocument", {
+    source: `window.__pageErrors = []; addEventListener('error', e => window.__pageErrors.push(e.message));
+      addEventListener('unhandledrejection', e => window.__pageErrors.push(String(e.reason)));`,
+  });
+  await send("Page.navigate", { url: `${base}/#stats` });
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await evaluate(`document.getElementById('stats-cost')?.textContent.includes('$')`)) break;
+    await sleep(100);
+  }
+  await evaluate(`document.querySelector('[data-stats-range="7"]').click()`);
+  assert.equal(await evaluate(`document.getElementById('stats-cost').textContent`), "$4,746.00");
+  await evaluate(`(() => {
+    const original = window.fetch.bind(window);
+    window.__projectionFetches = [];
+    window.fetch = (...args) => {
+      const url = String(args[0] || '');
+      if (url.includes('/api/models/roster') || url.includes('/api/stats')) window.__projectionFetches.push(url);
+      return original(...args);
+    };
+  })()`);
+  const catalogRevision = services.modelCatalogRevision;
+  rates = { input: 0.3, cache_read: 0.1, output: 1 };
+  await services.runScheduledMaintenance();
+  assert.equal(services.modelCatalogRevision, catalogRevision, "a price change is not a model catalog change");
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await evaluate(`document.getElementById('stats-cost')?.textContent === '$8,400.00'`)) break;
+    await sleep(100);
+  }
+  assert.equal(await evaluate(`document.getElementById('stats-cost').textContent`), "$8,400.00",
+    "the existing status stream invalidates the ten-minute Stats cache");
+  assert.match(await evaluate(`document.getElementById('stats-model-chart').textContent`), /\$8,400\.00/,
+    "the donut uses the same updated quote as the aggregate card");
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(window.__projectionFetches)`)), ["/api/stats"],
+    "a price revision refetches Stats once and does not fetch the model roster");
+  await evaluate(`document.querySelector('[data-stats-range="30"]').click()`);
+  assert.equal(await evaluate(`document.getElementById('stats-cost').textContent`), "$14,400.00");
+  await evaluate(`document.querySelector('[data-stats-range="1"]').click()`);
+  assert.equal(await evaluate(`document.getElementById('stats-cost').textContent`), "$0.0008");
+  assert.equal(calls.length, 4, "page navigation and range filters never fetch either public price source");
+  for (let index = 0; index < 20; index += 1) {
+    services.metrics.begin("responses", { model: "qwen3.8-flash@opencode-go" })({ ok: true });
+  }
+  await sleep(600);
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(window.__projectionFetches)`)), ["/api/stats"],
+    "ordinary metrics events do not introduce extra Stats polling");
+  assert.deepEqual(JSON.parse(await evaluate(`JSON.stringify(window.__pageErrors)`)), []);
+  if (process.env.MODELDOCK_PRICING_SCREENSHOT) {
+    await evaluate(`document.querySelector('[data-stats-range="7"]').click()`);
+    await sleep(200);
+    const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
+    writeFileSync(process.env.MODELDOCK_PRICING_SCREENSHOT, Buffer.from(shot.result.data, "base64"));
+  }
+});
 
 test("every dashboard tab renders itself and nothing else", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {

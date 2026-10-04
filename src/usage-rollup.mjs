@@ -336,10 +336,10 @@ function modelParts(key) {
     : { model: ref.model || "unknown", provider: "unknown" };
 }
 
-function addPricedStatsRow(target, key, source = {}) {
+function addPricedStatsRow(target, key, source, price) {
   addStatsRow(target, source);
   const { model, provider } = modelParts(key);
-  const cost = estimateApiCost({
+  const cost = price({
     model,
     provider,
     inputTokens: source.in,
@@ -363,14 +363,14 @@ const STATS_OTHER = "__other__";
 // canonical owner instead of maintaining two model-name pipelines.
 export const canonicalUsageModelId = canonicalModelId;
 
-function statsModelsForBuckets(buckets, retainedKeys) {
+function statsModelsForBuckets(buckets, retainedKeys, price) {
   const byModel = new Map();
   for (const [bucketKey, bucket] of Object.entries(buckets || {})) {
     if (!retainedKeys.has(bucketKey)) continue;
     for (const [key, entry] of Object.entries(bucket || {})) {
       const id = canonicalUsageModelId(key);
       const raw = byModel.get(id) || emptyStatsRow();
-      addPricedStatsRow(raw, key, entry);
+      addPricedStatsRow(raw, key, entry, price);
       byModel.set(id, raw);
     }
   }
@@ -389,7 +389,7 @@ function statsModelsForBuckets(buckets, retainedKeys) {
 // Per-bucket attribution for the model-coloured stacks. Priced by the real
 // model key even when the row is folded into Other, so a tail model's cost
 // stays in the spend bar instead of silently becoming zero.
-function bucketModelRows(entries, legend) {
+function bucketModelRows(entries, legend, price) {
   const rows = new Map();
   for (const [key, entry] of Object.entries(entries || {})) {
     const canonical = canonicalUsageModelId(key);
@@ -399,7 +399,7 @@ function bucketModelRows(entries, legend) {
     const outputTokens = Math.max(0, Number(entry?.out) || 0);
     const row = rows.get(id) || { newInput: 0, cached: 0, output: 0, requests: 0, cost: 0 };
     const { model, provider } = modelParts(key);
-    const cost = estimateApiCost({ model, provider, inputTokens, cachedTokens, outputTokens });
+    const cost = price({ model, provider, inputTokens, cachedTokens, outputTokens });
     row.newInput += Math.max(0, inputTokens - cachedTokens);
     row.cached += cachedTokens;
     row.output += outputTokens;
@@ -426,9 +426,9 @@ function bucketModelRows(entries, legend) {
 // ranked model share, legend and time buckets. Keeping these together prevents
 // the donut from re-ranking a model that the bar pipeline already folded into
 // Other (the 1D Command Code Qwen regression).
-function statsProjection(buckets, keys, keyName) {
+function statsProjection(buckets, keys, keyName, price) {
   const retainedKeys = new Set(keys);
-  const modelPeriod = statsModelsForBuckets(buckets, retainedKeys);
+  const modelPeriod = statsModelsForBuckets(buckets, retainedKeys, price);
   const legend = new Set(modelPeriod.models
     .filter((entry) => entry.id !== STATS_OTHER)
     .map((entry) => entry.id));
@@ -436,12 +436,12 @@ function statsProjection(buckets, keys, keyName) {
   const timeline = keys.map((key) => {
     const entries = buckets?.[key] || {};
     const raw = emptyStatsRow();
-    for (const [model, entry] of Object.entries(entries)) addPricedStatsRow(raw, model, entry);
+    for (const [model, entry] of Object.entries(entries)) addPricedStatsRow(raw, model, entry, price);
     addStatsRow(total, raw);
     return {
       [keyName]: key,
       ...finishStatsRow(raw),
-      byModel: bucketModelRows(entries, legend),
+      byModel: bucketModelRows(entries, legend, price),
     };
   });
   return {
@@ -457,7 +457,7 @@ function statsProjection(buckets, keys, keyName) {
 // ids and every other per-request detail stay on disk and never reach the browser.
 // `completedRequests` uses the durable success count; incomplete failure
 // metering therefore cannot turn into a misleading success-rate claim.
-export function usageStats(rollup, now = new Date().toISOString()) {
+export function usageStats(rollup, now = new Date().toISOString(), price = estimateApiCost) {
   const today = validUtcDay(now) || validUtcDay(new Date().toISOString());
   const dayKeys = [];
   for (let offset = -(ROLLUP_DAYS - 1); offset <= 0; offset += 1) dayKeys.push(shiftedUtcDay(today, offset));
@@ -465,10 +465,10 @@ export function usageStats(rollup, now = new Date().toISOString()) {
   for (let offset = -(ROLLUP_HOURS - 1); offset <= 0; offset += 1) hourKeys.push(shiftedUtcHour(now, offset));
 
   const projections = {
-    today: statsProjection(rollup?.days, dayKeys.slice(-1), "day"),
-    hours24: statsProjection(rollup?.hours, hourKeys, "hour"),
-    days7: statsProjection(rollup?.days, dayKeys.slice(-7), "day"),
-    days30: statsProjection(rollup?.days, dayKeys, "day"),
+    today: statsProjection(rollup?.days, dayKeys.slice(-1), "day", price),
+    hours24: statsProjection(rollup?.hours, hourKeys, "hour", price),
+    days7: statsProjection(rollup?.days, dayKeys.slice(-7), "day", price),
+    days30: statsProjection(rollup?.days, dayKeys, "day", price),
   };
   const modelPeriods = Object.fromEntries(Object.entries(projections).map(([key, projection]) => [key, {
     models: projection.models,

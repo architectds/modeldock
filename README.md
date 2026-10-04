@@ -134,6 +134,15 @@ one.
 button when a new release is ready. Change autostart or interface language in
 Settings.
 
+**Equivalent API cost** - Stats uses one normalized price table for local,
+cloud, and native models. Public Standard base-rate quotes refresh from
+models.dev and OpenRouter at startup and every 24 hours in the background.
+Each source keeps its last-good snapshot in `~/.modeldock/api-prices.json`;
+offline first starts use bundled prices. Missing cache-read rates stay unknown,
+not free. Costs use the cheapest complete published offer for the token mix,
+not a subscription invoice. Updating current quotes can revalue historical
+equivalent costs; opening Stats never fetches a pricing feed.
+
 ---
 
 ## Manual recovery

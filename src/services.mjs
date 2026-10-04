@@ -38,6 +38,7 @@ import { urlHost } from "./loopback.mjs";
 import { codexModelCatalog, labelForModelId, modelOptions } from "./model-options.mjs";
 import { DEFAULT_ZSTD_MEMORY_BUDGET_BYTES, WeightedByteBudget } from "./zstd-ingress-budget.mjs";
 import { opencodeSessionHeaders } from "./upstream-headers.mjs";
+import { createApiPricing } from "./api-pricing.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -139,6 +140,13 @@ export function createServices(config = loadConfig()) {
   // hand, so make the runtime copy self-consistent before routes mutate it.
   mutableConfig.tokens = mutableConfig.tokens || {};
   const metrics = new Metrics({ recentLimit: mutableConfig.recentLimit });
+  const apiPricing = createApiPricing({
+    file: mutableConfig.apiPricesFile,
+    modelsDevUrl: mutableConfig.modelsDevPricesUrl,
+    openRouterUrl: mutableConfig.openRouterPricesUrl,
+    timeoutMs: mutableConfig.apiPricesTimeoutMs,
+    onChange: () => metrics.emit("change"),
+  });
   const zstdMemoryBudget = new WeightedByteBudget(
     mutableConfig.zstdMemoryBudgetBytes || DEFAULT_ZSTD_MEMORY_BUDGET_BYTES,
   );
@@ -394,10 +402,12 @@ export function createServices(config = loadConfig()) {
   //
   // After the refresh rather than beside it: a model that arrived in this pass
   // should get its first-seen stamp before anything reasons about its age.
-  const runScheduledMaintenance = () => refreshModelCatalog().then(
-    () => runModelTidy(),
-    () => runModelTidy(),
-  );
+  // Public prices share this background pass, not the page request path. Each
+  // source retains its last-good batch, and one price owner serves all Stats.
+  const runScheduledMaintenance = () => Promise.all([
+    refreshModelCatalog().then(() => runModelTidy(), () => runModelTidy()),
+    apiPricing.refresh(),
+  ]);
 
   // The managed agent file is another Codex-facing model boundary. Migrate it
   // before publishing the catalog so both representations change together.
@@ -416,7 +426,7 @@ export function createServices(config = loadConfig()) {
     : null;
   if (modelRefreshTimer) modelRefreshTimer.unref();
   Object.assign(services, {
-    config: mutableConfig, runtime, metrics, zstdMemoryBudget, mediaStore, upstreams, configSwitcher,
+    config: mutableConfig, runtime, metrics, apiPricing, zstdMemoryBudget, mediaStore, upstreams, configSwitcher,
     visionOverridesFile,
     autostart, updater, routeAffinity, modelSelection, derivedFallback, callerKey, nativeSlugs,
     memoryStore, memoryTimer,

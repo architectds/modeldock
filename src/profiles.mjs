@@ -886,6 +886,25 @@ export function profileById(id) {
   return PROFILES[id] || null;
 }
 
+// Local compute owns the instruction budget and no-delegation policy. Custom
+// is a mixed provider, so its endpoint address decides; hosted providers do
+// not become local merely because a test redirects their base URL to loopback.
+// Protocol adaptation is a separate provider contract, not gated here.
+export function isLocalBackend(config, model) {
+  const provider = providerForModel(config, model);
+  const profile = profileById(provider);
+  if (profile?.local) return true;
+  if (provider !== "custom") return false;
+  const baseUrl = profile?.baseUrlFor?.(config, model);
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return isLoopbackHost(host) || host === "0.0.0.0";
+  } catch {
+    return false;
+  }
+}
+
 // Resolve the complete provider-owned request target once. Every caller - main
 // relay, compaction, and delegated vision - consumes this same projection.
 export function upstreamTargetFor(config, model) {

@@ -420,6 +420,7 @@ function statusPayload(services) {
     // config.profileId, so the same state produced two different answers and the
     // dashboard showed a provider that did not own the model beside it.
     models,
+    pricing: services.apiPricing?.status(),
     subagent: subagentPayload(services),
     media: mediaStore.snapshot(),
     routing: routeAffinity?.snapshot?.() || { activeCallIds: 0 },
@@ -1799,8 +1800,8 @@ export function createApp(services = createServices()) {
   app.get("/api/stats", (req, res) => {
     const rollup = readRollup(services.usageRollupFile || usageRollupPath());
     const directory = statsModelDirectory(services);
-    const stats = usageStats(rollup);
-    return res.json({ ...stats, modelLabels: statsModelLabels(directory, stats) });
+    const stats = usageStats(rollup, undefined, services.apiPricing.estimateApiCost);
+    return res.json({ ...stats, modelLabels: statsModelLabels(directory, stats), pricing: services.apiPricing.status() });
   });
   app.get("/api/local/discover", async (req, res) => {
     try {
@@ -2125,6 +2126,7 @@ export function createApp(services = createServices()) {
   return {
     app: outer,
     close: async () => {
+      services.apiPricing?.close();
       await Promise.all([
         readOnlyMcpHandler.close?.(),
         scopedMcpHandler.close?.(),

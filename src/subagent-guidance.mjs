@@ -11,6 +11,38 @@
 export const SUBAGENT_SPAWN_RULE =
   "For ordinary delegation, set agent_type=\"modeldock_subagent\" whenever that managed role is available; if it is unavailable, omit agent_type so Codex inherits its default. With a named role, set fork_turns to a positive recent-turn count sized to the task (normally \"3\"); use fork_turns=\"none\" only when the message is fully self-contained. Never omit fork_turns or use \"all\" with a named role: full-history forks inherit the parent role and model, so Codex rejects the override. Use any other named agent_type only when the user explicitly requests that role. Put the complete task in spawn_agent's `message` (not prompt). To give more work to an existing child, call followup_task -- send_message only reaches a still-running worker and returns empty once it has finished.";
 
+export const LOCAL_SUBAGENT_RULE = "LOCAL SUBAGENT RULE: In this local-model turn, complete the task in the primary agent and maintain a concise update_plan for long work. Do not spawn, resume, or assign more work to subagents, including through alternate tools or shell commands. Waiting for or stopping an already-running child is allowed; do not stop children automatically. This rule does not disable approval reviewers or ordinary project MCP tools.";
+
+const SUBAGENT_WORK_STARTERS = new Set(["spawn_agent", "followup_task", "resume_agent", "send_input"]);
+const SUBAGENT_NAMESPACES = new Set(["collaboration", "multi_agent_v1"]);
+const namespaceId = (name) => String(name || "").replace(/^namespace:/, "").replace(/_+$/, "");
+
+// Both initial and deferred declarations use this denylist. Namespace identity
+// matters: a project's MCP tool named spawn_agent is not a Codex child launcher.
+// Calls/results already in history are never passed through this filter.
+export function stripSubagentWorkTools(tools) {
+  if (!Array.isArray(tools)) return { tools, removed: 0 };
+  let removed = 0;
+  const kept = [];
+  for (const tool of tools) {
+    if (tool?.type === "namespace" && SUBAGENT_NAMESPACES.has(namespaceId(tool.name)) && Array.isArray(tool.tools)) {
+      const children = tool.tools.filter((child) => !SUBAGENT_WORK_STARTERS.has(child?.name));
+      removed += tool.tools.length - children.length;
+      if (children.length) kept.push(children.length === tool.tools.length ? tool : { ...tool, tools: children });
+      else if (!tool.tools.length) kept.push(tool);
+      continue;
+    }
+    const name = tool?.name;
+    const separator = typeof name === "string" ? name.lastIndexOf("__") : -1;
+    const isStarter = (tool?.type === "function" || tool?.type === "custom") && (SUBAGENT_WORK_STARTERS.has(name)
+      || (separator >= 0 && SUBAGENT_NAMESPACES.has(namespaceId(name.slice(0, separator)))
+        && SUBAGENT_WORK_STARTERS.has(name.slice(separator + 2))));
+    if (isStarter) removed += 1;
+    else kept.push(tool);
+  }
+  return { tools: removed ? kept : tools, removed };
+}
+
 export function historicalImageSpawnHint(ref) {
   return `[Image attachment ${ref}: if visual evidence is needed, call vision_inspect(image_ref="${ref}", question="your specific visual question") before making visual claims. Pixels are preserved by reference, not embedded in this text history.]`;
 }

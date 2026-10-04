@@ -4,7 +4,8 @@ import { createServer } from "node:http";
 import os from "node:os";
 import nodePath from "node:path";
 import { pathToFileURL } from "node:url";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 
 // End-to-end for native vision, with only the ChatGPT backend faked.
@@ -16,7 +17,7 @@ import { OPENCODE_GO_PROFILE } from "../src/profiles.mjs";
 // silently break (the set is built once; a catalog written after boot is not in
 // it), so this test drives the real createServices/createUpstreams path and
 // asserts what actually arrived at the backend.
-test("the built bundle refreshes native models, routes vision, and prices Sol in Stats", async (t) => {
+test("the built bundle refreshes native models, routes vision, and prices the latest GPT models across Stats", async (t) => {
   const dir = mkdtempSync(nodePath.join(os.tmpdir(), "modeldock-native-e2e-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -90,6 +91,14 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
             supported_reasoning_levels: [{ effort: "medium", description: "Balanced" }],
             default_reasoning_level: "medium",
           },
+          ...["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"].map((slug) => ({
+            slug,
+            display_name: slug,
+            visibility: "list",
+            input_modalities: ["text", "image"],
+            supported_reasoning_levels: [{ effort: "medium", description: "Balanced" }],
+            default_reasoning_level: "medium",
+          })),
           {
             slug: "mdr.bW9kZWxkb2Nr.cmVtb3RlLWVjaG8",
             display_name: "Routed Echo",
@@ -98,22 +107,29 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
         ] }));
         return;
       }
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       received.push({
         method: req.method,
         url: req.url,
         auth: req.headers.authorization,
         account: req.headers["chatgpt-account-id"],
-        body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        body,
       });
       // The real backend streams, and puts the words only in the deltas: its
       // response.completed carries an empty output array.
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end([
         'data: {"type":"response.output_text.delta","delta":"a red bar chart"}',
-        'data: {"type":"response.completed","response":{"id":"resp_e2e","output":[]}}',
+        `data: ${JSON.stringify({ type: "response.completed", response: {
+          id: "resp_e2e", model: body.model, status: "completed", output: [],
+          ...(["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"].includes(body.model) ? { usage: {
+            input_tokens: 10_000, output_tokens: 1_000, total_tokens: 11_000,
+            input_tokens_details: { cached_tokens: 8_000 },
+          } } : {}),
+        } })}`,
         "data: [DONE]",
         "",
-      ].join("\n"));
+      ].join("\n\n"));
     });
   });
   await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
@@ -126,9 +142,9 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
   const bundleUrl = process.env.MODELDOCK_TEST_BUNDLE
     ? pathToFileURL(nodePath.resolve(process.env.MODELDOCK_TEST_BUNDLE)).href
     : new URL("../dist/modeldock.mjs", import.meta.url).href;
-  const { createServices, createApp } = await import(bundleUrl);
+  const { startServer } = await import(bundleUrl);
 
-  const services = createServices({
+  const config = {
     host: "127.0.0.1",
     port: 0,
     profile: { ...OPENCODE_GO_PROFILE },
@@ -157,9 +173,13 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
     nativeCatalogFile: nodePath.join(dir, "native-catalog.json"),
     codexCatalogFile: nodePath.join(dir, "codex-model-catalog.json"),
     usageRollupFile,
+    usageEventsFile: nodePath.join(dir, "usage-events.jsonl"),
     summariesFile: nodePath.join(dir, "summaries.json"),
-  });
-  t.after(() => services.mediaStore.cleanup());
+    autostartDefault: false,
+  };
+  let instance = await startServer(config);
+  t.after(() => instance.stop());
+  const { services, server: gateway } = instance;
 
   let captured = null;
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -194,13 +214,6 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
   assert.ok(String(call.body.input[0].content[1].image_url).startsWith("data:image/png;base64,"));
   assert.equal(result.answer, "a red bar chart", "the backend's answer comes back through inspectVision");
 
-  const { app } = createApp(services);
-  const gateway = app.listen(0, "127.0.0.1");
-  await new Promise((resolve) => gateway.once("listening", resolve));
-  t.after(() => new Promise((resolve) => {
-    gateway.closeAllConnections?.();
-    gateway.close(resolve);
-  }));
   const statsResponse = await fetch(`http://127.0.0.1:${gateway.address().port}/api/stats`);
   assert.equal(statsResponse.status, 200);
   const stats = await statsResponse.json();
@@ -215,4 +228,69 @@ test("the built bundle refreshes native models, routes vision, and prices Sol in
     sum + (bucket.byModel?.["gpt-6-sol"]?.cost || 0), 0);
   assert.ok(Math.abs(plottedCost - sol.estimatedApiCostUsd) < 1e-12,
     "the spend chart uses the same Sol price as the card and model breakdown");
+
+  // Replay the original full Codex package, changing only the selected model.
+  // Prices are asserted after real streamed usage, not injected into Stats.
+  const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))));
+  assert.equal(fixture.request.tools.length, 164);
+  for (const model of ["gpt-6.1-sol", "gpt-6-luna", "gpt-6-astra"]) {
+    const response = await fetch(`http://127.0.0.1:${gateway.address().port}/c/${services.callerKey}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json", "x-codex-session-id": `pricing-${model}`,
+        authorization: "Bearer chatgpt-e2e-token", "chatgpt-account-id": "acct-e2e",
+      },
+      body: JSON.stringify({ ...fixture.request, model }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    assert.match(text, /a red bar chart/);
+    const call = received.at(-1);
+    assert.equal(call.url, "/responses");
+    assert.equal(call.body.model, model, "the native selected identity reaches the upstream unchanged");
+    assert.equal(call.auth, "Bearer chatgpt-e2e-token");
+    assert.ok(call.body.tools.length > 0, "the full request carries its coding tool surface");
+  }
+  const expectedCosts = new Map([
+    ["gpt-6-sol", 0.0156], ["gpt-6.1-sol", 0.0148],
+    ["gpt-6-luna", 0.00078], ["gpt-6-astra", 0.078],
+  ]);
+  const expectedTotal = [...expectedCosts.values()].reduce((sum, cost) => sum + cost, 0);
+  // Wait for metering to finish after the terminal SSE frame, then restart
+  // this isolated instance to exercise the production boot-time rollup fold.
+  let events = [];
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    events = existsSync(config.usageEventsFile)
+      ? readFileSync(config.usageEventsFile, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse)
+      : [];
+    if (events.length === 3) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(events.length, 3, "all native streams record their real usage");
+  for (const event of events) {
+    assert.equal(event.provider, "openai");
+    assert.equal(event.status, 200);
+    assert.equal(event.inputTokens, 10_000);
+    assert.equal(event.cachedTokens, 8_000);
+    assert.equal(event.outputTokens, 1_000);
+  }
+  await instance.stop();
+  instance = await startServer(config);
+  const pricedResponse = await fetch(`http://127.0.0.1:${instance.server.address().port}/api/stats`);
+  assert.equal(pricedResponse.status, 200);
+  const pricedStats = await pricedResponse.json();
+  for (const period of ["hours24", "days7", "days30"]) {
+    for (const [model, cost] of expectedCosts) {
+      const row = pricedStats.modelPeriods[period].models.find((entry) => entry.id === model);
+      assert.ok(row, `${model} has one normalized identity in ${period}`);
+      assert.ok(Math.abs(row.estimatedApiCostUsd - cost) < 1e-12,
+        `${model} in ${period}: expected published cache-aware cost ${cost}, received ${row.estimatedApiCostUsd}`);
+      assert.equal(row.costCoverage, 1);
+      const plotted = pricedStats.series[period].reduce((sum, bucket) => sum + (bucket.byModel?.[model]?.cost || 0), 0);
+      assert.ok(Math.abs(plotted - cost) < 1e-12, `${model}'s chart and model breakdown share the ${period} cost`);
+    }
+    assert.ok(Math.abs(pricedStats.periods[period].estimatedApiCostUsd - expectedTotal) < 1e-12,
+      `the aggregate card shares every model's price in ${period}`);
+    assert.equal(pricedStats.periods[period].costCoverage, 1);
+  }
 });

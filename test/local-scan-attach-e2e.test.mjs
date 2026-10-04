@@ -37,6 +37,12 @@ const MODEL_NAME = "flash-next";
 const MODEL_ID = `${PROVIDER_NAME}/${MODEL_NAME}`;
 const EXPECTED_INTERNAL_ID = `${MODEL_ID}@local`;
 const LEGACY_MODEL = "legacy-model";
+const RELAY_USAGE = { prompt_tokens: 8308, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 6000 } };
+// These are the declared equivalent prices for this exact mock-reported usage:
+// Qwen Flash 0.15/0.016/0.47, and the known Qwen 27B offer 0.4/0.04/3 USD/M.
+const LOCAL_EQUIVALENT_USD = 0.00044408;
+const QWEN_27B_USD = 0.0011752;
+const RELAY_TOKENS = RELAY_USAGE.prompt_tokens + RELAY_USAGE.completion_tokens;
 
 const b64 = (value) => Buffer.from(String(value), "utf8").toString("base64url");
 const codexSlugFor = (provider, modelId) => `mdr.${b64(provider)}.${b64(modelId)}`;
@@ -85,6 +91,50 @@ async function waitForStatus(port) {
 }
 
 const modelIdOf = (entry) => (typeof entry === "string" ? entry : entry?.id);
+
+function assertEquivalentPricing(stats, localRequests) {
+  const closeCost = (actual, expected, message) => assert.ok(Math.abs(actual - expected) < 1e-12,
+    `${message}: expected ${expected}, received ${actual}`);
+  const expectedCost = (localRequests + 1) * LOCAL_EQUIVALENT_USD + QWEN_27B_USD;
+  // Four persisted controls plus the Local requests, the legacy Custom turn,
+  // and the Custom turn whose model name is identical to the Local route.
+  const requests = 6 + localRequests;
+  for (const range of ["hours24", "days7", "days30"]) {
+    const summary = stats.periods[range];
+    const models = stats.modelPeriods[range].models;
+    const local = models.find((entry) => entry.id === MODEL_NAME);
+    assert.ok(local, `${range} must retain the Local model's own identity`);
+    closeCost(local.estimatedApiCostUsd, localRequests * LOCAL_EQUIVALENT_USD,
+      `${range} Local equivalent cost must include the cache discount`);
+    assert.equal(local.completedRequests, localRequests + 1, `${range} includes its Custom namesake`);
+    assert.equal(local.pricedTokens, localRequests * RELAY_TOKENS,
+      `${range} must price only the Local traffic, not the same-named Custom traffic`);
+    assert.equal(local.unpricedTokens, RELAY_TOKENS);
+    assert.ok(!models.some((entry) => entry.id === "qwen3.8-flash"),
+      "the comparator must not rename or merge Local traffic into hosted Qwen Flash");
+
+    for (const [id, usd] of [["local", LOCAL_EQUIVALENT_USD], ["qwen3.8-27b", QWEN_27B_USD],
+      ["unknown-cloud", 0], ["unknown-custom", 0], [LEGACY_MODEL, 0]]) {
+      const model = models.find((entry) => entry.id === id);
+      assert.ok(model, `${range} must include price control ${id}`);
+      closeCost(model.estimatedApiCostUsd, usd, `${range} price control ${id}`);
+      assert.equal(model.costCoverage, usd > 0 ? 1 : 0, `${range} price coverage for ${id}`);
+    }
+    assert.equal(summary.completedRequests, requests, `${range} request counts`);
+    assert.equal(summary.inputTokens, requests * RELAY_USAGE.prompt_tokens);
+    assert.equal(summary.outputTokens, requests * RELAY_USAGE.completion_tokens);
+    assert.equal(summary.cachedTokens, requests * RELAY_USAGE.prompt_tokens_details.cached_tokens);
+    assert.equal(summary.pricedTokens, (localRequests + 2) * RELAY_TOKENS);
+    assert.equal(summary.unpricedTokens, 4 * RELAY_TOKENS);
+    closeCost(summary.estimatedApiCostUsd, expectedCost, `${range} summary cost`);
+    closeCost(models.reduce((total, entry) => total + entry.estimatedApiCostUsd, 0), expectedCost,
+      `${range} model-share cost must agree with the aggregate`);
+    closeCost(stats.series[range].reduce((total, entry) => total + entry.estimatedApiCostUsd, 0), expectedCost,
+      `${range} timeline cost must agree with the aggregate`);
+    closeCost(stats.series[range].reduce((total, entry) => total + (entry.byModel[MODEL_NAME]?.cost || 0), 0),
+      localRequests * LOCAL_EQUIVALENT_USD, `${range} Local stack cost must agree with model share`);
+  }
+}
 
 // A keyless, Chat-only OpenAI-compatible mock. It answers /v1/models and the
 // Chat dialect, and deliberately 404s the Responses dialect so the probe has to
@@ -135,7 +185,7 @@ function createUpstream() {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end([
         `data: ${JSON.stringify({ id: "chatcmpl_local_relay", created: 21, model: body?.model || UPSTREAM_ID, choices: [{ index: 0, delta: { role: "assistant", content: "LOCAL_OK" } }] })}`,
-        `data: ${JSON.stringify({ id: "chatcmpl_local_relay", created: 21, model: body?.model || UPSTREAM_ID, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 8308, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 0 } } })}`,
+        `data: ${JSON.stringify({ id: "chatcmpl_local_relay", created: 21, model: body?.model || UPSTREAM_ID, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: RELAY_USAGE })}`,
         "data: [DONE]",
         "",
       ].join("\n\n"));
@@ -224,11 +274,19 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   // The inclusive thirty-date rollup starts twenty-nine days before today.
   // An unrelated event there proves that the complete retained window exists;
   // the two stale fixtures have no requests in that window.
+  const controlUsage = Object.fromEntries([
+    "Local@llamacpp", "Qwen/Qwen3.8-27B@local", "unknown-cloud@opencode-go", "unknown-custom@custom",
+  ].map((key) => [key, {
+    requests: 1, ok: 1, in: RELAY_USAGE.prompt_tokens, out: RELAY_USAGE.completion_tokens,
+    cached: RELAY_USAGE.prompt_tokens_details.cached_tokens, ms: 5000, okOut: 4, okMs: 5000,
+  }]));
+  const currentDay = new Date(now).toISOString().slice(0, 10);
+  const currentHour = `${new Date(now).toISOString().slice(0, 13)}:00:00.000Z`;
   await writeFile(path.join(stateDir, "usage-rollup.json"), JSON.stringify({
     version: 2,
     lastFoldedAt: new Date(now).toISOString(),
-    days: { [rollupDay]: { "unrelated@custom": { requests: 1 } } },
-    hours: {},
+    days: { [rollupDay]: { "unrelated@custom": { requests: 1 } }, [currentDay]: controlUsage },
+    hours: { [currentHour]: controlUsage },
   }));
   const firstSeen = Object.fromEntries([
     ...bulkRecent.map((entry) => [`${entry.modelId}@custom`, new Date(now).toISOString()]),
@@ -292,6 +350,15 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   await waitForStatus(gatewayPort);
   const api = `http://127.0.0.1:${gatewayPort}`;
   const savedEndpoints = () => JSON.parse(readFileSync(endpointFile, "utf8"));
+  const waitForUsageEvents = async (count) => {
+    const file = path.join(stateDir, "usage-events.jsonl");
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const events = existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+      if (events.length === count) return events;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail(`expected ${count} real relay usage events inside MODELDOCK_STATE_DIR`);
+  };
   const catalogSlug = async (modelId) => {
     const catalog = await (await fetch(`${api}/v1/models`)).json();
     return catalog.models.find((item) => item.slug === codexSlugFor("local", modelId));
@@ -432,16 +499,18 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const attachedRelayText = await attachedRelay.text();
   assert.equal(attachedRelay.status, 200, `the attached model did not relay: ${attachedRelayText}\n${stderr}`);
   assert.match(attachedRelayText, /"type":"response.completed"/);
+  assert.match(attachedRelayText, /"cached_tokens":6000/, "the client receives the upstream's cache usage");
   const attachedTurns = received.filter((entry) => entry.method === "POST" && entry.path === "/v1/chat/completions" && entry.body?.stream === true);
   assert.equal(attachedTurns.length, 1, "the Codex turn must reach the attached Chat endpoint exactly once");
   assert.equal(attachedTurns[0].body.model, UPSTREAM_ID, "the REAL upstream id must travel on the wire, not the slug");
   // The metering append happens as the server side of the stream closes,
   // which can land a beat after the client finishes reading it.
-  for (let attempt = 0; attempt < 40 && !existsSync(path.join(stateDir, "usage-events.jsonl")); attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  assert.ok(existsSync(path.join(stateDir, "usage-events.jsonl")),
-    "relay metering must land inside MODELDOCK_STATE_DIR, not in the real ~/.modeldock stream");
+  const [localEvent] = await waitForUsageEvents(1);
+  assert.equal(localEvent.model, EXPECTED_INTERNAL_ID, "pricing must not replace the persisted Local identity");
+  assert.equal(localEvent.provider, "local");
+  assert.equal(localEvent.inputTokens, RELAY_USAGE.prompt_tokens);
+  assert.equal(localEvent.outputTokens, RELAY_USAGE.completion_tokens);
+  assert.equal(localEvent.cachedTokens, RELAY_USAGE.prompt_tokens_details.cached_tokens);
   assert.ok(Array.isArray(attachedTurns[0].body.tools) && attachedTurns[0].body.tools.length > 150,
     "the full Codex tool catalog must reach the attached endpoint");
 
@@ -461,11 +530,17 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   assert.equal(sameNameRemote?.body.model, MODEL_ID);
 
   // 6. A restart from the same state keeps the slug and the routing.
+  await waitForUsageEvents(3);
   await stop(child);
   child = launchGateway();
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   await waitForStatus(gatewayPort).catch((error) => { throw new Error(`${error.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`); });
+  // Boot folds real metering into the durable rollup. All three dashboard
+  // ranges must use the same Local comparator while keeping cloud unknowns
+  // unpriced, including the identical Custom model name.
+  const firstStats = await (await fetch(`${api}/api/stats`)).json();
+  assertEquivalentPricing(firstStats, 1);
   const restoredRow = await catalogSlug(MODEL_ID);
   assert.ok(restoredRow, "the published slug must survive a restart");
   const restoredRelay = await relay(restoredRow.slug);
@@ -480,6 +555,27 @@ test("built bundle probes a keyless local origin without saving, then attaches o
   const restartedFirstHundred = (await (await fetch(`${api}/v1/models`)).json()).models.slice(0, 100);
   assert.ok(restartedFirstHundred.some((entry) => entry.slug === restoredRow.slug),
     "the Local registration remains within the first 100 after restart and tidy");
+
+  // Fold the second real Local turn, then restart again without new traffic.
+  // The counts and cost must survive, and boot-time folding is idempotent.
+  await waitForUsageEvents(4);
+  await stop(child);
+  child = launchGateway();
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  await waitForStatus(gatewayPort);
+  const foldedStats = await (await fetch(`${api}/api/stats`)).json();
+  assertEquivalentPricing(foldedStats, 2);
+  await stop(child);
+  child = launchGateway();
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  await waitForStatus(gatewayPort);
+  const idempotentStats = await (await fetch(`${api}/api/stats`)).json();
+  assertEquivalentPricing(idempotentStats, 2);
+  assert.deepEqual(idempotentStats.periods, foldedStats.periods, "restart preserves counts and equivalent cost");
+  assert.deepEqual(idempotentStats.modelPeriods, foldedStats.modelPeriods, "restart preserves model shares");
+  assert.deepEqual(idempotentStats.series, foldedStats.series, "restart preserves time-bucket attribution");
 
   // A saved registration is itself a scan candidate. This covers services on
   // non-default ports whose owning process is Node, Python, WSL, or a container
