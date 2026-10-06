@@ -9,10 +9,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalMemoryScope, verifiedMemoryScope } from "../src/memory-scope.mjs";
 
-const STANDALONE = fileURLToPath(new URL("../src/mcp-standalone.mjs", import.meta.url));
+const STANDALONE = process.env.MODELDOCK_TEST_MCP_BUNDLE
+  || (process.env.MODELDOCK_TEST_BUNDLE
+    ? path.join(path.dirname(path.resolve(process.env.MODELDOCK_TEST_BUNDLE)), "mcp-standalone.mjs")
+    : fileURLToPath(new URL("../dist/mcp-standalone.mjs", import.meta.url)));
 const CALLER_KEY = "test-caller-key-0123456789-abcdef";
+const MCP_HELPER = process.env.MODELDOCK_TEST_MCP_HELPER
+  || fileURLToPath(new URL("../scripts/mcp-call.mjs", import.meta.url));
 
-function startMockGateway() {
+function startMockGateway({ imageError = false, toolErrors = false } = {}) {
   const calls = [];
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -32,6 +37,12 @@ function startMockGateway() {
           : [
               { type: "text", text: JSON.stringify({ forwarded: message.params.name, args: message.params.arguments }) },
             ];
+        if (imageError && message.params.name === "image_gen") {
+          result = { content: [{ type: "text", text: "Native image API returned 503: fixture unavailable" }], isError: true };
+        }
+        if (toolErrors) {
+          result = { content: [{ type: "text", text: `Fixture ${message.params.name} failed` }], isError: true };
+        }
       } else if (message.method === "tools/list") {
         result.tools = [];
       }
@@ -181,6 +192,15 @@ test("stdio bridge exposes and forwards both Grok media tools only after login",
       arguments: { prompt: "a small blue circle" },
     });
     assert.equal(JSON.parse(image.result.content[0].text).forwarded, "grok_image_gen");
+    for (const [index, args] of [
+      { action: "generate", prompt: "a blue circle moving right", duration: 2, wait_seconds: 0 },
+      { action: "status", request_id: "fixture-video-request" },
+    ].entries()) {
+      const called = await rpc(bridge, 4 + index, "tools/call", { name: "grok_video_gen", arguments: args });
+      assert.equal(called.result.isError, undefined);
+      assert.deepEqual(JSON.parse(called.result.content[0].text), { forwarded: "grok_video_gen", args });
+      assert.deepEqual(gateway.calls.at(-1).params, { name: "grok_video_gen", arguments: args });
+    }
   } finally {
     await stopBridge(bridge);
     await gateway.close();
@@ -320,6 +340,14 @@ test("two project bridges authenticate distinct write scopes and reject model ov
       false,
       "rejected learn calls never reach the gateway",
     );
+    const learned = await rpc(bridgeA, 4, "tools/call", {
+      name: "learn", arguments: { path: path.join(projectA, "notes.md") },
+    });
+    assert.equal(learned.result.isError, undefined);
+    assert.deepEqual(JSON.parse(learned.result.content[0].text), {
+      forwarded: "learn", args: { path: path.join(projectA, "notes.md") },
+    });
+    assert.equal(verifiedMemoryScope(gateway.requests.at(-1).headers, CALLER_KEY), canonicalMemoryScope(projectA));
   } finally {
     await stopBridge(bridgeA);
     await stopBridge(bridgeB);
@@ -398,6 +426,114 @@ test("stdio bridge forwards web_search_exa calls to the gateway", async () => {
   } finally {
     await stopBridge(bridge);
     await gateway.close();
+  }
+});
+
+for (const imageError of [false, true]) test(imageError
+  ? "built stdio image_gen preserves a gateway tool failure"
+  : "built stdio image_gen reaches the keyed gateway and returns its result", async () => {
+  const gateway = await startMockGateway({ imageError });
+  const bridge = startBridge(gateway.url);
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "codex-image-replay", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+    const listed = await rpc(bridge, 2, "tools/list", {});
+    assert.ok(listed.result.tools.some((tool) => tool.name === "image_gen"));
+    const args = { prompt: "A red apple on a wooden table.", size: "1024x1024", model: "gpt-image-1" };
+    const called = await rpc(bridge, 3, "tools/call", { name: "image_gen", arguments: args });
+    const forwarded = gateway.calls.filter((message) => message.method === "tools/call");
+    assert.equal(forwarded.length, 1, "advertising image_gen is insufficient: the invocation must reach the gateway");
+    assert.equal(forwarded[0].params.name, "image_gen");
+    assert.deepEqual(forwarded[0].params.arguments, args);
+    if (imageError) {
+      assert.equal(called.result.isError, true, "gateway failures must not become successful stdio results");
+      assert.match(called.result.content[0].text, /Native image API returned 503: fixture unavailable/);
+    } else {
+      assert.equal(called.result.isError, undefined);
+      assert.deepEqual(JSON.parse(called.result.content[0].text), { forwarded: "image_gen", args });
+    }
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+  }
+});
+
+for (const imageError of [false, true]) test(imageError
+  ? "shipped MCP helper exits with failure when image_gen returns a tool error"
+  : "shipped MCP helper forwards image_gen and returns its successful result", { timeout: 15_000 }, async () => {
+  const gateway = await startMockGateway({ imageError });
+  const args = { prompt: "fixture helper image", size: "1024x1024", model: "gpt-image-1" };
+  const child = spawn(process.execPath, [MCP_HELPER, "image", args.prompt, args.size, args.model], {
+    env: { ...process.env, MODELDOCK_GATEWAY_URL: gateway.url },
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  try {
+    const [code] = await once(child, "exit");
+    const calls = gateway.calls.filter((message) => message.method === "tools/call");
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].params, { name: "image_gen", arguments: args });
+    if (imageError) {
+      assert.notEqual(code, 0, "tool errors must not become successful CLI exits");
+      assert.equal(stdout, "");
+      assert.match(stderr, /Native image API returned 503: fixture unavailable/);
+    } else {
+      assert.equal(code, 0, stderr);
+      assert.match(stdout, /forwarded: 'image_gen'/);
+      assert.match(stdout, /prompt: 'fixture helper image'/);
+    }
+  } finally {
+    await stopBridge({ child });
+    await gateway.close();
+  }
+});
+
+test("every gateway-backed stdio tool reaches the gateway and preserves its tool error", async () => {
+  const gateway = await startMockGateway({ toolErrors: true });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "modeldock-mcp-all-tools-"));
+  writeFileSync(path.join(stateDir, "xai-auth.json"), JSON.stringify({
+    accessToken: "fixture-grok-token", expiresAt: Date.now() + 60_000,
+  }), "utf8");
+  const bridge = startBridge(gateway.url, { MODELDOCK_MEMORY: "1", MODELDOCK_STATE_DIR: stateDir });
+  try {
+    await rpc(bridge, 1, "initialize", {
+      protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "all-tool-invocations", version: "1.0.0" },
+    });
+    notify(bridge, "notifications/initialized", {});
+    const listed = await rpc(bridge, 2, "tools/list", {});
+    const calls = {
+      web_search_exa: { query: "fixture search" },
+      vision_inspect: { image_ref: "img_fixture", question: "fixture vision" },
+      preview_images: { paths: [path.join(stateDir, "shot.png")] },
+      image_gen: { prompt: "fixture native image" },
+      grok_image_gen: { prompt: "fixture grok image" },
+      grok_video_gen: { action: "status", request_id: "fixture-video-request" },
+      recall_memory: { query: "fixture memory", scope_dir: stateDir },
+      store_memory: { content: "fixture memory", kind: "knowledge" },
+      learn: { path: path.join(stateDir, "notes.md") },
+    };
+    assert.deepEqual(listed.result.tools.map((tool) => tool.name).filter((name) => name !== "speak" && name !== "hear").sort(),
+      Object.keys(calls).sort(), "every advertised gateway tool needs an actual invocation, not just a list assertion");
+    for (const [index, [name, args]] of Object.entries(calls).entries()) {
+      const called = await rpc(bridge, index + 3, "tools/call", { name, arguments: args });
+      assert.equal(gateway.calls.at(-1).method, "tools/call", name);
+      assert.deepEqual(gateway.calls.at(-1).params, { name, arguments: args }, `${name} must reach the keyed gateway`);
+      assert.equal(called.result.isError, true, `${name} must not turn an upstream tool error into a successful result`);
+      assert.match(called.result.content[0].text, new RegExp(`Fixture ${name} failed`));
+    }
+    assert.equal(gateway.calls.filter((message) => message.method === "tools/call").length, Object.keys(calls).length);
+  } finally {
+    await stopBridge(bridge);
+    await gateway.close();
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });
 

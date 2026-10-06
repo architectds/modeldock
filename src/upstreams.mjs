@@ -58,15 +58,28 @@ export function parseMcpTextResult(body) {
   payloads.push(...sseDataLines(trimmed));
 
   for (const payload of payloads) {
+    let parsed;
     try {
-      const parsed = JSON.parse(payload);
-      const content = parsed?.result?.content;
-      if (!Array.isArray(content)) continue;
-      const texts = content.filter((item) => item?.type === "text" && typeof item.text === "string").map((item) => item.text);
-      if (texts.length) return texts.join("\n");
+      parsed = JSON.parse(payload);
     } catch {
       // Try the next JSON or SSE payload.
+      continue;
     }
+
+    if (parsed?.error) {
+      const message = typeof parsed.error.message === "string" ? parsed.error.message : "Exa MCP returned a JSON-RPC error";
+      throw new Error(message);
+    }
+    const result = parsed?.result;
+    const content = result?.content;
+    const texts = Array.isArray(content)
+      ? content.filter((item) => item?.type === "text" && typeof item.text === "string").map((item) => item.text)
+      : [];
+    if (result?.isError === true) {
+      throw new Error(texts.join("\n") || "Exa MCP returned a tool error");
+    }
+    if (!Array.isArray(content)) continue;
+    if (texts.length) return texts.join("\n");
   }
   return "";
 }

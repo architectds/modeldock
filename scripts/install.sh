@@ -1602,6 +1602,7 @@ async function listMcpTools(baseUrl = gatewayBaseUrl()) {
 async function callMcpTool(name, args, baseUrl = gatewayBaseUrl()) {
   const result = await callMcpToolResult(name, args, baseUrl);
   const text = (result.content || []).find((item) => item.type === "text")?.text ?? "";
+  if (result.isError) throw new Error(text || `MCP tool ${name} failed`);
   try {
     return JSON.parse(text);
   } catch {
