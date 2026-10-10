@@ -1,23 +1,22 @@
 export const MIB = 1024 * 1024;
 
-export const ZSTD_COMPRESSED_HARD_LIMIT_BYTES = 64 * MIB;
-export const ZSTD_DECODED_HARD_LIMIT_BYTES = 64 * MIB;
+export const ZSTD_COMPRESSED_HARD_LIMIT_BYTES = 100 * MIB;
+export const ZSTD_DECODED_HARD_LIMIT_BYTES = 100 * MIB;
 // Every zstd request initially reserves the full decode ceiling plus its wire
 // bytes. Keep the configurable process budget large enough to admit at least a
 // small valid request instead of accepting a setting that makes zstd unusable.
 export const MIN_ZSTD_MEMORY_BUDGET_BYTES = ZSTD_DECODED_HARD_LIMIT_BYTES + MIB;
-
-// One worst-case request can occupy a 64 MiB wire buffer while a 64 MiB
-// logical body is decoded, converted to a JavaScript string, and parsed. The
-// weighted budget is deliberately larger than the two protocol limits: those
-// limits bound one request, while this limit bounds aggregate process memory.
-export const DEFAULT_ZSTD_MEMORY_BUDGET_BYTES = 256 * MIB;
 
 // Parsed JSON is mostly strings for Codex history. Three logical bytes per
 // input byte conservatively covers UTF-16 text plus object/string overhead
 // after the compressed and decoded byte buffers leave scope.
 export const ZSTD_PARSED_BODY_MEMORY_FACTOR = 3;
 export const ZSTD_MIN_PARSED_BODY_CHARGE_BYTES = 64 * 1024;
+
+// Admit one maximum-size request while still bounding concurrent decoding and
+// parsed history. This is an accounting ceiling, not a preallocated buffer.
+export const DEFAULT_ZSTD_MEMORY_BUDGET_BYTES = ZSTD_COMPRESSED_HARD_LIMIT_BYTES
+  + ZSTD_DECODED_HARD_LIMIT_BYTES * ZSTD_PARSED_BODY_MEMORY_FACTOR;
 
 function validBytes(value) {
   return Number.isSafeInteger(value) && value >= 0;

@@ -1104,8 +1104,8 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
   const instance = await startApp({});
   t.after(instance.stop);
 
-  // Highly compressible payload: tiny on the wire, decompresses past 64MB.
-  const bomb = zlib.zstdCompressSync(Buffer.alloc(100 * 1024 * 1024));
+  // Highly compressible payload: tiny on the wire, decompresses past the cap.
+  const bomb = zlib.zstdCompressSync(Buffer.alloc(ZSTD_DECODED_HARD_LIMIT_BYTES + 1));
   const tooBig = await fetch(`${instance.base}/healthz`, {
     method: "POST",
     headers: { "content-type": "application/json", "content-encoding": "zstd" },
@@ -1120,14 +1120,14 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
     wireBytes: bomb.length,
     wireLimitBytes: null,
     decodedBytes: null,
-    decodedBytesAtLeast: 64 * 1024 * 1024 + 1,
-    decodedLimitBytes: 64 * 1024 * 1024,
+    decodedBytesAtLeast: ZSTD_DECODED_HARD_LIMIT_BYTES + 1,
+    decodedLimitBytes: ZSTD_DECODED_HARD_LIMIT_BYTES,
     inputItems: null,
     inputImages: null,
     inputImageBytes: null,
   });
 
-  // A body between the former 32 MiB cap and the 64 MiB hard cap reaches the
+  // A body between the former 32 MiB cap and the hard cap reaches the
   // decoder. It is deliberately not JSON, so 400 proves it was not rejected by
   // the ingress-size guard before a Codex compaction could be parsed.
   const admitted = await fetch(`${instance.base}/healthz`, {
@@ -1138,7 +1138,7 @@ test("zstd decoder caps the compressed stream and the decompressed body", async 
   assert.equal(admitted.status, 400);
   assert.match((await admitted.json()).error.message, /zstd request decode failed/);
 
-  // A request whose declared wire body exceeds 64 MiB is rejected before the
+  // A request whose declared wire body exceeds the cap is rejected before the
   // gateway allocates or reads that body.
   const port = new URL(instance.base).port;
   const rawResponse = await new Promise((resolve, reject) => {
@@ -1236,9 +1236,10 @@ test("zstd aggregate budget fails fast, authenticates first, and recovers after 
   });
   const upstreamPort = await listen(upstream);
   t.after(() => new Promise((resolve) => upstream.close(resolve)));
+  const budgetBytes = ZSTD_DECODED_HARD_LIMIT_BYTES + 6 * 1024 * 1024;
   const instance = await startApp({
     opencodeBaseUrl: `http://127.0.0.1:${upstreamPort}/v1`,
-    zstdMemoryBudgetBytes: 70 * 1024 * 1024,
+    zstdMemoryBudgetBytes: budgetBytes,
   });
   t.after(instance.stop);
   const logical = Buffer.from(JSON.stringify({
@@ -1269,7 +1270,7 @@ test("zstd aggregate budget fails fast, authenticates first, and recovers after 
   assert.equal(overloaded.headers.get("retry-after"), "1");
   const overloadedBody = await overloaded.json();
   assert.equal(overloadedBody.error.type, "decode_budget_exhausted");
-  assert.equal(overloadedBody.error.diagnostics.budgetBytes, 70 * 1024 * 1024);
+  assert.equal(overloadedBody.error.diagnostics.budgetBytes, budgetBytes);
   assert.ok(overloadedBody.error.diagnostics.reservedBytes > 12 * 1024 * 1024);
   assert.equal(requestCount, 1);
 

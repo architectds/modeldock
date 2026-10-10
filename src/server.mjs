@@ -724,7 +724,7 @@ function sendDecodeBudgetExhausted(res, metrics, memoryBudget, requestedBytes) {
 }
 
 function zstdRequestDecoder({ callerKey, metrics, memoryBudget }) {
-  // Both one-request protocol limits are 64 MiB. Aggregate process exposure is
+  // Both one-request protocol limits are 100 MiB. Aggregate process exposure is
   // bounded separately by memoryBudget, which follows each request from receive
   // through response completion and shrinks after its real size is known.
   const maxInput = ZSTD_COMPRESSED_HARD_LIMIT_BYTES;
@@ -858,7 +858,7 @@ function zstdRequestDecoder({ callerKey, metrics, memoryBudget }) {
   };
 }
 
-export function decodeZstdBody(compressed, maxOutput = 64 * 1024 * 1024, nativeDecoder = zlib.zstdDecompress) {
+export function decodeZstdBody(compressed, maxOutput = ZSTD_DECODED_HARD_LIMIT_BYTES, nativeDecoder = zlib.zstdDecompress) {
   if (typeof nativeDecoder === "function") {
     return new Promise((resolve, reject) => {
       nativeDecoder(compressed, { maxOutputLength: maxOutput }, (error, body) => {

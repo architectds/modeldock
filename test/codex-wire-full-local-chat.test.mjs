@@ -14,11 +14,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, zstdCompressSync } from "node:zlib";
 import { readFileSync } from "node:fs";
+import { encode as encodePng } from "fast-png";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
+const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
 
 function listen(server) {
@@ -230,4 +231,79 @@ test("built bundle bridges the complete original Codex package to strict local C
     false,
     "the delivering tool name is not invented as an upstream call",
   );
+
+  // Valid PNGs with synthetic metadata enlarge the captured image-result shape
+  // without requiring a GPU or committing multi-megabyte binary fixtures.
+  const mib = 1024 * 1024;
+  const image = `data:image/png;base64,${Buffer.from(encodePng({
+    width: 1, height: 1, channels: 4, data: new Uint8Array([0, 128, 0, 255]),
+    text: { Padding: "z".repeat(9 * mib) },
+  })).toString("base64")}`;
+  const imageHistory = [
+    ...fixture.request.input,
+    ...firstOutput,
+    { type: "function_call_output", call_id: "call_local_fixture", output: [
+      { type: "input_text", text: "LOCAL_FIXTURE" },
+      ...Array.from({ length: 8 }, () => ({ type: "input_image", image_url: image })),
+    ] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Continue after inspecting the historical images." }] },
+  ];
+  const largeBody = Buffer.from(JSON.stringify({ ...fixture.request, model: selectedModel, input: imageHistory }));
+  assert.ok(largeBody.length > 96 * mib && largeBody.length < 100 * mib);
+  const compressedRequest = (body) => fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-encoding": "zstd", "x-codex-session-id": "full-local-fixture" },
+    body: zstdCompressSync(body),
+  });
+  // Compaction enters through the same decoder as sampling. A 64 MiB limit
+  // rejected this request before the CPU handoff could remove the image bytes.
+  const receivedBeforeCompact = requests.length;
+  const compactBody = Buffer.from(JSON.stringify({
+    ...fixture.request,
+    model: selectedModel,
+    input: [...imageHistory, { type: "compaction_trigger" }],
+  }));
+  const compactResponse = await compressedRequest(compactBody);
+  const compactText = await compactResponse.text();
+  assert.equal(compactResponse.status, 200, `large image history must reach CPU compaction: ${compactText}`);
+  const compacted = completedResponse(compactText);
+  assert.equal(compacted.output.length, 1);
+  const compactItem = compacted.output[0];
+  assert.equal(compactItem.type, "compaction");
+  assert.match(compactItem.encrypted_content, /^kcr1:/);
+  const summary = Buffer.from(compactItem.encrypted_content.slice(5), "base64").toString("utf8");
+  assert.match(summary, /img_[a-f0-9]{20}/, "the handoff preserves access to the historical images");
+  assert.equal(summary.includes("data:image/"), false, "the CPU handoff does not retain inline pixels");
+  assert.ok(Buffer.byteLength(compactText) < mib, "the returned handoff shrinks the large request");
+  assert.equal(requests.length, receivedBeforeCompact, "CPU compaction needs no model request");
+  const resumed = await send([
+    ...imageHistory.filter((item) => item.type === "message" && ["user", "developer", "system"].includes(item.role)),
+    compactItem,
+    { type: "message", role: "user", content: [{ type: "input_text", text: "Continue the task from the CPU handoff." }] },
+  ]);
+  assert.match(resumed, /response\.completed/);
+  assert.match(JSON.stringify(requests.at(-1).messages), /img_[a-f0-9]{20}/);
+  assert.equal(JSON.stringify(requests.at(-1).messages).includes("data:image/"), false);
+
+  const largeResponse = await compressedRequest(largeBody);
+  const largeText = await largeResponse.text();
+  assert.equal(largeResponse.status, 200, `large image history must reach the local relay: ${largeText}`);
+  assert.match(largeText, /LOCAL_FIXTURE_DONE/);
+  assert.match(largeText, /response\.completed/);
+  assert.match(JSON.stringify(requests.at(-1).messages), /img_[a-f0-9]{20}/);
+  assert.equal(JSON.stringify(requests.at(-1).messages).includes("data:image/"), false);
+
+  const receivedBeforeReject = requests.length;
+  const oversizedBody = Buffer.from(JSON.stringify({ ...fixture.request, model: selectedModel, input: [
+    ...imageHistory,
+    { type: "message", role: "user", content: [{ type: "input_text", text: "z".repeat(5 * mib) }] },
+  ] }));
+  assert.ok(oversizedBody.length > 100 * mib);
+  const rejected = await compressedRequest(oversizedBody);
+  assert.equal(rejected.status, 413);
+  const rejection = await rejected.json();
+  assert.equal(rejection.error.diagnostics.reason, "decompressed_request");
+  assert.equal(rejection.error.diagnostics.decodedLimitBytes, 100 * mib);
+  assert.equal(requests.length, receivedBeforeReject, "an oversized body never reaches the upstream");
+  assert.match(await send(fixture.request.input), /response\.completed/, "the gateway recovers after rejecting a large body");
 });
