@@ -26,6 +26,7 @@ const UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
 const ROUTED_SLUG = `${UPSTREAM_MODEL}@commandcode`;
 const VISION_UPSTREAM_MODEL = "Qwen/Qwen3.8-Flash";
 const VISION_ROUTED_SLUG = `${VISION_UPSTREAM_MODEL}@commandcode`;
+const GO_CLAUDE_SLUG = "claude-haiku-5-5@opencode-go";
 const BLUE_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZCMsAAAAASUVORK5CYII=";
 
 function listen(server) {
@@ -166,6 +167,12 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify({ error }));
     };
+    if (req.method === "GET" && req.url === "/go/v1/models") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ data: [
+        { id: "claude-haiku-5-5", name: "Claude Haiku 5.5" },
+      ] }));
+    }
     if (req.method === "GET" && req.url === "/provider/v1/models") {
       res.writeHead(200, { "content-type": "application/json" });
       // The Claude entry is here on purpose: end to end, the directory must be
@@ -273,6 +280,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       MODELDOCK_PORT: String(gatewayPort),
       MODELDOCK_PROFILE: "opencode-go",
       OPENCODE_GO_TOKEN: "fixture-token",
+      MODELDOCK_UPSTREAM_BASE_URL: `http://127.0.0.1:${upstreamPort}/go/v1`,
       // Discovery stays on: this test drives the whole real path, directory to
       // bridge, so the published set is produced by the gateway rather than by the
       // test. The mock serves /provider/v1/models for it.
@@ -305,9 +313,11 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
   assert.equal(providerIcon.headers.get("content-type"), "image/svg+xml; charset=utf-8",
     "the bundled favicon reaches the browser as an SVG rather than an opaque download");
   assert.match(await providerIcon.text(), /<svg\b/, "the served provider mark contains SVG image data");
-  const published = await waitForModel(gatewayPort, ROUTED_SLUG);
-  assert.ok(!published.some((id) => id.startsWith("claude-")),
-    `the vendor directory listed a Claude model and it reached the picker anyway: ${published}`);
+  await waitForModel(gatewayPort, ROUTED_SLUG);
+  const published = await waitForModel(gatewayPort, GO_CLAUDE_SLUG);
+  assert.ok(!published.some((id) => id.startsWith("claude-") && id.endsWith("@commandcode")),
+    `Command Code published a Messages-only model through the Chat bridge: ${published}`);
+  assert.ok(published.includes(GO_CLAUDE_SLUG), "Command Code filtering must not hide another provider's Claude model");
 
   const send = async (input, stream = true, model = ROUTED_SLUG, sessionId = "full-commandcode-chat-fixture") => {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
