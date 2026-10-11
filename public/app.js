@@ -2649,7 +2649,8 @@ function endpointField(endpoint) {
   // Never echo a stored key back into the field: the placeholder reports that
   // one is set, and leaving it blank keeps it - the same contract the preset
   // key fields have always had.
-  key.placeholder = t(endpoint.apiKeyConfigured ? "settings.configured" : "settings.required");
+  key.placeholder = endpoint.apiKeyConfigured ? t("settings.configured")
+    : endpoint.apiKeyRequired === false ? "sk-..." : t("settings.required");
   remove.addEventListener("click", async (event) => {
     event.preventDefault();
     remove.disabled = true;
@@ -2770,10 +2771,6 @@ async function saveCustomEndpointDraft() {
   if (!modelId) {
     throw new Error(t("custom.errModelRequired"));
   }
-  if (!apiKey) {
-    throw new Error(t("custom.errKeyRequired"));
-  }
-
   const response = await fetch("/api/custom/add", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2787,7 +2784,8 @@ async function saveCustomEndpointDraft() {
   const body = await response.json();
   if (!response.ok) {
     const error = Object.assign(new Error(body.error?.message || "Save failed"), { code: body.error?.type });
-    error.message = customErrorText(error.code) || error.message;
+    error.message = error.code === "key" && !apiKey
+      ? t("custom.errKeyRequired") : customErrorText(error.code) || error.message;
     throw error;
   }
   clearCustomDraft();

@@ -125,6 +125,11 @@ Codex; the dashboard shows what is connected.
 on your machine. Connect opens one naming form; the provider/model name you save
 becomes the readable Local picker entry. Protocol selection is automatic.
 
+**LAN models** - add the server's API base URL (including `/v1`) as a custom
+endpoint in Cloud. Private LAN addresses can use HTTP without an API key when
+the server needs none. ModelDock does not scan the subnet or expose its own
+dashboard to the network.
+
 **Tools** - web search, image understanding, image generation, memory, speech,
 and video are available to the model when configured. For voice, turn TTS or
 STT on in the dashboard. Choose a dedicated sub-agent model there when you want

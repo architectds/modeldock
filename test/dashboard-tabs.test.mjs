@@ -308,6 +308,85 @@ async function openBrowser(t, chromePath, { width = 1500, height = 1000, deviceS
 
 const chromePath = findChrome();
 
+test("the built Cloud form saves a keyless private-LAN endpoint", { timeout: 120_000 }, async (t) => {
+  const lanHost = Object.values(os.networkInterfaces()).flat().find((entry) =>
+    entry.family === "IPv4" && !entry.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)/.test(entry.address))?.address;
+  if (!chromePath || !lanHost) {
+    t.skip("requires Chrome and an assigned private-LAN IPv4 address");
+    return;
+  }
+  const model = "lan-browser-model";
+  const received = [];
+  const upstream = createHttpServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    received.push({ url: req.url, authorization: req.headers.authorization });
+    res.setHeader("content-type", "application/json");
+    if (req.method === "GET" && req.url === "/v1/models") {
+      res.end(JSON.stringify({ data: [{ id: model, meta: { n_ctx: 65536 } }] }));
+    } else if (req.method === "POST" && req.url === "/v1/responses") {
+      res.end(JSON.stringify({ id: "resp_lan_probe", status: "completed", output: [], usage: {} }));
+    } else {
+      res.statusCode = 404;
+      res.end("{}");
+    }
+  });
+  await new Promise((resolve, reject) => {
+    upstream.once("error", reject);
+    upstream.listen(0, lanHost, resolve);
+  });
+  t.after(() => new Promise((resolve) => {
+    upstream.closeAllConnections?.();
+    upstream.close(resolve);
+  }));
+  const endpoint = `http://${lanHost}:${upstream.address().port}`;
+  const { base, services } = await startDashboard(t, { bundled: true });
+  const { send, evaluate } = await openBrowser(t, chromePath, { instance: "lan-custom" });
+  await send("Page.navigate", { url: `${base}#cloud` });
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (await evaluate("document.readyState === 'complete' && typeof saveCustomEndpointDraft === 'function'")) break;
+    await sleep(100);
+  }
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (await evaluate("Boolean(document.getElementById('modeldock-wizard')?.open)")) break;
+    await sleep(100);
+  }
+  await evaluate(`(() => {
+    const wizard = document.getElementById('modeldock-wizard');
+    [...(wizard?.querySelectorAll('button') || [])].find((button) => /skip for now/i.test(button.textContent))?.click();
+    document.getElementById('custom-endpoint').value = ${JSON.stringify(`${endpoint}/v1`)};
+    document.getElementById('custom-endpoint').dispatchEvent(new Event('input', { bubbles: true }));
+    document.getElementById('custom-api-key').value = '';
+    document.getElementById('custom-list-models').click();
+  })()`);
+  let listed;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    listed = await evaluate(`({ ready: [...document.getElementById('custom-model-select').options].some((option) => option.value === ${JSON.stringify(model)}), error: document.getElementById('custom-error').hidden ? '' : document.getElementById('custom-error').textContent })`);
+    if (listed.ready || listed.error) break;
+    await sleep(100);
+  }
+  assert.equal(listed.ready, true, `the LAN model list must reach the form: ${listed.error}`);
+  await evaluate(`document.getElementById('custom-model-select').value = ${JSON.stringify(model)}; document.getElementById('endpoint-save').click();`);
+  let saved;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    saved = JSON.parse(readFileSync(services.customEndpointsFile, "utf8")).find((entry) => entry.modelId === model);
+    if (saved) break;
+    await sleep(100);
+  }
+  const status = await evaluate("document.getElementById('endpoint-status')?.textContent || document.getElementById('custom-error').textContent");
+  assert.ok(saved, `the blank key must not prevent saving the reachable LAN endpoint: ${status}`);
+  assert.equal(saved.baseUrl, `${endpoint}/v1`);
+  assert.equal(saved.apiKey, "");
+  assert.ok(received.some((request) => request.url === "/v1/responses"));
+  assert.ok(received.every((request) => request.authorization === undefined), "no dummy or unrelated key is sent to the LAN server");
+  const catalog = await (await fetch(`${base}/v1/models`)).json();
+  assert.ok(catalog.models.some((entry) => entry.display_name === `Custom - ${model}`));
+  if (process.env.MODELDOCK_TEST_SCREENSHOT) {
+    const shot = await send("Page.captureScreenshot", { format: "png" });
+    writeFileSync(`${process.env.MODELDOCK_TEST_SCREENSHOT}.lan-custom.png`, Buffer.from(shot.result.data, "base64"));
+  }
+});
+
 test("public price refresh invalidates an open built-bundle Stats page without extra polling", { timeout: 120_000 }, async (t) => {
   if (!chromePath) {
     assert.ok(!process.env.CI, "CI has no browser, so the render check cannot run - install Chrome on the runner");

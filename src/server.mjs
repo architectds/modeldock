@@ -31,7 +31,7 @@ import { validateProviderToken } from "./token-validate.mjs";
 import { RouteAffinity } from "./router.mjs";
 import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, applyCustomProfile, applyLocalProfile, effectiveContextWindow, bareModelId, modelAddressFor, modelRefParts, profileOptions, profileById, providerForModel, remoteEndpoints, routedModelRefFor, tokenFor, upstreamTargetFor } from "./profiles.mjs";
 import { hasChatGptLogin } from "./codex-auth.mjs";
-import { sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
+import { isLocalNetworkHost, sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
 // Re-exported: tests and embedders construct the service bag through
 // server.mjs, and that path stays stable across the services split.
@@ -42,7 +42,7 @@ import { NATIVE_PROVIDER } from "./native-provider.mjs";
 // Re-exported: tests and the config switcher import the catalog through
 // server.mjs, and that path stays stable across the model-options split.
 export { codexModelCatalog };
-import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomEndpoint } from "./custom-endpoint.mjs";
+import { CustomEndpointError, listEndpointModels, normalizeBaseUrl, probeCustomEndpoint, validateBaseUrl } from "./custom-endpoint.mjs";
 import { LEGACY_CUSTOM_ENV_KEYS, migrateLegacyCustomEndpoint, CustomEndpointsError, addCustomEndpoint, customEndpointsPath, readCustomEndpoints, removeCustomEndpoint, writeCustomEndpoints } from "./custom-endpoints.mjs";
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
 import { usageEventsPath } from "./usage-events.mjs";
@@ -1409,6 +1409,7 @@ export function createApp(services = createServices()) {
       supportsVision: entry.supportsVision,
       transport: entry.transport,
       apiKeyConfigured: Boolean(entry.apiKey),
+      apiKeyRequired: upstreamTargetFor(config, modelAddressFor("custom", entry.modelId)).tokenRequired !== false,
       addedAt: entry.addedAt,
     }));
     return res.json({ endpoints });
@@ -1419,7 +1420,10 @@ export function createApp(services = createServices()) {
     try {
       const model = String(modelId || "").trim();
       if (!model) throw new CustomEndpointError("model", "A model id is required.");
-      if (!String(apiKey || "").trim()) throw new CustomEndpointError("key", "An API key is required.");
+      const endpoint = new URL(validateBaseUrl(baseUrl));
+      if (!String(apiKey || "").trim() && !isLocalNetworkHost(endpoint.hostname)) {
+        throw new CustomEndpointError("key", "An API key is required.");
+      }
       const probe = await probeCustomEndpoint({ baseUrl, apiKey, modelId: model });
       // Advertised context window (llama.cpp meta.n_ctx) so compaction limits
       // match the real backend instead of the 250K custom fallback.
@@ -1541,13 +1545,10 @@ export function createApp(services = createServices()) {
       const upstream = listed.models.find((entry) => entry.id === upstreamId);
       if (!upstream) throw new Error("The selected model is not available.");
       const probe = await probeCustomEndpoint({ baseUrl, apiKey, modelId: upstreamId, preferChat: true });
-      // Reuse the scanner's capability probe for the selected port. Its llama
+      // Reuse the scanner's capability probe for the selected host. Its llama
       // template facts affect tool-call serialization and media escaping, even
       // though engine identity no longer decides which provider owns the model.
-      const port = Number(new URL(baseUrl).port);
-      const detected = Number.isInteger(port) && port > 0
-        ? await probeLocalEngine(port)
-        : null;
+      const detected = await probeLocalEngine(baseUrl);
       const modelId = `${provider}/${model}`;
       const next = addCustomEndpoint(readCustomEndpoints(endpointsFile()), {
         modelId,
@@ -1806,30 +1807,8 @@ export function createApp(services = createServices()) {
   app.get("/api/local/discover", async (req, res) => {
     try {
       let endpointRows = readCustomEndpoints(endpointsFile());
-      // Re-probe every saved Local port as well as the conventional engine
-      // ports. A server launched by Node, Python, WSL, a container relay, or a
-      // renamed binary may not look like an inference engine in the process
-      // table; its explicit Local registration is still authoritative evidence
-      // that this exact loopback port belongs in the scan.
-      const candidatePorts = new Map();
-      for (const definition of localEngineDefinitions()) {
-        if (Number(definition.defaultPort) > 0) {
-          candidatePorts.set(Number(definition.defaultPort), { port: Number(definition.defaultPort), hint: definition.label });
-        }
-      }
-      for (const entry of endpointRows) {
-        if (!entry.local) continue;
-        try {
-          const endpoint = new URL(entry.baseUrl);
-          const port = Number(endpoint.port || (endpoint.protocol === "https:" ? 443 : 80));
-          if (port > 0) candidatePorts.set(port, { port, hint: entry.label || entry.modelId });
-        } catch {
-          // A malformed persisted endpoint remains visible as offline. It must
-          // not make the rest of the Local scan fail.
-        }
-      }
       const live = await (services.discoverEngines || discoverLocalEngines)({
-        candidates: [...candidatePorts.values()],
+        endpoints: endpointRows.filter((entry) => entry.local).map((entry) => entry.baseUrl),
       });
       const registrationsFor = (engine) => endpointRows.filter((entry) => entry.local
         && sameLocalHost(entry.baseUrl, engine.baseUrl));

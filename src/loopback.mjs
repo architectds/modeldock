@@ -1,15 +1,13 @@
-// Which hosts count as this machine.
-//
-// Two rules lean on that answer, in opposite directions: plaintext http is allowed
-// only to loopback (the gateway's own bind address or a local endpoint), and
-// remote image fetches are allowed only *away* from loopback. The
-// membership test behind both was written out across configuration, discovery,
-// custom-endpoint.mjs twice, media-store.mjs - and the copies had already drifted:
-// media-store stripped the brackets URL.hostname puts around an IPv6 literal, the
-// others did not, so `http://[::1]:11434` failed the check and was refused as a
-// remote plaintext endpoint. A security rule kept in five places is a rule that
-// gets changed in one.
+import { BlockList, isIP } from "node:net";
+
+// Gateway binding stays loopback-only. Explicit inference endpoints may also
+// use private LAN literals; that permission must not widen the gateway bind.
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+const PRIVATE_NETWORKS = new BlockList();
+PRIVATE_NETWORKS.addSubnet("10.0.0.0", 8, "ipv4");
+PRIVATE_NETWORKS.addSubnet("172.16.0.0", 12, "ipv4");
+PRIVATE_NETWORKS.addSubnet("192.168.0.0", 16, "ipv4");
+PRIVATE_NETWORKS.addSubnet("fc00::", 7, "ipv6");
 
 // The spelling a host needs inside a URL: IPv6 literals get their brackets
 // back ("::1" -> "[::1]"). Shared by the server's guards and the services
@@ -23,6 +21,13 @@ export function isLoopbackHost(value) {
   // host read straight from an env var or a config field has no brackets.
   const host = String(value || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
   return LOOPBACK_HOSTS.has(host);
+}
+
+export function isLocalNetworkHost(value) {
+  if (isLoopbackHost(value)) return true;
+  const host = String(value || "").trim().replace(/^\[|\]$/g, "");
+  const family = isIP(host);
+  return Boolean(family && PRIVATE_NETWORKS.check(host, family === 6 ? "ipv6" : "ipv4"));
 }
 
 // Compare the network identity of two endpoint URLs while deliberately

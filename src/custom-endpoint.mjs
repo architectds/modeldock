@@ -2,7 +2,7 @@
 // The gateway speaks Responses to Codex and can relay either Responses or Chat
 // Completions upstream, so saving detects that boundary once and persists it.
 import { randomUUID } from "node:crypto";
-import { isLoopbackHost } from "./loopback.mjs";
+import { isLocalNetworkHost } from "./loopback.mjs";
 import { opencodeSessionHeaders } from "./upstream-headers.mjs";
 
 export class CustomEndpointError extends Error {
@@ -31,15 +31,14 @@ function validateEndpoint(raw, { appendV1 = false } = {}) {
   } catch {
     throw new CustomEndpointError("connect", "Endpoint must be an http(s) URL.");
   }
-  const loopback = isLoopbackHost(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
-    throw new CustomEndpointError("connect", "Only https and loopback http endpoints are allowed.");
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && isLocalNetworkHost(parsed.hostname))) {
+    throw new CustomEndpointError("connect", "Use HTTPS, or HTTP with a loopback or private LAN address.");
   }
   return url;
 }
 
-// Only https and loopback http are acceptable: the gate is a local service and a
-// custom endpoint must never point it at an arbitrary LAN or internet target.
+// Public endpoints require HTTPS. Explicit loopback and private LAN endpoints
+// may use HTTP, as self-hosted inference servers commonly do.
 export function validateBaseUrl(raw) {
   return validateEndpoint(raw, { appendV1: true });
 }

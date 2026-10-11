@@ -12,7 +12,7 @@
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { atomicWriteJsonSync } from "./atomic-file.mjs";
-import { isLoopbackHost } from "./loopback.mjs";
+import { isLocalNetworkHost, sameEndpointHost } from "./loopback.mjs";
 import { stateFile } from "./state-dir.mjs";
 import { listEngineListeners, parseLlamaArgs } from "./engine-processes.mjs";
 import { modelFactsAreStale, readModelFacts } from "./gguf.mjs";
@@ -51,9 +51,8 @@ export function engineFromProbes({ tags, props, version, models } = {}) {
   return "";
 }
 
-// Only loopback: the keyless path exists because a local engine has no key to
-// give, so it must never be able to reach a remote host. These two facts are
-// one decision, not two.
+// User-configured inference servers may live on another machine on the LAN.
+// Public hosts and arbitrary DNS names are not Local endpoints.
 export function assertLocalBase(raw) {
   const value = String(raw || "").trim().replace(/\/+$/, "");
   let parsed;
@@ -65,8 +64,8 @@ export function assertLocalBase(raw) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new LocalEngineError("base", "Local engine URL must be an http(s) URL.");
   }
-  if (!isLoopbackHost(parsed.hostname)) {
-    throw new LocalEngineError("base", "Local engines must be on this machine (loopback address).");
+  if (!isLocalNetworkHost(parsed.hostname)) {
+    throw new LocalEngineError("base", "Local engines require a loopback or private LAN address.");
   }
   return value;
 }
@@ -86,10 +85,11 @@ async function probeJson(fetchImpl, url, timeoutMs) {
   }
 }
 
-// One candidate, three probes in parallel. A miss is silent by design: most
+// One candidate, four probes in parallel. A miss is silent by design: most
 // ports are empty on most machines, and reporting that is noise.
-export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 800 } = {}) {
-  const base = `http://127.0.0.1:${port}`;
+export async function probeLocalEngine(baseUrl, { fetchImpl = fetch, timeoutMs = 800 } = {}) {
+  const endpoint = new URL(assertLocalBase(baseUrl));
+  const base = endpoint.origin;
   const [tags, props, version, models] = await Promise.all([
     probeJson(fetchImpl, `${base}/api/tags`, timeoutMs),
     probeJson(fetchImpl, `${base}/props`, timeoutMs),
@@ -105,7 +105,7 @@ export async function probeLocalEngine(port, { fetchImpl = fetch, timeoutMs = 80
     engine,
     label: ENGINE_LABELS[engine] || engine,
     baseUrl: base,
-    port,
+    port: Number(endpoint.port || (endpoint.protocol === "https:" ? 443 : 80)),
     models: modelIds,
     // llama.cpp publishes modalities on /props. This is a live capability
     // fact, not a remembered dashboard preference: an engine restarted without
@@ -137,6 +137,7 @@ export async function discoverLocalEngines({
   fetchImpl = fetch,
   timeoutMs = 800,
   candidates = LOCAL_CANDIDATES,
+  endpoints = [],
   listeners = null,
   factsOptions = undefined,
 } = {}) {
@@ -150,10 +151,24 @@ export async function discoverLocalEngines({
   for (const candidate of candidates) {
     if (!byPort.has(candidate.port)) byPort.set(candidate.port, { port: candidate.port });
   }
-  const found = await Promise.all(
-    [...byPort.keys()].map((port) => probeLocalEngine(port, { fetchImpl, timeoutMs })),
-  );
-  return found.filter(Boolean).map((engine) => describeFromProcess(engine, byPort.get(engine.port), factsOptions));
+  const targets = [...byPort.values()].map((listener) => ({
+    baseUrl: `http://127.0.0.1:${listener.port}`, listener,
+  }));
+  // Probe only explicitly saved LAN endpoints, never scan the subnet. Process
+  // metadata belongs to a host plus port, not a matching port on another host.
+  for (const endpoint of endpoints) {
+    try {
+      const baseUrl = new URL(assertLocalBase(endpoint)).origin;
+      if (!targets.some((target) => sameEndpointHost(target.baseUrl, baseUrl))) targets.push({ baseUrl });
+    } catch {
+      // A malformed saved endpoint remains offline without breaking the scan.
+    }
+  }
+  const found = await Promise.all(targets.map(async ({ baseUrl, listener }) => {
+    const engine = await probeLocalEngine(baseUrl, { fetchImpl, timeoutMs });
+    return engine ? describeFromProcess(engine, listener, factsOptions) : null;
+  }));
+  return found.filter(Boolean);
 }
 
 // Attach what the operating system already told us about the process behind a

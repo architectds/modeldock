@@ -1,6 +1,6 @@
 
 import { customEndpointFor } from "./custom-endpoint-routing.mjs";
-import { isLoopbackHost } from "./loopback.mjs";
+import { isLocalNetworkHost, isLoopbackHost } from "./loopback.mjs";
 import { NATIVE_PROVIDER_ID } from "./native-provider.mjs";
 import {
   codexSlugFor,
@@ -513,7 +513,7 @@ const LOCAL_PROFILE = {
 // read it here instead of filtering the list again.
 function isLocalEndpoint(entry) {
   if (entry?.local !== true) return false;
-  try { return isLoopbackHost(new URL(entry.baseUrl).hostname); }
+  try { return isLocalNetworkHost(new URL(entry.baseUrl).hostname); }
   catch { return false; }
 }
 
@@ -835,12 +835,15 @@ function customWireTarget(config, model) {
   const endpoint = customEndpointFor(remoteEndpoints(config), model);
   const transport = endpoint?.transport === "chat" ? "chat" : "responses";
   const baseUrl = trimBase(endpoint?.baseUrl || "");
+  let tokenRequired = true;
+  try { tokenRequired = !isLocalNetworkHost(new URL(baseUrl).hostname); } catch { /* invalid endpoint */ }
   return {
     provider: CUSTOM_PROFILE.id,
     model: endpoint?.upstreamId || bareModelId(model),
     url: `${baseUrl}/${transport === "chat" ? "chat/completions" : "responses"}`,
     transport,
     token: endpoint?.apiKey || "",
+    tokenRequired,
   };
 }
 
