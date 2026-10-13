@@ -255,7 +255,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       return;
     }
     if (body.stream === false) {
-      if (body.tools?.length || body.tool_choice !== "none" || !body.messages.at(-1)?.content.includes("CONTEXT CHECKPOINT COMPACTION")) {
+      if (JSON.stringify(body.tools) !== JSON.stringify(requests[0].tools) || body.tool_choice !== "none" || !body.messages.at(-1)?.content.includes("CONTEXT CHECKPOINT COMPACTION")) {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid compaction Chat request" }));
         return;

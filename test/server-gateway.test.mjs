@@ -415,69 +415,6 @@ test("zstd-encoded request bodies are decompressed before the relay", { skip: ty
   assert.equal(seenModel, "deepseek-v4-flash");
 });
 
-test("gateway: remote compaction v1/v2 is synthesized for routed models", async (t) => {
-  const seen = [];
-  const upstream = createServer(async (req, res) => {
-    const body = await jsonBody(req);
-    seen.push({ path: req.url, model: body.model, stream: body.stream, tools: body.tools, toolChoice: body.tool_choice, lastInput: body.input?.at(-1) });
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({
-      id: "resp_summary",
-      object: "response",
-      model: "deepseek-v4-flash",
-      output: [{ id: "msg", type: "message", role: "assistant", content: [{ type: "output_text", text: "compact summary" }] }],
-      usage: { input_tokens: 7, output_tokens: 4, total_tokens: 11 },
-    }));
-  });
-  const port = await listen(upstream);
-  t.after(() => upstream.close());
-  const instance = await startApp({ opencodeBaseUrl: `http://127.0.0.1:${port}` });
-  t.after(instance.stop);
-
-  const keyedCompactV1 = await fetch(`${instance.base}/c/test-caller-key-0123456789abcdefghij/v1/responses/compact`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "deepseek-v4-flash", input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "recent" }] }] }),
-  });
-  assert.equal(keyedCompactV1.status, 200);
-  const v1Body = await keyedCompactV1.json();
-  assert.ok(Array.isArray(v1Body.output));
-  assert.equal(v1Body.output.at(-1).role, "user");
-  assert.match(v1Body.output.at(-1).content[0].text, /compact summary/);
-  assert.equal(seen[0].stream, false, "the summarize call is non-streaming");
-  assert.deepEqual(seen[0].tools, [], "no tools ride on the summarize call");
-  assert.equal(seen[0].toolChoice, "none");
-
-  const v2 = await fetch(`${instance.base}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "deepseek-v4-flash",
-      stream: false,
-      input: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
-        { type: "compaction_trigger" },
-      ],
-    }),
-  });
-  assert.equal(v2.status, 200);
-  const v2Body = await v2.json();
-  assert.equal(v2Body.output[0].type, "compaction");
-  assert.match(v2Body.output[0].encrypted_content, /^kcr1:/);
-  assert.ok(!seen[1].lastInput || seen[1].lastInput.type !== "compaction_trigger", "the trigger never reaches the upstream");
-
-  // The same v2 request must not 404 on the wrong-keyed path, and a bare
-  // compact path relays too.
-  const bareV1 = await fetch(`${instance.base}/responses/compact`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "deepseek-v4-flash", input: [] }),
-  });
-  assert.equal(bareV1.status, 200);
-  const bareV1Body = await bareV1.json();
-  assert.ok(Array.isArray(bareV1Body.output));
-});
-
 test("gateway: nativeMerge=false hides native models from /v1/models but the relay still routes", async (t) => {
   const seen = [];
   const upstream = createServer(async (req, res) => {

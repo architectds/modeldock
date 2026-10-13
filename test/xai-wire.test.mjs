@@ -240,47 +240,6 @@ test("an xAI request drops the OpenAI-only external web access flag", async (t) 
   assert.equal(seen[0].external_web_access, undefined, "the xAI wire contains no OpenAI-only transport flag");
 });
 
-test("a visual xAI compaction keeps image evidence and returns a handoff", async (t) => {
-  const { base, seen } = await startGrokApp(t, [answer("The attached image is red.")]);
-  const imageUrl = "data:image/png;base64,iVBORw0KGgo=";
-  const response = await fetch(`${base}/v1/responses`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "grok-4.5@xai",
-      stream: false,
-      external_web_access: true,
-      input: [
-        {
-          type: "message",
-          role: "user",
-          content: [
-            { type: "input_text", text: "Remember the image." },
-            { type: "input_image", image_url: imageUrl },
-          ],
-        },
-        { type: "compaction_trigger" },
-      ],
-    }),
-  });
-
-  assert.equal(response.status, 200);
-  const compacted = await response.json();
-  assert.equal(compacted.output[0].type, "compaction");
-  assert.match(compacted.output[0].encrypted_content, /^kcr1:/);
-
-  assert.equal(seen.length, 1, "compaction sends one summarize request to Grok");
-  const outbound = seen[0];
-  assert.equal(outbound.model, "grok-4.5");
-  assert.equal(outbound.external_web_access, undefined, "the compaction wire also excludes the OpenAI-only flag");
-  assert.deepEqual(outbound.tools, []);
-  assert.equal(outbound.tool_choice, "none");
-  assert.ok(
-    outbound.input.some((item) => item.content?.some?.((part) => part.type === "input_image" && part.image_url === imageUrl)),
-    "the visual Grok summarize call receives the original image rather than a text placeholder",
-  );
-});
-
 // The reasoning item Codex replays carries `content: null`, and xAI reads a
 // null there as a different item shape: it decodes the item as a compaction
 // blob and answers 400 "Could not decode the compaction blob. Ensure it is

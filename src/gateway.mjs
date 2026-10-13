@@ -1598,6 +1598,101 @@ async function prepareRoutedInput(payload, services, route, signal) {
   };
 }
 
+// Ordinary turns and model-driven compaction share the final upstream prefix.
+// Only CPU compaction replaces every image with a ref: it never sends this
+// payload to a model. Keep tool declarations and their replayed names together.
+async function prepareRoutedPayload(payload, services, route, signal, {
+  selectedModel,
+  cpuCompaction = false,
+  onImageRef,
+} = {}) {
+  const { config, mediaStore, attachmentIndex, incomingHeaders } = services;
+  const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
+  const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(payload, services, route, signal);
+  const entry = modelEntryFor(config, route.model);
+  const supportsVision = Boolean(entry?.supportsVision);
+  const imageTransportLimit = Number(entry?.imageTransportMaxWireBytes) || 0;
+  const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
+  let routedInput = rewriteHistoricalImages(normalizedInput, mediaStore, {
+    preserveImages: !cpuCompaction && supportsVision,
+    keepRecentImages: !cpuCompaction && supportsVision
+      ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
+      : 0,
+    keepCurrentImages: !cpuCompaction,
+    currentStartIndex: currentTurnStartIndex(normalizedInput),
+    resolveExternalSource,
+    sessionId,
+    onImageRef,
+  });
+  if (imageTransportLimit) {
+    try {
+      routedInput = constrainImagesForTransport(routedInput, mediaStore, {
+        maxTotalWireBytes: imageTransportLimit,
+        resolveExternalSource,
+        sessionId,
+      });
+    } catch (error) {
+      return { imageError: error };
+    }
+  }
+  let normalizedPayload = {
+    ...(localPayload || payload),
+    input: adaptImageUrlShape(routedInput, entry?.imageUrlShape),
+    model: route.model,
+  };
+  if (localPayload) {
+    normalizedPayload.reasoning = normalizeLocalReasoning(normalizedPayload).reasoning;
+  }
+  delete normalizedPayload.client_metadata;
+  // The cleaned input is authoritative; server-side continuation could restore
+  // an orphaned tool call that this gateway already removed.
+  delete normalizedPayload.previous_response_id;
+  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
+  const target = upstreamTargetFor(config, normalizedPayload.model);
+  const localBackend = isLocalBackend(config, route.model);
+  // A temporary vision escalation must not re-enable local child-work starters.
+  const disableSubagentWork = localBackend || isLocalBackend(config, selectedModel);
+  const profile = profileById(routedProvider) || {};
+  const policy = entry || {};
+  const { tools, stripped, namespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
+    disableSubagentWork,
+    hiddenToolNames: hiddenToolNamesForModel({
+      supportsVision,
+      modelHiddenToolNames: policy.hiddenToolNames,
+      profileHiddenToolNames: profile.hiddenToolNames,
+    }),
+    blockedToolTypes: policy.blockedToolTypes ?? profile.blockedToolTypes,
+    hostedToolTypes: policy.hostedToolTypes ?? profile.hostedToolTypes,
+    customToolsAsFunctions: policy.customToolsAsFunctions ?? profile.customToolsAsFunctions,
+    // Chat has no namespace descriptor, even on a mixed-transport provider.
+    flattenAllNamespaces: (policy.flattenAllNamespaces ?? profile.flattenAllNamespaces) || target.transport === "chat",
+    safeNamespaceFunctionNames: policy.safeNamespaceFunctionNames ?? profile.safeNamespaceFunctionNames,
+  });
+  if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
+  if (disableSubagentWork && Array.isArray(normalizedPayload.input)) {
+    normalizedPayload.input = normalizedPayload.input.flatMap((item) => {
+      if (item?.type !== "additional_tools" || !Array.isArray(item.tools)) return [item];
+      const deferred = stripSubagentWorkTools(item.tools);
+      stripped.hidden += deferred.removed;
+      if (deferred.tools === item.tools) return [item];
+      return deferred.tools.length ? [{ ...item, tools: deferred.tools }] : [];
+    });
+  }
+  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces, toolNames);
+  if (disableSubagentWork) {
+    normalizedPayload.instructions = appendLocalGuidance(localBackend
+      ? stripLocalInstructions(normalizedPayload.instructions)
+      : normalizedPayload.instructions, localBackend);
+  }
+  if (route.reason === "current_turn_image" && route.directVision) {
+    normalizedPayload.instructions = stripTextOnlyVisionGuidance(normalizedPayload.instructions);
+  }
+  // Hosted descriptors may survive tool policy verbatim; apply the provider's
+  // final payload contract after declarations and history have been normalized.
+  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
+  return { normalizedPayload, target, routedInput, resolveExternalSource, stripped, namespaces, customToolNames, toolNames };
+}
+
 // Replace input_image parts with a lightweight image_ref placeholder only when
 // the final upstream cannot see images. Text-only histories remain byte-stable,
 // while a vision-capable model keeps every image it may need after tool calls or
@@ -3686,7 +3781,7 @@ function writeDirectCompaction(res, payload, summary, v2) {
 // kcr1: payload. v2 returns a single compaction output item (JSON or SSE);
 // v1 returns replacement history under { output }.
 export async function relayCompaction(payload, res, services, { signal } = {}, v2 = true) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
+  const { config, metrics, mediaStore, knownModels, incomingHeaders, ingressBytes } = services;
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   mediaStore?.touchSession?.(sessionId);
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
@@ -3704,73 +3799,24 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     directVision: false,
   };
   recordDerivedFallback(services, sessionId, route);
-  // Custom and Local backends must see the same adapted shape on the compact path
-  // as on the main relay path: opening system/developer items merged into
-  // instructions, later updates encoded in place, the
-  // standard tool-item rewrite, and a reasoning effort the jinja template
-  // accepts. Context size is not the right gate here - a local server can
-  // advertise a large window and still reject a mid-history system item, so
-  // this must match relayResponses unconditionally for the provider, not only
-  // for isLocalBackend. Skipping the adaptation made compact_v2
-  // fail with "System message must be at the beginning" whenever the compacted
-  // history carried a mid-history system item.
-  const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(
-    payload,
-    services,
-    route,
-    signal,
-  );
   const localBackend = isLocalBackend(config, route.model);
-  const compactModelEntry = modelEntryFor(config, route.model);
-  const targetSupportsVision = Boolean(compactModelEntry?.supportsVision);
-  const imageTransportLimit = Number(compactModelEntry?.imageTransportMaxWireBytes) || 0;
-  // A compaction must carry image refs forward, not raw pixels. The selected
-  // visual model can still see the 20 newest attachments while it summarizes;
-  // every older image survives in the returned text handoff as an img_ref.
-  const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
   const compactImageRefs = new Set();
-  let summarizeInput = rewriteHistoricalImages(
-    normalizedInput,
-    mediaStore,
-    {
-      preserveImages: !localBackend && targetSupportsVision,
-      keepRecentImages: !localBackend && targetSupportsVision
-        ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
-        : 0,
-      resolveExternalSource,
-      sessionId,
-      onImageRef: (ref) => compactImageRefs.add(ref),
-    },
-  );
-  if (imageTransportLimit) {
-    try {
-      summarizeInput = constrainImagesForTransport(summarizeInput, mediaStore, {
-        maxTotalWireBytes: imageTransportLimit,
-        resolveExternalSource,
-        sessionId,
-      });
-    } catch (error) {
-      return imageTransportError(res, route, error);
-    }
-  }
+  const prepared = await prepareRoutedPayload(payload, services, route, signal, {
+    selectedModel: requestedModel || mainModel,
+    cpuCompaction: localBackend,
+    onImageRef: (ref) => compactImageRefs.add(ref),
+  });
+  if (prepared.imageError) return imageTransportError(res, route, prepared.imageError);
+  const { normalizedPayload, target, routedInput: summarizeInput, resolveExternalSource } = prepared;
   const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId, compactImageRefs);
+  // Keep the ordinary prefix, including tool schemas. Disabling execution is
+  // a choice for this response, not a reason to erase the model's tool context.
   const summarizeBody = {
-    ...(localPayload || payload),
-    model: route.model,
+    ...normalizedPayload,
     stream: false,
-    tools: [],
     tool_choice: "none",
-    input: [
-      ...adaptImageUrlShape(
-        summarizeInput,
-        compactModelEntry?.imageUrlShape,
-      ),
-      messageItem(COMPACT_PROMPT),
-    ],
+    input: [...normalizedPayload.input, messageItem(COMPACT_PROMPT)],
   };
-  if (localPayload) {
-    summarizeBody.reasoning = normalizeLocalReasoning(summarizeBody).reasoning;
-  }
   // A small-context local backend cannot finish an LLM handoff of a large
   // history inside Codex's ~5 minute timeout: prefill alone can run for
   // minutes on a modest local backend. For these backends the CPU extract IS
@@ -3790,18 +3836,8 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
     }
     directSummary = `${compressed.text}${imageHandoff}`;
   }
-  // Small-context local backends do not need the heavy creative skills; drop
-  // their entries from the instructions so the summarize call (which replays
-  // the full history) carries less dead weight.
-  if (localBackend) {
-    summarizeBody.instructions = stripLocalInstructions(summarizeBody.instructions);
-  }
-  delete summarizeBody.previous_response_id;
-  delete summarizeBody.client_metadata;
-  const upstreamSummarizeBody = normalizePayloadForRoute(config, route.model, summarizeBody);
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
 
-  const target = upstreamTargetFor(config, route.model);
   const upstreamModel = target.model;
   const operation = v2 ? "compact_v2" : "compact_v1";
   const finish = metrics?.begin?.("responses", {
@@ -3877,13 +3913,13 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       dumpRequestBody(config.debug.dumpDir, { ...summarizeBody, model: upstreamModel });
     }
     const chatSummary = target.transport === "chat"
-      ? responsesToChat(upstreamSummarizeBody, {
+      ? responsesToChat(summarizeBody, {
         toolArgumentsAsObjects: target.toolArgumentsAsObjects,
         mediaMarker: target.mediaMarker,
         cachePrompt: Boolean(target.cachePrompt),
       }).payload
       : null;
-    const upstreamRequest = serializedBody({ ...(chatSummary || upstreamSummarizeBody), model: upstreamModel });
+    const upstreamRequest = serializedBody({ ...(chatSummary || summarizeBody), model: upstreamModel });
     const upstream = await fetch(target.url, {
       method: "POST",
       headers: upstreamHeaders(target, { incomingHeaders }),
@@ -3992,8 +4028,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
       upstream: target.provider,
       bytesOut: clientBytes,
       upstreamResponseBytes: bytes.length,
-      inputTokens: usage?.input_tokens || 0,
-      outputTokens: usage?.output_tokens || 0,
+      ...usageTokens(usage),
       compression: compressionInfo,
     });
     metrics?.recordResponseUsage?.({ bytesOut: clientBytes, upstreamBytes: bytes.length, usage });
@@ -4018,7 +4053,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
 // `services` carries { config, metrics, mediaStore, routeAffinity, modelSelection,
 // knownModels, visionModelOf } so the caller decides wiring.
 export async function relayResponses(payload, res, services, { signal } = {}) {
-  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, attachmentIndex, ingressBytes } = services;
+  const { config, metrics, mediaStore, routeAffinity, knownModels, incomingHeaders, ingressBytes } = services;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     const error = {
       error: {
@@ -4090,132 +4125,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
     return relayNativeResponses({ ...payload, model: route.model }, res, services, { signal });
   }
 
-  // OpenCode Go's paid DeepSeek routes both require replayable reasoning_text.
-  // Pro additionally needs the id, assistant-content, tool-history and stream
-  // repairs; official and custom routes keep the generic path.
-  const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(
-    payload,
-    services,
-    route,
-    signal,
-  );
-  const routedModelEntry = modelEntryFor(config, route.model);
-  const imageTransportLimit = Number(routedModelEntry?.imageTransportMaxWireBytes) || 0;
-  const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
-  let routedInput = rewriteHistoricalImages(normalizedInput, mediaStore, {
-    preserveImages: modelSupportsVision(route.model),
-    keepRecentImages: modelSupportsVision(route.model)
-      ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
-      : 0,
-    keepCurrentImages: true,
-    currentStartIndex: currentTurnStartIndex(normalizedInput),
-    resolveExternalSource,
-    sessionId,
+  const prepared = await prepareRoutedPayload(payload, services, route, signal, {
+    selectedModel: requestedModel || mainModel,
   });
-  if (imageTransportLimit) {
-    try {
-      routedInput = constrainImagesForTransport(routedInput, mediaStore, {
-        maxTotalWireBytes: imageTransportLimit,
-        resolveExternalSource,
-        sessionId,
-      });
-    } catch (error) {
-      return imageTransportError(res, route, error);
-    }
-  }
-  let normalizedPayload = {
-    ...(localPayload || payload),
-    input: adaptImageUrlShape(
-      routedInput,
-      routedModelEntry?.imageUrlShape,
-    ),
-    model: route.model,
-  };
-  // llama.cpp's jinja template accepts only xhigh/medium/low and
-  // raises on "high" (Codex's default). Keep valid efforts, map "high" to the
-  // closest accepted value, and drop anything else so local routes never trip
-  // the template validator.
-  if (profileById(routedProvider)?.normalizesPayload) {
-    normalizedPayload = {
-      ...normalizedPayload,
-      reasoning: normalizeLocalReasoning(normalizedPayload).reasoning,
-    };
-  }
-  delete normalizedPayload.client_metadata;
-  // The input array is the authoritative history here. A previous_response_id
-  // would make the upstream resolve continuation state server-side - state
-  // that can still carry the orphaned tool call this gateway just cleaned, so
-  // strict upstreams (Go) would reject the request again.
-  delete normalizedPayload.previous_response_id;
-  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
-  const target = upstreamTargetFor(config, normalizedPayload.model);
-
+  if (prepared.imageError) return imageTransportError(res, route, prepared.imageError);
+  const { normalizedPayload, target, stripped, namespaces, customToolNames, toolNames } = prepared;
   const transfer = requestByteCounts(incomingHeaders, ingressBytes);
   const imageTransfer = {
     received: describeImageTransfer(payload.input),
     forwarded: describeImageTransfer(normalizedPayload.input),
   };
-
-  // Local compute keeps ordinary tools. A temporary vision escalation from a
-  // local selection must not re-enable child-work starters for that turn.
-  const localBackend = isLocalBackend(config, route.model);
-  const disableSubagentWork = localBackend || isLocalBackend(config, requestedModel || mainModel);
-  const routedProfile = profileById(routedProvider) || {};
-  // A mixed provider can expose models backed by different downstream APIs.
-  // Let a measured model narrow its tool dialect without weakening the other
-  // models on the same provider. Undefined fields inherit the provider policy.
-  const modelToolPolicy = routedModelEntry || {};
-  const { tools, stripped, namespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
-    disableSubagentWork,
-    // What this upstream refuses, and what it runs itself. Both are the
-    // profile's to declare: the gate cannot know from the model id that xAI
-    // rejects `custom` and serves its own web_search.
-    hiddenToolNames: hiddenToolNamesForModel({
-      supportsVision: modelSupportsVision(route.model),
-      modelHiddenToolNames: modelToolPolicy.hiddenToolNames,
-      profileHiddenToolNames: routedProfile.hiddenToolNames,
-    }),
-    blockedToolTypes: modelToolPolicy.blockedToolTypes ?? routedProfile.blockedToolTypes,
-    hostedToolTypes: modelToolPolicy.hostedToolTypes ?? routedProfile.hostedToolTypes,
-    customToolsAsFunctions: modelToolPolicy.customToolsAsFunctions ?? routedProfile.customToolsAsFunctions,
-    // Chat Completions has no namespace descriptor. A Go profile can mix
-    // Responses and Chat models, so this follows the chosen model's target,
-    // never a provider-wide transport flag.
-    flattenAllNamespaces: (modelToolPolicy.flattenAllNamespaces ?? routedProfile.flattenAllNamespaces) || target.transport === "chat",
-    safeNamespaceFunctionNames: modelToolPolicy.safeNamespaceFunctionNames ?? routedProfile.safeNamespaceFunctionNames,
-  });
-  if (tools !== normalizedPayload.tools) normalizedPayload.tools = tools;
-  if (disableSubagentWork && Array.isArray(normalizedPayload.input)) {
-    normalizedPayload.input = normalizedPayload.input.flatMap((item) => {
-      if (item?.type !== "additional_tools" || !Array.isArray(item.tools)) return [item];
-      const deferred = stripSubagentWorkTools(item.tools);
-      stripped.hidden += deferred.removed;
-      if (deferred.tools === item.tools) return [item];
-      return deferred.tools.length ? [{ ...item, tools: deferred.tools }] : [];
-    });
-  }
-  // The declarations above were flattened; the replayed history has to use the
-  // same flat names or the upstream sees calls for tools it was never given.
-  // Same for the 64-character cap: a replayed call for a tool whose declaration
-  // was shortened has to carry the shortened name, or it names a tool the
-  // upstream was never given.
-  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces, toolNames);
-  // Compress repeated prose without removing the instructions that govern the
-  // tools now visible to the local model.
-  if (disableSubagentWork) {
-    normalizedPayload.instructions = appendLocalGuidance(localBackend
-      ? stripLocalInstructions(normalizedPayload.instructions)
-      : normalizedPayload.instructions, localBackend);
-  }
-  if (route.reason === "current_turn_image" && route.directVision) {
-    normalizedPayload.instructions = stripTextOnlyVisionGuidance(normalizedPayload.instructions);
-  }
-  // applyToolPolicy can preserve hosted tool descriptors verbatim. Normalize
-  // again after that policy so Codex's web_search { external_web_access: true }
-  // option never reaches xAI on the final wire.
-  normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
-  // Tool policy and namespace flattening change declarations/history, not image
-  // parts. The image report above remains the exact before/after visual payload.
   const transformReport = () => noTransform({
     blocked: { tool_search: stripped.toolSearch, web_search: stripped.webSearch },
     directVision: route.directVision,
