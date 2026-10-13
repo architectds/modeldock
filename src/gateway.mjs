@@ -423,7 +423,7 @@ export function isNativeModel(requestedModel, knownModels, nativeSlugs) {
 // the compacted history.
 const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another language model that will resume the task.
 
-Include current progress, key decisions, constraints, user preferences, remaining steps, and critical data or references. Be concise, structured, and focused on seamless continuation.`;
+Include current progress, key decisions, constraints, user preferences, remaining steps, and critical data or references. Be concise, structured, and focused on seamless continuation. Do not call tools. Return only the handoff summary.`;
 // Exported because both decode sites (routed and native) must put the same words on
 // a replayed compaction, and a test asserts the boundary they share.
 export const SUMMARY_PREFIX =
@@ -3809,12 +3809,11 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   if (prepared.imageError) return imageTransportError(res, route, prepared.imageError);
   const { normalizedPayload, target, routedInput: summarizeInput, resolveExternalSource } = prepared;
   const imageHandoff = imageReferenceHandoff(summarizeInput, mediaStore, resolveExternalSource, sessionId, compactImageRefs);
-  // Keep the ordinary prefix, including tool schemas. Disabling execution is
-  // a choice for this response, not a reason to erase the model's tool context.
+  // Keep ordinary tool selection too: some upstreams remove tool schemas from
+  // the rendered prompt for "none". Summary-only guidance belongs at the tail.
   const summarizeBody = {
     ...normalizedPayload,
     stream: false,
-    tool_choice: "none",
     input: [...normalizedPayload.input, messageItem(COMPACT_PROMPT)],
   };
   // A small-context local backend cannot finish an LLM handoff of a large

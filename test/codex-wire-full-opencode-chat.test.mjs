@@ -174,6 +174,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.capture.originalToolCount, 164);
   assert.equal(fixture.request.tools.length, 164);
+  assert.equal(fixture.request.tool_choice, "auto");
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-wire-go-chat-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [];
@@ -255,7 +256,12 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       return;
     }
     if (body.stream === false) {
-      if (JSON.stringify(body.tools) !== JSON.stringify(requests[0].tools) || body.tool_choice !== "none" || !body.messages.at(-1)?.content.includes("CONTEXT CHECKPOINT COMPACTION")) {
+      if (body.tool_choice !== requests[0].tool_choice) {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "compaction tool_choice differs from ordinary request", expected: requests[0].tool_choice, actual: body.tool_choice }));
+        return;
+      }
+      if (JSON.stringify(body.tools) !== JSON.stringify(requests[0].tools) || !body.messages.at(-1)?.content.includes("CONTEXT CHECKPOINT COMPACTION")) {
         res.writeHead(400, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: "invalid compaction Chat request" }));
         return;
@@ -403,6 +409,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   assert.match(first, /call_go_b/);
   assert.match(first, /response\.reasoning_text\.done/);
   assert.equal(requests.length, 1);
+  assert.equal(requests[0].tool_choice, fixture.request.tool_choice);
   assert.equal(requests[0].tools.length, 162, "the unsupported hosted tool and delegated vision tool are removed for a visual Chat model");
   const firstToolNames = new Set(requests[0].tools.map((tool) => tool.function.name));
   assert.ok(firstToolNames.has("view_image"), "the visual Chat model keeps direct image inspection");

@@ -77,6 +77,7 @@ test("built bundle preserves the model-driven compaction prefix and reports cach
   assert.equal(fixture.capture.kind, "full_original_codex_request");
   assert.equal(fixture.capture.originalToolCount, 164);
   assert.equal(fixture.request.tools.length, 164);
+  assert.equal(fixture.request.tool_choice, "auto");
   const sandbox = path.resolve(process.env.MODELDOCK_SANDBOX_DIR || os.tmpdir());
   await mkdir(sandbox, { recursive: true });
   const root = await mkdtemp(path.join(sandbox, "modeldock-compaction-prefix-"));
@@ -199,14 +200,16 @@ globalThis.fetch = (input, options) => {
   const currentImages = Array.from({ length: 21 }, (_, index) => ({
     type: "input_image", image_url: `data:image/png;base64,${Buffer.from(encode({ width: 1, height: 1, channels: 4, data: new Uint8Array([index, 100, 200, 255]) })).toString("base64")}`,
   }));
-  const send = async (model, session, protocol = null, requestInput = input, compactPath = "/v1/responses/compact") => {
+  const send = async (model, session, protocol = null, requestInput = input, compactPath = "/v1/responses/compact", omitToolChoice = false) => {
     const before = received.length;
+    const request = { ...fixture.request, model, tools,
+      ...(model === slug("xai", "grok-4.6") ? { external_web_access: true } : {}),
+      input: protocol === "v2" ? [...requestInput, { type: "compaction_trigger" }] : requestInput };
+    if (omitToolChoice) delete request.tool_choice;
     const response = await fetch(`${api}${protocol === "v1" ? compactPath : "/v1/responses"}`, {
       method: "POST", headers: { "content-type": "application/json", session_id: session },
       signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ ...fixture.request, model, tools,
-        ...(model === slug("xai", "grok-4.6") ? { external_web_access: true } : {}),
-        input: protocol === "v2" ? [...requestInput, { type: "compaction_trigger" }] : requestInput }),
+      body: JSON.stringify(request),
     });
     const text = await response.text();
     assert.equal(response.status, 200, `${model} ${protocol || "ordinary"}: ${text}\n${logs}`);
@@ -227,6 +230,7 @@ globalThis.fetch = (input, options) => {
       : input;
     const ordinary = await send(model, `${name}-ordinary`, null, requestInput);
     assert.match(JSON.stringify(ordinary.response), /ORDINARY_PREFIX_OK/);
+    assert.equal(ordinary.body.tool_choice, fixture.request.tool_choice);
     if (withImages) {
       const images = imageUrls(ordinary.body);
       for (const image of currentImages) assert.ok(images.includes(image.image_url), "ordinary relay must retain all 21 current images, not merely the last 20");
@@ -265,7 +269,7 @@ globalThis.fetch = (input, options) => {
         assert.ok(isDeepStrictEqual(transcript(compact.body).slice(0, prior.length), prior), "compaction rewrote the normalized shared history prefix");
         assert.match(textOf(transcript(compact.body).at(-1)), /CONTEXT CHECKPOINT COMPACTION/);
         assert.equal(transcript(compact.body).at(-1).role, "user");
-        assert.equal(compact.body.tool_choice, "none");
+        assert.deepEqual(compact.body.tool_choice, ordinary.body.tool_choice, "compaction must preserve the ordinary effective tool_choice");
         assert.equal(compact.body.stream, false);
         assert.ok((compact.body.input || []).every((item) => item.type !== "compaction_trigger"), "the client trigger must never reach the upstream");
         assert.deepEqual(compact.body.reasoning, ordinary.body.reasoning);
@@ -284,6 +288,17 @@ globalThis.fetch = (input, options) => {
         assert.ok(trace, "compaction must expose a trace record");
         assert.equal(trace.inputTokens, usage.input_tokens);
         assert.equal(trace.cachedTokens, usage.input_tokens_details.cached_tokens, "compact trace must not turn an upstream cache hit into an absent/zero field");
+      });
+    });
+    if (name.startsWith("Custom")) await routeTest.test("omitted tool_choice stays absent", async (omittedTest) => {
+      const withoutChoice = await send(model, `${name}-ordinary-omitted`, null, requestInput, compactPath, true);
+      assert.equal(Object.hasOwn(withoutChoice.body, "tool_choice"), false, "ordinary relay must preserve an omitted tool_choice");
+      for (const protocol of ["v1", "v2"]) await omittedTest.test(protocol, async () => {
+        const compact = await send(model, `${name}-${protocol}-omitted`, protocol, requestInput, compactPath, true);
+        assert.equal(Object.hasOwn(compact.body, "tool_choice"), false, "compaction must not add tool_choice when the client omitted it");
+        assert.ok(isDeepStrictEqual(compact.body.tools, withoutChoice.body.tools));
+        const prior = transcript(withoutChoice.body);
+        assert.ok(isDeepStrictEqual(transcript(compact.body).slice(0, prior.length), prior));
       });
     });
   });
