@@ -322,6 +322,7 @@ test("built bundle probes a keyless local origin without saving, then attaches o
     MODELDOCK_STATE_DIR: stateDir,
     MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointFile,
     MODELDOCK_UPSTREAM_BASE_URL: `${origin}/v1`,
+    MODELDOCK_ZEN_BASE_URL: `${origin}/v1`,
     MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
     MODELDOCK_REQUIRE_CALLER_KEY: "0",
     MODELDOCK_MEMORY: "0",

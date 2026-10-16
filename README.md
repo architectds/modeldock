@@ -139,6 +139,12 @@ one.
 button when a new release is ready. Change autostart or interface language in
 Settings.
 
+**Model discovery** - configured cloud providers refresh their model directories
+at startup and every 24 hours. OpenCode merges the Go directory with Zen's free
+models (including new free releases); Zen-only paid models are not added to a
+Go subscription. A directory listing is not a successful inference/access test.
+The directories refresh independently, keeping the healthy source if one fails.
+
 **Equivalent API cost** - Stats uses one normalized price table for local,
 cloud, and native models. Public Standard base-rate quotes refresh from
 models.dev and OpenRouter at startup and every 24 hours in the background.

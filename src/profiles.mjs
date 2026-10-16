@@ -59,10 +59,16 @@ const LOCAL_REASONING_LEVELS = [
   { effort: "xhigh", description: "Extra-deep reasoning for hard problems" },
 ];
 
-// OpenCode Go's public OpenAI-compatible surface accepts most models on
-// Responses, while its Qwen and MiniMax families use Chat Completions. This is
-// provider contract metadata, not a runtime test made during discovery.
+function openCodeFreeModel(modelId) {
+  return String(modelId).endsWith("-free") || modelId === "big-pickle";
+}
+
+// Contract metadata, not a runtime capability probe. Zen's free directory uses
+// Chat except for Muse Spark; Jev is System One, which this bridge cannot serve.
+// Existing curated rows retain their explicitly declared transport.
 export function openCodeTransportForModel(modelId) {
+  if (String(modelId).startsWith("jev-")) return "systemone";
+  if (openCodeFreeModel(modelId)) return String(modelId).startsWith("muse-spark-") ? "responses" : "chat";
   return /^(hy4-preview|minimax-m2\.5|minimax-m3|qwen)/.test(String(modelId || "")) ? "chat" : "responses";
 }
 
@@ -266,6 +272,17 @@ const OPENCODE_GO_PROFILE = {
   modelDiscovery: true,
   discoveryTransports: new Set(["responses", "chat"]),
   discoveryTransportFor: openCodeTransportForModel,
+  discoverySources(config) {
+    return [
+      { baseUrl: this.baseUrlFor(config) },
+      // Go subscriptions do not include Zen's paid catalog. Import its free
+      // rows only, so discovery cannot silently opt a Go user into paid Zen.
+      { baseUrl: trimBase(config?.zenBaseUrl || "https://opencode.ai/zen/v1"), acceptsModel: openCodeFreeModel },
+    ];
+  },
+  discoveryModel(id) {
+    return openCodeFreeModel(id) ? { zen: true, free: true } : {};
+  },
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
   // inputNormalizer names a per-model input adaptation the gateway keeps in
@@ -769,8 +786,7 @@ defineRouting(OPENCODE_GO_PROFILE, {
   // endpoint, under the same account and the same token.
   baseUrlFor(config, model) {
     const goBase = trimBase(config?.opencodeBaseUrl || OPENCODE_GO_PROFILE.baseUrl);
-    // Directory discovery has no model. Only model-specific requests can
-    // select the alternate Zen host; the provider directory belongs to Go.
+    // The primary directory is Go; discoverySources separately includes Zen.
     if (model == null) return goBase;
     const entry = modelEntryFor(config, bareModelId(model));
     // The name test is a fallback for a Zen model that is not in the catalog:

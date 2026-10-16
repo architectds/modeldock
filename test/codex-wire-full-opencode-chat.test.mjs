@@ -178,9 +178,21 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   const root = await mkdtemp(path.join(os.tmpdir(), "modeldock-codex-wire-go-chat-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const requests = [];
+  const requestPaths = [];
   const sessionHeaders = [];
   let directoryCalls = 0;
+  let zenDirectoryCalls = 0;
+  let zenUnavailable = false;
   const upstream = http.createServer(async (req, res) => {
+    if (req.method === "GET" && req.url === "/zen/v1/models") {
+      zenDirectoryCalls += 1;
+      assert.equal(req.headers.authorization, "Bearer fixture-token");
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [
+        { id: "deepseek-v4.1-flash-free" }, { id: "zen-paid-only" }, { id: "jev-1.13-free" },
+      ] }));
+      return;
+    }
     if (req.method === "GET" && req.url === "/v1/models") {
       directoryCalls += 1;
       assert.equal(req.headers.authorization, "Bearer fixture-token");
@@ -196,6 +208,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     requests.push(body);
+    requestPaths.push(req.url);
     sessionHeaders.push(req.headers["x-opencode-session"]);
     if (!["full-go-chat-fixture", "legacy-go-chat-fixture", "other-go-task"].includes(req.headers["x-opencode-session"])) {
       res.writeHead(400, { "content-type": "application/json" });
@@ -222,7 +235,8 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       }
       return;
     }
-    if (req.url !== "/v1/chat/completions") {
+    const zenFree = body.model === "deepseek-v4.1-flash-free";
+    if (req.url !== (zenFree ? "/zen/v1/chat/completions" : "/v1/chat/completions")) {
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "expected Chat Completions endpoint" }));
       return;
@@ -237,9 +251,14 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       res.end(JSON.stringify({ error: "missing Chat messages" }));
       return;
     }
-    if (body.model !== "qwen3.8-flash") {
+    if (body.model !== "qwen3.8-flash" && !zenFree) {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "wrong Go Chat model" }));
+      return;
+    }
+    if (zenFree && zenUnavailable) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "fixture free capacity exhausted" }));
       return;
     }
     try {
@@ -316,6 +335,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       MODELDOCK_PORT: String(gatewayPort),
       MODELDOCK_PROFILE: "opencode-go",
       MODELDOCK_UPSTREAM_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+      MODELDOCK_ZEN_BASE_URL: `http://127.0.0.1:${upstreamPort}/zen/v1`,
       OPENCODE_GO_TOKEN: "fixture-token",
       MODELDOCK_STATE_DIR: path.join(root, "state"),
       MODELDOCK_CODEX_HOME: path.join(root, "codex-home"),
@@ -356,6 +376,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
       v4: byName("DeepSeek V4 Flash"),
       v41: byName("DeepSeek V4.1 Flash"),
       v42: byName("DeepSeek V4.2 Flash"),
+      free: byName("DeepSeek V4.1 Flash Free"),
     };
     reviewOverrides = catalog.models
       .map((model) => model.auto_review_model_override)
@@ -364,7 +385,7 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     // The directory above never mentions v4.1: it is only here because it is declared.
     const v41 = models.options.find((model) => model.id === "deepseek-v4.1-flash@opencode-go");
     declaredWithoutDiscovery = Boolean(v41?.contextWindow && v41?.inputNormalizer);
-    if (discovered && published && declaredWithoutDiscovery) break;
+    if (discovered && published && declaredWithoutDiscovery && wireModels.free) break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.ok(discovered, "boot discovery must publish the new Go model in the picker");
@@ -373,6 +394,13 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     "a declared model must be published with its window and normalizer even when discovery never lists it",
   );
   assert.equal(directoryCalls, 1, "boot must query the real Go profile directory once");
+  assert.equal(zenDirectoryCalls, 1, "boot must query the Zen free directory too");
+  const discoveredModels = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/models`)).json();
+  const freeModel = discoveredModels.options.find((model) => model.id === "deepseek-v4.1-flash-free@opencode-go");
+  assert.equal(freeModel?.zen, true);
+  assert.equal(freeModel?.free, true);
+  assert.equal(freeModel?.endpoint, "chat");
+  assert.ok(!discoveredModels.options.some((model) => ["zen-paid-only@opencode-go", "jev-1.13-free@opencode-go"].includes(model.id)));
   assert.ok(published, "Codex must receive the same discovered slug");
   assert.ok(Object.values(wireModels).every(Boolean), `Codex catalog missed a routed wire slug: ${JSON.stringify(wireModels)}`);
   assert.ok(Object.values(wireModels).every((slug) => /^[A-Za-z0-9._/-]+$/.test(slug) && !slug.includes("@")),
@@ -599,4 +627,19 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   const visualImages = visual.content.filter((part) => part.type === "input_image");
   assert.equal(visualImages.length, 1, "a vision route keeps the promoted preview pixels");
   assert.equal(visualImages[0].image_url, parallelImageUrl, "a vision route keeps the exact pixels the tool returned");
+
+  // The newly discovered free model must accept the same full 164-tool Codex
+  // request through Zen Chat, not the paid Go host or the Responses endpoint.
+  const freeReply = await send(fixture.request.input, "full-go-chat-fixture", true, wireModels.free);
+  assert.match(freeReply, /response\.completed/);
+  assert.equal(requests.at(-1).model, "deepseek-v4.1-flash-free");
+  assert.equal(requestPaths.at(-1), "/zen/v1/chat/completions");
+  assert.equal(requests.at(-1).tools.length, 162);
+  zenUnavailable = true;
+  const noCapacity = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-codex-session-id": "full-go-chat-fixture" },
+    body: JSON.stringify({ ...fixture.request, model: wireModels.free }),
+  });
+  assert.match(await noCapacity.text(), /zen free endpoint/i, "discovered free models retain free-tier failure guidance");
 });

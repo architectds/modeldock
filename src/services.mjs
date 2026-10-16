@@ -50,28 +50,42 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
   const token = config.tokens?.[profile.id];
   if (!token) return { changed: false, discovered: 0 };
   try {
-    const base = profile.baseUrlFor(config).replace(/\/$/, "");
-    const response = await fetchImpl(`${base}/models`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...opencodeSessionHeaders({ provider: profile.id, url: base }, { sessionId: randomUUID() }),
-      },
-      signal: AbortSignal.timeout(10_000),
-    });
+    const sources = profile.discoverySources?.(config) || [{ baseUrl: profile.baseUrlFor(config) }];
+    const failures = [];
+    // Independent requests: a broken Go directory must not suppress Zen free
+    // models (or vice versa). Merge in source order, not response arrival order.
+    const listings = await Promise.all(sources.map(async (source) => {
+      const base = source.baseUrl.replace(/\/+$/, "");
+      try {
+        const response = await fetchImpl(`${base}/models`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...opencodeSessionHeaders({ provider: profile.id, url: base }, { sessionId: randomUUID() }),
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const entries = (await response.json())?.data;
+        if (!Array.isArray(entries)) throw new Error("invalid model directory");
+        return entries.filter((entry) => typeof entry?.id === "string" && entry.id
+          && (!source.acceptsModel || source.acceptsModel(entry.id)));
+      } catch (error) {
+        failures.push(error);
+        console.log(`[gate] ${profile.id} model directory ${base} failed: ${error.message}`);
+        return [];
+      }
+    }));
     // The directory entry is kept beside the id rather than thrown away, because a
     // provider that publishes a real context window should have that number used
     // instead of the shared conservative fallback. Only the provider's own
     // discoveryModel ever reads it, so providers whose directory publishes no
     // per-model facts are unaffected.
     const directory = new Map();
-    if (response.ok) {
-      for (const entry of (await response.json())?.data || []) {
-        const id = entry?.id;
-        if (typeof id === "string" && id && !directory.has(id)) directory.set(id, entry);
-      }
+    for (const entries of listings) for (const entry of entries) {
+      if (!directory.has(entry.id)) directory.set(entry.id, entry);
     }
     const fetchedIds = [...directory.keys()];
-    if (!fetchedIds.length) return { changed: false, discovered: 0 };
+    if (!fetchedIds.length) return { changed: false, discovered: 0, ...(failures.length ? { error: failures[0] } : {}) };
     const existing = profile.availableModels || [];
     const existingById = new Map(existing.map((model) => [model.id, model]));
     const unknown = fetchedIds
@@ -87,9 +101,11 @@ export async function refreshProfileModels(profile, config, { fetchImpl = fetch 
         // window, no normalizer and no ladder, and because the rows themselves were
         // discovered they disappeared on every restart until a refresh put them back -
         // which surfaced as the addressed-provider 503 "endpoint was removed".
-        const candidate = profile.discoveryModel
-          ? profile.discoveryModel(id, directory.get(id))
-          : { id, label: labelForModelId(id), endpoint, supportsVision: false, visionStatus: "unknown", status: "available" };
+        const declared = profile.discoveryModel ? profile.discoveryModel(id, directory.get(id)) : {};
+        const candidate = declared && {
+          id, label: labelForModelId(id), endpoint, supportsVision: false, visionStatus: "unknown", status: "available",
+          ...declared,
+        };
         // A provider can list models for several dialects. Directory discovery
         // is not permission to publish an Anthropic /messages model through an
         // OpenAI bridge we do not implement. The provider declares the endpoint
