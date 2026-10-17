@@ -1604,6 +1604,7 @@ async function prepareRoutedInput(payload, services, route, signal) {
 async function prepareRoutedPayload(payload, services, route, signal, {
   selectedModel,
   cpuCompaction = false,
+  compaction = false,
   onImageRef,
 } = {}) {
   const { config, mediaStore, attachmentIndex, incomingHeaders } = services;
@@ -1611,7 +1612,13 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   const { routedProvider, localPayload, normalizedInput } = await prepareRoutedInput(payload, services, route, signal);
   const entry = modelEntryFor(config, route.model);
   const supportsVision = Boolean(entry?.supportsVision);
-  const imageTransportLimit = Number(entry?.imageTransportMaxWireBytes) || 0;
+  const localBackend = isLocalBackend(config, route.model);
+  // Without the media store the images cannot be replaced by refs, so a budget
+  // would only turn a big request into a hard error. Keep the old pass-through
+  // behaviour in that case.
+  const imageTransportLimit = mediaStore?.put && mediaStore?.getTransportVariant
+    ? imageWireBudgetFor({ entry, supportsVision, localBackend, compaction })
+    : 0;
   const resolveExternalSource = codexAttachmentResolver(attachmentIndex, sessionId, threadId);
   let routedInput = rewriteHistoricalImages(normalizedInput, mediaStore, {
     preserveImages: !cpuCompaction && supportsVision,
@@ -1649,7 +1656,6 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   delete normalizedPayload.previous_response_id;
   normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
   const target = upstreamTargetFor(config, normalizedPayload.model);
-  const localBackend = isLocalBackend(config, route.model);
   // A temporary vision escalation must not re-enable local child-work starters.
   const disableSubagentWork = localBackend || isLocalBackend(config, selectedModel);
   const profile = profileById(routedProvider) || {};
@@ -1729,6 +1735,34 @@ export function adaptImageUrlShape(input, shape) {
 }
 
 export const RECENT_IMAGE_WINDOW = 20;
+
+// Cloud upstreams cap the request body, not the token count. A screenshot-heavy
+// session can sit at 150k of a 1M-token window and still come back 413 because
+// twenty raw PNGs are tens of megabytes of base64 - and the compact request that
+// was supposed to rescue the turn carries the same images, so it fails too.
+// A budget measured in wire bytes is the dimension the upstream actually
+// enforces: keep the newest pixels inside it, hand everything older to the media
+// store as a ref the model can reopen with view_image.
+export const DEFAULT_CLOUD_IMAGE_WIRE_BUDGET_BYTES = envWireBudget("MODELDOCK_IMAGE_WIRE_BUDGET_MB", 8);
+export const DEFAULT_CLOUD_COMPACT_IMAGE_WIRE_BUDGET_BYTES = envWireBudget("MODELDOCK_COMPACT_IMAGE_WIRE_BUDGET_MB", 4);
+
+function envWireBudget(name, fallbackMb) {
+  const configured = Number(process.env[name]);
+  const megabytes = Number.isFinite(configured) && configured > 0 ? configured : fallbackMb;
+  return Math.max(MIN_IMAGE_TRANSPORT_WIRE_BYTES, Math.floor(megabytes * 1024 * 1024));
+}
+
+// A provider-declared per-model budget always wins. Otherwise every routed cloud
+// vision model gets the byte budget, which is what turns "the package is already
+// too big" into a decision we make before the upstream rejects the turn.
+export function imageWireBudgetFor({ entry, supportsVision, localBackend, compaction = false } = {}) {
+  const declared = Number(entry?.imageTransportMaxWireBytes) || 0;
+  if (declared > 0) return declared;
+  if (!supportsVision || localBackend) return 0;
+  return compaction
+    ? DEFAULT_CLOUD_COMPACT_IMAGE_WIRE_BUDGET_BYTES
+    : DEFAULT_CLOUD_IMAGE_WIRE_BUDGET_BYTES;
+}
 
 // A compact_v2 item can return only text, so image refs are deliberately part
 // of its handoff. A visual model gets the current images plus a small recent
@@ -3844,6 +3878,7 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   const prepared = await prepareRoutedPayload(payload, services, route, signal, {
     selectedModel: requestedModel || mainModel,
     cpuCompaction: localBackend,
+    compaction: true,
     onImageRef: (ref) => compactImageRefs.add(ref),
   });
   if (prepared.imageError) return imageTransportError(res, route, prepared.imageError);
