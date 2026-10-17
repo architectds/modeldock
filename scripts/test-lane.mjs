@@ -42,6 +42,7 @@ const testDir = path.join(repoRoot, "test");
 
 const BROWSER = ["dashboard-tabs.test.mjs"];
 const LIVE = [
+  "codex-compaction-switch-client.test.mjs",
   "codex-chat-reasoning-client.test.mjs",
   "codex-native-search-client.test.mjs",
   "codex-preview-client.test.mjs",

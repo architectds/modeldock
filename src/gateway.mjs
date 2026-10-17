@@ -3830,9 +3830,9 @@ export async function relayCompaction(payload, res, services, { signal } = {}, v
   // A compact is a handoff for the model the user selected, not a new vision
   // escalation. Keeping a selected vision model matters: it can summarize the
   // visual evidence in its own long-running conversation.
-  const compactModel = requestedModel && knownModels?.has(requestedModel)
-    ? requestedModel
-    : mainModel;
+  // Like ordinary traffic, an explicit provider-qualified model is valid even
+  // when the in-memory catalog lags the client's picker after a refresh.
+  const compactModel = requestedModel || mainModel;
   const route = {
     model: compactModel,
     reason: "compact_summarize",
@@ -4105,6 +4105,16 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   }
   const { sessionId, threadId } = sessionIdsFrom(incomingHeaders);
   mediaStore?.touchSession?.(sessionId);
+  const compactV1 = isCompactV1Request(services.requestUrl);
+  const compactV2 = isCompactV2Request(payload);
+  if (compactV1 || compactV2) {
+    // Model-switch pre-compaction is sent with the OLD payload.model, before
+    // a request using the new selection ever reaches us. Resolve the current
+    // thread's picker setting, not the global model or last sampled route.
+    // Do this before native bypass: switches can cross either boundary.
+    const selected = services.compactionModelFor?.(incomingHeaders);
+    if (selected) payload = { ...payload, model: selected };
+  }
   const requestedModel = normalizeLegacySlug(typeof payload.model === "string" ? payload.model : "", knownModels);
   if (requestedModel !== payload.model && requestedModel) payload = { ...payload, model: requestedModel };
   if (isNativeModel(requestedModel, knownModels, services.nativeSlugs)) {
@@ -4124,10 +4134,10 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
   // Remote compaction for routed models: Codex expects a compaction output item
   // (v2) or replacement history (v1) back, which DeepSeek does not produce
   // natively. Intercept instead of forwarding the raw request.
-  if (isCompactV1Request(services.requestUrl)) {
+  if (compactV1) {
     return relayCompaction(payload, res, services, { signal }, false);
   }
-  if (isCompactV2Request(payload)) {
+  if (compactV2) {
     return relayCompaction(payload, res, services, { signal }, true);
   }
   const mainModel = mainModelFor(services, sessionId);

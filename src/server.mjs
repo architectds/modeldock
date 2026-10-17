@@ -33,6 +33,7 @@ import { applyXaiProfile, allProfiles, credentialProfiles, DEFAULT_PROFILE_ID, a
 import { hasChatGptLogin } from "./codex-auth.mjs";
 import { isLocalNetworkHost, sameEndpointHost as sameLocalHost, urlHost } from "./loopback.mjs";
 import { createServices } from "./services.mjs";
+import { readCodexSessionModel } from "./codex-session-model.mjs";
 // Re-exported: tests and embedders construct the service bag through
 // server.mjs, and that path stays stable across the services split.
 export { createServices };
@@ -610,6 +611,7 @@ async function relayGatewayRequest(req, res, services) {
       nativeSelectableModels: services.nativeSelectableModels,
       mainModel: modelSelection?.mainModel || config.mainModel,
       visionModel: modelSelection?.visionModel || config.visionModel,
+      compactionModelFor: (headers) => readCodexSessionModel(config.codexHome, headers),
       // The native passthrough leg forwards these to ChatGPT's backend untouched.
       incomingHeaders: req.headers,
       // zstdRequestDecoder preserves the original compressed and decoded sizes

@@ -13,6 +13,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { gunzipSync } from "node:zlib";
+import { DatabaseSync } from "node:sqlite";
 import { encode } from "fast-png";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -92,6 +93,7 @@ test("built bundle preserves the model-driven compaction prefix and reports cach
   }));
   const usageFile = path.join(state, "usage-events.jsonl");
   const received = [];
+  let unavailableModel = "";
   let child;
   let logs = "";
   const autostartKey = `HKCU\\Software\\ModelDockTests\\compaction-prefix-${process.pid}`;
@@ -104,11 +106,17 @@ test("built bundle preserves the model-driven compaction prefix and reports cach
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks));
     received.push({ path: req.url, body });
+    if (body.model === unavailableModel) {
+      res.writeHead(403, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "The old model is no longer available." } }));
+    }
     const n = received.length;
     const text = body.stream === false ? summary : "ORDINARY_PREFIX_OK";
     const response = {
       id: `resp_prefix_${n}`, object: "response", status: "completed", model: body.model,
-      output: [message("assistant", text)], usage,
+      output: req.url.startsWith("/native") && body.input?.at(-1)?.type === "compaction_trigger"
+        ? [{ type: "compaction", encrypted_content: "opaque-native-fixture" }]
+        : [message("assistant", text)], usage,
     };
     if (body.stream === false) {
       res.writeHead(200, { "content-type": "application/json" });
@@ -137,7 +145,7 @@ test("built bundle preserves the model-driven compaction prefix and reports cach
   await writeFile(endpointsFile, JSON.stringify(["responses", "chat"].map((transport) => ({
     modelId: `prefix-${transport}`, baseUrl: `https://hosted.fixture/${transport}/v1`, transport,
     apiKey: "fixture-custom", supportsVision: true, contextWindow: 1_000_000,
-  }))));
+  })).concat({ modelId: "prefix-local", baseUrl: `${origin}/local/v1`, transport: "chat", contextWindow: 16_000 })));
   const redirect = path.join(root, "redirect.mjs");
   await writeFile(redirect, `const original = globalThis.fetch;
 globalThis.fetch = (input, options) => {
@@ -160,6 +168,7 @@ globalThis.fetch = (input, options) => {
       MODELDOCK_CUSTOM_ENDPOINTS_FILE: endpointsFile, MODELDOCK_USAGE_EVENTS_FILE: usageFile,
       MODELDOCK_SETTINGS_EVENTS_FILE: path.join(state, "settings-events.jsonl"),
       MODELDOCK_UPSTREAM_BASE_URL: `${origin}/go/v1`, OPENCODE_GO_TOKEN: "fixture-go-token",
+      CODEX_NATIVE_BASE_URL: `${origin}/native`,
       MODELDOCK_REQUIRE_CALLER_KEY: "0", MODELDOCK_MEMORY: "0", MODELDOCK_NATIVE_MERGE: "0",
       MODELDOCK_REFRESH_NATIVE_CATALOG: "0", MODELDOCK_MODEL_DISCOVERY: "0", MODELDOCK_VISION_MODEL: "none",
       MODELDOCK_AUTOSTART_KEY: autostartKey, MODELDOCK_AUTOSTART_NAME: `ModelDockCompactionPrefix${process.pid}`,
@@ -200,14 +209,14 @@ globalThis.fetch = (input, options) => {
   const currentImages = Array.from({ length: 21 }, (_, index) => ({
     type: "input_image", image_url: `data:image/png;base64,${Buffer.from(encode({ width: 1, height: 1, channels: 4, data: new Uint8Array([index, 100, 200, 255]) })).toString("base64")}`,
   }));
-  const send = async (model, session, protocol = null, requestInput = input, compactPath = "/v1/responses/compact", omitToolChoice = false) => {
+  const send = async (model, session, protocol = null, requestInput = input, compactPath = "/v1/responses/compact", omitToolChoice = false, extraHeaders = {}) => {
     const before = received.length;
     const request = { ...fixture.request, model, tools,
       ...(model === slug("xai", "grok-4.6") ? { external_web_access: true } : {}),
       input: protocol === "v2" ? [...requestInput, { type: "compaction_trigger" }] : requestInput };
     if (omitToolChoice) delete request.tool_choice;
     const response = await fetch(`${api}${protocol === "v1" ? compactPath : "/v1/responses"}`, {
-      method: "POST", headers: { "content-type": "application/json", session_id: session },
+      method: "POST", headers: { "content-type": "application/json", session_id: session, ...extraHeaders },
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify(request),
     });
@@ -308,5 +317,83 @@ globalThis.fetch = (input, options) => {
         assert.ok(isDeepStrictEqual(transcript(compact.body).slice(0, prior.length), prior));
       });
     });
+  });
+
+  await t.test("switch compaction uses the current per-thread picker before the new model has sampled", async (switchTest) => {
+    const dbPath = path.join(codexHome, "state_5.sqlite");
+    const db = new DatabaseSync(dbPath);
+    db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT)"); db.close();
+    const select = (id, model) => {
+      const db = new DatabaseSync(dbPath);
+      try { db.prepare("INSERT OR REPLACE INTO threads VALUES (?, ?)").run(id, model); }
+      finally { db.close(); }
+    };
+    const old = slug("opencode-go", "deepseek-v4-pro");
+    const next = slug("custom", "prefix-chat");
+    const native = "gpt-6.1-sol";
+    let n = 0;
+    const session = () => `00000000-0000-0000-0000-${String(++n).padStart(12, "0")}`;
+    for (const protocol of ["v1", "v2"]) await switchTest.test(protocol, async () => {
+      const id = session(); select(id, next);
+      unavailableModel = "deepseek-v4-pro";
+      try {
+        const compact = await send(old, id, protocol);
+        assert.equal(compact.body.model, "prefix-chat", "never contact the unavailable old model first");
+        assert.ok(compact.body.tools.length >= 150, "retain the full normalized 164-tool fixture");
+        assert.match(JSON.stringify(compact.body.messages), /RETAIN_REASONING_PREFIX/);
+        assert.match(JSON.stringify(compact.response.output), /COMPACTION_PREFIX_HANDOFF|kcr1:/);
+      } finally { unavailableModel = ""; }
+
+      const nativeToRouted = session(); select(nativeToRouted, next);
+      const fromNative = await send("gpt-6-astra", nativeToRouted, protocol);
+      assert.equal(fromNative.body.model, "prefix-chat", "selection must be resolved before native bypass");
+
+      const routedToNative = session(); select(routedToNative, native);
+      const toNative = await send(old, routedToNative, protocol);
+      assert.equal(toNative.body.model, native);
+      assert.match(received.at(-1).path, /^\/native\//);
+
+      const nativeToNative = session(); select(nativeToNative, native);
+      assert.equal((await send("gpt-6-astra", nativeToNative, protocol)).body.model, native);
+
+      const parent = session(), child = session();
+      select(parent, native); select(child, next);
+      const subagent = await send(old, parent, protocol, input, "/v1/responses/compact", false, {
+        "x-codex-parent-thread-id": parent,
+        "x-codex-turn-metadata": JSON.stringify({ thread_id: child, session_id: parent }),
+      });
+      assert.equal(subagent.body.model, "prefix-chat", "parent cache affinity must not hijack child compaction");
+      assert.equal((await send(old, parent, protocol)).body.model, native, "another session keeps its own choice");
+
+      const legacy = session(); select(legacy, "opencode-go/deepseek-v4.1-flash");
+      assert.equal((await send(old, legacy, protocol)).body.model, "deepseek-v4.1-flash");
+    });
+
+    const id = session(); select(id, next);
+    assert.equal((await send(old, id)).body.model, "deepseek-v4-pro", "normal inference must honor its explicit request, not SQLite");
+    assert.equal((await send(old, session(), "v1")).body.model, "deepseek-v4-pro", "missing thread state preserves the compact request model");
+
+    for (const v2 of [false, true]) {
+      const localId = session(); select(localId, slug("custom", "prefix-local"));
+      const before = received.length;
+      const response = await fetch(`${api}/v1/responses${v2 ? "" : "/compact"}`, {
+        method: "POST", headers: { "content-type": "application/json", session_id: localId },
+        body: JSON.stringify({ ...fixture.request, model: old, tools, input: v2 ? [...input, { type: "compaction_trigger" }] : input }),
+      });
+      const text = await response.text(); assert.equal(response.status, 200, text);
+      assert.ok(completed(text).output.length);
+      assert.equal(received.length, before, "switching to a local model retains CPU compaction, with no old-model request");
+    }
+    const a = session(), b = session(); select(a, next); select(b, slug("opencode-go", "deepseek-v4.1-flash"));
+    const before = received.length;
+    const results = await Promise.all([a, b].map(async (id) => {
+      const response = await fetch(`${api}/v1/responses/compact`, {
+        method: "POST", headers: { "content-type": "application/json", session_id: id },
+        body: JSON.stringify({ ...fixture.request, model: old, tools, input }),
+      });
+      const text = await response.text(); assert.equal(response.status, 200, text); return completed(text);
+    }));
+    assert.ok(results.every((result) => result.output.length));
+    assert.deepEqual(received.slice(before).map((item) => item.body.model).sort(), ["deepseek-v4.1-flash", "prefix-chat"], "concurrent conversations must not share their new selection");
   });
 });
