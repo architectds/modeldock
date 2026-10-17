@@ -1654,7 +1654,7 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   const disableSubagentWork = localBackend || isLocalBackend(config, selectedModel);
   const profile = profileById(routedProvider) || {};
   const policy = entry || {};
-  const { tools, stripped, namespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
+  const { tools, stripped, namespaces: flattenedNamespaces, customToolNames, toolNames } = applyToolPolicy(normalizedPayload.tools, {
     disableSubagentWork,
     hiddenToolNames: hiddenToolNamesForModel({
       supportsVision,
@@ -1678,7 +1678,7 @@ async function prepareRoutedPayload(payload, services, route, signal, {
       return deferred.tools.length ? [{ ...item, tools: deferred.tools }] : [];
     });
   }
-  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, namespaces, toolNames);
+  normalizedPayload.input = flattenNamespaceCalls(normalizedPayload.input, flattenedNamespaces, toolNames);
   if (disableSubagentWork) {
     normalizedPayload.instructions = appendLocalGuidance(localBackend
       ? stripLocalInstructions(normalizedPayload.instructions)
@@ -1690,6 +1690,14 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   // Hosted descriptors may survive tool policy verbatim; apply the provider's
   // final payload contract after declarations and history have been normalized.
   normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
+  // Responses peers can return a flattened name even when we preserved the
+  // namespace descriptor. Only declarations actually forwarded on this turn
+  // (including deferred tools, after local policy) may supply response aliases.
+  const namespaces = responseNamespacesFor([
+    ...(Array.isArray(normalizedPayload.tools) ? normalizedPayload.tools : []),
+    ...(Array.isArray(normalizedPayload.input) ? normalizedPayload.input : []).filter((item) => item?.type === "additional_tools")
+      .flatMap((item) => Array.isArray(item.tools) ? item.tools : []),
+  ], flattenedNamespaces);
   return { normalizedPayload, target, routedInput, resolveExternalSource, stripped, namespaces, customToolNames, toolNames };
 }
 
@@ -2406,6 +2414,37 @@ export function flattenNamespaceCalls(input, namespaces = null, toolNames = null
   return changed ? out : input;
 }
 
+// OpenCode Responses sometimes returns collaboration__spawn_agent without a
+// namespace even though its request kept the original collaboration namespace.
+// Learn aliases from forwarded declarations, never by splitting arbitrary '__'
+// strings. A real flat tool wins over a guessed alias, ambiguous pairs fail
+// closed, and explicit flattening mappings retain their existing precedence.
+// Keep these aliases response-only so request schemas/replay stay byte-stable.
+export function responseNamespacesFor(tools, namespaces = null) {
+  const mappings = new Map(namespaces || []);
+  const blocked = new Set((tools || [])
+    .filter((tool) => tool?.type === "function" || tool?.type === "custom")
+    .map((tool) => tool.name));
+  const aliases = new Map();
+  for (const tool of tools || []) {
+    if (tool?.type !== "namespace" || typeof tool.name !== "string" || !Array.isArray(tool.tools)) continue;
+    for (const child of tool.tools) {
+      if (child?.type !== "function" || typeof child.name !== "string" || !child.name) continue;
+      const alias = joinNamespace(tool.name, child.name);
+      if (blocked.has(alias) || mappings.has(alias)) continue;
+      const previous = aliases.get(alias);
+      if (previous && (previous.name !== child.name || previous.namespace !== tool.name)) {
+        aliases.delete(alias);
+        blocked.add(alias);
+      } else {
+        aliases.set(alias, { name: child.name, namespace: tool.name });
+      }
+    }
+  }
+  for (const [alias, pair] of aliases) mappings.set(alias, pair);
+  return mappings;
+}
+
 // Outbound (model response): restore the pair. Without this Codex looks the flat
 // name up in a registry keyed by (namespace, name), finds nothing, and answers
 // the model with a synthetic "unsupported call: <name>" instead of running the
@@ -2413,6 +2452,7 @@ export function flattenNamespaceCalls(input, namespaces = null, toolNames = null
 // while the built-in shell keeps working.
 export function restoreNamespaceCall(item, namespaces) {
   if (!namespaces?.size || item?.type !== "function_call" || typeof item.name !== "string") return item;
+  if (typeof item.namespace === "string" && item.namespace) return item;
   const split = namespaces.get(item.name);
   if (!split) return item;
   return { ...item, name: split.name, namespace: split.namespace };

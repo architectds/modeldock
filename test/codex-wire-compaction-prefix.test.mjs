@@ -275,9 +275,16 @@ globalThis.fetch = (input, options) => {
         assert.deepEqual(compact.body.reasoning, ordinary.body.reasoning);
         assert.equal(compact.body.cache_prompt, ordinary.body.cache_prompt);
       });
-      await compactTest.test("records the upstream cache hit in persisted usage", () => {
-        const events = readFileSync(usageFile, "utf8").trim().split(/\r?\n/).map((line) => JSON.parse(line));
-        const event = events.findLast((item) => item.sessionId === session && item.route === `compact_${protocol}`);
+      await compactTest.test("records the upstream cache hit in persisted usage", async () => {
+        // The client can finish reading res.end() before the relay resumes to
+        // append its usage record. Wait for that record, not an arbitrary sleep.
+        let event;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const events = readFileSync(usageFile, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+          event = events.findLast((item) => item.sessionId === session && item.route === `compact_${protocol}`);
+          if (event) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
         assert.ok(event, "compaction must record a usage event");
         assert.equal(event.inputTokens, usage.input_tokens);
         assert.equal(event.cachedTokens, usage.input_tokens_details.cached_tokens);
