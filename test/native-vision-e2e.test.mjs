@@ -248,6 +248,8 @@ test("the built bundle refreshes native models, routes vision, and prices the la
     const call = received.at(-1);
     assert.equal(call.url, "/responses");
     assert.equal(call.body.model, model, "the native selected identity reaches the upstream unchanged");
+    assert.deepEqual(call.body.stream_options, fixture.request.stream_options,
+      "native OpenAI keeps Codex stream_options; the Go compatibility rule is not global");
     assert.equal(call.auth, "Bearer chatgpt-e2e-token");
     assert.ok(call.body.tools.length > 0, "the full request carries its coding tool surface");
   }

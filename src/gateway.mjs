@@ -1696,6 +1696,15 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   // Hosted descriptors may survive tool policy verbatim; apply the provider's
   // final payload contract after declarations and history have been normalized.
   normalizedPayload = normalizePayloadForRoute(config, route.model, normalizedPayload);
+  // Native passthrough never enters this path. Ordinary routed requests and
+  // both compaction protocols do, so remove provider-incompatible Responses
+  // fields here, after the final normalizer, rather than patching one relay.
+  // Chat builds its own stream_options (include_usage) and must keep that wire.
+  if (target.transport !== "chat") {
+    for (const field of policy.unsupportedResponsesFields ?? profile.unsupportedResponsesFields ?? []) {
+      delete normalizedPayload[field];
+    }
+  }
   // Responses peers can return a flattened name even when we preserved the
   // namespace descriptor. Only declarations actually forwarded on this turn
   // (including deferred tools, after local policy) may supply response aliases.

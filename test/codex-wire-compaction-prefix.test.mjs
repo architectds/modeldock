@@ -106,6 +106,10 @@ test("built bundle preserves the model-driven compaction prefix and reports cach
     for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks));
     received.push({ path: req.url, body });
+    if (req.url === "/go/v1/responses" && Object.hasOwn(body, "stream_options")) {
+      res.writeHead(503, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: { message: "Upstream request failed: Endpoint is unavailable." } }));
+    }
     if (body.model === unavailableModel) {
       res.writeHead(403, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "The old model is no longer available." } }));
@@ -238,6 +242,10 @@ globalThis.fetch = (input, options) => {
       ? [...input, { type: "message", role: "user", content: [{ type: "input_text", text: "Inspect these 21 current attachments." }, ...currentImages] }]
       : input;
     const ordinary = await send(model, `${name}-ordinary`, null, requestInput);
+    if (name === "Custom Responses") {
+      assert.deepEqual(ordinary.body.stream_options, fixture.request.stream_options,
+        "Go-specific policy must not strip options from another Responses provider");
+    }
     assert.match(JSON.stringify(ordinary.response), /ORDINARY_PREFIX_OK/);
     assert.equal(ordinary.body.tool_choice, fixture.request.tool_choice);
     if (withImages) {
@@ -351,6 +359,8 @@ globalThis.fetch = (input, options) => {
       const routedToNative = session(); select(routedToNative, native);
       const toNative = await send(old, routedToNative, protocol);
       assert.equal(toNative.body.model, native);
+      assert.deepEqual(toNative.body.stream_options, fixture.request.stream_options,
+        "native compaction retains Codex's own stream contract");
       assert.match(received.at(-1).path, /^\/native\//);
 
       const nativeToNative = session(); select(nativeToNative, native);
