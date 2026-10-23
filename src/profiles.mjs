@@ -285,6 +285,10 @@ const OPENCODE_GO_PROFILE = {
   },
 
   blockedToolTypes: new Set(["tool_search", "web_search"]),
+  // Go's Responses endpoint rejects Codex's native stream_options extension
+  // with a misleading 503, even when the object is empty. This is a wire
+  // contract, not a model capability; discovered models inherit it too.
+  unsupportedResponsesFields: new Set(["stream_options"]),
   // inputNormalizer names a per-model input adaptation the gateway keeps in
   // its INPUT_NORMALIZERS registry. The route code asks the profile instead
   // of matching model/provider ids, so adding a provider (or moving a model)

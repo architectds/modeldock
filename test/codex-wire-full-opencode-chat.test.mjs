@@ -217,6 +217,8 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     }
     if (req.url === "/v1/responses") {
       try {
+        assert.equal(Object.hasOwn(body, "stream_options"), false,
+          "Go Responses rejects even an empty Codex stream_options object with 503");
         assert.ok(["deepseek-v4-flash", "deepseek-v4.1-flash", "deepseek-v4.2-flash"].includes(body.model));
         const calls = body.input.filter((item) => ["function_call", "custom_tool_call"].includes(item.type));
         const results = body.input.filter((item) => ["function_call_output", "custom_tool_call_output"].includes(item.type));
@@ -419,11 +421,11 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
     assert.equal(result.id, "qwen3.8-flash@opencode-go",
       "Codex-facing model edits fold onto the internal preference key");
   }
-  const send = async (input, sessionId, stream = true, model = wireModels.qwen) => {
+  const send = async (input, sessionId, stream = true, model = wireModels.qwen, streamOptions = fixture.request.stream_options) => {
     const response = await fetch(`http://127.0.0.1:${gatewayPort}/v1/responses`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-codex-session-id": sessionId },
-      body: JSON.stringify({ ...fixture.request, model, stream, input }),
+      body: JSON.stringify({ ...fixture.request, model, stream, input, stream_options: streamOptions }),
     });
     const text = await response.text();
     const rejectedTools = requests.at(-1)?.tools || [];
@@ -508,6 +510,8 @@ test("built bundle bridges the complete original Codex package to strict OpenCod
   const legacyDeclared = await send(history, "legacy-go-chat-fixture", true, "deepseek-v4.1-flash@opencode-go");
   assert.match(legacyDeclared, /RESPONSES_HISTORY_OK/);
   assert.equal(requests.at(-1).model, "deepseek-v4.1-flash", "a stored legacy model@provider session must still reach the same upstream model");
+  assert.match(await send(history, "full-go-chat-fixture", true, wireModels.v41, {}), /RESPONSES_HISTORY_OK/,
+    "removing only reasoning_summary_delivery and leaving {} is not sufficient");
 
   const compact = await send([...history,
     { type: "message", role: "user", content: [{ type: "input_text", text: "Summarize the completed work." }] },
