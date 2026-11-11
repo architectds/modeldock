@@ -267,7 +267,8 @@ export function responsesToChat(payload, { toolArgumentsAsObjects = false, media
       messages.push({ role: "tool", tool_call_id: callId, content: textValue(item.output, mediaMarker) });
       continue;
     }
-    if (item.type === "message") {
+    if (item.type === "message"
+      || (item.type === undefined && ["user", "assistant", "system", "developer"].includes(item.role))) {
       const role = item.role === "developer" ? "system" : item.role;
       const content = chatContent(item.content, "message", mediaMarker, degraded);
       if (role !== "system" && role !== "user" && role !== "assistant") {

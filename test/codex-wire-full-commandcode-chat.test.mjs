@@ -19,12 +19,12 @@ import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const bundle = path.join(repoRoot, "dist", "modeldock.mjs");
+const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
 const fixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/codex-xai-full-2026-08-21.json.gz", import.meta.url))).toString("utf8"));
 const longSwitchFixture = JSON.parse(gunzipSync(readFileSync(new URL("./fixtures/voxel-commandcode-native-compact-2026-09-02.json.gz", import.meta.url))).toString("utf8"));
 const UPSTREAM_MODEL = "deepseek/deepseek-v4-flash";
 const ROUTED_SLUG = `${UPSTREAM_MODEL}@commandcode`;
-const VISION_UPSTREAM_MODEL = "Qwen/Qwen3.8-Flash";
+const VISION_UPSTREAM_MODEL = "deepseek/deepseek-v4.1-flash";
 const VISION_ROUTED_SLUG = `${VISION_UPSTREAM_MODEL}@commandcode`;
 const GO_CLAUDE_SLUG = "claude-haiku-5-5@opencode-go";
 const BLUE_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZCMsAAAAASUVORK5CYII=";
@@ -179,7 +179,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       // filtered, not merely described as filtered.
       return res.end(JSON.stringify({ data: [
         { id: UPSTREAM_MODEL, name: "DeepSeek V4 Flash (latest)", context_length: 1_000_000 },
-        { id: VISION_UPSTREAM_MODEL, name: "Qwen 3.8 Flash", context_length: 1_000_000 },
+        { id: VISION_UPSTREAM_MODEL, name: "DeepSeek V4.1 Flash", context_length: 1_000_000 },
         { id: "claude-sonnet-5", name: "Claude Sonnet 5", context_length: 1_000_000 },
       ] }));
     }
@@ -247,8 +247,22 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       return rejectWith(400, `namespaced tool name survived for a Chat upstream: ${[...names].find((name) => name.includes("."))}`);
     }
     const toolIds = new Set(body.messages.filter((message) => message.role === "tool").map((message) => message.tool_call_id));
+    if (body.model === VISION_UPSTREAM_MODEL) {
+      const hasImage = body.messages.some((message) => Array.isArray(message.content)
+        && message.content.some((part) => part?.type === "image_url" && part.image_url?.url === BLUE_PNG));
+      const answer = hasImage ? "COMMAND_CODE_VISION_OK" : "COMMAND_CODE_NO_IMAGE";
+      if (body.stream) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        return res.end(textStream(answer, body.model));
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({
+        id: "chatcmpl_cmd_vision", object: "chat.completion", model: body.model,
+        choices: [{ index: 0, message: { role: "assistant", content: answer }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 9000, completion_tokens: 9 },
+      }));
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
-    if (body.model === VISION_UPSTREAM_MODEL) return res.end(textStream("COMMAND_CODE_VISION_OK", body.model));
     // Longest history first: the third turn carries a, b and c, so checking the
     // a+b pair ahead of c would answer the same hop twice.
     if (toolIds.has("call_cmd_c")) return res.end(textStream("CMD_TOOL_LOOP_COMPLETE"));
@@ -414,6 +428,39 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       && message.content.some((part) => part?.type === "image_url" && part.image_url?.url === BLUE_PNG)),
     "the complete Codex image item reaches Command Code Chat",
   );
+
+  // Responses EasyInputMessage defaults an omitted type to "message". The
+  // complete package must produce the same Chat prefix, roles, and pixels.
+  const shorthandInput = visualInput.map((item) => {
+    if (item.type !== "message") return item;
+    const { type: _type, ...message } = item;
+    return message;
+  });
+  for (const stream of [true, false]) {
+    const sessionId = `full-commandcode-shorthand-vision-${stream}`;
+    const shorthand = await send(shorthandInput, stream, VISION_ROUTED_SLUG, sessionId);
+    assert.match(shorthand, /COMMAND_CODE_VISION_OK/, "shorthand image input must reach the model as pixels");
+    assert.deepEqual(requests.at(-1).messages, visualRequest.messages,
+      "omitting optional message types must preserve the exact Chat history");
+    assert.deepEqual(requests.at(-1).tools, visualRequest.tools);
+    const status = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/status`)).json();
+    const trace = status.recent.find((entry) => entry.sessionId === sessionId);
+    assert.equal(trace.imageTransfer.forwarded.images, 1);
+    assert.equal(trace.imageTransfer.forwarded.imageWireBytes, Buffer.byteLength(BLUE_PNG));
+    assert.equal(trace.imageTransfer.forwarded.items, requests.at(-1).messages.length,
+      "transfer diagnostics describe the final Chat messages, not the pre-conversion input");
+  }
+
+  const unsupported = await send([
+    ...fixture.request.input,
+    { ...visualInput.at(-1), type: "future_visual_item" },
+  ], true, VISION_ROUTED_SLUG, "full-commandcode-unsupported-vision");
+  assert.match(unsupported, /COMMAND_CODE_NO_IMAGE/, "an explicit unknown type must not be reinterpreted as a message");
+  const unsupportedStatus = await (await fetch(`http://127.0.0.1:${gatewayPort}/api/status`)).json();
+  const unsupportedTrace = unsupportedStatus.recent.find((entry) => entry.sessionId === "full-commandcode-unsupported-vision");
+  assert.equal(unsupportedTrace.imageTransfer.received.images, 1);
+  assert.equal(unsupportedTrace.imageTransfer.forwarded.images, 0,
+    "a folded image must not be reported as forwarded to Chat");
 
   // Recombine the complete current top-level Codex package with the complete
   // captured 1,659-item Voxel history that failed after Command Code -> native

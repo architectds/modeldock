@@ -123,19 +123,23 @@ export function describeInputShape(input) {
 
 // Transfer diagnostics deliberately describe structure and byte counts only.
 // They never retain prompt text, a data URL, a ref, or a file path. Image wire
-// bytes are the encoded URL bytes that actually occupy the Responses payload.
+// bytes are the encoded URL bytes that actually occupy the outgoing payload.
 function describeImageTransfer(input) {
   const report = { items: Array.isArray(input) ? input.length : 0, images: 0, imageWireBytes: 0, imageReferences: 0 };
   if (!Array.isArray(input)) return report;
   for (const item of input) {
+    if (typeof item?.content === "string") {
+      report.imageReferences += imageRefsInText(item.content).length;
+      continue;
+    }
     if (!Array.isArray(item?.content)) continue;
     for (const part of item.content) {
-      if (part?.type === "input_image") {
+      if (part?.type === "input_image" || part?.type === "image_url") {
         const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
         report.images += 1;
         if (typeof url === "string") report.imageWireBytes += Buffer.byteLength(url);
       }
-      if (part?.type === "input_text" && typeof part.text === "string") {
+      if ((part?.type === "input_text" || part?.type === "text") && typeof part.text === "string") {
         report.imageReferences += imageRefsInText(part.text).length;
       }
     }
@@ -4322,6 +4326,7 @@ export async function relayResponses(payload, res, services, { signal } = {}) {
       console.error(`[modeldock] chat bridge folded ${chatBridge.degraded.length} item(s) this transport cannot encode for ${upstreamModel}: ${chatBridge.degraded.slice(0, 3).join(", ")}`);
     }
     const localChatPayload = chatBridge ? chatBridge.payload : null;
+    if (localChatPayload) imageTransfer.forwarded = describeImageTransfer(localChatPayload.messages);
     const localCustomToolNames = chatBridge
       ? new Set([...customToolNames, ...chatBridge.customToolNames])
       : customToolNames;
