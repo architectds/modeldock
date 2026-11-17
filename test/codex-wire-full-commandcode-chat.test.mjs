@@ -17,6 +17,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { encode as encodePng } from "fast-png";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bundle = process.env.MODELDOCK_TEST_BUNDLE || path.join(repoRoot, "dist", "modeldock.mjs");
@@ -27,6 +28,7 @@ const ROUTED_SLUG = `${UPSTREAM_MODEL}@commandcode`;
 const VISION_UPSTREAM_MODEL = "deepseek/deepseek-v4.1-flash";
 const VISION_ROUTED_SLUG = `${VISION_UPSTREAM_MODEL}@commandcode`;
 const GO_CLAUDE_SLUG = "claude-haiku-5-5@opencode-go";
+const IMAGE_BUDGET = 64 * 1024;
 const BLUE_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZCMsAAAAASUVORK5CYII=";
 
 function listen(server) {
@@ -307,6 +309,7 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
       MODELDOCK_MEMORY: "0",
       MODELDOCK_NATIVE_MERGE: "0",
       MODELDOCK_REFRESH_NATIVE_CATALOG: "0",
+      MODELDOCK_IMAGE_WIRE_BUDGET_MB: String(IMAGE_BUDGET / 1024 / 1024),
       MODELDOCK_AUTOSTART_KEY: autostartKey,
       MODELDOCK_AUTOSTART_NAME: autostartName,
     },
@@ -450,6 +453,77 @@ test("built bundle bridges the complete Codex package to Command Code Chat", asy
     assert.equal(trace.imageTransfer.forwarded.items, requests.at(-1).messages.length,
       "transfer diagnostics describe the final Chat messages, not the pre-conversion input");
   }
+
+  // Real Codex turn ids, not an assistant-only approximation, determine which
+  // image belongs to the previous turn. Keep its pixels across the next reply.
+  const previousImage = {
+    ...visualInput.at(-1),
+    internal_chat_message_metadata_passthrough: { turn_id: "image-turn" },
+  };
+  const followupInput = [
+    ...fixture.request.input,
+    previousImage,
+    {
+      type: "message", role: "assistant",
+      content: [{ type: "output_text", text: "Image received." }],
+      internal_chat_message_metadata_passthrough: { turn_id: "image-turn" },
+    },
+    {
+      type: "message", role: "user",
+      content: [{ type: "input_text", text: "Inspect the same image again." }],
+      internal_chat_message_metadata_passthrough: { turn_id: "followup-turn" },
+    },
+  ];
+  for (const stream of [true, false]) {
+    const followup = await send(followupInput, stream, VISION_ROUTED_SLUG, `image-followup-${stream}`);
+    assert.match(followup, /COMMAND_CODE_VISION_OK/, "a small previous-turn image must still reach Chat as pixels");
+    assert.ok(requests.at(-1).messages.some((message) => message.content?.some?.((part) => part.image_url?.url === BLUE_PNG)));
+  }
+
+  // The recent window stays bounded: after twenty newer unique images, the
+  // first image becomes a durable reference instead of growing every request.
+  const newerImages = Array.from({ length: 20 }, (_, index) => ({
+    ...previousImage,
+    content: [{
+      type: "input_image",
+      image_url: `data:image/png;base64,${Buffer.from(encodePng({
+        width: 1, height: 1, channels: 3, data: new Uint8Array([index, 100, 200]),
+      })).toString("base64")}`,
+    }],
+  }));
+  const aged = await send([
+    ...fixture.request.input, previousImage, ...newerImages, ...followupInput.slice(-2),
+  ], true, VISION_ROUTED_SLUG, "image-followup-window");
+  assert.match(aged, /COMMAND_CODE_NO_IMAGE/);
+  const agedParts = requests.at(-1).messages.flatMap((message) => Array.isArray(message.content) ? message.content : []);
+  assert.equal(agedParts.filter((part) => part.type === "image_url").length, 20);
+  assert.ok(requests.at(-1).messages.some((message) => JSON.stringify(message.content).includes("[Image attachment img_")));
+  assert.ok(agedParts.filter((part) => part.type === "image_url")
+    .reduce((bytes, part) => bytes + Buffer.byteLength(part.image_url.url), 0) <= IMAGE_BUDGET);
+
+  const largeImages = Array.from({ length: 3 }, (_, index) => {
+    const pixels = new Uint8Array(256 * 256 * 3);
+    let random = index + 1;
+    for (let offset = 0; offset < pixels.length; offset += 1) {
+      random = (random * 1664525 + 1013904223) >>> 0;
+      const left = Math.floor(offset / 3) % 256 < 128;
+      const dominant = offset % 3 === (left ? 0 : 2);
+      pixels[offset] = (dominant ? 210 : 0) + (random >>> 27);
+    }
+    const image = `data:image/png;base64,${Buffer.from(encodePng({
+      width: 256, height: 256, channels: 3, data: pixels,
+    })).toString("base64")}`;
+    assert.ok(Buffer.byteLength(image) > IMAGE_BUDGET);
+    return { ...previousImage, content: [{ type: "input_image", image_url: image }] };
+  });
+  await send([
+    ...fixture.request.input, previousImage, ...largeImages, ...followupInput.slice(-2),
+  ], true, VISION_ROUTED_SLUG, "image-followup-budget");
+  const boundedParts = requests.at(-1).messages.flatMap((message) => Array.isArray(message.content) ? message.content : []);
+  const boundedImages = boundedParts.filter((part) => part.type === "image_url");
+  assert.equal(boundedImages.length, 2, "the byte budget still spills excess recent images at the useful size floor");
+  assert.ok(boundedImages.reduce((bytes, part) => bytes + Buffer.byteLength(part.image_url.url), 0) <= IMAGE_BUDGET);
+  assert.ok(JSON.stringify(requests.at(-1).messages).includes("[Image attachment img_"), "overflow pixels remain recoverable by reference");
 
   const unsupported = await send([
     ...fixture.request.input,

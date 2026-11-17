@@ -398,6 +398,11 @@ function nativeEntryForCatalog(model, overrides = {}) {
   return {
     ...named,
     provider: NATIVE_PROVIDER_ID,
+    // The native capture can come from a newer Codex than another client
+    // reading this shared file. Older clients accept only text and image.
+    ...(Array.isArray(model.input_modalities) ? {
+      input_modalities: model.input_modalities.filter((modality) => modality === "text" || modality === "image"),
+    } : {}),
     ...(contextWindow ? {
       context_window: contextWindow,
       max_context_window: contextWindow,

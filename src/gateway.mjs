@@ -1627,7 +1627,7 @@ async function prepareRoutedPayload(payload, services, route, signal, {
   let routedInput = rewriteHistoricalImages(normalizedInput, mediaStore, {
     preserveImages: !cpuCompaction && supportsVision,
     keepRecentImages: !cpuCompaction && supportsVision
-      ? imageTransportLimit ? 0 : RECENT_IMAGE_WINDOW
+      ? RECENT_IMAGE_WINDOW
       : 0,
     keepCurrentImages: !cpuCompaction,
     currentStartIndex: currentTurnStartIndex(normalizedInput),
