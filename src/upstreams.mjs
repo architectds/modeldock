@@ -147,7 +147,7 @@ export function createUpstreams({ config, metrics, mediaStore, memoryStore = nul
   }
 
   async function generateImage(args) {
-    const model = String(args.model || "gpt-image-1");
+    const model = String(args.model || "gpt-image-2.5-sunburst");
     const size = String(args.size || "1024x1024");
     const finish = metrics.begin("vision", { operation: "image_gen", model });
     try {
